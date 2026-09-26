@@ -112,7 +112,7 @@ pub struct SocialPostFact {
 /// share is a person doing something, a like is a thumb. Compared with the
 /// median of the same account's earlier posts, so the bar is the band's own
 /// normal, not a number from somebody else's audience.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct PostResonance {
     pub engagement: i64,
     /// Median engagement of the account's earlier posts on this platform,
@@ -120,6 +120,17 @@ pub struct PostResonance {
     pub peer_median: Option<i64>,
     /// How many earlier posts the median is over.
     pub peers: u32,
+    /// Engagement per thousand people reached, when the platform reported
+    /// reach (Instagram insights). Fair to a post shown to fewer people.
+    pub rate_per_mille: Option<i64>,
+    /// The same rate's median over earlier posts that reported reach.
+    pub peer_rate_median: Option<i64>,
+    /// How many earlier posts the rate median is over.
+    pub rate_peers: u32,
+    /// Average watch time in milliseconds (a reel) — what a hook moves.
+    pub watch_ms: Option<i64>,
+    /// Median average watch time of earlier reels.
+    pub peer_watch_median: Option<i64>,
 }
 
 /// Posts younger than this have not had time to show how they landed.
@@ -147,6 +158,19 @@ pub fn resonates_for_communities(
     };
     if now - occurred_at < Duration::hours(RESONANCE_SETTLE_HOURS) || resonance.engagement <= 0 {
         return false;
+    }
+    // With reach on both sides, the rate decides: engagement per thousand
+    // reached against the account's usual rate. A reel below that rate still
+    // earns its place when people watched it clearly longer than usual — a
+    // hook that held attention is the signal, even when nobody tapped like.
+    if let (Some(rate), Some(peer_rate)) = (resonance.rate_per_mille, resonance.peer_rate_median)
+        && resonance.rate_peers >= RESONANCE_MIN_PEERS
+    {
+        let held_attention = matches!(
+            (resonance.watch_ms, resonance.peer_watch_median),
+            (Some(watch), Some(peer)) if peer > 0 && watch.saturating_mul(4) >= peer.saturating_mul(5)
+        );
+        return rate >= peer_rate || held_attention;
     }
     match resonance.peer_median {
         Some(median) if resonance.peers >= RESONANCE_MIN_PEERS => resonance.engagement >= median,
@@ -966,11 +990,13 @@ mod tests {
             engagement: 80,
             peer_median: Some(50),
             peers: 10,
+            ..Default::default()
         };
         let below = PostResonance {
             engagement: 30,
             peer_median: Some(50),
             peers: 10,
+            ..Default::default()
         };
         assert!(resonates_for_communities(
             &fact(Some(above)),
@@ -995,6 +1021,7 @@ mod tests {
             engagement: 4,
             peer_median: None,
             peers: 0,
+            ..Default::default()
         };
         assert!(resonates_for_communities(
             &fact(Some(first)),
@@ -1005,9 +1032,44 @@ mod tests {
             engagement: 0,
             peer_median: None,
             peers: 0,
+            ..Default::default()
         };
         assert!(!resonates_for_communities(
             &fact(Some(silent)),
+            posted,
+            settled
+        ));
+    }
+
+    #[test]
+    fn reach_and_watch_time_decide_when_the_platform_reports_them() {
+        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let settled = posted + Duration::hours(40);
+        let with = |rate: i64, watch: Option<i64>| PostResonance {
+            engagement: 10,
+            peer_median: Some(500), // raw engagement alone would refuse it
+            peers: 10,
+            rate_per_mille: Some(rate),
+            peer_rate_median: Some(40),
+            rate_peers: 8,
+            watch_ms: watch,
+            peer_watch_median: Some(4_000),
+        };
+        // Shown to few people, but those people engaged at a high rate.
+        assert!(resonates_for_communities(
+            &fact(Some(with(55, None))),
+            posted,
+            settled
+        ));
+        // Low rate, and watched no longer than usual: not spread.
+        assert!(!resonates_for_communities(
+            &fact(Some(with(20, Some(4_100)))),
+            posted,
+            settled
+        ));
+        // Low rate, but held attention 25%+ longer than usual: the hook worked.
+        assert!(resonates_for_communities(
+            &fact(Some(with(20, Some(5_000)))),
             posted,
             settled
         ));

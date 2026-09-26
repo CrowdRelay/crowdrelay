@@ -56,6 +56,8 @@ const MAX_TITLE_CHARS: usize = 230;
 /// How much of a caption becomes the row title — the first line, short.
 const TITLE_HEAD_CHARS: usize = 80;
 const USER_AGENT: &str = "CrowdRelay/1.0 (social post source sync)";
+mod insights;
+
 const GRAPH_API_BASE: &str = "https://graph.facebook.com/v21.0";
 
 #[derive(Debug, Error)]
@@ -410,6 +412,12 @@ impl SocialPostSourceSyncWorker {
                 comments_count: media.comments_count,
             };
             self.upsert_post("instagram", &entry).await?;
+            self.refresh_instagram_insights(
+                &media.id,
+                media.media_type.as_deref(),
+                entry.posted_at,
+            )
+            .await;
         }
         Ok(())
     }
@@ -463,7 +471,8 @@ impl SocialPostSourceSyncWorker {
                -- Engagement is written separately below and is not an edit;
                -- compared with it, every sync would look like a new version.
                OR (content_sources.metadata - 'engagement' - 'engagement_at'
-                   - 'comments_count' - 'comments_harvested')
+                   - 'comments_count' - 'comments_harvested'
+                   - 'reach' - 'saves' - 'shares' - 'views' - 'avg_watch_ms' - 'insights_at')
                   IS DISTINCT FROM EXCLUDED.metadata
             RETURNING id, version
             "#,
