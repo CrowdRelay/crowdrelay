@@ -673,12 +673,17 @@ fn introduction(sender: &SenderIdentity, act: &str, language: LetterLanguage) ->
         (LetterLanguage::English, None, Some(city)) => format!("We are {act}, a band from {city},"),
         (LetterLanguage::English, None, None) => format!("We are {act},"),
         (LetterLanguage::Polish, Some(style), Some(city)) => {
-            format!("Jesteśmy {act}, zespół grający {style} z {city},")
+            // "z miasta" keeps the city in the nominative, as the booking
+            // letter does: "z Wrocław" is not Polish, and declining a city
+            // name without a dictionary is a guess.
+            format!("Jesteśmy {act}, zespół grający {style} z miasta {city},")
         }
         (LetterLanguage::Polish, Some(style), None) => {
             format!("Jesteśmy {act}, zespół grający {style},")
         }
-        (LetterLanguage::Polish, None, Some(city)) => format!("Jesteśmy {act}, zespół z {city},"),
+        (LetterLanguage::Polish, None, Some(city)) => {
+            format!("Jesteśmy {act}, zespół z miasta {city},")
+        }
         (LetterLanguage::Polish, None, None) => format!("Jesteśmy {act},"),
     }
 }
@@ -932,7 +937,7 @@ mod tests {
         assert!(
             letter
                 .body
-                .contains("Jesteśmy Virya, zespół grający modern metal z Wrocław,")
+                .contains("Jesteśmy Virya, zespół grający modern metal z miasta Wrocław,")
         );
         assert!(
             letter
