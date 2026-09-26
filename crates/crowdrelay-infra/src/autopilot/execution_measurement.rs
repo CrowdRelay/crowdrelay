@@ -194,6 +194,32 @@ async fn schedule_attendance(
 
 /// Paid gross across a ticket type in the 72 hours before the price change —
 /// the `TicketRevenue72h` counterfactual baseline.
+async fn audience_ticket_revenue_baseline_72h(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    event_id: &EventId,
+    now: OffsetDateTime,
+) -> Result<f64, RepositoryError> {
+    sqlx::query_scalar::<_, f64>(
+        r#"
+        SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
+        FROM ticket_orders ticket_order
+        JOIN ticket_sales sale
+          ON sale.workspace_id=ticket_order.workspace_id AND sale.id=ticket_order.ticket_sale_id
+        WHERE ticket_order.workspace_id=$1 AND sale.event_id=$2
+          AND ticket_order.status IN ('paid','partially_refunded','refunded')
+          AND ticket_order.paid_at >= $3 - INTERVAL '72 hours'
+          AND ticket_order.paid_at < $3
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(now)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sqlx)
+}
+
 async fn ticket_revenue_baseline_72h(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -237,42 +263,3 @@ fn wave_reply_measurement(
     )
 }
 
-/// Persists the planned measurements — one idempotent row per
-/// (action, kind, subject), each inheriting the action's trace.
-async fn insert_measurement_plans(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    action_id: AutopilotActionId,
-    now: OffsetDateTime,
-    plans: Vec<(AutopilotMeasurementKind, uuid::Uuid, f64, OffsetDateTime)>,
-) -> Result<(), RepositoryError> {
-    for (kind, subject_id, baseline_value, due_at) in plans {
-        if !baseline_value.is_finite() || baseline_value < 0.0 {
-            return Err(RepositoryError::Unexpected);
-        }
-        sqlx::query(
-            r#"
-            INSERT INTO autopilot_measurements (
-                id, workspace_id, action_id, measurement_kind, subject_id,
-                action_finished_at, baseline_value, due_at, available_at,
-                trace_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
-                (SELECT trace_id FROM autopilot_actions WHERE id = $3)
-            )
-            ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id) DO NOTHING
-            "#,
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(workspace_id.into_uuid())
-        .bind(action_id.into_uuid())
-        .bind(kind.as_str())
-        .bind(subject_id)
-        .bind(now)
-        .bind(baseline_value)
-        .bind(due_at)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_sqlx)?;
-    }
-    Ok(())
-}

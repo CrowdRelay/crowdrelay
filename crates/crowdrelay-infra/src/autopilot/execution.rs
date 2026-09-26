@@ -133,24 +133,9 @@ pub(super) async fn schedule_effect_measurement(
             }
         }
         AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => {
-            let baseline = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
-                FROM ticket_orders ticket_order
-                JOIN ticket_sales sale
-                  ON sale.workspace_id=ticket_order.workspace_id AND sale.id=ticket_order.ticket_sale_id
-                WHERE ticket_order.workspace_id=$1 AND sale.event_id=$2
-                  AND ticket_order.status IN ('paid','partially_refunded','refunded')
-                  AND ticket_order.paid_at >= $3 - INTERVAL '72 hours'
-                  AND ticket_order.paid_at < $3
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(event_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            let baseline =
+                audience_ticket_revenue_baseline_72h(transaction, workspace_id, event_id, now)
+                    .await?;
             plans.push((
                 AutopilotMeasurementKind::AudienceTicketRevenue72h,
                 event_id.into_uuid(),
@@ -970,6 +955,34 @@ pub(super) async fn schedule_effect_measurement(
         }
     }
 
-    insert_measurement_plans(transaction, workspace_id, action_id, now, plans).await
+    for (kind, subject_id, baseline_value, due_at) in plans {
+        if !baseline_value.is_finite() || baseline_value < 0.0 {
+            return Err(RepositoryError::Unexpected);
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_measurements (
+                id, workspace_id, action_id, measurement_kind, subject_id,
+                action_finished_at, baseline_value, due_at, available_at,
+                trace_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
+                (SELECT trace_id FROM autopilot_actions WHERE id = $3)
+            )
+            ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(action_id.into_uuid())
+        .bind(kind.as_str())
+        .bind(subject_id)
+        .bind(now)
+        .bind(baseline_value)
+        .bind(due_at)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
+    Ok(())
 }
 
