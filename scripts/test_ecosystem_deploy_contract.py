@@ -148,6 +148,81 @@ class EcosystemDeployContract(unittest.TestCase):
         self.assertIn("RUNTIME_SHA=PASS", ECOSYSTEM_TEXT)
         self.assertIn("org.opencontainers.image.revision", ECOSYSTEM_TEXT)
 
+    def _run_runtime_check(self, containers: dict[str, tuple[bool, str]]) -> subprocess.CompletedProcess:
+        """Runs the 3c heredoc against a fake `docker` that knows `containers`
+        (name -> (running, revision)). Exercises the script's own text, so the
+        check that ships is the check that is tested."""
+        import os
+        import tempfile
+
+        start = ECOSYSTEM_TEXT.index("<<'VERIFY_SHA'\n") + len("<<'VERIFY_SHA'\n")
+        end = ECOSYSTEM_TEXT.index("\nVERIFY_SHA\n", start)
+        body = ECOSYSTEM_TEXT[start:end]
+        self.assertIn("RUNTIME_SHA=PASS", body, "the heredoc was not found")
+        with tempfile.TemporaryDirectory() as tmp:
+            table = "\n".join(
+                f'{name}) running={"true" if running else "false"}; revision={rev};;'
+                for name, (running, rev) in containers.items()
+            )
+            fake = Path(tmp) / "docker"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                '[[ "$1" == inspect ]] || exit 1\n'
+                'if [[ "$2" == --format ]]; then fmt="$3"; name="$4"; else fmt=""; name="$2"; fi\n'
+                'case "$name" in\n'
+                f"{table}\n"
+                "*) exit 1;;\n"
+                "esac\n"
+                'case "$fmt" in\n'
+                '*State.Running*) echo "$running";;\n'
+                '*image.revision*) echo "$revision";;\n'
+                "esac\n"
+            )
+            fake.chmod(0o755)
+            env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}")
+            return subprocess.run(
+                ["bash", "-s", "--", tmp, "abc123"],
+                input=body,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+
+    def test_runtime_check_refuses_a_stopped_worker(self) -> None:
+        # 2026-09-26: the worker was stopped after the leadership handoff and
+        # the gate still printed PASS, because an exited container inspects
+        # fine and keeps its image label.
+        stopped = self._run_runtime_check(
+            {
+                "crowdrelay-api-1": (True, "abc123"),
+                "crowdrelay-worker-1": (False, "abc123"),
+            }
+        )
+        self.assertNotEqual(stopped.returncode, 0, stopped.stdout)
+        self.assertIn("no running worker container", stopped.stdout)
+
+    def test_runtime_check_accepts_either_running_colour(self) -> None:
+        live = self._run_runtime_check(
+            {
+                "crowdrelay-api-1": (True, "abc123"),
+                "crowdrelay-worker-1": (False, "old"),
+                "crowdrelay-worker-green-1": (True, "abc123"),
+            }
+        )
+        self.assertEqual(live.returncode, 0, live.stdout + live.stderr)
+        self.assertIn("RUNTIME_SHA=PASS service=worker", live.stdout)
+
+    def test_runtime_check_refuses_a_stale_revision(self) -> None:
+        stale = self._run_runtime_check(
+            {
+                "crowdrelay-api-1": (True, "abc123"),
+                "crowdrelay-worker-1": (True, "old"),
+            }
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("runtime SHA mismatch for worker", stale.stdout)
+
     def test_bluegreen_has_rollback(self) -> None:
         self.assertIn("rollback()", BLUEGREEN_TEXT)
         self.assertIn("ROLLBACK=START", BLUEGREEN_TEXT)
