@@ -11,6 +11,7 @@
   "crowdrelay.autopilot.approval_requested": "VOSAPR000000001",
   "crowdrelay.booking.outreach_requested": "lLrMr0EcSIB9xULI",
   "crowdrelay.booking_agent.approach_requested": "IVFMCBV02ynsYfIq",
+  "crowdrelay.booking_agent.reply_requested": "IVFMCBV02ynsYfIq",
   "crowdrelay.calendar.upsert_requested": "VOSCAL000000001",
   "crowdrelay.community.engagement_requested": "a4d01240-d313-5d1c-9f02-33e6c2a558db",
   "crowdrelay.content.artifact_requested": "VOSTEAMOPS00001",

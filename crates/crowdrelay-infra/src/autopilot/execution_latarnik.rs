@@ -76,6 +76,7 @@ pub(super) async fn execute_latarnik_invite(
         "latarnik_invite",
         &pinned.1,
         now,
+        false,
     )
     .await?;
 

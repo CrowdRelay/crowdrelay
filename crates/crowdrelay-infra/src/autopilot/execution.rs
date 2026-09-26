@@ -116,7 +116,10 @@ pub(super) async fn schedule_effect_measurement(
         // An agent decides on a season's timescale — thirty days is where a
         // reply is still this application's answer, and the reply lives on
         // the agent's own interaction ledger, not the outreach targets'.
-        AutopilotActionPayload::RequestBookingAgentApproach { agent_id, .. } => plans.push((
+        // Approach and reply measure the same counter on the same subject:
+        // did the conversation continue.
+        AutopilotActionPayload::RequestBookingAgentApproach { agent_id, .. }
+        | AutopilotActionPayload::RequestBookingAgentReply { agent_id, .. } => plans.push((
             AutopilotMeasurementKind::BookingAgentReply30d,
             agent_id.into_uuid(),
             0.0,
@@ -130,24 +133,9 @@ pub(super) async fn schedule_effect_measurement(
             }
         }
         AutopilotActionPayload::RequestAudienceCampaign { event_id, .. } => {
-            let baseline = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(ticket_order.amount_gross_minor),0)::double precision
-                FROM ticket_orders ticket_order
-                JOIN ticket_sales sale
-                  ON sale.workspace_id=ticket_order.workspace_id AND sale.id=ticket_order.ticket_sale_id
-                WHERE ticket_order.workspace_id=$1 AND sale.event_id=$2
-                  AND ticket_order.status IN ('paid','partially_refunded','refunded')
-                  AND ticket_order.paid_at >= $3 - INTERVAL '72 hours'
-                  AND ticket_order.paid_at < $3
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(event_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            let baseline =
+                audience_ticket_revenue_baseline_72h(transaction, workspace_id, event_id, now)
+                    .await?;
             plans.push((
                 AutopilotMeasurementKind::AudienceTicketRevenue72h,
                 event_id.into_uuid(),

@@ -686,6 +686,38 @@ pub enum AutopilotActionPayload {
         /// empty — the same rule the single lane holds.
         approaches: Vec<BookingAgentApproachDraft>,
     },
+    /// Answer a booking agent who wrote back — the reply lane's counterpart
+    /// of `RequestOutreachReply` on the agent ledger.
+    ///
+    /// The reply is operator-initiated like the approach it answers: the
+    /// agents board shows who is waiting, and asking for the draft writes
+    /// this action. The scaffold is composed at request time under
+    /// `draft` — `draft_revision` can offer `subject`/`body` for editing,
+    /// and dispatch refuses a missing or empty draft rather than letting
+    /// anything answer a person on the band's behalf unread.
+    ///
+    /// `standing_approval_target` stays `None` for the same reason the
+    /// outreach reply carries none: the draft is a scaffold a person
+    /// completes against the real thread, and a grant would send it
+    /// unedited.
+    RequestBookingAgentReply {
+        agent_id: BookingAgentId,
+        /// The registry row's version when the draft was requested — the
+        /// optimistic lock dispatch re-pins before a word leaves.
+        agent_version: i64,
+        agent_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agency: Option<String>,
+        /// The inbound `booking_agent_interactions` row this answers — pins
+        /// the reply to one conversation, so a second answer to the same
+        /// thread is provably a different action rather than a resend.
+        reply_interaction_id: i64,
+        /// `received`, `positive` or `signed` when the draft was requested —
+        /// the shape the scaffold was composed against, kept for the ledger.
+        reply_disposition: String,
+        #[serde(default)]
+        draft: crowdrelay_domain::approach_letter::ApproachLetter,
+    },
     /// Write to everybody who books one room about one night (§12-6, 4G.4).
     ///
     /// # Why this is one action and not one per promoter
@@ -1251,6 +1283,10 @@ impl AutopilotActionPayload {
             // A wave is the same relationships N at a time — the class does
             // not dilute because the asks shared one card.
             | Self::RequestBookingAgentApproachWave { .. }
+            // An agent's own reply lane: somebody else's inbox, same as the
+            // application it answers — the send is brokered and the agent's
+            // address never reaches the band.
+            | Self::RequestBookingAgentReply { .. }
             | Self::RequestBeaconOutreach { .. }
             // An invitation is a letter to somebody outside the band's own
             // audience — that is the whole point of it — so it carries the

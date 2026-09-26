@@ -233,6 +233,7 @@ impl PostgresAutopilotRepository {
                         "outreach",
                         &target.1,
                         now,
+                        false,
                     )
                     .await?;
                     // Read before the emit rather than inside it: the numbers
@@ -321,6 +322,7 @@ impl PostgresAutopilotRepository {
                         "representation",
                         &target.contact_email,
                         now,
+                        false,
                     )
                     .await?;
                     // The listing is the pitch: the lock just proved it is
@@ -413,6 +415,7 @@ impl PostgresAutopilotRepository {
                         "booking_agent",
                         &agent.contact_email,
                         now,
+                        false,
                     )
                     .await?;
                     emit_outward_action(
@@ -442,6 +445,15 @@ impl PostgresAutopilotRepository {
                         workspace_id,
                         action.id,
                         *agent_id,
+                        now,
+                    )
+                    .await?;
+                }
+                AutopilotActionPayload::RequestBookingAgentReply { .. } => {
+                    operations::execute_booking_agent_reply(
+                        &mut transaction,
+                        workspace_id,
+                        action,
                         now,
                     )
                     .await?;

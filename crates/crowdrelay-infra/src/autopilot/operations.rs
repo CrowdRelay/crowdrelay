@@ -38,6 +38,7 @@ use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 mod acquisition_channels;
 pub(in crate::autopilot) mod attribution;
 pub(in crate::autopilot) mod belief_revisions;
+mod booking_agent_reply_execution;
 mod booking_agent_wave_execution;
 pub(in crate::autopilot) mod booking_agents;
 mod booking_outreach_execution;
@@ -74,6 +75,7 @@ mod show_growth_execution;
 mod snapshots;
 
 pub(super) use acquisition_channels::*;
+pub(super) use booking_agent_reply_execution::*;
 pub(super) use booking_agent_wave_execution::*;
 pub(super) use booking_outreach_execution::*;
 pub(super) use chief::*;

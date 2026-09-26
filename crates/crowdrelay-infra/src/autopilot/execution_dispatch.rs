@@ -160,6 +160,13 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("contact:{target_id}")),
             DispatchContext::default(),
         ),
+        // The agent reply rides the agent's own grouping for the same reason.
+        AutopilotActionPayload::RequestBookingAgentReply { agent_id, .. } => (
+            "booking-agent-reply".to_owned(),
+            format!("agent:{agent_id}"),
+            Some(format!("agent:{agent_id}")),
+            DispatchContext::default(),
+        ),
         // One evidence row per wave — the per-agent measurements merge their
         // observed counts onto it, so the batch learns as one intervention.
         AutopilotActionPayload::RequestBookingAgentApproachWave { wave_id, .. } => (

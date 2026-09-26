@@ -869,6 +869,10 @@ pub fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> Strin
         ("booking_agent.approach_wave.request", BriefingLocale::En) => {
             "Approve the booking-agent approach wave"
         }
+        ("booking_agent.reply.request", BriefingLocale::Pl) => {
+            "Zatwierdź odpowiedź do agenta bookingowego"
+        }
+        ("booking_agent.reply.request", BriefingLocale::En) => "Approve the booking-agent reply",
         ("community.engage.request", BriefingLocale::Pl) => "Zatwierdź publikację w społeczności",
         ("community.engage.request", BriefingLocale::En) => "Approve the community post",
         ("community.decline.advisory", BriefingLocale::Pl) => {

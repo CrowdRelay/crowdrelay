@@ -56,7 +56,10 @@ const CHANNEL_EVENTS: &[(&str, &[&str])] = &[
     ),
     (
         "booking_agent",
-        &["crowdrelay.booking_agent.approach_requested"],
+        &[
+            "crowdrelay.booking_agent.approach_requested",
+            "crowdrelay.booking_agent.reply_requested",
+        ],
     ),
     (
         "beacon",

@@ -50,6 +50,7 @@ pub(super) async fn execute_beacon_outreach(
         "beacon",
         &target.2,
         now,
+        false,
     )
     .await?;
     let city = sqlx::query_scalar::<_, Option<String>>(

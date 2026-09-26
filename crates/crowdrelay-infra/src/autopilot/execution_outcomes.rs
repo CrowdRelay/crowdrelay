@@ -68,6 +68,9 @@ pub(super) async fn record_execution_outcome(
         AutopilotActionPayload::RequestBookingAgentApproach { .. } => {
             ("booking_agent_approach_requested", 1.0, None)
         }
+        AutopilotActionPayload::RequestBookingAgentReply { .. } => {
+            ("booking_agent_reply_sent", 1.0, None)
+        }
         // The wave's measure is letters sent, not waves approved — the
         // funnel reads per agent either way.
         AutopilotActionPayload::RequestBookingAgentApproachWave { approaches, .. } => {

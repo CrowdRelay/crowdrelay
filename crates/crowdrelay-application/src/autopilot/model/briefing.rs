@@ -514,6 +514,42 @@ impl AutopilotActionPayload {
                     deadline_note: String::new(),
                 }
             }
+            Self::RequestBookingAgentReply { agent_name, agency, reply_disposition, draft, .. } => ActionBriefing {
+                summary: format!("Answer {}'s reply", agent_name),
+                why_it_matters: "They wrote back and nobody has answered. The draft is a starting point — read their actual reply and edit this to fit before sending. The platform sends it on the band's behalf — the agent's address never reaches the band.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Read their reply in the mailbox first".into(), why_it_matters: "The ledger recorded what the reply meant, not the words they used — the draft cannot answer what it never read".into() },
+                    BriefingStep { what_to_do: "Edit the reply below to fit".into(), why_it_matters: "It is the exact text they receive — approve the words, not the idea".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "Once approved the answer is sent and the conversation is recorded".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Agent".into(), value: agent_name.clone() },
+                        BriefingField { label: "Agency".into(), value: agency.clone().unwrap_or_else(|| "—".into()) },
+                        BriefingField { label: "Their answer".into(), value: match reply_disposition.as_str() {
+                            "positive" => "they want to talk".to_owned(),
+                            "signed" => "they took the act on".to_owned(),
+                            _ => "they wrote back".to_owned(),
+                        }},
+                    ];
+                    fields.push(BriefingField {
+                        label: "Subject".into(),
+                        value: match draft.subject.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => draft.subject.clone(),
+                        },
+                    });
+                    fields.push(BriefingField {
+                        label: "Body".into(),
+                        value: match draft.body.trim().is_empty() {
+                            true => "not composed".to_owned(),
+                            false => truncate(draft.body.clone(), 2000),
+                        },
+                    });
+                    fields
+                },
+                deadline_note: String::new(),
+            },
             Self::VerifyPlaylistPlacement { playlist_external_id, track_external_id, checkpoint, .. } => ActionBriefing {
                 summary: format!("Verify the playlist (check {})", checkpoint),
                 why_it_matters: "This checks whether the track is on the playlist. It reads public data and contacts nobody.".into(),

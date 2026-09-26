@@ -106,6 +106,7 @@ pub(in crate::autopilot) async fn execute_booking_outreach(
             "booking_opportunity",
             &locked.2,
             now,
+            false,
         )
         .await?;
         addressed.push(json!({
