@@ -126,6 +126,12 @@ pub struct UnengagedTarget {
     /// last 90 days — the early signal a conversion takes weeks to become.
     #[serde(default)]
     pub interactions_90d: u32,
+    /// Of `converted_fans_90d`, the fans still here: active, consented to
+    /// marketing and meaningfully active in the last 30 days. The number the
+    /// north star counts — a community is worth what it leaves behind, not
+    /// what it signs up.
+    #[serde(default)]
+    pub durable_fans_90d: u32,
 }
 
 impl UnengagedTarget {

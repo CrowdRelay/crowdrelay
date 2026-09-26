@@ -128,6 +128,9 @@ async fn a_community_that_converted_outranks_a_bigger_quiet_one()
     let converted = &engager.unengaged_targets[0];
     assert_eq!(converted.converted_fans_90d, 1);
     assert_eq!(converted.interactions_90d, 0);
+    // The fan never consented to marketing nor acted since: a conversion,
+    // not yet a fan who stayed.
+    assert_eq!(converted.durable_fans_90d, 0);
     let clicked = &engager.unengaged_targets[1];
     assert_eq!(clicked.converted_fans_90d, 0);
     assert_eq!(clicked.interactions_90d, 2);
