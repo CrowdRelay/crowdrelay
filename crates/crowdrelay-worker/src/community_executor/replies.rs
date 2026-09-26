@@ -313,7 +313,11 @@ impl CommunityExecutorWorker {
     }
 
     /// Drafts pending comments, then sends at most one due reply.
-    pub(super) async fn run_reply_lane(&self) -> Result<usize, CommunityExecutorError> {
+    ///
+    /// Public so tests can drive the real lane — the same reason
+    /// `recover_stale_posting` is public: the regressions it guards live in
+    /// the SQL this runs, not in a seam a test could replay by hand.
+    pub async fn run_reply_lane(&self) -> Result<usize, CommunityExecutorError> {
         if self.agent_service_auth_key.is_none() {
             return Ok(0);
         }
@@ -391,7 +395,8 @@ impl CommunityExecutorWorker {
                 Ok(()) => drafted += 1,
                 Err(error) => {
                     tracing::warn!(comment = %row.id, error = %error, "reply draft failed");
-                    self.back_off(row.id, row.attempts, "unanswered").await?;
+                    self.back_off(row.id, row.attempts + 1, "unanswered")
+                        .await?;
                 }
             }
         }
@@ -470,7 +475,14 @@ impl CommunityExecutorWorker {
         )
         .hold_reason()
         .map(|reason| reason.as_str().to_owned())
-        .or_else(|| review_community_register(&reply, recent).map(|hold| hold.as_str().to_owned()));
+        // The register is the community channel's own — the band's Instagram
+        // or Facebook audience opted into its hashtags and calls to action.
+        .or_else(|| {
+            (row.platform == "reddit")
+                .then(|| review_community_register(&reply, recent))
+                .flatten()
+                .map(|hold| hold.as_str().to_owned())
+        });
 
         let review = if guard_hold.is_some() {
             // Already going to a person; no need to spend a review.
@@ -607,7 +619,7 @@ impl CommunityExecutorWorker {
             SELECT count(*) FILTER (WHERE replied_at > now() - INTERVAL '24 hours'),
                    max(replied_at)
             FROM community_comments
-            WHERE workspace_id = $1 AND status = 'replied'
+            WHERE workspace_id = $1 AND status = 'replied' AND platform = 'reddit'
             "#,
         )
         .bind(ws)

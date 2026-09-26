@@ -11,6 +11,7 @@ mod city_geocoding;
 mod common;
 mod community_recovery;
 mod community_relay_batch;
+mod community_replies_lane;
 mod content_source_upsert;
 mod growth_metric_sync_schedule;
 mod import_opportunities;
