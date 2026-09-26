@@ -111,6 +111,7 @@ struct ReplySent {
 #[derive(sqlx::FromRow)]
 struct DraftRow {
     id: Uuid,
+    platform: String,
     parent_id: String,
     author: String,
     body: String,
@@ -125,7 +126,7 @@ struct DraftRow {
 #[derive(sqlx::FromRow)]
 struct SendRow {
     id: Uuid,
-    reddit_comment_id: String,
+    platform_comment_id: String,
     draft: String,
     attempts: i32,
 }
@@ -282,10 +283,10 @@ impl CommunityExecutorWorker {
             sqlx::query(
                 r#"
                 INSERT INTO community_comments
-                    (workspace_id, community_post_id, reddit_comment_id, parent_id, author, body,
+                    (workspace_id, community_post_id, platform_comment_id, parent_id, author, body,
                      parent_body, parent_by_band)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (workspace_id, reddit_comment_id) DO NOTHING
+                ON CONFLICT (workspace_id, platform, platform_comment_id) DO NOTHING
                 "#,
             )
             .bind(ws)
@@ -317,9 +318,13 @@ impl CommunityExecutorWorker {
             return Ok(0);
         }
         self.recover_stale_replies().await?;
+        let harvested = self.harvest_owned_comments().await.unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "owned-channel comment harvest failed");
+            0
+        });
         let drafted = self.draft_pending_replies().await?;
-        let sent = self.send_due_reply().await?;
-        Ok(drafted + sent)
+        let sent = self.send_due_reply().await? + self.send_due_owned_reply().await?;
+        Ok(harvested + drafted + sent)
     }
 
     /// A reply stuck in `replying` may already be live on Reddit. It is not
@@ -347,11 +352,18 @@ impl CommunityExecutorWorker {
         let ws = self.workspace_id.into_uuid();
         let rows: Vec<DraftRow> = sqlx::query_as(
             r#"
-            SELECT c.id, c.parent_id, c.author, c.body, p.subreddit,
-                   p.title AS post_title, p.body AS post_body,
+            -- A Reddit comment's post is a community post; an Instagram or
+            -- Facebook comment's post is the synced social post itself.
+            SELECT c.id, c.platform, c.parent_id, c.author, c.body,
+                   COALESCE(p.subreddit, c.platform) AS subreddit,
+                   COALESCE(p.title, src.title, '') AS post_title,
+                   COALESCE(p.body, src.metadata->>'body', '') AS post_body,
                    c.parent_body, c.parent_by_band, c.attempts
             FROM community_comments c
-            JOIN community_posts p ON p.id = c.community_post_id AND p.workspace_id = c.workspace_id
+            LEFT JOIN community_posts p
+              ON p.id = c.community_post_id AND p.workspace_id = c.workspace_id
+            LEFT JOIN content_sources src
+              ON src.id = c.content_source_id AND src.workspace_id = c.workspace_id
             WHERE c.workspace_id = $1
               AND c.status = 'unanswered'
               AND (c.not_before IS NULL OR c.not_before <= now())
@@ -366,7 +378,7 @@ impl CommunityExecutorWorker {
         let recent: Vec<String> = sqlx::query_scalar(
             r#"
             SELECT draft FROM community_comments
-            WHERE workspace_id = $1 AND status = 'replied'
+            WHERE workspace_id = $1 AND status = 'replied' AND platform = 'reddit'
               AND replied_at > now() - INTERVAL '30 days'
             "#,
         )
@@ -413,6 +425,7 @@ impl CommunityExecutorWorker {
                 "/community/reply-draft",
                 crate::discovery::AgentCapability::Dispatch,
                 &serde_json::json!({
+                    "platform": row.platform,
                     "subreddit": row.subreddit,
                     "post_title": row.post_title,
                     "post_body": row.post_body,
@@ -464,11 +477,15 @@ impl CommunityExecutorWorker {
             ReviewOutcome::Unavailable
         } else {
             self.review_text(
-                "reddit_reply",
+                if row.platform == "reddit" {
+                    "reddit_reply"
+                } else {
+                    "owned_reply"
+                },
                 &row.subreddit,
                 &reply,
                 &format!(
-                    "Post title: {}\nPost body: {}\nComment by u/{}: {}",
+                    "Post title: {}\nPost body: {}\nComment by {}: {}",
                     row.post_title, row.post_body, row.author, row.body
                 ),
                 draft.provider.as_deref(),
@@ -481,7 +498,13 @@ impl CommunityExecutorWorker {
             }
             ReviewOutcome::Unavailable => None,
         };
-        let unattended = unattended_replies_enabled() && reddit_write_enabled();
+        // Each channel's own pair of switches: Reddit's write switches, or
+        // the owned-channel publish gate.
+        let unattended = if row.platform == "reddit" {
+            unattended_replies_enabled() && reddit_write_enabled()
+        } else {
+            owned_replies::unattended_owned_replies_enabled()
+        };
         let (status, hold_reason, approved_by, not_before) =
             match route_reply(guard_hold.as_deref(), review, unattended) {
                 ReplyRoute::Approve => (
@@ -571,7 +594,7 @@ impl CommunityExecutorWorker {
             // Everything approved goes back to a person while the account is
             // halted — a reply is a write through the same account.
             sqlx::query(
-                "UPDATE community_comments SET status = 'awaiting_approval', hold_reason = $2, updated_at = now() WHERE workspace_id = $1 AND status = 'approved'",
+                "UPDATE community_comments SET status = 'awaiting_approval', hold_reason = $2, updated_at = now() WHERE workspace_id = $1 AND status = 'approved' AND platform = 'reddit'",
             )
             .bind(ws)
             .bind(reason.as_str())
@@ -599,9 +622,9 @@ impl CommunityExecutorWorker {
         let mut tx = self.pool.begin().await?;
         let row: Option<SendRow> = sqlx::query_as(
             r#"
-            SELECT id, reddit_comment_id, draft, attempts
+            SELECT id, platform_comment_id, draft, attempts
             FROM community_comments
-            WHERE workspace_id = $1 AND status = 'approved'
+            WHERE workspace_id = $1 AND status = 'approved' AND platform = 'reddit'
               AND (not_before IS NULL OR not_before <= now())
             ORDER BY not_before NULLS FIRST, created_at
             LIMIT 1
@@ -627,7 +650,7 @@ impl CommunityExecutorWorker {
             .agents_call::<ReplySent>(
                 "/reddit/reply",
                 crate::discovery::AgentCapability::SocialPublish,
-                &serde_json::json!({ "parent_id": row.reddit_comment_id, "text": row.draft }),
+                &serde_json::json!({ "parent_id": row.platform_comment_id, "text": row.draft }),
                 AGENTS_SUBMIT_TIMEOUT,
             )
             .await
@@ -674,7 +697,7 @@ impl CommunityExecutorWorker {
 
     /// Defers a row by the retry backoff in `status`, or fails it once it
     /// has used its attempts.
-    async fn back_off(
+    pub(super) async fn back_off(
         &self,
         id: Uuid,
         attempts: i32,

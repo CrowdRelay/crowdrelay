@@ -131,6 +131,12 @@ pub fn route_reply(
 pub const MAX_REPLIES_PER_24H: i64 = 12;
 /// Least time between two replies from the account.
 pub const MIN_REPLY_GAP: Duration = Duration::minutes(10);
+/// Replies on the band's own Instagram and Facebook in 24 hours. Looser than
+/// Reddit: no moderator can remove the account, but a burst still reads as a
+/// bot to the people reading it.
+pub const OWNED_MAX_REPLIES_PER_24H: i64 = 30;
+/// Least time between two replies on the band's own channels.
+pub const OWNED_MIN_REPLY_GAP: Duration = Duration::minutes(3);
 /// An approved reply waits at least this long after approval…
 pub const REPLY_DELAY_MIN: Duration = Duration::minutes(12);
 /// …and at most this long: a person gets to their notifications eventually.

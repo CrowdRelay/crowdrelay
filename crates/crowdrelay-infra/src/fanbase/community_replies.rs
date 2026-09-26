@@ -1,5 +1,6 @@
 //! The operator's side of the reply lane: what the band is about to say to
-//! the people who commented on its posts, and the three answers a person can
+//! the people who commented on its posts — on Reddit and on its own
+//! Instagram and Facebook — and the three answers a person can
 //! give — send it, send it as edited, or don't.
 //!
 //! The worker owns everything else (harvest, draft, review, send). An
@@ -16,6 +17,9 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct CommunityReplyView {
     pub id: Uuid,
+    /// reddit | instagram | facebook
+    pub platform: String,
+    /// The subreddit on Reddit; the platform name on the band's own channels.
     pub subreddit: String,
     pub post_title: String,
     pub post_url: Option<String>,
@@ -39,11 +43,17 @@ pub async fn list_community_replies(
 ) -> Result<Vec<CommunityReplyView>, sqlx::Error> {
     sqlx::query_as::<_, CommunityReplyView>(
         r#"
-        SELECT c.id, p.subreddit, p.title AS post_title, p.reddit_post_url AS post_url,
+        SELECT c.id, c.platform,
+               COALESCE(p.subreddit, c.platform) AS subreddit,
+               COALESCE(p.title, src.title, '') AS post_title,
+               COALESCE(p.reddit_post_url, src.metadata->>'url') AS post_url,
                c.author, c.body AS comment, c.status, c.draft, c.hold_reason,
                c.review_score, c.reply_permalink, c.created_at
         FROM community_comments c
-        JOIN community_posts p ON p.id = c.community_post_id AND p.workspace_id = c.workspace_id
+        LEFT JOIN community_posts p
+          ON p.id = c.community_post_id AND p.workspace_id = c.workspace_id
+        LEFT JOIN content_sources src
+          ON src.id = c.content_source_id AND src.workspace_id = c.workspace_id
         WHERE c.workspace_id = $1
           AND (c.status IN ('awaiting_approval', 'approved', 'unanswered')
                OR c.updated_at > now() - INTERVAL '7 days')
