@@ -43,8 +43,12 @@ jobs:
     # Warm-cache runs land around 6 minutes; a fully cold sccache+target
     # compile needs ~14. 35 is headroom for the box being shared: the
     # frontend lane now runs Tauri/Android builds alongside, and at 20 a
-    # busy-box run died mid-e2e at exactly the timeout (2026-09-22).
-    timeout-minutes: 35
+    # busy-box run died mid-e2e at exactly the timeout (2026-09-22). At 35 a
+    # main run that queued behind PR runs for 44 minutes then spent all 35
+    # still in "Run repository checks" (2026-09-26) — cancelled, no verdict,
+    # and a main HEAD with no CI run cannot deploy. 60 covers a cold compile
+    # on a contended box; a genuinely hung run still dies.
+    timeout-minutes: 60
 
     # The pg-gated lib tests in this job point at 127.0.0.1:5432 and used to
     # borrow whatever happened to be listening there — usually a leftover
