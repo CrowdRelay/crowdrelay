@@ -83,7 +83,7 @@ const MAX_SUBJECT: usize = 160;
 pub fn compose_reply_letter(
     input: &ReplyLetterInput<'_>,
 ) -> Result<OutreachLetter, ReplyLetterRefusal> {
-    let target = input.target_name.trim();
+    let target = crate::outreach_letter::salutation_name(input.target_name);
     let act = input.sender.act_name.trim();
     if target.is_empty() {
         return Err(ReplyLetterRefusal::NoTarget);
