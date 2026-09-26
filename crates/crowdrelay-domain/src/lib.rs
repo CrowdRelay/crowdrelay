@@ -123,6 +123,7 @@ pub mod play_measurement;
 pub mod playlist_placement;
 pub mod plays;
 pub mod portfolio;
+pub mod posting_window;
 pub mod pricing;
 pub mod promotion;
 pub mod publish_guard;

@@ -1076,6 +1076,10 @@ impl CommunityExecutorWorker {
             return Ok(());
         }
 
+        // Not while the community sleeps, and never on the dot of approval.
+        if self.defer_to_posting_window(action).await? {
+            return Ok(());
+        }
         // Standing (halted, a community that removed us), register, and the
         // independent review: any of them sends the draft to a person.
         if let Some(reason) = self.standing_hold(action).await? {
