@@ -99,10 +99,14 @@ pub enum Platform {
     X,
     Gdrive,
     Gmail,
+    /// The channel owner's Google grant for answering comments on the
+    /// band's videos (`youtube.force-ssl`). Its own platform so it never
+    /// collides with the `youtube` rows the video sync keys by channel id.
+    YoutubeAccount,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 20] = [
+    pub const ALL: [Platform; 21] = [
         Platform::Meta,
         Platform::Tiktok,
         Platform::GoogleAds,
@@ -123,6 +127,7 @@ impl Platform {
         Platform::X,
         Platform::Gdrive,
         Platform::Gmail,
+        Platform::YoutubeAccount,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -147,6 +152,7 @@ impl Platform {
             Self::X => "x",
             Self::Gdrive => "gdrive",
             Self::Gmail => "gmail",
+            Self::YoutubeAccount => "youtube_account",
         }
     }
 
@@ -168,7 +174,12 @@ impl Platform {
         match self {
             // Google Drive feeds the contacts staging table, not metric
             // series — the gdrive worker owns it.
-            Self::Meta | Self::GoogleAds | Self::Bandsintown | Self::Gdrive | Self::Gmail => false,
+            Self::Meta
+            | Self::GoogleAds
+            | Self::Bandsintown
+            | Self::Gdrive
+            | Self::Gmail
+            | Self::YoutubeAccount => false,
             // Reddit is polled via the agents service /reddit/observe
             // endpoint, which uses the official OAuth API. The old proxy-based
             // scrape was abandoned (Reddit blocks datacenter IPs), but the
@@ -233,6 +244,7 @@ impl Platform {
             Self::X => "X",
             Self::Gdrive => "Google Drive",
             Self::Gmail => "Gmail",
+            Self::YoutubeAccount => "YouTube (replies)",
         }
     }
 }
@@ -357,7 +369,8 @@ mod tests {
                 | Platform::Bandcamp
                 | Platform::X
                 | Platform::Gdrive
-                | Platform::Gmail => {}
+                | Platform::Gmail
+                | Platform::YoutubeAccount => {}
             }
         }
         let mut keys: Vec<&str> = Platform::ALL.iter().map(|p| p.as_str()).collect();

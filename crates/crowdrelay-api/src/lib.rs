@@ -76,6 +76,7 @@ mod connections_gdrive;
 mod connections_gmail;
 mod connections_simple;
 mod connections_tiktok;
+mod connections_youtube;
 mod console_views;
 mod content_engine;
 mod control_plane;
@@ -396,6 +397,7 @@ pub fn router(state: AppState, config: HttpConfig) -> Router {
         .layer(from_fn(rate_limit::enforce_rate_limits));
 
     routing::application_routes(state.clone())
+        .merge(connections_youtube::public_routes().with_state(state.clone()))
         .merge(area_admin::router(state.clone()))
         .merge(control_plane::router(state.clone()))
         .merge(control_plane_operator::router(state.clone()))

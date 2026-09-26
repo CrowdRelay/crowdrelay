@@ -499,7 +499,35 @@ impl PostgresFanbaseRepository {
         .await
     }
 
-    /// Shared body for the two Google connections — identical encrypted
+    /// Upserts any Google grant's connection — the API's generic grant flow
+    /// (Gmail, YouTube replies) stores through this, each under its own
+    /// platform and AAD binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_google_grant(
+        &self,
+        platform: &str,
+        workspace_id: Uuid,
+        google_user_id: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: time::OffsetDateTime,
+        scope: &str,
+        label: &str,
+    ) -> Result<(), FanbaseError> {
+        self.upsert_google_connection(
+            platform,
+            workspace_id,
+            google_user_id,
+            access_token,
+            refresh_token,
+            expires_at,
+            scope,
+            label,
+        )
+        .await
+    }
+
+    /// Shared body for the Google connections — identical encrypted
     /// column shape, differing only in platform name and AAD binding.
     #[allow(clippy::too_many_arguments)]
     async fn upsert_google_connection(

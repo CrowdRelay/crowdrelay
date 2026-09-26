@@ -285,7 +285,8 @@ impl CommunityExecutorWorker {
             r#"
             SELECT id, platform, platform_comment_id, draft, attempts
             FROM community_comments
-            WHERE workspace_id = $1 AND status = 'approved' AND platform <> 'reddit'
+            WHERE workspace_id = $1 AND status = 'approved'
+              AND platform IN ('instagram', 'facebook')
               AND (not_before IS NULL OR not_before <= now())
             ORDER BY not_before NULLS FIRST, created_at
             LIMIT 1
