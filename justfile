@@ -193,7 +193,9 @@ test-postgres-env:
       secrets_do_not_cross_workspaces
     {{CARGO}} test --locked --all-features --package crowdrelay-api --test postgres -- --ignored --test-threads=1 \
       an_attestation_is_anchored_once_and_the_anchor_says_so \
-      a_mailed_link_renders_then_decides_the_ask
+      a_mailed_link_renders_then_decides_the_ask \
+      material_counts_expired_sources_as_aged_out_and_folds_song_copies \
+      a_city_night_nobody_measured_reads_null_not_zero
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --lib -- --ignored --test-threads=1 \
       postgres_outbox_round_trip
     {{CARGO}} test --locked --all-features --package crowdrelay-api --lib -- --ignored --test-threads=1 \

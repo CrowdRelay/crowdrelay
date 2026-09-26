@@ -6,6 +6,7 @@
 mod attestation_anchor;
 mod common;
 mod concert_scan_split;
+mod console_views;
 mod gdrive_promote_batch;
 mod outreach_contacts;
 mod replies_waiting;

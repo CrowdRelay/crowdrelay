@@ -552,7 +552,7 @@ pub async fn city_opportunities(
     workspace_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<Vec<CityOpportunity>, sqlx::Error> {
-    city_opportunities_inner(pool, workspace_id, now, true).await
+    city_opportunities_inner(pool, workspace_id, now, true, None).await
 }
 
 /// The roster's per-member read. Every city's `co_bill` is relative to the
@@ -564,7 +564,22 @@ pub async fn city_opportunities_for_roster_member(
     workspace_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<Vec<CityOpportunity>, sqlx::Error> {
-    city_opportunities_inner(pool, workspace_id, now, false).await
+    city_opportunities_inner(pool, workspace_id, now, false, None).await
+}
+
+/// One city's evidence for the city page — the same pass, narrowed by slug
+/// before the per-city reads run, so the page and the plan cannot disagree.
+pub async fn city_opportunity(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+    city_slug: &str,
+) -> Result<Option<CityOpportunity>, sqlx::Error> {
+    Ok(
+        city_opportunities_inner(pool, workspace_id, now, true, Some(city_slug))
+            .await?
+            .pop(),
+    )
 }
 
 async fn city_opportunities_inner(
@@ -572,8 +587,10 @@ async fn city_opportunities_inner(
     workspace_id: Uuid,
     now: OffsetDateTime,
     gather_co_bill: bool,
+    only_city: Option<&str>,
 ) -> Result<Vec<CityOpportunity>, sqlx::Error> {
-    let cities = candidate_cities(pool, workspace_id, now).await?;
+    let mut cities = candidate_cities(pool, workspace_id, now).await?;
+    cities.retain(|city| only_city.is_none_or(|slug| city.city_slug == slug));
     // The tenant's own genre set, fetched once per pass — the "mine" half
     // of every venue's comparable-acts test, canonicalised through the
     // shared alias map the same way `city_venues` does it. One read per
