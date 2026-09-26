@@ -822,6 +822,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/content/pipeline",
             get(crate::autopilot::content_pipeline),
         )
+        // Which of the band's own posts held attention, against its own
+        // medians — the feedback the next video is made from.
+        .route(
+            "/v1/control-plane/content/hooks",
+            get(crate::ops::content_hooks),
+        )
         .route(
             "/v1/control-plane/autopilot/content-suggestions/{suggestion_id}/outcome",
             post(crate::autopilot::report_suggestion_outcome),

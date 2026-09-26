@@ -97,6 +97,7 @@ pub mod gig_plan;
 pub mod growth_debt;
 pub mod growth_envelope;
 pub mod growth_metrics;
+pub mod hook_scorecard;
 pub mod ids;
 pub mod iso_date;
 pub mod join_ask;
