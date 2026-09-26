@@ -100,6 +100,58 @@ pub struct SocialPostFact {
     /// The still a video post shows — what an image post can actually carry
     /// when `media_type` is VIDEO.
     pub thumbnail_url: Option<String>,
+    /// How the post landed with the band's own followers, against the band's
+    /// other recent posts on the same platform. `None` until the sync has
+    /// read its engagement.
+    pub resonance: Option<PostResonance>,
+}
+
+/// A synced post's engagement against the account's own recent posts.
+///
+/// Weighted count — likes, plus comments ×3, plus shares ×5: a comment or a
+/// share is a person doing something, a like is a thumb. Compared with the
+/// median of the same account's earlier posts, so the bar is the band's own
+/// normal, not a number from somebody else's audience.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct PostResonance {
+    pub engagement: i64,
+    /// Median engagement of the account's earlier posts on this platform,
+    /// rounded up — the bar errs high.
+    pub peer_median: Option<i64>,
+    /// How many earlier posts the median is over.
+    pub peers: u32,
+}
+
+/// Posts younger than this have not had time to show how they landed.
+pub const RESONANCE_SETTLE_HOURS: i64 = 36;
+/// Below this many earlier posts a median says nothing; any real engagement
+/// is enough.
+const RESONANCE_MIN_PEERS: u32 = 3;
+
+/// Whether a synced post has earned a place in other people's communities.
+///
+/// The owned audience gets every post — they followed the band. Communities
+/// get the ones the band's own followers answered: at or above the account's
+/// usual engagement, once it has had time to show. A post nobody engaged
+/// with at home is not one strangers will; carrying only what resonated is
+/// both what spreads and what reads as a band sharing its best, not a bot
+/// mirroring a feed. Fail closed: no engagement read, no community relay.
+#[must_use]
+pub fn resonates_for_communities(
+    post: &SocialPostFact,
+    occurred_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> bool {
+    let Some(resonance) = post.resonance else {
+        return false;
+    };
+    if now - occurred_at < Duration::hours(RESONANCE_SETTLE_HOURS) || resonance.engagement <= 0 {
+        return false;
+    }
+    match resonance.peer_median {
+        Some(median) if resonance.peers >= RESONANCE_MIN_PEERS => resonance.engagement >= median,
+        _ => true,
+    }
 }
 
 /// A community the workspace may post in: an outreach target the screening
@@ -890,5 +942,74 @@ mod tests {
             evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
             ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
         );
+    }
+
+    fn fact(resonance: Option<PostResonance>) -> SocialPostFact {
+        SocialPostFact {
+            title: "Gramy 17.10 w Gorzowie.".to_owned(),
+            url: None,
+            platform: "instagram".to_owned(),
+            body: None,
+            media_url: None,
+            media_id: None,
+            media_type: None,
+            thumbnail_url: None,
+            resonance,
+        }
+    }
+
+    #[test]
+    fn only_posts_that_landed_at_home_go_to_communities() {
+        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let settled = posted + Duration::hours(40);
+        let above = PostResonance {
+            engagement: 80,
+            peer_median: Some(50),
+            peers: 10,
+        };
+        let below = PostResonance {
+            engagement: 30,
+            peer_median: Some(50),
+            peers: 10,
+        };
+        assert!(resonates_for_communities(
+            &fact(Some(above)),
+            posted,
+            settled
+        ));
+        assert!(!resonates_for_communities(
+            &fact(Some(below)),
+            posted,
+            settled
+        ));
+        // Too early to tell, however well it is doing.
+        assert!(!resonates_for_communities(
+            &fact(Some(above)),
+            posted,
+            posted + Duration::hours(6)
+        ));
+        // Never read: fail closed.
+        assert!(!resonates_for_communities(&fact(None), posted, settled));
+        // A new account with no history: any real engagement is enough, none is not.
+        let first = PostResonance {
+            engagement: 4,
+            peer_median: None,
+            peers: 0,
+        };
+        assert!(resonates_for_communities(
+            &fact(Some(first)),
+            posted,
+            settled
+        ));
+        let silent = PostResonance {
+            engagement: 0,
+            peer_median: None,
+            peers: 0,
+        };
+        assert!(!resonates_for_communities(
+            &fact(Some(silent)),
+            posted,
+            settled
+        ));
     }
 }

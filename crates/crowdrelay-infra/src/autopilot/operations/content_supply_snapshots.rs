@@ -2,7 +2,7 @@
 //! has in flight, and has failed to get.
 
 use super::*;
-use crowdrelay_domain::content_supply::FailedArtifact;
+use crowdrelay_domain::content_supply::{FailedArtifact, PostResonance};
 
 #[derive(Debug, FromRow)]
 struct ContentRow {
@@ -19,6 +19,9 @@ struct ContentRow {
     post_media_id: Option<String>,
     post_media_type: Option<String>,
     post_thumbnail_url: Option<String>,
+    post_engagement: Option<i64>,
+    peer_median: Option<i64>,
+    peer_count: i64,
     communication_enabled: Option<bool>,
     press_enabled: Option<bool>,
     release_tier: Option<String>,
@@ -63,6 +66,13 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                  THEN source.metadata->>'media_type' END AS post_media_type,
             CASE WHEN source.source_kind = 'social_post'
                  THEN source.metadata->>'thumbnail_url' END AS post_thumbnail_url,
+            -- How the post landed at home (weighted engagement the sync
+            -- stores), against the median of the same account's earlier posts.
+            CASE WHEN source.source_kind = 'social_post'
+                  AND jsonb_typeof(source.metadata->'engagement') = 'number'
+                 THEN (source.metadata->>'engagement')::bigint END AS post_engagement,
+            peers.peer_median,
+            COALESCE(peers.peer_count, 0) AS peer_count,
             -- The three switches are release-plan vocabulary, so the read is
             -- scoped to release rows: a video or event whose own metadata
             -- happens to carry a `tier` key must not inherit release gating.
@@ -131,6 +141,24 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             COALESCE(failed.counts, ARRAY[]::bigint[]) AS failed_artifact_counts,
             COALESCE(failed.last_failed, ARRAY[]::timestamptz[]) AS failed_artifact_last
         FROM content_sources AS source
+        -- The account's own normal: earlier posts on the same platform in the
+        -- last 90 days that the sync has read engagement for. Earlier only —
+        -- they have had at least as long to collect it.
+        LEFT JOIN LATERAL (
+            SELECT
+                ceil(percentile_cont(0.5) WITHIN GROUP (
+                    ORDER BY (peer.metadata->>'engagement')::double precision
+                ))::bigint AS peer_median,
+                count(*)::bigint AS peer_count
+            FROM content_sources AS peer
+            WHERE peer.workspace_id = source.workspace_id
+              AND peer.source_kind = 'social_post'
+              AND peer.id <> source.id
+              AND peer.metadata->>'platform' = source.metadata->>'platform'
+              AND jsonb_typeof(peer.metadata->'engagement') = 'number'
+              AND peer.occurred_at < source.occurred_at
+              AND peer.occurred_at > source.occurred_at - INTERVAL '90 days'
+        ) AS peers ON source.source_kind = 'social_post'
         -- Requests that failed for this source version. Without them the
         -- evaluator asked again under the failed action's own key, which
         -- dedupes and writes nothing, and the chain stopped for good. A new
@@ -215,6 +243,11 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                         media_id: row.post_media_id.clone(),
                         media_type: row.post_media_type.clone(),
                         thumbnail_url: row.post_thumbnail_url.clone(),
+                        resonance: row.post_engagement.map(|engagement| PostResonance {
+                            engagement,
+                            peer_median: row.peer_median,
+                            peers: u32::try_from(row.peer_count).unwrap_or(0),
+                        }),
                     })
                 } else {
                     None

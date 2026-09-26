@@ -101,6 +101,7 @@ async fn post_upsert_writes_and_repeats_idempotently() -> Result<()> {
         media_id: Some("media-1".to_owned()),
         media_type: Some("IMAGE".to_owned()),
         thumbnail_url: None,
+        engagement: Some(42),
     };
     worker
         .upsert_post("instagram", &entry)
@@ -124,6 +125,27 @@ async fn post_upsert_writes_and_repeats_idempotently() -> Result<()> {
         max_version, 1,
         "an unchanged fact does not bump the version"
     );
+
+    // Engagement moves every hour and is not an edit: it lands in metadata
+    // without bumping the version or writing history.
+    let later = PostEntry {
+        engagement: Some(97),
+        ..entry
+    };
+    worker
+        .upsert_post("instagram", &later)
+        .await
+        .map_err(|error| anyhow::anyhow!("engagement upsert: {error}"))?;
+    let (engagement, version): (Option<i64>, i64) = sqlx::query_as(
+        "SELECT (metadata->>'engagement')::bigint, version FROM content_sources
+         WHERE workspace_id = $1 AND source_kind = 'social_post'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&db)
+    .await
+    .context("read engagement")?;
+    assert_eq!(engagement, Some(97));
+    assert_eq!(version, 1, "engagement is not a new version of the post");
 
     Ok(())
 }
