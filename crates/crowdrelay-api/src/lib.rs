@@ -75,6 +75,7 @@ mod connections_gdrive;
 mod connections_gmail;
 mod connections_simple;
 mod connections_tiktok;
+mod console_views;
 mod content_engine;
 mod control_plane;
 mod control_plane_operator;

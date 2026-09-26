@@ -210,6 +210,36 @@ pub async fn city_funnel(
     headers: HeaderMap,
 ) -> Response {
     let now = OffsetDateTime::now_utc();
+    let result = city_funnel_rows(
+        &state.database,
+        state.ticketing.workspace_id().into_uuid(),
+        now,
+        None,
+    )
+    .await
+    .map(|mut rows| {
+        if params.order.as_deref() == Some("organise") {
+            rows.sort_by(|a, b| {
+                b.organise_score_bp
+                    .cmp(&a.organise_score_bp)
+                    .then_with(|| b.active_30d.cmp(&a.active_30d))
+                    .then_with(|| a.city_slug.cmp(&b.city_slug))
+            });
+        }
+        rows
+    });
+    private_json(result, &headers)
+}
+
+/// The funnel rows, optionally narrowed to one city by catalogue slug — the
+/// city page asks for its own row through the same query the Places table
+/// reads, so the two can never disagree about a city's fans or reach.
+pub(crate) async fn city_funnel_rows(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+    only_city: Option<&str>,
+) -> Result<Vec<CityFunnelRow>, sqlx::Error> {
     let result = sqlx::query_as::<_, CityFunnelRow>(
         r#"
         WITH city_fans AS (
@@ -255,6 +285,7 @@ pub async fn city_funnel(
               -- to the surviving fan; everything else, pending included,
               -- is a real member of the fanbase a city count should name.
               AND fan.status <> 'merged'
+              AND ($3::text IS NULL OR city.slug = $3)
         ),
         agg AS (
             SELECT
@@ -427,11 +458,12 @@ pub async fn city_funnel(
         LIMIT 100
         "#,
     )
-    .bind(state.ticketing.workspace_id().into_uuid())
+    .bind(workspace_id)
     .bind(now)
-    .fetch_all(&state.database)
+    .bind(only_city)
+    .fetch_all(pool)
     .await;
-    let result = result.map(|mut rows| {
+    result.map(|mut rows| {
         let today = now.date();
         for row in &mut rows {
             row.months_since_show = row.last_show_at.map(|played| {
@@ -453,17 +485,8 @@ pub async fn city_funnel(
                 },
             ));
         }
-        if params.order.as_deref() == Some("organise") {
-            rows.sort_by(|a, b| {
-                b.organise_score_bp
-                    .cmp(&a.organise_score_bp)
-                    .then_with(|| b.active_30d.cmp(&a.active_30d))
-                    .then_with(|| a.city_slug.cmp(&b.city_slug))
-            });
-        }
         rows
-    });
-    private_json(result, &headers)
+    })
 }
 
 /// The shared venue registry read (§4f-2): one row per room that any
@@ -484,11 +507,33 @@ pub async fn city_funnel(
 /// A name-only peer with no genre claims is honestly not counted: the count
 /// is a floor, not a guess.
 pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    match city_venue_rows(&state, None).await {
+        Ok(rows) => private_json(Ok::<_, sqlx::Error>(rows), &headers),
+        Err(error) => {
+            // Degrading the genre read to an empty set made every
+            // comparability test fail and reported `comparable_acts: 0` — a
+            // measured claim that no act of this band's genre ever played the
+            // room. Any failed evidence read fails the request instead.
+            tracing::warn!(%error, "city venues read failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// The registry rows, optionally narrowed to one city by catalogue slug —
+/// the city page's rooms are the Places tab's rooms, filtered, never a
+/// second read that could rank or assess them differently.
+pub(crate) async fn city_venue_rows(
+    state: &crate::AppState,
+    only_city: Option<&str>,
+) -> Result<Vec<CityVenueRow>, sqlx::Error> {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     // The requesting tenant's own genre set, one scalar up front — the
-    // "mine" half of every comparability test below. A failed read degrades
-    // to an empty set rather than failing the venue list over it.
-    let my_genres = match sqlx::query_scalar::<_, Vec<String>>(
+    // "mine" half of every comparability test below. A failed read fails the
+    // request (see `city_venues`): it must never degrade to an empty set.
+    let my_genres = sqlx::query_scalar::<_, Vec<String>>(
         r#"
         SELECT COALESCE(array_agg(DISTINCT lower(btrim(g))), '{}')
         FROM band_listings AS bl, unnest(bl.genre_tags) AS g
@@ -497,23 +542,7 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
     )
     .bind(workspace_id)
     .fetch_one(&state.database)
-    .await
-    {
-        Ok(genres) => genres,
-        Err(error) => {
-            // Degrading to an empty set made every comparability test fail,
-            // and the read then reported `comparable_acts: 0` — a measured
-            // claim that no act of this band's genre has ever played the room.
-            // That number reaches a proposal's caveat, so an outage would have
-            // put a false statement in front of a promoter. The evidence read
-            // failing fails the request, the way the other evidence reads on
-            // this surface do.
-            tracing::warn!(%error, "tenant genre read failed");
-            return Problem::service_unavailable(request_id(&headers))
-                .private()
-                .into_response();
-        }
-    };
+    .await?;
     let mut result = sqlx::query_as::<_, CityVenueRow>(
         r#"
         WITH marks AS (
@@ -690,6 +719,7 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
           ON stat.venue_id = venue.id AND stat.attribute = 'status'
         -- A room resolved closed is a dead lead; the list does not show it.
         WHERE lower(btrim(COALESCE(stat.value, ''))) <> 'closed'
+          AND ($3::text IS NULL OR city.slug = $3)
         GROUP BY venue.id, venue.display_name, city.slug, city.name,
                  city.country_code, repeaters.repeat_attenders,
                  comparable.comparable_acts
@@ -699,12 +729,11 @@ pub async fn city_venues(State(state): State<crate::AppState>, headers: HeaderMa
     )
     .bind(workspace_id)
     .bind(&my_genres)
+    .bind(only_city)
     .fetch_all(&state.database)
-    .await;
-    if let Ok(rows) = &mut result {
-        assess_venue_rows(&state, rows).await;
-    }
-    private_json(result, &headers)
+    .await?;
+    assess_venue_rows(state, &mut result).await;
+    Ok(result)
 }
 
 /// The standing verification brief — one paste-able prompt covering all

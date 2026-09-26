@@ -31,7 +31,7 @@ use crowdrelay_infra::gig_outreach::{
     gig_outreach_is_sendable,
 };
 use crowdrelay_infra::gig_planning::{
-    city_opportunities, proposal_track_record, roster_opportunity, stated_intent,
+    city_opportunities, city_opportunity, proposal_track_record, roster_opportunity, stated_intent,
 };
 use crowdrelay_infra::organization_settings::{
     KEY_ROSTER_PACKAGES_PER_PERIOD, OrganizationSettingsRepository, PACKAGES_PER_PERIOD_RANGE,
@@ -77,6 +77,55 @@ pub struct PlanParams {
 /// proposals again and nobody can say why.
 fn resolve_intent(param: Option<&str>, stored: TenantIntent) -> TenantIntent {
     param.and_then(TenantIntent::parse).unwrap_or(stored)
+}
+
+/// The planner's answer for one city, as the city page opens on it.
+#[derive(Debug, Serialize)]
+pub(crate) struct CityVerdict {
+    /// True when the plan proposes a show here; the proposal itself, and
+    /// its approve button, stay on the Places plan.
+    pub(crate) proposed: bool,
+    /// The planner's own sentence: why not, and what would change it.
+    pub(crate) reason: Option<String>,
+    /// Fans who asked to hear about a show here — the planner's input.
+    /// `None` when the city cannot be measured, never a zero.
+    pub(crate) reachable: Option<u32>,
+    /// The audience a show needs before the planner calls it a plan; only
+    /// present when that bar is the reason it passed.
+    pub(crate) floor: Option<u32>,
+}
+
+/// The stored intent applied to one city's evidence. `Ok(None)` means the
+/// planner did not consider the city at all — no fan named it.
+pub(crate) async fn city_verdict(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+    city_slug: &str,
+) -> Result<Option<CityVerdict>, sqlx::Error> {
+    let settings = TenantSettingsRepository::new(pool.clone());
+    let intent = stated_intent(&settings, workspace_id).await?;
+    let Some(opportunity) = city_opportunity(pool, workspace_id, now, city_slug).await? else {
+        return Ok(None);
+    };
+    let reachable = opportunity.reachable_fans;
+    Ok(Some(match plan_gig(&opportunity, intent) {
+        Ok(_) => CityVerdict {
+            proposed: true,
+            reason: None,
+            reachable,
+            floor: None,
+        },
+        Err(refusal) => CityVerdict {
+            proposed: false,
+            reason: Some(refusal.message()),
+            reachable,
+            floor: match refusal {
+                GigRefusal::TooFewReachable { floor, .. } => Some(floor),
+                _ => None,
+            },
+        },
+    }))
 }
 
 /// One city that produced no proposal, with the sentence explaining it.
