@@ -37,24 +37,12 @@ use crowdrelay_domain::growth_metrics::NorthStarMetric;
 /// a local that a read field is derived from — the trend, the conversion rate,
 /// the target progress — so carrying it costs a struct field and no query.
 ///
-/// **DORMANT — computed, stored, read by nothing.**
-/// `discovered_communities`, `active_communities`,
-/// `avg_community_engagement_bps`, `best_performing_community`,
-/// `worst_performing_community`, `pending_outreach_targets`,
-/// `promoted_outreach_targets`, `engaged_outreach_targets`. The first two and
-/// the last three cost a dedicated query per cycle each.
-///
-/// The dormant set is kept rather than deleted for one reason: the counters are
-/// *correct*, expensively so. Both were `COUNT(*)` over a LEFT JOIN onto
-/// `community_posts`, so every post added a phantom community or outreach
-/// target, and `pipeline_counts_count_places_not_posts` is the live-Postgres
-/// proof of the fix. Deleting the fields would delete that.
-///
-/// But be exact about what they are. A number on this struct reads as something
-/// the brain knows *and uses*, and the failure mode the counter test describes —
-/// posting more making the brain believe it needs fewer places — cannot happen
-/// today, because nothing consults the count. Wiring one of these up is the good
-/// outcome; it just has to move out of this list in the same change.
+/// **Nothing dormant.** Every community and outreach counter here feeds
+/// strategy selection or EFE scoring. The three that never did —
+/// `best_performing_community`, `worst_performing_community` and
+/// `promoted_outreach_targets` — were deleted: a number on this struct reads as
+/// something the brain knows *and uses*. The promoted count still reaches the
+/// community engager through its snapshot's `unengaged_outreach_targets`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WorldModel {
     // ── Fan aggregation state ──
@@ -132,16 +120,9 @@ pub struct WorldModel {
     #[serde(default)]
     pub channel_yield: Vec<crate::platform_yield::ChannelYield>,
 
-    /// Best performing community by avg score, if any.
-    pub best_performing_community: Option<String>,
-    /// Worst performing community by avg score, if any.
-    pub worst_performing_community: Option<String>,
-
     // ── Outreach pipeline state ──
     /// Outreach targets proposed but not yet promoted.
     pub pending_outreach_targets: u32,
-    /// Outreach targets promoted but not yet engaged with community posts.
-    pub promoted_outreach_targets: u32,
     /// Outreach targets that have community posts (engaged).
     pub engaged_outreach_targets: u32,
 

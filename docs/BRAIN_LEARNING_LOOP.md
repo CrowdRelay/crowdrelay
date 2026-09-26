@@ -245,7 +245,6 @@ Written, never read on a decision path. Listed so nobody has to discover it.
 
 | Value | Written by | Read by |
 |---|---|---|
-| `WorldModel`: `best_performing_community`, `worst_performing_community`, `promoted_outreach_targets` | the snapshot loader, two dedicated queries per cycle | nothing — and `WorldModel` is neither persisted nor served, so unread here is unread everywhere |
 | `SelfAssessment` verdict | `/v1/control-plane/ops/attention` | operator only; changes no ranking, by design |
 
 Wired or deleted since this table first listed them:
@@ -255,6 +254,10 @@ Wired or deleted since this table first listed them:
   P(challenger exceeds the hysteresis incumbent by ≥1 fan) ≥ 0.6.
 - `DecisionValue::contamination` — deleted; the truthful record is the
   assignment row's `final_contamination`.
+- `WorldModel`: `best_performing_community`, `worst_performing_community`,
+  `promoted_outreach_targets` — deleted; nothing read them, and the promoted
+  count still reaches the engager as the snapshot's
+  `unengaged_outreach_targets`.
 - `GrowthEvidence::creative_family` — consumed by `update_family_effect` in
   evidence replay and the community-engager's Thompson sampling.
 

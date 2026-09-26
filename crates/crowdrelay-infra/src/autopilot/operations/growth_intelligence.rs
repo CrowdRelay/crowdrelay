@@ -639,11 +639,6 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         u16::try_from((weighted_ratio_sum / weighted_posts as f64 * 10_000.0) as u64).unwrap_or(0)
     };
 
-    // engagement_history is ordered by avg_score DESC (from the SQL query),
-    // so first = best, last = worst.
-    let best_performing_community = engagement_history.first().map(|e| e.subreddit.clone());
-    let worst_performing_community = engagement_history.last().map(|e| e.subreddit.clone());
-
     // North star metric — loaded in parallel with the count queries above.
     let north_star = north_star_str
         .and_then(|(s,)| NorthStarMetric::parse(&s))
@@ -942,10 +937,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         discovered_communities,
         active_communities,
         avg_community_engagement_bps,
-        best_performing_community,
-        worst_performing_community,
         pending_outreach_targets,
-        promoted_outreach_targets,
         engaged_outreach_targets,
         days_to_next_event,
         has_upcoming_event,
