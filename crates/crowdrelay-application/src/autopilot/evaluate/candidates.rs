@@ -760,6 +760,7 @@ fn content_candidates(
             push_audience,
             confidence,
             evidence,
+            now,
         )?),
         ContentSupplyDecision::Hold(_) => Ok(Vec::new()),
     }

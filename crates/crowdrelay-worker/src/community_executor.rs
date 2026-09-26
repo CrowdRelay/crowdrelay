@@ -63,6 +63,8 @@ use uuid::Uuid;
 
 mod marks;
 mod relay;
+mod standing;
+use time::OffsetDateTime;
 
 use relay::RelayBatchGate;
 
@@ -120,19 +122,9 @@ fn build_http_client(
     builder.build().map_err(CommunityExecutorError::ClientBuild)
 }
 
-/// Maximum posts per workspace per 24 hours.
-///
-/// One, not three, for as long as autonomous posting is unproven. The account
-/// this publishes through is the only Reddit access the system has, and a
-/// moderator who reads the pattern as spam does not cost a post — it costs
-/// every read the growth loop depends on. One post a day into a community the
-/// account has joined, on a seven-day per-subreddit cooldown, is
-/// indistinguishable from somebody who posts occasionally.
-///
-/// Raise it once posts have survived a week, not before. Three was chosen
-/// when nothing had ever been published, so the evidence for it was zero
-/// either way.
-const MAX_POSTS_PER_24H: i64 = 1;
+// The 24h post ceiling is earned, not fixed: one a day until posts have
+// survived, and back to one on any removal. See `standing` and
+// `crowdrelay_domain::reddit_standing`.
 
 /// Cooldown: no more than one post per subreddit per 7 days.
 const SUBREDDIT_COOLDOWN_DAYS: i32 = 7;
@@ -173,9 +165,10 @@ const MAX_TRANSIENT_ATTEMPTS: i32 = 6;
 /// After this window, engagement is considered stale and polling stops.
 const METRICS_WINDOW: Duration = Duration::from_secs(72 * 60 * 60);
 
-/// Minimum interval between metric polls for the same post. Prevents
-/// hammering Reddit's API for posts that haven't changed.
-const METRICS_POLL_MIN_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Poll interval: 30 min while a post is under 6h old (when removals land),
+/// then 3h — ~34 reads a post through the one session, not ~288.
+const METRICS_POLL_MIN_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const METRICS_POLL_SETTLED_INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// Maximum posts to poll for metrics in a single cycle. Bounded to keep
 /// the cycle fast even if many posts are in the window.
@@ -641,8 +634,8 @@ impl CommunityExecutorWorker {
         let ws = self.workspace_id.into_uuid();
         let mut tx = self.pool.begin().await?;
 
-        // Guardrail 1: 24h post limit. If the workspace has already posted
-        // MAX_POSTS_PER_24H posts in the last 24 hours, don't claim any more.
+        // Guardrail 1: 24h post limit. If the workspace has already posted its
+        // earned daily cap in the last 24 hours, don't claim any more.
         // Checking this inside the transaction prevents the "posting → failed"
         // transition that would otherwise briefly make an action look active.
         //
@@ -666,7 +659,8 @@ impl CommunityExecutorWorker {
         // The cap binds uncampaigned deliveries only. Campaign rows pace
         // themselves on their batch interval, so the cap becoming reached
         // closes the uncampaigned lane without parking the drip.
-        let cap_reached = recent_posts >= MAX_POSTS_PER_24H;
+        let history = standing::post_history(&mut *tx, ws).await?;
+        let cap_reached = recent_posts >= standing::daily_cap(&history);
 
         // Step 1: Insert pending rows for unprocessed succeeded actions.
         //
@@ -1081,6 +1075,13 @@ impl CommunityExecutorWorker {
             return Ok(());
         }
 
+        // The account's standing: a halted account, or a community whose
+        // moderators removed one of our posts, sends the draft to a person.
+        if let Some(reason) = self.standing_hold(action).await? {
+            self.hold_for_human(action.id, reason).await?;
+            return Ok(());
+        }
+
         // Browser-only: the agents service posts through a real logged-in
         // browser session — the only Reddit access path that works reliably.
         // No OAuth fallback: if the agents service is unavailable, the post
@@ -1323,22 +1324,6 @@ impl CommunityExecutorWorker {
         Ok(count > 0)
     }
 
-    /// Checks if the workspace has reached the 24h post limit.
-    async fn rate_limit_reached(&self) -> Result<bool, CommunityExecutorError> {
-        let count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT count(*) FROM community_posts
-            WHERE workspace_id = $1
-              AND status = 'posted'
-              AND posted_at > now() - INTERVAL '24 hours'
-            "#,
-        )
-        .bind(self.workspace_id.into_uuid())
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(count >= MAX_POSTS_PER_24H)
-    }
-
     /// Builds the final post body, appending the smart link as a full URL
     /// if present. The smart_link stored in the action payload is a `/l/{slug}`
     /// path; Reddit needs a full URL for it to be clickable.
@@ -1527,7 +1512,7 @@ impl CommunityExecutorWorker {
     /// Only polls posts that:
     /// - Have `status = 'posted'` with a non-null `reddit_post_id`
     /// - Were posted within the last `METRICS_WINDOW` (72h)
-    /// - Haven't been polled in the last `METRICS_POLL_MIN_INTERVAL` (15min)
+    /// - Haven't been polled in the last `METRICS_POLL_MIN_INTERVAL` / `_SETTLED_INTERVAL`
     ///
     /// This is the feedback loop: the system learns which posts generate
     /// engagement (upvotes, comments) and which don't.
@@ -1545,7 +1530,9 @@ impl CommunityExecutorWorker {
               AND posted_at > now() - make_interval(secs => $2::double precision)
               AND (
                   metrics_last_fetched_at IS NULL
-                  OR metrics_last_fetched_at < now() - make_interval(secs => $3::double precision)
+                  OR metrics_last_fetched_at < now() - make_interval(secs => CASE
+                      WHEN posted_at > now() - INTERVAL '6 hours' THEN $3::double precision
+                      ELSE $5::double precision END)
               )
             ORDER BY posted_at DESC
             LIMIT $4
@@ -1555,6 +1542,7 @@ impl CommunityExecutorWorker {
         .bind(METRICS_WINDOW.as_secs() as i64)
         .bind(METRICS_POLL_MIN_INTERVAL.as_secs() as i64)
         .bind(METRICS_POLL_BATCH)
+        .bind(METRICS_POLL_SETTLED_INTERVAL.as_secs() as i64)
         .fetch_all(&self.pool)
         .await?;
 
@@ -1737,6 +1725,13 @@ impl CommunityExecutorWorker {
             upvotes: data.data.ups,
             num_comments: data.data.num_comments,
             upvote_ratio: data.data.upvote_ratio,
+            removed_by_category: data
+                .data
+                .removed_by_category
+                .as_ref()
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            removal_visible: data.data.removed_by_category.is_some(),
         })
     }
 
@@ -1767,6 +1762,7 @@ impl CommunityExecutorWorker {
         .bind(metrics.upvote_ratio)
         .execute(&mut *tx)
         .await?;
+        standing::record_removal_state(&mut tx, ws, post_id, metrics).await?;
 
         sqlx::query(
             r#"
@@ -1882,6 +1878,10 @@ struct RedditPostData {
     ups: i32,
     num_comments: i32,
     upvote_ratio: Option<f64>,
+    /// Absent: the listing said nothing about removal. `Some(Null)`: it
+    /// said the post is live. Kept apart so a missing key never reads as live.
+    #[serde(default, deserialize_with = "standing::present_value")]
+    removed_by_category: Option<Value>,
 }
 
 /// Parsed metrics from a Reddit post, ready to record.
@@ -1891,6 +1891,13 @@ struct RedditPostMetrics {
     upvotes: i32,
     num_comments: i32,
     upvote_ratio: Option<f64>,
+    /// Reddit's `removed_by_category`, when the read could see it.
+    #[serde(default)]
+    removed_by_category: Option<String>,
+    /// Whether the read could establish removal state at all. An agents
+    /// service that predates the field omits it, and its reads prove nothing.
+    #[serde(default)]
+    removal_visible: bool,
 }
 
 include!("community_executor/tests.rs");

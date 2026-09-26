@@ -52,6 +52,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         // What the approved asks produced: terminal actions with their
         // measurement verdicts — the funnel's other half, per action.
         .route("/v1/control-plane/ops/outcomes", get(crate::ops::outcomes))
+        // The goal scoreboard: planned vs actual for the objective the brain
+        // is working toward, resolved-evidence count against the learning
+        // target, and how long people take to approve what it drafts.
+        .route("/v1/control-plane/ops/goal", get(crate::ops::goal))
         // The intelligence brief: one read composing the brain's verdict,
         // its posture, its plan, what it found, what it did, and what needs
         // the operator — the "are we getting anywhere" answer.

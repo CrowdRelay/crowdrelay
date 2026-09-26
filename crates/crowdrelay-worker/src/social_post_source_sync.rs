@@ -97,6 +97,27 @@ pub struct PostEntry {
     /// The still a VIDEO post shows — kept apart from `media_url` so a video
     /// repost can ship its frame as the photo rather than an unplayable mp4.
     pub thumbnail_url: Option<String>,
+    /// Weighted engagement from the same Graph read — likes + comments ×3 +
+    /// shares ×5. `None` when the platform reported none of the counts (an
+    /// owner can hide likes), which is not zero engagement.
+    pub engagement: Option<i64>,
+}
+
+/// Likes + comments ×3 + shares ×5: a comment or share is a person doing
+/// something, a like is a thumb. `None` when no count was reported.
+pub fn weighted_engagement(
+    likes: Option<i64>,
+    comments: Option<i64>,
+    shares: Option<i64>,
+) -> Option<i64> {
+    if likes.is_none() && comments.is_none() && shares.is_none() {
+        return None;
+    }
+    Some(
+        likes.unwrap_or(0).max(0)
+            + 3 * comments.unwrap_or(0).max(0)
+            + 5 * shares.unwrap_or(0).max(0),
+    )
 }
 
 #[derive(Clone)]
@@ -234,7 +255,7 @@ impl SocialPostSourceSyncWorker {
             .as_ref()
             .ok_or_else(|| "no Facebook Page access token configured".to_owned())?;
         let url = format!(
-            "{GRAPH_API_BASE}/{page_id}/posts?fields=id,message,created_time,permalink_url,full_picture&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
+            "{GRAPH_API_BASE}/{page_id}/posts?fields=id,message,created_time,permalink_url,full_picture,reactions.summary(total_count).limit(0),comments.summary(total_count).limit(0),shares&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
         );
         // The token is inside the URL — strip it off transport errors so it
         // cannot reach a log line, the same guard the metric sync applies.
@@ -278,6 +299,11 @@ impl SocialPostSourceSyncWorker {
                 media_id: post.full_picture.as_ref().map(|_| post.id.clone()),
                 media_type: None,
                 thumbnail_url: None,
+                engagement: weighted_engagement(
+                    post.reactions.as_ref().and_then(GraphCount::total),
+                    post.comments.as_ref().and_then(GraphCount::total),
+                    post.shares.as_ref().and_then(|shares| shares.count),
+                ),
             };
             self.upsert_post("facebook", &entry).await?;
         }
@@ -292,7 +318,7 @@ impl SocialPostSourceSyncWorker {
             .as_ref()
             .ok_or_else(|| "no Facebook Page access token configured".to_owned())?;
         let url = format!(
-            "{GRAPH_API_BASE}/{ig_user_id}/media?fields=id,caption,timestamp,permalink,media_type,media_url,thumbnail_url,children{{media_url,media_type,thumbnail_url}}&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
+            "{GRAPH_API_BASE}/{ig_user_id}/media?fields=id,caption,timestamp,permalink,media_type,media_url,thumbnail_url,like_count,comments_count,children{{media_url,media_type,thumbnail_url}}&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
         );
         let response = self
             .http_client
@@ -376,6 +402,7 @@ impl SocialPostSourceSyncWorker {
                 media_id,
                 media_type: media.media_type.clone(),
                 thumbnail_url: media.thumbnail_url.clone(),
+                engagement: weighted_engagement(media.like_count, media.comments_count, None),
             };
             self.upsert_post("instagram", &entry).await?;
         }
@@ -428,7 +455,10 @@ impl SocialPostSourceSyncWorker {
             WHERE content_sources.title IS DISTINCT FROM EXCLUDED.title
                OR content_sources.occurred_at IS DISTINCT FROM EXCLUDED.occurred_at
                OR content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
-               OR content_sources.metadata IS DISTINCT FROM EXCLUDED.metadata
+               -- Engagement is written separately below and is not an edit;
+               -- compared with it, every sync would look like a new version.
+               OR (content_sources.metadata - 'engagement' - 'engagement_at')
+                  IS DISTINCT FROM EXCLUDED.metadata
             RETURNING id, version
             "#,
         )
@@ -442,6 +472,28 @@ impl SocialPostSourceSyncWorker {
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| format!("upsert: {e}"))?;
+
+        // Engagement moves every hour; it is not an edit of the post. Written
+        // on its own so it neither bumps the version nor writes history.
+        if let Some(engagement) = entry.engagement {
+            sqlx::query(
+                r#"
+                UPDATE content_sources
+                SET metadata = metadata || jsonb_build_object(
+                    'engagement', $3::bigint,
+                    'engagement_at', to_jsonb(now())
+                )
+                WHERE workspace_id = $1 AND source_kind = 'social_post' AND source_key = $2
+                  AND (metadata->'engagement') IS DISTINCT FROM to_jsonb($3::bigint)
+                "#,
+            )
+            .bind(self.workspace_id)
+            .bind(&source_key)
+            .bind(engagement)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("engagement: {e}"))?;
+        }
 
         if let Some((source_id, version)) = upserted {
             sqlx::query(
@@ -492,6 +544,33 @@ struct FacebookPost {
     created_time: Option<String>,
     permalink_url: Option<String>,
     full_picture: Option<String>,
+    reactions: Option<GraphCount>,
+    comments: Option<GraphCount>,
+    shares: Option<FacebookShares>,
+}
+
+/// `{field}.summary(total_count).limit(0)` → `{"summary":{"total_count":N}}`.
+#[derive(Debug, Deserialize)]
+struct GraphCount {
+    summary: Option<GraphSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphSummary {
+    total_count: Option<i64>,
+}
+
+impl GraphCount {
+    fn total(&self) -> Option<i64> {
+        self.summary
+            .as_ref()
+            .and_then(|summary| summary.total_count)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FacebookShares {
+    count: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -503,6 +582,9 @@ struct InstagramMedia {
     media_type: Option<String>,
     media_url: Option<String>,
     thumbnail_url: Option<String>,
+    /// Absent when the owner hides like counts.
+    like_count: Option<i64>,
+    comments_count: Option<i64>,
     children: Option<GraphDataPage<InstagramMediaChild>>,
 }
 
@@ -514,6 +596,18 @@ struct InstagramMediaChild {
     media_url: Option<String>,
     media_type: Option<String>,
     thumbnail_url: Option<String>,
+}
+
+#[cfg(test)]
+mod engagement_tests {
+    use super::weighted_engagement;
+
+    #[test]
+    fn comments_and_shares_outweigh_likes_and_silence_is_not_zero() {
+        assert_eq!(weighted_engagement(Some(10), Some(2), Some(1)), Some(21));
+        assert_eq!(weighted_engagement(None, Some(4), None), Some(12));
+        assert_eq!(weighted_engagement(None, None, None), None);
+    }
 }
 
 /// First line of a caption, shortened — the panel's readable name for a post.

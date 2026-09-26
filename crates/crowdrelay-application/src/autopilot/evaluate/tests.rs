@@ -514,7 +514,9 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 3,
-            occurred_at: now - time::Duration::hours(5),
+            // Settled (past the 36h resonance window) and above the account's
+            // own median — the post communities should get.
+            occurred_at: now - time::Duration::hours(40),
             expires_at: now + time::Duration::days(39),
             communication_enabled: None,
             press_enabled: None,
@@ -531,6 +533,11 @@ mod tests {
                 media_id: Some("1790".to_owned()),
                 media_type: Some("IMAGE".to_owned()),
                 thumbnail_url: None,
+                resonance: Some(crowdrelay_domain::content_supply::PostResonance {
+                    engagement: 90,
+                    peer_median: Some(40),
+                    peers: 12,
+                }),
             }),
         };
         let policy = AutopilotPolicy {
@@ -690,6 +697,7 @@ mod tests {
                 media_id: None,
                 media_type: None,
                 thumbnail_url: None,
+                resonance: None,
             }),
         };
         let policy = AutopilotPolicy {
@@ -714,4 +722,87 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn a_post_that_has_not_landed_at_home_reaches_fans_but_not_communities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::{
+            ContentSourceId, OutreachTargetId,
+            content_supply::{
+                CommunityRelayTarget, ContentSupplyPolicy, ContentSupplySnapshot, PostResonance,
+                SocialPostFact,
+            },
+        };
+        let now = OffsetDateTime::now_utc();
+        let snapshot = |hours_old: i64, engagement: i64| ContentSupplySnapshot {
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::SocialPost,
+            source_version: 1,
+            occurred_at: now - time::Duration::hours(hours_old),
+            expires_at: now + time::Duration::days(40),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
+            social_post: Some(SocialPostFact {
+                title: "rehearsal cut".to_owned(),
+                url: Some("https://instagram.com/p/xyz".to_owned()),
+                platform: "instagram".to_owned(),
+                body: Some("rehearsal cut of the new one".to_owned()),
+                media_url: None,
+                media_id: None,
+                media_type: None,
+                thumbnail_url: None,
+                resonance: Some(PostResonance {
+                    engagement,
+                    peer_median: Some(40),
+                    peers: 12,
+                }),
+            }),
+        };
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ContentSupply,
+            enabled: true,
+            autonomy_level: AutonomyLevel::BoundedAuto,
+            minimum_confidence: Confidence::from_basis_points(5_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ContentSupply(ContentSupplyPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let communities = vec![CommunityRelayTarget {
+            target_id: OutreachTargetId::new(),
+            subreddit: "doommetal".to_owned(),
+            language: Some("en".to_owned()),
+        }];
+        // Five hours old: doing well, but too early to tell.
+        let fresh = content_candidates(
+            &snapshot(5, 90),
+            &policy,
+            &communities,
+            None,
+            ContextEvidence::UNPROVEN,
+            now,
+        )?;
+        // Settled, below the account's own median.
+        let weak = content_candidates(
+            &snapshot(40, 10),
+            &policy,
+            &communities,
+            None,
+            ContextEvidence::UNPROVEN,
+            now,
+        )?;
+        for candidates in [fresh, weak] {
+            assert_eq!(candidates.len(), 1, "owned push only");
+            assert!(matches!(
+                candidates[0].action,
+                AutopilotActionPayload::RequestSignalPush { .. }
+            ));
+        }
+        Ok(())
+    }
 }

@@ -111,6 +111,7 @@ mod relay_push_text_tests {
 /// audience, plus one community post per admitted community. No version in
 /// either key — a caption edit bumps the source version, and re-relaying an
 /// edited post would put the same news in front of the same people twice.
+#[allow(clippy::too_many_arguments)]
 fn relay_candidates(
     snapshot: &ContentSupplySnapshot,
     policy: &AutopilotPolicy,
@@ -119,6 +120,7 @@ fn relay_candidates(
     push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
     confidence: crowdrelay_domain::autonomy::Confidence,
     evidence: ContextEvidence,
+    now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let Some(post) = &snapshot.social_post else {
         return Ok(Vec::new());
@@ -192,6 +194,20 @@ fn relay_candidates(
     //
     // A community not on the admitted list never appears here, and the
     // executor re-checks admission at post time.
+    //
+    // Only posts that landed at home go further: the owned push above carries
+    // every post; communities get the ones the band's followers answered
+    // (`resonates_for_communities`). The keys carry no version, so a post
+    // that earns it on a later cycle fans out then, once.
+    let communities = if crowdrelay_domain::content_supply::resonates_for_communities(
+        post,
+        snapshot.occurred_at,
+        now,
+    ) {
+        communities
+    } else {
+        &[]
+    };
     for target in communities {
         let target_id = target.target_id.into_uuid();
         let caption_facts = post.body.as_deref().unwrap_or(post.title.as_str());

@@ -411,13 +411,14 @@ mod tests {
         assert!(CommunityExecutorWorker::reddit_is_read_only());
     }
 
-    /// One post a day while autonomous posting is unproven. This is the
-    /// number a moderator sees, so it is worth a test rather than a comment.
+    /// One post a day until posts have survived. This is the number a
+    /// moderator sees, so it is worth a test rather than a comment.
     #[test]
-    fn the_daily_post_ceiling_stays_conservative() {
+    fn the_daily_post_ceiling_starts_conservative() {
         assert_eq!(
-            MAX_POSTS_PER_24H, 1,
-            "raise this only after posts have survived a week"
+            standing::daily_cap(&[]),
+            1,
+            "a fresh account posts once a day; more is earned, not configured"
         );
         assert_eq!(SUBREDDIT_COOLDOWN_DAYS, 7);
     }

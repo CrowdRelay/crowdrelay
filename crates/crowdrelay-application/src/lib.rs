@@ -89,6 +89,9 @@ pub use concert_qr::{
 };
 /// Re-exported brain types used in API responses.
 pub use crowdrelay_brain::ReachMetrics;
+/// The declared objective the brain works toward, and the pace it implies —
+/// re-exported for the operator's goal scoreboard.
+pub use crowdrelay_brain::{ActiveObjective, GoalPace};
 pub use ecosystem::{
     EcosystemControlPlaneRepository, EcosystemRepositoryError, FeatureFlagMutation,
     FeatureFlagState, ReconciliationFindingState, ReconciliationOutcome, ReconciliationRunState,

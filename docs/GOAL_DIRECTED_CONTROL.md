@@ -169,6 +169,14 @@ portfolio stage and the exploration boost, and never appears in
 document and the gate in the same commit, and the section it has to change is
 "What was built", not "What must not be built".
 
+`GET /v1/control-plane/ops/goal` is the scoreboard for a run: the objective
+and its pace, the expected new fans the brain's dispatches since declaration
+were decided on beside how far the series actually moved (side by side, never
+divided — different units), resolved and pending evidence against the 200
+resolved rows the brain needs before uncertainty can enter selection, and how
+long people take to approve what it drafts (standing grants and ladders
+excluded), with the oldest item still waiting.
+
 The wiring is exercised by unit tests, not yet by a real deadline. Whether the
 raised ceiling produces more durable fans or only more dispatches is a
 question for resolved outcomes, and the `goal` provenance block is there so
