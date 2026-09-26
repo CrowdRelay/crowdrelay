@@ -32,8 +32,11 @@ const STATE_COOKIE_MAX_AGE: &str = "Max-Age=600";
 /// Cookie flags: HttpOnly, SameSite=Lax (needed for the redirect from TikTok).
 const STATE_COOKIE_FLAGS: &str = "HttpOnly; SameSite=Lax; Path=/";
 
-/// Scopes requested from TikTok: basic profile + stats (follower count).
-const TIKTOK_SCOPES: &str = "user.info.basic,user.info.stats";
+/// Scopes requested from TikTok: basic profile + stats (follower count), and
+/// the video list — the band's own videos become content sources the hook
+/// scorecard and the relay read. A connection made before `video.list` was
+/// added keeps working for followers; reconnecting grants the videos.
+const TIKTOK_SCOPES: &str = "user.info.basic,user.info.stats,video.list";
 
 /// Allowlist of permitted post-redirect paths. The OAuth callback must
 /// not redirect to arbitrary URLs from the state cookie — only these

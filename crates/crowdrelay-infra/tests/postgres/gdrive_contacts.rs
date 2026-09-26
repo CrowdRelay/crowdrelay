@@ -1096,7 +1096,11 @@ async fn an_outbound_sighting_marks_known_conversations_written()
     .execute(&fixture.pool)
     .await?;
 
-    let at = time::OffsetDateTime::now_utc() - time::Duration::hours(3);
+    // Microsecond precision: Postgres stores timestamptz to the microsecond,
+    // so a nanosecond clock reading never round-trips equal.
+    let at = (time::OffsetDateTime::now_utc() - time::Duration::hours(3))
+        .replace_nanosecond(0)
+        .expect("zero nanoseconds is valid");
     for (email, key) in [
         ("promo@venue.pl", "gmail:msg-out-1"),
         ("booker@club.pl", "gmail:msg-out-2"),
