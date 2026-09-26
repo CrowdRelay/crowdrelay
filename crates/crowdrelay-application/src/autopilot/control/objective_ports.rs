@@ -80,4 +80,13 @@ pub trait AutopilotObjectiveRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthObjectiveView>, RepositoryError>;
+
+    /// The one objective the brain works toward this cycle — the live
+    /// workspace-scoped one with the nearest deadline — judged by the same
+    /// read as `load_growth_objectives`. `None` when nothing declared is live.
+    async fn load_active_objective(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Option<crowdrelay_brain::ActiveObjective>, RepositoryError>;
 }

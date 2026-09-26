@@ -234,6 +234,15 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
         })
         .await
     }
+
+    async fn load_active_objective(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Option<crowdrelay_brain::ActiveObjective>, RepositoryError> {
+        self.bounded(load_brain_objective(&self.pool, workspace_id, now))
+            .await
+    }
 }
 
 /// Every live objective, each with the state its own series implies.
