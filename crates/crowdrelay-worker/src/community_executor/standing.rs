@@ -6,6 +6,7 @@
 //! read, which is where a removal is first seen and recorded.
 
 use super::*;
+use crowdrelay_domain::community_register::{RegisterHold, review_community_register};
 use crowdrelay_domain::reddit_standing::{
     COMMUNITY_REMOVED_US, PostRecord, RedditStanding, RemovalCause, community_removed_us,
     reddit_standing,
@@ -86,20 +87,38 @@ pub(super) fn daily_cap(history: &[PostRecord]) -> i64 {
 }
 
 impl CommunityExecutorWorker {
-    /// Why this draft must go to a person instead of Reddit, if it must.
+    /// Why this draft must go to a person instead of Reddit, if it must: the
+    /// account is halted, this community removed us, or the draft reads like
+    /// marketing or a repeat (`community_register`).
     pub(super) async fn standing_hold(
         &self,
-        subreddit: &str,
+        action: &ClaimedAction,
     ) -> Result<Option<&'static str>, CommunityExecutorError> {
-        let history = post_history(&self.pool, self.workspace_id.into_uuid()).await?;
+        let ws = self.workspace_id.into_uuid();
+        let history = post_history(&self.pool, ws).await?;
         let now = OffsetDateTime::now_utc();
         if let RedditStanding::Halted(reason) = reddit_standing(&history, now) {
             return Ok(Some(reason.as_str()));
         }
-        if community_removed_us(&history, &normalized_subreddit(subreddit), now) {
+        if community_removed_us(&history, &normalized_subreddit(&action.subreddit), now) {
             return Ok(Some(COMMUNITY_REMOVED_US));
         }
-        Ok(None)
+        // Title and drafted body, as a reader sees them — before the tracked
+        // link is appended, which carries a per-action slug and would make
+        // every post look new.
+        let recent: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT title || E'\n' || body FROM community_posts
+            WHERE workspace_id = $1
+              AND status = 'posted'
+              AND posted_at > now() - INTERVAL '30 days'
+            "#,
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await?;
+        let draft = format!("{}\n{}", action.title, action.body);
+        Ok(review_community_register(&draft, &recent).map(RegisterHold::as_str))
     }
 
     /// Whether the workspace has reached its earned 24h post limit.

@@ -1076,7 +1076,7 @@ impl CommunityExecutorWorker {
 
         // The account's standing: a halted account, or a community whose
         // moderators removed one of our posts, sends the draft to a person.
-        if let Some(reason) = self.standing_hold(&action.subreddit).await? {
+        if let Some(reason) = self.standing_hold(action).await? {
             self.hold_for_human(action.id, reason).await?;
             return Ok(());
         }
