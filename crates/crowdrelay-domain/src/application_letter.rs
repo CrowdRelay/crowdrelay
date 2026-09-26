@@ -176,7 +176,7 @@ fn polish(
     push_listen(&mut lines, input, LetterLanguage::Polish);
     lines.push(String::new());
     lines.push(
-        "Jeśli to nie jest dobry fit, krótka odpowiedź w którąkolwiek stronę jest \
+        "Jeśli to do Was nie pasuje, krótka odpowiedź w którąkolwiek stronę jest \
          równie pomocna — scenariusz, rider techniczny i dodatkowe materiały \
          możemy dosłać od razu."
             .to_owned(),
@@ -245,10 +245,10 @@ fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
         .filter(|value| !value.is_empty());
     match (style, home) {
         (Some(style), Some(home)) => {
-            format!("Piszemy w imieniu {act} — zespołu {style} z {home},")
+            format!("Piszemy w imieniu {act} — zespołu {style} z miasta {home},")
         }
         (Some(style), None) => format!("Piszemy w imieniu {act} — zespołu {style},"),
-        (None, Some(home)) => format!("Piszemy w imieniu {act} — zespołu z {home},"),
+        (None, Some(home)) => format!("Piszemy w imieniu {act} — zespołu z miasta {home},"),
         (None, None) => format!("Piszemy w imieniu {act},"),
     }
 }
@@ -350,7 +350,15 @@ mod tests {
         let letter = compose_application_letter(&input(&sender, LetterLanguage::Polish))
             .expect("a polish input composes");
         assert!(letter.body.contains("Dzień dobry, Summerfest,"));
-        assert!(letter.body.contains("zespołu modern metal z Wrocław"));
+        assert!(
+            letter
+                .body
+                .contains("zespołu modern metal z miasta Wrocław")
+        );
+        assert!(
+            !letter.body.contains(" fit"),
+            "no anglicism in a Polish letter"
+        );
         assert!(letter.body.contains("zgłosić się na slot na"));
         assert!(letter.body.contains("Posłuchaj (our new single"));
         assert_eq!(
