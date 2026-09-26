@@ -682,6 +682,15 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/audience/city-venues",
             get(crate::audience::city_venues),
         )
+        // Console views: one read per page's first screen (console_views.rs).
+        .route(
+            "/v1/control-plane/views/cities/{city_slug}",
+            get(crate::console_views::city_view),
+        )
+        .route(
+            "/v1/control-plane/views/content-material",
+            get(crate::console_views::content_material_view),
+        )
         .route(
             "/v1/control-plane/audience/registry-verification-brief",
             get(crate::audience::registry_verification_brief),

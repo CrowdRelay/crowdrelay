@@ -21,6 +21,7 @@ struct ReportEventRow {
     counterparty_name: Option<String>,
     counterparty_email: Option<String>,
     acts: Option<serde_json::Value>,
+    next_show: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +40,9 @@ struct ControlPlaneEventReportResponse {
     report: serde_json::Value,
     recipients: serde_json::Value,
     honesty_contract: serde_json::Value,
+    /// The tenant's next announced night — where the report's "next time"
+    /// points the band (its door QR). Null when nothing is announced.
+    next_show: serde_json::Value,
 }
 
 /// `GET /v1/control-plane/events/{event_slug}/report` — the artifact preview.
@@ -65,6 +69,7 @@ pub async fn control_plane_event_report(
                 report: facts.report,
                 recipients: facts.recipients,
                 honesty_contract: facts.honesty_contract,
+                next_show: facts.next_show,
             }),
         )
             .into_response(),
@@ -87,6 +92,7 @@ struct ReportFacts {
     report: serde_json::Value,
     recipients: serde_json::Value,
     honesty_contract: serde_json::Value,
+    next_show: serde_json::Value,
 }
 
 async fn load_report_facts(
@@ -103,7 +109,16 @@ async fn load_report_facts(
                      ORDER BY act.position, act.act_slug)
              FROM event_acts AS act
              WHERE act.workspace_id = event.workspace_id
-               AND act.event_id = event.id) AS acts
+               AND act.event_id = event.id) AS acts,
+            (SELECT jsonb_build_object('slug', next.slug, 'title', next.title,
+                                       'city', next_city.name, 'starts_at', next.starts_at)
+             FROM events AS next
+             LEFT JOIN cities AS next_city ON next_city.id = next.city_id
+             WHERE next.workspace_id = event.workspace_id
+               AND next.status = 'published'
+               AND next.starts_at > now()
+             ORDER BY next.starts_at, next.id
+             LIMIT 1) AS next_show
         FROM events AS event
         LEFT JOIN cities AS city ON city.id = event.city_id
         WHERE event.workspace_id = $1 AND event.slug = $2
@@ -147,9 +162,16 @@ async fn load_report_facts(
     .fetch_optional(&state.database)
     .await?;
 
-    if let Some((payload, status, delivered_at, emitted)) = issued {
+    let next_show = event.next_show.clone().unwrap_or(serde_json::Value::Null);
+    if let Some((mut payload, status, delivered_at, emitted)) = issued {
+        // The issuer serialized its timestamps with `time`'s default serde —
+        // [year, ordinal, h, m, s, ns, offH, offM, offS] — and the mailed
+        // artifact keeps them that way. The page reads RFC 3339, so the read
+        // converts them; the stored artifact is never rewritten.
+        rfc3339_time_arrays(&mut payload);
         let object = payload.as_object().cloned().unwrap_or_default();
         return Ok(Some(ReportFacts {
+            next_show,
             issued_at: Some(delivered_at.unwrap_or(emitted)),
             delivery_status: Some(status),
             event: object
@@ -293,6 +315,7 @@ async fn load_report_facts(
     }
 
     Ok(Some(ReportFacts {
+        next_show,
         issued_at: None,
         delivery_status: None,
         event: serde_json::json!({
@@ -365,4 +388,71 @@ async fn load_report_facts(
             ]
         }),
     }))
+}
+
+/// Rewrite every `time` serde array (`[year, ordinal, h, m, s, ns, offH,
+/// offM, offS]`) inside `value` as an RFC 3339 string. Anything that is not
+/// exactly that shape, or not a valid instant, is left untouched.
+fn rfc3339_time_arrays(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            if let Some(text) = time_array_as_rfc3339(items) {
+                *value = serde_json::Value::String(text);
+            } else {
+                items.iter_mut().for_each(rfc3339_time_arrays);
+            }
+        }
+        serde_json::Value::Object(map) => map.values_mut().for_each(rfc3339_time_arrays),
+        _ => {}
+    }
+}
+
+fn time_array_as_rfc3339(items: &[serde_json::Value]) -> Option<String> {
+    let numbers: Vec<i64> = items
+        .iter()
+        .map(serde_json::Value::as_i64)
+        .collect::<Option<_>>()?;
+    let [year, ordinal, hour, minute, second, nanos, off_h, off_m, off_s] = numbers[..] else {
+        return None;
+    };
+    let date = time::Date::from_ordinal_date(
+        i32::try_from(year).ok()?,
+        u16::try_from(ordinal).ok()?,
+    )
+    .ok()?;
+    let clock = time::Time::from_hms_nano(
+        u8::try_from(hour).ok()?,
+        u8::try_from(minute).ok()?,
+        u8::try_from(second).ok()?,
+        u32::try_from(nanos).ok()?,
+    )
+    .ok()?;
+    let offset = time::UtcOffset::from_hms(
+        i8::try_from(off_h).ok()?,
+        i8::try_from(off_m).ok()?,
+        i8::try_from(off_s).ok()?,
+    )
+    .ok()?;
+    date.with_time(clock).assume_offset(offset).format(&Rfc3339).ok()
+}
+
+#[cfg(test)]
+mod time_array_tests {
+    use super::rfc3339_time_arrays;
+
+    #[test]
+    fn issued_artifact_arrays_become_rfc3339_and_other_arrays_stay() {
+        let mut payload = serde_json::json!({
+            "event": {"starts_at": [2026, 254, 18, 0, 0, 0, 0, 0, 0]},
+            "report": {"campaigns": [{"scheduled_at": [2026, 239, 8, 32, 58, 452_149_000, 0, 0, 0]}],
+                       "evidence_gaps": ["room_attendance_unverified"]},
+            "counts": [1, 2, 3, 4, 5, 6, 7, 8, 9000],
+        });
+        rfc3339_time_arrays(&mut payload);
+        assert_eq!(payload["event"]["starts_at"], "2026-09-11T18:00:00Z");
+        assert_eq!(payload["report"]["campaigns"][0]["scheduled_at"], "2026-08-27T08:32:58.452149Z");
+        assert_eq!(payload["report"]["evidence_gaps"][0], "room_attendance_unverified");
+        // Nine integers, but a 9000-second offset is not an instant: kept.
+        assert!(payload["counts"].is_array());
+    }
 }

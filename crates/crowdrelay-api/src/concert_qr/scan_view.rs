@@ -40,6 +40,20 @@ struct ControlPlaneEventScanResponse {
     checkin_count: i64,
     campaign_checkin_count: Option<i64>,
     max_checkins: Option<u32>,
+    /// The night the door belongs to, and the two numbers the person at the
+    /// door asks about. `tickets_sold` is null when the night has no active
+    /// ticket sale — an unticketed night is unmeasured, not sold out of zero.
+    event: ScanEventFacts,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanEventFacts {
+    title: String,
+    city: Option<String>,
+    starts_at: String,
+    capacity: Option<i64>,
+    tickets_sold: Option<i64>,
+    interested: i64,
 }
 
 /// `GET /v1/control-plane/events/{event_slug}/scan` — the door view.
@@ -96,6 +110,14 @@ pub async fn control_plane_event_scan(
                     checkin_count: facts.checkin_count,
                     campaign_checkin_count: facts.campaign_checkin_count,
                     max_checkins: facts.max_checkins,
+                    event: ScanEventFacts {
+                        title: facts.event.title,
+                        city: facts.event.city,
+                        starts_at: format_time(facts.event.starts_at),
+                        capacity: facts.event.capacity,
+                        tickets_sold: facts.event.tickets_sold,
+                        interested: facts.event.interested,
+                    },
                 }),
             )
                 .into_response()
@@ -116,6 +138,12 @@ pub async fn control_plane_event_scan(
 struct ScanEventRow {
     id: Uuid,
     slug: String,
+    title: String,
+    city: Option<String>,
+    starts_at: OffsetDateTime,
+    capacity: Option<i64>,
+    tickets_sold: Option<i64>,
+    interested: i64,
 }
 
 struct ScanFacts {
@@ -132,6 +160,7 @@ struct ScanFacts {
     checkin_count: i64,
     campaign_checkin_count: Option<i64>,
     max_checkins: Option<u32>,
+    event: ScanEventRow,
 }
 
 /// The campaign the door uses: the staff manager's own pick — the first
@@ -150,10 +179,42 @@ async fn load_scan_facts(
     // and prepared clean.
     let Some(event) = sqlx::query_as::<_, ScanEventRow>(
         r#"
-        SELECT id, slug
-        FROM events
-        WHERE workspace_id = $1 AND slug = $2
-          AND status IN ('published','completed')
+        SELECT event.id, event.slug, event.title, city.name AS city, event.starts_at,
+               -- Capacity and paid tickets by the show-growth snapshot's own
+               -- predicates (see timeline_facts): the sale's capacity first,
+               -- the largest admission pool second.
+               COALESCE(
+                   (SELECT MAX(sale.capacity)::bigint FROM ticket_sales AS sale
+                    WHERE sale.workspace_id = event.workspace_id
+                      AND sale.event_id = event.id AND sale.active),
+                   (SELECT MAX(pool.capacity)::bigint FROM admission_pools AS pool
+                    WHERE pool.workspace_id = event.workspace_id
+                      AND pool.event_id = event.id)
+               ) AS capacity,
+               CASE WHEN EXISTS (
+                   SELECT 1 FROM ticket_sales AS sale
+                   WHERE sale.workspace_id = event.workspace_id
+                     AND sale.event_id = event.id AND sale.active
+               ) THEN (
+                   SELECT COALESCE(SUM(item.quantity), 0)::bigint
+                   FROM ticket_sales AS sale
+                   JOIN ticket_orders AS orders
+                     ON orders.workspace_id = sale.workspace_id
+                    AND orders.ticket_sale_id = sale.id
+                    AND orders.status IN ('paid','partially_refunded')
+                   JOIN ticket_order_items AS item
+                     ON item.workspace_id = orders.workspace_id
+                    AND item.ticket_order_id = orders.id
+                   WHERE sale.workspace_id = event.workspace_id
+                     AND sale.event_id = event.id AND sale.active
+               ) END AS tickets_sold,
+               (SELECT count(*) FROM event_interests AS interest
+                WHERE interest.workspace_id = event.workspace_id
+                  AND interest.event_id = event.id)::bigint AS interested
+        FROM events AS event
+        LEFT JOIN cities AS city ON city.id = event.city_id
+        WHERE event.workspace_id = $1 AND event.slug = $2
+          AND event.status IN ('published','completed')
         "#,
     )
     .bind(workspace_id)
@@ -204,7 +265,7 @@ async fn load_scan_facts(
             .brand_settings(workspace_id)
             .await?;
     Ok(Some(ScanFacts {
-        event_slug: event.slug,
+        event_slug: event.slug.clone(),
         live_page,
         campaign_is_live: live.is_some(),
         token,
@@ -216,5 +277,6 @@ async fn load_scan_facts(
         max_checkins: live
             .as_ref()
             .and_then(|row| row.max_checkins.and_then(|v| u32::try_from(v).ok())),
+        event,
     }))
 }

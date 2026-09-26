@@ -47,19 +47,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CRATES = ROOT / "crates"
+MIGRATIONS = ROOT / "migrations"
 TRIGGER = ROOT / "migrations/0251_add_fan_growth_3d_check_constraint.sql"
-ACTION_CHECK = ROOT / "migrations/0189_autopilot_action_unknown_status.sql"
-ASSIGNMENT_CHECK = ROOT / "migrations/0191_execution_status_unknown.sql"
-# The constraint is redefined whenever the vocabulary grows (0138 added
-# `community`, 0364 added `organiser`); the live definition is the newest
-# migration that re-adds it, so the gate reads that rather than pinning one
-# file and going stale on the next widening.
-TARGET_KIND_CHECK = sorted(
-    path
-    for path in (ROOT / "migrations").glob("*.sql")
-    if "agent_outreach_targets_target_kind_check\n    CHECK (target_kind IN ("
-    in path.read_text()
-)[-1]
 EXPERIMENT = CRATES / "crowdrelay-brain/src/experiment.rs"
 AGENT_OUTCOMES = CRATES / "crowdrelay-worker/src/agent_outcomes.rs"
 
@@ -72,12 +61,23 @@ SOURCE_ROOTS = (
 )
 
 
-def check_vocabulary(path: Path, constraint: str) -> set[str]:
-    """The values a `CHECK (<column> IN (...))` constraint allows."""
-    source = path.read_text()
-    start = source.index(constraint)
-    body = source[start : source.index("))", start)]
-    values = set(re.findall(r"'([a-z_]+)'", body))
+def check_vocabulary(constraint: str) -> set[str]:
+    """The values a `CHECK (<column> IN (...))` constraint allows.
+
+    A constraint's vocabulary can move in a later migration — the
+    DROP/ADD-CONSTRAINT pair redefines it in place, and the file that first
+    named the constraint then reads stale. The last definition across the
+    migration sequence is the live one, so scan every migration and keep the
+    newest body found.
+    """
+    values: set[str] = set()
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        source = path.read_text()
+        if constraint not in source:
+            continue
+        start = source.rindex(constraint)
+        body = source[start : source.index("))", start)]
+        values = set(re.findall(r"'([a-z_]+)'", body))
     if not values:
         raise AssertionError(f"{constraint} has no values; the parser is wrong")
     return values
@@ -201,7 +201,6 @@ def surfaces() -> list[Surface]:
             "autopilot_actions",
             "status",
             check_vocabulary(
-                ACTION_CHECK,
                 "autopilot_actions_status_check\n    CHECK (status IN (",
             ),
             action_ledger_edges(),
@@ -211,7 +210,6 @@ def surfaces() -> list[Surface]:
             "experiment_assignments",
             "execution_status",
             check_vocabulary(
-                ASSIGNMENT_CHECK,
                 "experiment_assignments_execution_status_valid\n"
                 "    CHECK (execution_status IN (",
             ),
@@ -244,7 +242,6 @@ class AgentTargetKindVocabulary(unittest.TestCase):
         self.assertEqual(
             listed,
             check_vocabulary(
-                TARGET_KIND_CHECK,
                 "agent_outreach_targets_target_kind_check\n"
                 "    CHECK (target_kind IN (",
             ),
