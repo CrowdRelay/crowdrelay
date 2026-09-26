@@ -165,9 +165,10 @@ const MAX_TRANSIENT_ATTEMPTS: i32 = 6;
 /// After this window, engagement is considered stale and polling stops.
 const METRICS_WINDOW: Duration = Duration::from_secs(72 * 60 * 60);
 
-/// Minimum interval between metric polls for the same post. Prevents
-/// hammering Reddit's API for posts that haven't changed.
-const METRICS_POLL_MIN_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Poll interval: 30 min while a post is under 6h old (when removals land),
+/// then 3h — ~34 reads a post through the one session, not ~288.
+const METRICS_POLL_MIN_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const METRICS_POLL_SETTLED_INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// Maximum posts to poll for metrics in a single cycle. Bounded to keep
 /// the cycle fast even if many posts are in the window.
@@ -1511,7 +1512,7 @@ impl CommunityExecutorWorker {
     /// Only polls posts that:
     /// - Have `status = 'posted'` with a non-null `reddit_post_id`
     /// - Were posted within the last `METRICS_WINDOW` (72h)
-    /// - Haven't been polled in the last `METRICS_POLL_MIN_INTERVAL` (15min)
+    /// - Haven't been polled in the last `METRICS_POLL_MIN_INTERVAL` / `_SETTLED_INTERVAL`
     ///
     /// This is the feedback loop: the system learns which posts generate
     /// engagement (upvotes, comments) and which don't.
@@ -1529,7 +1530,9 @@ impl CommunityExecutorWorker {
               AND posted_at > now() - make_interval(secs => $2::double precision)
               AND (
                   metrics_last_fetched_at IS NULL
-                  OR metrics_last_fetched_at < now() - make_interval(secs => $3::double precision)
+                  OR metrics_last_fetched_at < now() - make_interval(secs => CASE
+                      WHEN posted_at > now() - INTERVAL '6 hours' THEN $3::double precision
+                      ELSE $5::double precision END)
               )
             ORDER BY posted_at DESC
             LIMIT $4
@@ -1539,6 +1542,7 @@ impl CommunityExecutorWorker {
         .bind(METRICS_WINDOW.as_secs() as i64)
         .bind(METRICS_POLL_MIN_INTERVAL.as_secs() as i64)
         .bind(METRICS_POLL_BATCH)
+        .bind(METRICS_POLL_SETTLED_INTERVAL.as_secs() as i64)
         .fetch_all(&self.pool)
         .await?;
 
