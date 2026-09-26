@@ -514,11 +514,19 @@ set -Eeuo pipefail
 repo="$1"; target="$2"
 cd "$repo"
 for service in api worker; do
-  container="crowdrelay-${service}-1"
-  # The blue-green deploy may have left the green container as the active one
-  if ! docker inspect "$container" >/dev/null 2>&1; then
-    container="crowdrelay-${service}-green-1"
-  fi
+  # The running container, not merely an existing one. `docker inspect`
+  # succeeds on an exited container and its label still carries the new
+  # revision, so on 2026-09-26 this printed PASS for a worker that had been
+  # stopped forty seconds after taking leadership, and production ran with
+  # no worker until somebody noticed. Either colour may be the live one.
+  container=""
+  for candidate in "crowdrelay-${service}-1" "crowdrelay-${service}-green-1"; do
+    if [[ "$(docker inspect --format '{{.State.Running}}' "$candidate" 2>/dev/null || true)" == "true" ]]; then
+      container="$candidate"
+      break
+    fi
+  done
+  [[ -n "$container" ]] || { echo "ERROR: no running $service container after the deploy"; exit 1; }
   revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container" 2>/dev/null || true)"
   [[ "$revision" == "$target" ]] || { echo "ERROR: runtime SHA mismatch for $service: $revision != $target"; exit 1; }
   printf 'RUNTIME_SHA=PASS service=%s sha=%s\n' "$service" "$revision"
@@ -534,7 +542,7 @@ printf '\n==> 3d — Verify agent service revision\n'
 ssh -T "$CONTROL_PLANE_REMOTE" sudo bash -s -- "$AGENT_CONTAINER" "$AGENT_RELEASE_SHA" <<'VERIFY_AGENT'
 set -Eeuo pipefail
 container="$1"; expected="$2"
-docker inspect "$container" >/dev/null 2>&1 \
+[[ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" == "true" ]] \
   || { echo "ERROR: agent service container $container is not running"; exit 1; }
 revision="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container" 2>/dev/null || true)"
 [[ "$revision" == "$expected" ]] \
