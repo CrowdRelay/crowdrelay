@@ -75,6 +75,7 @@ pub mod calendar_routing;
 pub mod campaign_lifecycle;
 pub mod community_intelligence;
 pub mod community_register;
+pub mod community_reply;
 pub mod community_topic;
 pub mod content_engine;
 pub mod content_supply;

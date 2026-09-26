@@ -15,9 +15,11 @@ use uuid::Uuid;
 use crate::sensitive_response::{SensitiveResponseKey, encrypt_value};
 use crowdrelay_domain::fanbase::SourceKind;
 
+mod community_replies;
 mod ingestion;
 mod manual_publication;
 
+pub use community_replies::*;
 pub use manual_publication::*;
 
 #[derive(Clone)]

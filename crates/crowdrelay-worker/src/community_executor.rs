@@ -63,6 +63,7 @@ use uuid::Uuid;
 
 mod marks;
 mod relay;
+mod replies;
 mod standing;
 use time::OffsetDateTime;
 
@@ -499,7 +500,7 @@ impl CommunityExecutorWorker {
         // posted content. This is the "eyes" of the growth loop — the system
         // learns which posts generate engagement.
         processed += self.poll_post_metrics().await?;
-
+        processed += self.run_reply_lane().await?;
         Ok(processed)
     }
 
@@ -1733,52 +1734,6 @@ impl CommunityExecutorWorker {
                 .map(str::to_owned),
             removal_visible: data.data.removed_by_category.is_some(),
         })
-    }
-
-    /// Records a post metrics snapshot and updates the fetch timestamp.
-    async fn record_post_metrics(
-        &self,
-        post_id: Uuid,
-        reddit_post_id: &str,
-        metrics: &RedditPostMetrics,
-    ) -> Result<(), CommunityExecutorError> {
-        let ws = self.workspace_id.into_uuid();
-        let mut tx = self.pool.begin().await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO community_post_metrics
-                (workspace_id, community_post_id, reddit_post_id, score, upvotes, num_comments, upvote_ratio)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (workspace_id, community_post_id, measured_at) DO NOTHING
-            "#,
-        )
-        .bind(ws)
-        .bind(post_id)
-        .bind(reddit_post_id)
-        .bind(metrics.score)
-        .bind(metrics.upvotes)
-        .bind(metrics.num_comments)
-        .bind(metrics.upvote_ratio)
-        .execute(&mut *tx)
-        .await?;
-        standing::record_removal_state(&mut tx, ws, post_id, metrics).await?;
-
-        sqlx::query(
-            r#"
-            UPDATE community_posts
-            SET metrics_last_fetched_at = now(),
-                updated_at = now()
-            WHERE id = $1 AND workspace_id = $2
-            "#,
-        )
-        .bind(post_id)
-        .bind(ws)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Updates only the `metrics_last_fetched_at` timestamp, used when a
