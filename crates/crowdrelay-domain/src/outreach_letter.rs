@@ -97,6 +97,21 @@ impl OutreachLetterRefusal {
     }
 }
 
+/// The name a letter greets: the contact's display name without the role
+/// the contact list appended to it. On 2026-09-26 drafts opened "Hi Kamil
+/// Dráb — hudební dramaturg," and "Dzień dobry, Rockowa Noc — organizator,":
+/// the list's " — role" suffix, read aloud as part of the name.
+#[must_use]
+pub fn salutation_name(display_name: &str) -> &str {
+    let name = display_name.trim();
+    [" — ", " – ", " - ", " | "]
+        .iter()
+        .filter_map(|separator| name.find(separator))
+        .min()
+        .and_then(|end| name.get(..end))
+        .map_or(name, str::trim)
+}
+
 /// Subjects stay well under the executor's 220 cap — a subject a mail client
 /// truncates is a subject nobody read.
 const MAX_SUBJECT: usize = 160;
@@ -110,7 +125,7 @@ const MAX_SUBJECT: usize = 160;
 pub fn compose_outreach_letter(
     input: &OutreachLetterInput<'_>,
 ) -> Result<OutreachLetter, OutreachLetterRefusal> {
-    let target = input.target_name.trim();
+    let target = salutation_name(input.target_name);
     let act = input.sender.act_name.trim();
     let title = input.pitch_title.trim();
     let url = input.pitch_url.trim();
@@ -133,12 +148,8 @@ pub fn compose_outreach_letter(
         (LetterLanguage::English, OutreachPhase::FollowUp) => {
             follow_up(input, target, act, title, url, ask)
         }
-        (LetterLanguage::Polish, OutreachPhase::Initial) => {
-            initial_pl(input, target, act, title, url)
-        }
-        (LetterLanguage::Polish, OutreachPhase::FollowUp) => {
-            follow_up_pl(input, target, act, title, url)
-        }
+        (LetterLanguage::Polish, OutreachPhase::Initial) => initial_pl(input, act, title, url),
+        (LetterLanguage::Polish, OutreachPhase::FollowUp) => follow_up_pl(input, act, title, url),
     })
 }
 
@@ -159,13 +170,15 @@ fn purpose_pl(kind: OutreachTargetKind) -> &'static str {
 
 fn initial_pl(
     input: &OutreachLetterInput<'_>,
-    target: &str,
     act: &str,
     title: &str,
     url: &str,
 ) -> OutreachLetter {
     let mut lines = vec![
-        format!("Dzień dobry, {target},"),
+        // A Polish letter greets without the name: "Dzień dobry, Anna
+        // Laskiewicz" is a form field read aloud, and declining a name into
+        // the vocative without a dictionary is a guess.
+        "Dzień dobry,".to_owned(),
         String::new(),
         format!(
             "{} i chcielibyśmy zaproponować Wam {title} {}.",
@@ -189,13 +202,15 @@ fn initial_pl(
 
 fn follow_up_pl(
     input: &OutreachLetterInput<'_>,
-    target: &str,
     act: &str,
     title: &str,
     url: &str,
 ) -> OutreachLetter {
     let mut lines = vec![
-        format!("Dzień dobry, {target},"),
+        // A Polish letter greets without the name: "Dzień dobry, Anna
+        // Laskiewicz" is a form field read aloud, and declining a name into
+        // the vocative without a dictionary is a guess.
+        "Dzień dobry,".to_owned(),
         String::new(),
         format!(
             "Krótko wracamy do poprzedniej wiadomości w sprawie {title}. \
@@ -352,7 +367,7 @@ pub struct ThreadFollowUpInput<'a> {
 pub fn compose_thread_followup_letter(
     input: &ThreadFollowUpInput<'_>,
 ) -> Result<OutreachLetter, OutreachLetterRefusal> {
-    let target = input.target_name.trim();
+    let target = salutation_name(input.target_name);
     let act = input.sender.act_name.trim();
     if target.is_empty() {
         return Err(OutreachLetterRefusal::NoTarget);
@@ -698,6 +713,32 @@ mod tests {
     }
 
     #[test]
+    fn the_greeting_drops_the_role_the_contact_list_appended() {
+        assert_eq!(
+            salutation_name("Kamil Dráb — hudební dramaturg"),
+            "Kamil Dráb"
+        );
+        assert_eq!(salutation_name("Metal Noise - review blog"), "Metal Noise");
+        assert_eq!(salutation_name("  Radio 357  "), "Radio 357");
+        assert_eq!(
+            salutation_name("Rock-Radio"),
+            "Rock-Radio",
+            "a hyphen inside a name stays"
+        );
+        let sender = sender();
+        let letter = compose_outreach_letter(&OutreachLetterInput {
+            target_name: "Kamil Dráb — hudební dramaturg",
+            ..input(&sender, OutreachTargetKind::Press, OutreachPhase::Initial)
+        })
+        .expect("composes");
+        assert!(
+            letter.body.starts_with("Hi Kamil Dráb,\n"),
+            "{}",
+            letter.body
+        );
+    }
+
+    #[test]
     fn a_polish_pitch_is_polish_end_to_end() {
         let sender = sender();
         let letter = compose_outreach_letter(&OutreachLetterInput {
@@ -705,11 +746,7 @@ mod tests {
             ..input(&sender, OutreachTargetKind::Press, OutreachPhase::Initial)
         })
         .expect("a complete input composes");
-        assert!(
-            letter
-                .body
-                .starts_with("Dzień dobry, Metal Playlists Weekly,")
-        );
+        assert!(letter.body.starts_with("Dzień dobry,\n"));
         assert!(letter.body.contains(
             "Piszemy w imieniu VIRYA — zespołu modern metal z miasta Wrocław — i chcielibyśmy \
              zaproponować Wam our new single \"Rytuał\" do omówienia lub recenzji."
