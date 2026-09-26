@@ -138,6 +138,54 @@ impl Fixture {
         Ok(id)
     }
 
+    /// A published show with a city on record — the fact an organiser's
+    /// letter cites, and the row the old sender identity mistook for the
+    /// act's home.
+    async fn event_in_city(
+        &self,
+        days_out: i64,
+        status: &str,
+        city_name: &str,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let city = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO cities (id, slug, name, country_code)
+             VALUES ($1, $2, $3, 'PL')",
+        )
+        .bind(city)
+        .bind(format!("city-{}", city.simple()))
+        .bind(city_name)
+        .execute(&self.pool)
+        .await?;
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at, city_id)
+             VALUES ($1, $2, $3, 'A show', $4, $5, CASE WHEN $5 = 'published' THEN now() END, $6)",
+        )
+        .bind(id)
+        .bind(self.ws())
+        .bind(format!("show-{}", id.simple()))
+        .bind(self.now + time::Duration::days(days_out))
+        .bind(status)
+        .bind(city)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    async fn set_setting(&self, key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, $2, $3)
+             ON CONFLICT (workspace_id, key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(self.ws())
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// One message on a thread — `None` opportunity is the imported,
     /// hand-sent kind; `Some` is a send the engine itself wrote.
     async fn message(
@@ -656,5 +704,186 @@ async fn the_hand_written_threads_seed_one_follow_up_each() -> Result<(), Box<dy
         .refresh_outreach_supply(f.workspace_id, f.now)
         .await?;
     assert!(f.live().await?.is_empty());
+    Ok(())
+}
+
+/// An organiser is pitched a slot, not a review — the letter asks to play
+/// and cites the act's next confirmed show, which the same show used to
+/// supply the "from" line instead.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_organiser_gets_a_gig_request_citing_the_next_show()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("supply-organiser").await?;
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run) VALUES ($1, true, false)
+         ON CONFLICT (workspace_id) DO UPDATE SET agent_enabled = true, dry_run = false",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+             (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
+              max_actions_24h, config)
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20,
+                 '{\"waves\": {\"min_pitches_per_wave\": 2}}')
+         ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
+             autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
+             max_actions_24h = 20, config = EXCLUDED.config",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    // The band declares home — the upcoming show's city must not become it.
+    f.set_setting("act_home_city", "Wrocław").await?;
+    f.release_source(
+        "Echoes",
+        "https://open.spotify.example/album/echoes",
+        "album",
+        Some(1_746_057_600),
+    )
+    .await?;
+    f.event_in_city(20, "published", "Gorzów Wielkopolski")
+        .await?;
+    let organiser = f
+        .target(
+            "uROCK Młodych — organizator",
+            "organiser",
+            true,
+            false,
+            None,
+        )
+        .await?;
+    // A press contact alongside, to prove only the organiser's letter changes.
+    f.target("Metal Noise", "press", true, false, None).await?;
+
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    assert!(
+        f.live()
+            .await?
+            .iter()
+            .any(|(source, _, name)| source == "event_autopilot" && name.starts_with("uROCK")),
+        "the show seeds the organiser an opportunity"
+    );
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(f.now)
+        .await?;
+
+    let (key, subject, body, status): (String, String, String, String) = sqlx::query_as(
+        "SELECT payload->>'template_key', payload->'draft'->>'subject',
+                payload->'draft'->>'body', status
+         FROM autopilot_actions
+         WHERE workspace_id = $1 AND context = 'outreach'
+           AND payload->>'target_id' = $2",
+    )
+    .bind(f.ws())
+    .bind(organiser.to_string())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(key, "outreach.organiser.v1", "{key}");
+    assert_eq!(status, "awaiting_approval", "{status}");
+    assert!(
+        subject.contains("gig request"),
+        "the subject names the ask: {subject}"
+    );
+    // The ask is a slot, the proof is the calendar — the show city appears
+    // inside the citation and never as the band's home.
+    assert!(body.contains("a slot on your bill"), "{body}");
+    assert!(body.contains("Gorzów Wielkopolski"), "{body}");
+    assert!(body.contains("from Wrocław"), "{body}");
+    assert!(!body.contains("from Gorzów"), "{body}");
+    let lower = body.to_lowercase();
+    assert!(!lower.contains("review"), "{body}");
+    assert!(!lower.contains("submit"), "{body}");
+    Ok(())
+}
+
+/// The sender's city is a declaration, not a measurement: with the setting
+/// absent the letter carries no city at all — the upcoming show's city used
+/// to silently fill it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_home_city_is_declared_never_measured() -> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("supply-home-city").await?;
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run) VALUES ($1, true, false)
+         ON CONFLICT (workspace_id) DO UPDATE SET agent_enabled = true, dry_run = false",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+             (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
+              max_actions_24h, config)
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20, '{}')
+         ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
+             autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
+             max_actions_24h = 20, config = EXCLUDED.config",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    f.release_source(
+        "Echoes",
+        "https://open.spotify.example/album/echoes",
+        "album",
+        Some(1_746_057_600),
+    )
+    .await?;
+    // The only city in the workspace's calendar — the old heuristic would
+    // have announced the act as being from here.
+    f.event_in_city(20, "published", "Gorzów Wielkopolski")
+        .await?;
+    f.target("Metal Noise", "press", true, false, None).await?;
+
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(f.now)
+        .await?;
+
+    let (body,): (String,) = sqlx::query_as(
+        "SELECT payload->'draft'->>'body' FROM autopilot_actions
+         WHERE workspace_id = $1 AND context = 'outreach'",
+    )
+    .bind(f.ws())
+    .fetch_one(&f.pool)
+    .await?;
+    assert!(
+        body.contains("I am writing from Supply Test Act,"),
+        "{body}"
+    );
+    assert!(!body.contains("Gorzów"), "{body}");
+
+    // Declared, the same event sits beside a letter that says Wrocław.
+    f.set_setting("act_home_city", "Wrocław").await?;
+    f.target("Second Zine", "press", true, false, None).await?;
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(f.now)
+        .await?;
+    let bodies: Vec<String> = sqlx::query_scalar(
+        "SELECT payload->'draft'->>'body' FROM autopilot_actions
+         WHERE workspace_id = $1 AND context = 'outreach'",
+    )
+    .bind(f.ws())
+    .fetch_all(&f.pool)
+    .await?;
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    assert!(
+        bodies.iter().any(|body| body.contains("from Wrocław")),
+        "the declared city lands: {bodies:?}"
+    );
+    assert!(
+        bodies.iter().all(|body| !body.contains("from Gorzów")),
+        "the show's city is never the act's: {bodies:?}"
+    );
     Ok(())
 }

@@ -352,7 +352,7 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
           -- Representation targets are approached by the band's own request,
           -- never by an auto-pitched opportunity; a stray row for one must not
           -- reach `parse_outreach_kind` and poison the whole context.
-          AND target.target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage')
+          AND target.target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage','organiser')
           AND ($3::uuid IS NULL OR target.id = $3)
         ORDER BY opportunity.relevance_basis_points DESC, opportunity.id
         LIMIT $2
@@ -943,6 +943,7 @@ pub(super) fn parse_outreach_kind(value: &str) -> Result<OutreachTargetKind, Rep
         "support_slot" => Ok(OutreachTargetKind::SupportSlot),
         "endorsement" => Ok(OutreachTargetKind::Endorsement),
         "media_patronage" => Ok(OutreachTargetKind::MediaPatronage),
+        "organiser" => Ok(OutreachTargetKind::Organiser),
         _ => Err(RepositoryError::Unexpected),
     }
 }

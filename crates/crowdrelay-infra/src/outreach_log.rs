@@ -290,6 +290,7 @@ impl PostgresOutreachLogRepository {
                     "support_slot",
                     "endorsement",
                     "media_patronage",
+                    "organiser",
                 ];
                 if entry.needs_review() && TRIAGE_KINDS.contains(&target_kind.as_str()) {
                     let verdict_text = entry

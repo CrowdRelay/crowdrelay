@@ -54,7 +54,7 @@ pub struct ImportSummary {
 ///
 /// Checked here rather than left to the database so a bad row is reported with
 /// its name and line instead of aborting the run with a constraint error.
-const ACCEPTED_KINDS: [&str; 7] = [
+const ACCEPTED_KINDS: [&str; 8] = [
     "press",
     "radio",
     "playlist",
@@ -62,6 +62,7 @@ const ACCEPTED_KINDS: [&str; 7] = [
     "endorsement",
     "creator",
     "community",
+    "organiser",
 ];
 
 fn usable(row: &ContactRow) -> Result<(), String> {

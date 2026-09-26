@@ -666,6 +666,7 @@ mod tests {
             crate::outreach::OutreachTargetKind::SupportSlot,
             crate::outreach::OutreachTargetKind::Endorsement,
             crate::outreach::OutreachTargetKind::MediaPatronage,
+            crate::outreach::OutreachTargetKind::Organiser,
             crate::outreach::OutreachTargetKind::Agent,
             crate::outreach::OutreachTargetKind::Label,
         ] {
@@ -674,7 +675,7 @@ mod tests {
                 Some(kind)
             );
         }
-        assert_eq!(crate::outreach::OutreachTargetKind::all().len(), 9);
+        assert_eq!(crate::outreach::OutreachTargetKind::all().len(), 10);
     }
 
     // ---------------------------------------------------------------------

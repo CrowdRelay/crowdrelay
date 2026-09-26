@@ -721,6 +721,7 @@ const fn target_kind_str(kind: OutreachTargetKind) -> &'static str {
         OutreachTargetKind::SupportSlot => "support_slot",
         OutreachTargetKind::Endorsement => "endorsement",
         OutreachTargetKind::MediaPatronage => "media_patronage",
+        OutreachTargetKind::Organiser => "organiser",
         OutreachTargetKind::Agent => "agent",
         OutreachTargetKind::Label => "label",
     }
@@ -739,6 +740,7 @@ fn static_str(value: &str) -> &'static str {
         "support_slot" => "support_slot",
         "endorsement" => "endorsement",
         "media_patronage" => "media_patronage",
+        "organiser" => "organiser",
         "playlist_description" => "playlist_description",
         "curator_site" => "curator_site",
         "submission_channel" => "submission_channel",

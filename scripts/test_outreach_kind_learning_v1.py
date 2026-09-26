@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "migrations"
 MIGRATION_0117 = MIGRATIONS / "0117_outreach_kind_outcomes.sql"
 MIGRATION_0119 = MIGRATIONS / "0119_outreach_wave_outcomes.sql"
+MIGRATION_0364 = MIGRATIONS / "0364_outreach_organiser_kind.sql"
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/learning.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/play_outcomes.rs"
 WAVES = ROOT / "crates/crowdrelay-infra/src/autopilot/waves.rs"
@@ -45,6 +46,7 @@ class OutreachKindLearningContract(unittest.TestCase):
     def setUp(self) -> None:
         self.sql_0117 = strip_sql_comments(read(MIGRATION_0117))
         self.sql_0119 = strip_sql_comments(read(MIGRATION_0119))
+        self.sql_0364 = strip_sql_comments(read(MIGRATION_0364))
         self.domain = read(DOMAIN)
         self.infra = read(INFRA)
         self.waves = read(WAVES)
@@ -63,7 +65,7 @@ class OutreachKindLearningContract(unittest.TestCase):
         self.assertIn("retired_at", self.sql_0117)
         self.assertIn("retired_reason", self.sql_0117)
 
-    def test_the_learning_table_accepts_all_seven_target_kinds(self) -> None:
+    def test_the_learning_table_accepts_every_pitchable_kind(self) -> None:
         for kind in (
             "playlist",
             "radio",
@@ -74,6 +76,10 @@ class OutreachKindLearningContract(unittest.TestCase):
             "media_patronage",
         ):
             self.assertIn(f"'{kind}'", self.sql_0117)
+        # 'organiser' arrived with 0364, which widens the table's CHECK —
+        # a kind a wave can carry must be a kind the learning can hold.
+        self.assertIn("'organiser'", self.sql_0364)
+        self.assertIn("outreach_kind_learning_target_kind_check", self.sql_0364)
 
     def test_retirement_is_stated_not_decayed(self) -> None:
         self.assertIn(

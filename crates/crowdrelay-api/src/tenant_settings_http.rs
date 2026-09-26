@@ -160,6 +160,12 @@ pub async fn get_brand_settings(
                 "act_style".to_owned(),
                 overrides.get("act_style").cloned().unwrap_or_default(),
             );
+            // Same absent-spelling as `act_style`: empty means the act has
+            // not declared a home city and letters name none.
+            settings.insert(
+                "act_home_city".to_owned(),
+                overrides.get("act_home_city").cloned().unwrap_or_default(),
+            );
             // Empty means "use the workspace's own name" — the resolver's
             // ordinary path, not a missing value.
             settings.insert(
@@ -372,6 +378,11 @@ fn validate_value(key: &str, value: &str) -> bool {
     // here belongs to — bounded so it stays a descriptor rather than a bio.
     if key == "act_style" {
         return value.chars().count() <= 120;
+    }
+    // A city name, not a bio — it lands mid-sentence in a letter's opening
+    // line, so it is short, one line and free of control characters.
+    if key == "act_home_city" {
+        return value.trim().chars().count() <= 60 && !value.chars().any(char::is_control);
     }
     // It opens every push title an act's fans get ("{name} — new show"), so it
     // is a name, not a sentence: short, one line, no control characters that a

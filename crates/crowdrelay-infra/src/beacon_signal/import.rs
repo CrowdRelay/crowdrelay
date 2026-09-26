@@ -69,6 +69,9 @@ fn beacon_kind_for(target_kind: &str) -> Option<&'static str> {
         "endorsement" => Some("reviewer"),
         "media_patronage" => Some("patron"),
         "support_slot" => Some("promoter"),
+        // An organiser programmes the bill — the roster calls that job a
+        // promoter, whatever the outreach vocabulary calls the person.
+        "organiser" => Some("promoter"),
         _ => None,
     }
 }

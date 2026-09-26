@@ -51,6 +51,7 @@ const OUTREACH_KINDS: &[&str] = &[
     "media_patronage",
     "endorsement",
     "creator",
+    "organiser",
 ];
 const BOOKING_KINDS: &[&str] = &["venue", "promoter", "festival"];
 // The §12-5 booking agent: a band pitches an agent to be represented, once —

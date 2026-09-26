@@ -22,6 +22,12 @@ pub enum OutreachTargetKind {
     SupportSlot,
     Endorsement,
     MediaPatronage,
+    /// The people who programme events — festivals, contests, cultural
+    /// centres — pitched with a gig request, never a release review.
+    /// Distinct from the booking lane's `promoter`/`venue`/`festival`, which
+    /// are filed per-city against a planned route; an organiser is a standing
+    /// ask the act makes wherever its calendar reaches.
+    Organiser,
     Agent,
     Label,
 }
@@ -37,6 +43,7 @@ impl OutreachTargetKind {
             Self::SupportSlot => "support_slot",
             Self::Endorsement => "endorsement",
             Self::MediaPatronage => "media_patronage",
+            Self::Organiser => "organiser",
             Self::Agent => "agent",
             Self::Label => "label",
         }
@@ -52,6 +59,7 @@ impl OutreachTargetKind {
             "support_slot" => Some(Self::SupportSlot),
             "endorsement" => Some(Self::Endorsement),
             "media_patronage" => Some(Self::MediaPatronage),
+            "organiser" => Some(Self::Organiser),
             "agent" => Some(Self::Agent),
             "label" => Some(Self::Label),
             _ => None,
@@ -59,7 +67,7 @@ impl OutreachTargetKind {
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 9] {
+    pub const fn all() -> [Self; 10] {
         [
             Self::Playlist,
             Self::Radio,
@@ -68,6 +76,7 @@ impl OutreachTargetKind {
             Self::SupportSlot,
             Self::Endorsement,
             Self::MediaPatronage,
+            Self::Organiser,
             Self::Agent,
             Self::Label,
         ]

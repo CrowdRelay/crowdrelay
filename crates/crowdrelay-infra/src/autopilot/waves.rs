@@ -233,10 +233,10 @@ kinds AS (
     -- curator can owe a reply the same as an editor can. Representation
     -- kinds stay out on both lists: agents and labels are approached through
     -- the listing path, never pitched, and the nudge is still a pitch's lane.
-    SELECT unnest(ARRAY['radio', 'press', 'creator', 'endorsement', 'media_patronage']::text[])
+    SELECT unnest(ARRAY['radio', 'press', 'creator', 'endorsement', 'media_patronage', 'organiser']::text[])
         AS target_kind, false AS thread_lane
     UNION ALL
-    SELECT unnest(ARRAY['playlist', 'radio', 'press', 'creator', 'support_slot', 'endorsement', 'media_patronage']::text[]),
+    SELECT unnest(ARRAY['playlist', 'radio', 'press', 'creator', 'support_slot', 'endorsement', 'media_patronage', 'organiser']::text[]),
         true
 )
 SELECT
@@ -600,6 +600,7 @@ const fn outreach_target_kind_str(kind: OutreachTargetKind) -> &'static str {
         OutreachTargetKind::SupportSlot => "support_slot",
         OutreachTargetKind::Endorsement => "endorsement",
         OutreachTargetKind::MediaPatronage => "media_patronage",
+        OutreachTargetKind::Organiser => "organiser",
         OutreachTargetKind::Agent => "agent",
         OutreachTargetKind::Label => "label",
     }

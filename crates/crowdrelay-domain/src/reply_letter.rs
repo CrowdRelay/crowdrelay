@@ -125,7 +125,10 @@ pub fn compose_reply_letter(
                 Some(OutreachTargetKind::Creator) => {
                     "happy to share stems, the full record, or talk about what a feature could look like"
                 }
-                Some(OutreachTargetKind::SupportSlot) => {
+                // A yes from an organiser is a gig conversation — what it
+                // needs next is what a support slot needs: live video and
+                // dates the act can actually play.
+                Some(OutreachTargetKind::SupportSlot) | Some(OutreachTargetKind::Organiser) => {
                     "we can send over our live videos and current availability"
                 }
                 Some(OutreachTargetKind::Endorsement) => {
