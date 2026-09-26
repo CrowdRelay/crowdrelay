@@ -104,18 +104,34 @@ async fn persist_decision_and_action_tx(
         .await
         .map_err(map_sqlx)?
         .ok_or(RepositoryError::Conflict)?;
+        // Counted per action class, not across the whole context. One
+        // context can hold very different work: `content_supply` renders
+        // artifacts (first-party, reversible) and relays the band's own posts
+        // to fans who opted in (owned audience). Counted together, a render
+        // backlog spent the whole day's quota — on 2026-09-26 thirty renders
+        // and agent runs against a quota of thirty — and every relay of a
+        // post the band had just published waited behind it. Outward classes
+        // are bounded again by the growth envelope and the bootstrap
+        // allowance, so this lets neither kind of work starve the other
+        // without widening what reaches anybody.
+        //
+        // A row with no recorded class (written before classes existed, or
+        // by a path that does not stamp one) counts against every class:
+        // an unknown row must never read as headroom.
         let actions_24h = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)::bigint
             FROM autopilot_actions
             WHERE workspace_id = $1
               AND context = $2
+              AND COALESCE(action_class, $3) = $3
               AND created_at >= now() - INTERVAL '24 hours'
               AND status <> 'cancelled'
             "#,
         )
         .bind(workspace_id.into_uuid())
         .bind(candidate.context.as_str())
+        .bind(candidate.action.action_class().as_str())
         .fetch_one(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
