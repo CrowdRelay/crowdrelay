@@ -6,7 +6,11 @@
 //! read, which is where a removal is first seen and recorded.
 
 use super::*;
-use crowdrelay_domain::community_register::{RegisterHold, review_community_register};
+use crowdrelay_domain::community_register::review_community_register;
+use crowdrelay_domain::community_reply::ReviewOutcome;
+use crowdrelay_domain::posting_window::{
+    default_active_hours, learned_active_hours, wait_before_posting,
+};
 use crowdrelay_domain::reddit_standing::{
     COMMUNITY_REMOVED_US, PostRecord, RedditStanding, RemovalCause, community_removed_us,
     reddit_standing,
@@ -93,15 +97,15 @@ impl CommunityExecutorWorker {
     pub(super) async fn standing_hold(
         &self,
         action: &ClaimedAction,
-    ) -> Result<Option<&'static str>, CommunityExecutorError> {
+    ) -> Result<Option<String>, CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
         let history = post_history(&self.pool, ws).await?;
         let now = OffsetDateTime::now_utc();
         if let RedditStanding::Halted(reason) = reddit_standing(&history, now) {
-            return Ok(Some(reason.as_str()));
+            return Ok(Some(reason.as_str().to_owned()));
         }
         if community_removed_us(&history, &normalized_subreddit(&action.subreddit), now) {
-            return Ok(Some(COMMUNITY_REMOVED_US));
+            return Ok(Some(COMMUNITY_REMOVED_US.to_owned()));
         }
         // Title and drafted body, as a reader sees them — before the tracked
         // link is appended, which carries a per-action slug and would make
@@ -118,7 +122,109 @@ impl CommunityExecutorWorker {
         .fetch_all(&self.pool)
         .await?;
         let draft = format!("{}\n{}", action.title, action.body);
-        Ok(review_community_register(&draft, &recent).map(RegisterHold::as_str))
+        if let Some(hold) = review_community_register(&draft, &recent) {
+            return Ok(Some(hold.as_str().to_owned()));
+        }
+        // Last, because it is the only check that spends a model call: the
+        // independent review. A failed review, or none at all, is a person.
+        let link = action
+            .source_url
+            .as_deref()
+            .or(action.smart_link.as_deref())
+            .unwrap_or("(no link)");
+        let context = format!(
+            "The post shares the band's own content, linked here: {link}\n\
+             Introducing or naming what that link carries is grounded; any \
+             other factual claim needs support in the post itself."
+        );
+        Ok(
+            match self
+                .review_text("reddit_post", &action.subreddit, &draft, &context, None)
+                .await
+            {
+                ReviewOutcome::Passed { .. } => None,
+                ReviewOutcome::Failed { score } => Some(format!(
+                    "held: the independent review scored it {score}/10 — rewrite before it goes out"
+                )),
+                ReviewOutcome::Unavailable => Some(
+                    "held: no reviewer could be reached — read it before it goes out".to_owned(),
+                ),
+            },
+        )
+    }
+
+    /// Defers the post until its community is awake and it has settled
+    /// (`crowdrelay_domain::posting_window`). Returns whether it deferred.
+    ///
+    /// A deferral is not an attempt: the claim's attempt bump is refunded, or
+    /// a post waiting overnight for its window would spend the transient
+    /// failure budget it never failed against.
+    pub(super) async fn defer_to_posting_window(
+        &self,
+        action: &ClaimedAction,
+    ) -> Result<bool, CommunityExecutorError> {
+        let ws = self.workspace_id.into_uuid();
+        let (language, ready_at): (Option<String>, OffsetDateTime) = sqlx::query_as(
+            r#"
+            SELECT target.language, post.created_at
+            FROM community_posts AS post
+            LEFT JOIN agent_outreach_targets AS target
+              ON target.id = post.target_id AND target.workspace_id = post.workspace_id
+            WHERE post.id = $1 AND post.workspace_id = $2
+            "#,
+        )
+        .bind(action.id)
+        .bind(ws)
+        .fetch_one(&self.pool)
+        .await?;
+        // The community's own online-user counts by UTC hour, last 30 days.
+        let samples: Vec<(i32, i64)> = sqlx::query_as(
+            r#"
+            SELECT EXTRACT(HOUR FROM obs.observed_at AT TIME ZONE 'UTC')::int,
+                   (obs.raw_activity_metrics->>'online_users')::bigint
+            FROM community_observations AS obs
+            JOIN agent_outreach_targets AS target
+              ON target.place_id = obs.place_id AND target.workspace_id = obs.workspace_id
+            WHERE obs.workspace_id = $1
+              AND target.id = $2
+              AND jsonb_typeof(obs.raw_activity_metrics->'online_users') = 'number'
+              AND obs.observed_at > now() - INTERVAL '30 days'
+            "#,
+        )
+        .bind(ws)
+        .bind(action.target_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let samples: Vec<(u8, i64)> = samples
+            .into_iter()
+            .filter_map(|(hour, online)| u8::try_from(hour).ok().map(|h| (h, online)))
+            .collect();
+        let active = learned_active_hours(&samples)
+            .unwrap_or_else(|| default_active_hours(language.as_deref()));
+        let Some(wait) = wait_before_posting(
+            OffsetDateTime::now_utc(),
+            ready_at,
+            &active,
+            action.id.as_u128(),
+        ) else {
+            return Ok(false);
+        };
+        let wait = Duration::try_from(wait).unwrap_or(Duration::from_secs(600));
+        tracing::info!(
+            post_id = %action.id,
+            subreddit = %action.subreddit,
+            wait_minutes = wait.as_secs() / 60,
+            "deferring to the community's active hours"
+        );
+        self.mark_rate_limited(action.id, wait).await?;
+        sqlx::query(
+            "UPDATE community_posts SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(action.id)
+        .bind(ws)
+        .execute(&self.pool)
+        .await?;
+        Ok(true)
     }
 
     /// Whether the workspace has reached its earned 24h post limit.

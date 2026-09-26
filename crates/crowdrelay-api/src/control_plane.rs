@@ -646,6 +646,20 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/community-posts/{community_post_id}/register-manual",
             post(crate::fanbase::register_manual_community_post),
         )
+        // The reply lane: the band's drafted answers to people who commented
+        // on its Reddit posts — read, approve (as edited), or skip.
+        .route(
+            "/v1/control-plane/community-replies",
+            get(crate::community_replies::list),
+        )
+        .route(
+            "/v1/control-plane/community-replies/{reply_id}/approve",
+            post(crate::community_replies::approve),
+        )
+        .route(
+            "/v1/control-plane/community-replies/{reply_id}/skip",
+            post(crate::community_replies::skip),
+        )
         .route(
             "/v1/control-plane/social-posts/{social_post_id}/register-manual",
             post(crate::fanbase::register_manual_social_post),

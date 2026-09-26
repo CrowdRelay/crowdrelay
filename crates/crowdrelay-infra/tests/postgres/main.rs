@@ -69,6 +69,7 @@ mod booking_graph;
 mod booking_target_venue_link;
 mod booking_window;
 mod common;
+mod community_replies;
 mod concert_qr;
 mod contact_governor_org;
 mod content_arcs;

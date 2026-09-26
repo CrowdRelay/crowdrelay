@@ -70,6 +70,7 @@ mod beacon_signal;
 mod booking_agents;
 mod commerce;
 mod community_intelligence_routes;
+mod community_replies;
 mod concert_qr;
 mod connections_gdrive;
 mod connections_gmail;
