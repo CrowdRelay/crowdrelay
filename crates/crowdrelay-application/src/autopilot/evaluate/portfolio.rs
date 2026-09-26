@@ -119,6 +119,7 @@ pub(super) fn select_portfolio(
     sizing_multiplier: f64,
     exchange: &crowdrelay_brain::ValueExchange,
     objective: Option<&ActiveObjective>,
+    uncertainty_gate: &crowdrelay_brain::uncertainty_gate::UncertaintyGate,
     now: time::OffsetDateTime,
 ) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
@@ -151,6 +152,12 @@ pub(super) fn select_portfolio(
             )
             .with_economic_value(stats, exchange)
             .with_harm_cost(stats);
+            // Uncertainty ranks nothing until the gate has checked it against
+            // resolved outcomes — and never an experiment's candidate, whose
+            // uncertainty is what the experiment is for.
+            if !experimental_quality.contains_key(&c.decision_key) {
+                decision_value = decision_value.with_uncertainty_penalty(uncertainty_gate);
+            }
             // A treatment-assigned candidate's dispatch executes under its
             // experiment design, so the design — not the stats' Observational
             // default — states what quality the measurement will carry. The
@@ -384,6 +391,9 @@ pub(super) fn decision_provenance(
                     // unconfident, which is exactly when the term is absent.
                     "economic_value_fans": value.economic_value_fans,
                     "harm_fans": value.harm_fans,
+                    // Null until the uncertainty gate opens; then the value
+                    // the posterior's spread took off the mean.
+                    "uncertainty_penalty": value.uncertainty_penalty,
                     "exchange_minor_per_fan": exchange_minor_per_fan,
                     "resource_cost_units": value.resource_cost.units,
                     "adjustments": adjustments,
@@ -586,6 +596,9 @@ mod tests {
                 sizing,
                 &crowdrelay_brain::ValueExchange::default(),
                 objective,
+                &crowdrelay_brain::uncertainty_gate::uncertainty_gate(
+                    &crowdrelay_brain::uncertainty_gate::IntervalCoverage::default(),
+                ),
                 now,
             )
         };

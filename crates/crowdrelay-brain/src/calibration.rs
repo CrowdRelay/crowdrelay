@@ -418,6 +418,13 @@ pub struct CalibrationByRegime {
     /// Lowest causal confidence.
     #[serde(default)]
     pub outcome_model: CalibrationTracker,
+    /// Resolved 30-day outcomes scored against the posterior each decision
+    /// recorded — the record `uncertainty_gate` reads before uncertainty may
+    /// enter selection. Separate from the trackers above, which score
+    /// `predicted_fans` against a fixed spread and cannot say whether the
+    /// posterior's own spread was honest.
+    #[serde(default)]
+    pub y30_interval: crate::uncertainty_gate::IntervalCoverage,
 }
 
 impl CalibrationByRegime {

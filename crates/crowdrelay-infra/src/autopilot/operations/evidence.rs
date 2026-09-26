@@ -331,6 +331,8 @@ async fn load_evidence(
         replayed_14d_at: Option<OffsetDateTime>,
         replayed_30d_at: Option<OffsetDateTime>,
         observed_metrics: serde_json::Value,
+        posterior_mean_y30: Option<f64>,
+        posterior_std_y30: Option<f64>,
     }
 
     let rows: Vec<EvidenceRow> = sqlx::query_as(
@@ -349,7 +351,9 @@ async fn load_evidence(
                ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
                COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
                ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at,
-               ge.observed_metrics
+               ge.observed_metrics,
+               posterior.mean_y30 AS posterior_mean_y30,
+               posterior.std_y30 AS posterior_std_y30
         FROM growth_evidence ge
         -- Belt-and-suspenders fallback: if the 3d measurement wrote to
         -- dispatch_predictions.observed_new_fans but not to
@@ -394,6 +398,27 @@ async fn load_evidence(
               )
             LIMIT 1
         ) ea ON true
+        -- The Y30 posterior the dispatching decision was valued on, from its
+        -- provenance record (`decision_value.epistemic.posterior`). Scored
+        -- against the resolved outcome to test whether the posterior's own
+        -- spread was honest (`uncertainty_gate`). A decision from before the
+        -- record, or a non-number there, reads as NULL.
+        LEFT JOIN LATERAL (
+            SELECT CASE WHEN jsonb_typeof(p.value->'mean_y30') = 'number'
+                        THEN (p.value->>'mean_y30')::double precision END AS mean_y30,
+                   CASE WHEN jsonb_typeof(p.value->'std_y30') = 'number'
+                        THEN (p.value->>'std_y30')::double precision END AS std_y30
+            FROM autopilot_actions action
+            JOIN autopilot_decisions decision
+              ON decision.workspace_id = action.workspace_id
+             AND decision.id = action.decision_id
+            CROSS JOIN LATERAL (
+                SELECT decision.input_snapshot->'decision_value'->'epistemic'->'posterior' AS value
+            ) p
+            WHERE action.workspace_id = ge.workspace_id
+              AND action.id = ge.action_id
+            LIMIT 1
+        ) posterior ON true
         WHERE ge.workspace_id = $1
           AND (ge.resolved_at IS NOT NULL OR COALESCE(ge.partial_resolution_count, 0) > 0)
           -- Absolute lookback bound, mirroring VALIDATION_LOOKBACK_DAYS in
@@ -583,6 +608,12 @@ async fn load_evidence(
                 converted_fan_id: row.converted_fan_id,
                 predicted_fans: row.predicted_fans,
                 predicted_signal_installs: row.predicted_signal_installs,
+                decision_posterior: row.posterior_mean_y30.zip(row.posterior_std_y30).map(
+                    |(mean_y30, std_y30)| crowdrelay_brain::evidence::DecisionPosterior {
+                        mean_y30,
+                        std_y30,
+                    },
+                ),
                 context,
                 strategy: row.strategy,
                 evidence_quality: crowdrelay_brain::EvidenceQuality::parse(&row.evidence_quality)

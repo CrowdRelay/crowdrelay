@@ -45,6 +45,7 @@ fn make_candidate(
         economic_value_fans: None,
         revenue_model_source: None,
         harm_fans: None,
+        uncertainty_penalty: None,
         decision_mode: DecisionMode::Exploit,
     };
     PortfolioCandidate {

@@ -77,6 +77,7 @@ pub mod strategy_learning;
 pub mod tenant_preference;
 pub mod treatment_effect;
 pub mod tune_llm;
+pub mod uncertainty_gate;
 pub mod validation;
 pub mod value_exchange;
 pub mod world_model;

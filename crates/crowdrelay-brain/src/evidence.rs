@@ -230,6 +230,13 @@ impl EvidenceQuality {
 /// brain predicted, what treatment was assigned, what reach was achieved,
 /// and what outcome was observed. This is the single source of truth for
 /// learning.
+/// A decision's Y30 posterior as recorded when it was made.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecisionPosterior {
+    pub mean_y30: f64,
+    pub std_y30: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GrowthEvidence {
     /// The workspace this evidence belongs to.
@@ -324,6 +331,11 @@ pub struct GrowthEvidence {
     pub predicted_fans: f64,
     /// Predicted Signal installs before the dispatch.
     pub predicted_signal_installs: f64,
+    /// The Y30 posterior the dispatching decision was valued on, read back
+    /// from its provenance record. `None` for evidence whose decision
+    /// predates the record, or which no decision dispatched (control units).
+    #[serde(default)]
+    pub decision_posterior: Option<DecisionPosterior>,
     /// The context features that informed the prediction.
     pub context: DispatchContext,
 
@@ -476,6 +488,7 @@ impl Default for GrowthEvidence {
             converted_fan_id: None,
             predicted_fans: 0.0,
             predicted_signal_installs: 0.0,
+            decision_posterior: None,
             context: DispatchContext::default(),
             strategy: None,
             evidence_quality: EvidenceQuality::default(),
@@ -541,6 +554,7 @@ impl GrowthEvidence {
             converted_fan_id: None,
             predicted_fans,
             predicted_signal_installs,
+            decision_posterior: None,
             context,
             strategy,
             evidence_quality,
