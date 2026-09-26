@@ -26,21 +26,18 @@ pub struct WaitCandidateValue {
     pub value_of_information: f64,
     /// Fatigue recovery value in expected Y30 fans.
     ///
-    /// **Not computed. Always 0.0.** This comment used to give a formula —
-    /// `sum(audience_fatigue * fatigue_recovery_per_cycle * expected_fans)` —
-    /// as though it described code. Nothing computes it; every call site of
-    /// [`Self::compute`] passes `0.0`, and the parameter exists as the seam
-    /// where it would arrive.
+    /// Measured, not assumed (`crate::fatigue`): the band's own community
+    /// history compares posts that followed another to the same community
+    /// within a week against rested ones. When the best candidate's audience
+    /// heard from the band inside that window, this is the measured discount
+    /// times its value — what acting now loses and waiting keeps. Zero until
+    /// the history measures a discount, and zero for an audience that is
+    /// already rested.
     ///
-    /// Say which way that biases the comparison, because it is not neutral.
-    /// This term and [`Self::option_value`] are the two that would make
-    /// waiting *more* valuable, and both are zero, so WAIT competes on
-    /// value-of-information against a full opportunity cost. The brain is
-    /// therefore biased toward acting by however much a recovered audience is
-    /// worth. Guessing a coefficient to close that gap would be worse: an
-    /// invented number in fan-equivalent units is exactly the weighted soup
-    /// `DecisionValue` refuses, and it would be indistinguishable from a
-    /// measured one.
+    /// Bounded by the opportunity cost it offsets (`discount ≤ 1`), so
+    /// [`Self::total_excluding_information`] stays at or below zero: a tired
+    /// audience makes WAIT more competitive, and never on its own a reason
+    /// for `min_dispatches` to stand down.
     pub fatigue_recovery_value: f64,
     /// Opportunity cost of NOT acting now. This is NEGATIVE.
     ///   -best_candidate_expected_y30
@@ -84,13 +81,11 @@ impl WaitCandidateValue {
     /// `min_dispatches` must not override, because no amount of acting changes
     /// that answer.
     ///
-    /// **Zero today, on purpose.** `fatigue_recovery_value` and `option_value`
-    /// are both unconditionally `0.0` — see the fields — so this is currently
-    /// just the negative opportunity cost and is never positive. Every WAIT that
-    /// can win today is a VOI deadlock, which is why overriding unconditionally
-    /// has been indistinguishable from overriding correctly. The distinction is
-    /// drawn now, while both readings agree, so that filling either seam changes
-    /// one number rather than silently turning the override into a spam switch.
+    /// **Never positive today.** `option_value` is `0.0` and the measured
+    /// `fatigue_recovery_value` is at most the opportunity cost it offsets, so
+    /// every WAIT that can win is still a VOI deadlock at heart. The
+    /// distinction stays drawn so a future option value changes one number
+    /// rather than silently turning the override into a spam switch.
     #[must_use]
     pub fn total_excluding_information(&self) -> f64 {
         self.fatigue_recovery_value + self.option_value + self.opportunity_cost
@@ -123,8 +118,8 @@ impl WaitCandidateValue {
     ///   outcomes haven't been observed yet.
     /// - `avg_treatment_std`: average treatment-effect std across
     ///   pending candidates.
-    /// - `fatigue_recovery_value`: the seam for fatigue recovery in fan-value
-    ///   space. Every caller passes `0.0` — nothing computes it. See the field.
+    /// - `fatigue_recovery_value`: the measured recovery for the best
+    ///   candidate's audience (`crate::fatigue::recovery_value`). See the field.
     #[must_use]
     pub fn compute(
         best_candidate_expected_y30: f64,

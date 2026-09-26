@@ -277,9 +277,11 @@ Wired or deleted since this table first listed them:
    only on 200+ outcomes scored against their decision-time posterior with
    honest 80% coverage. Until that record exists — and for decisions made
    before posteriors were recorded, it never will — ranking ignores spread.
-2. **WAIT is under-valued by construction.** Two of its four declared terms are
-   never computed, both in the direction that would favour waiting. The fix is
-   to measure fatigue recovery, not to pick a number for it.
+2. **WAIT's option value is still uncomputed.** Fatigue recovery is now
+   measured (`brain::fatigue`: quick follow-ups vs rested posts in the band's
+   own communities, each against its community's median) and priced for the
+   best candidate when its audience heard from the band within a week. The
+   option value stays `0.0`, in the direction that favours acting.
 3. **Only the chosen candidate's posterior is durable per decision.** The
    `decision_value` block keeps its Y30 posterior (mean, std, P(meaningful))
    beside the regime, terms and competition, so a resolved outcome can be

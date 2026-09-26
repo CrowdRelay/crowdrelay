@@ -33,6 +33,7 @@ mod channel_yield;
 mod community_targets;
 mod evidence_replay;
 mod exchange;
+mod fatigue;
 mod rescans;
 use evidence_replay::{
     PosteriorReplay, apply_evidence_to_model, apply_evidence_to_model_with_contrast,
@@ -859,6 +860,8 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // attribution from measurement into control — `platform_growth` says a
     // platform is compounding, this says a channel delivered a person.
     let channel_yield = channel_yield::load_channel_yield(pool, workspace_id).await?;
+    // What a quick follow-up post loses against a rested one — WAIT's recovery.
+    let fatigue = fatigue::load_fatigue(pool, workspace_id).await?;
 
     let off_platform_audience = u32::try_from(audience_row.0.max(0)).unwrap_or(u32::MAX);
     let off_platform_audience_this_month = u32::try_from(audience_row.1.max(0)).unwrap_or(u32::MAX);
@@ -1104,6 +1107,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             // One state per tenant — see where it is assessed, above the loop.
             metacognition: metacognition.clone(),
             rescan_requested: rescan_pending.contains(*template_id),
+            fatigue,
         });
     }
 

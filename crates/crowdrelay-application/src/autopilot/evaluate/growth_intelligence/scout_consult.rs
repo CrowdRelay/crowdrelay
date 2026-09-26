@@ -151,6 +151,7 @@ mod dispatch_rule_tests {
     /// fields and `rescan_requested`.
     fn snapshot_for(template_id: &str) -> GrowthIntelligenceSnapshot {
         GrowthIntelligenceSnapshot {
+            fatigue: None,
             template_id: template_id.to_owned(),
             hours_since_last_run: Some(500),
             hours_since_last_effective_run: Some(500),

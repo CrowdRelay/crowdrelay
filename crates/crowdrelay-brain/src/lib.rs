@@ -59,6 +59,7 @@ pub mod efe;
 pub mod evidence;
 pub mod experiment;
 pub mod exploration;
+pub mod fatigue;
 pub mod goal;
 pub mod hypothesis;
 pub mod metric_posterior;

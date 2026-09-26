@@ -620,6 +620,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 .first()
                 .and_then(|snapshot| snapshot.world_model.objective.as_ref()),
             &uncertainty_gate,
+            &portfolio::WaitInputs::from_snapshots(&snapshots),
             now,
         );
         let goal = run.goal;

@@ -109,6 +109,34 @@ pub(super) struct PortfolioRun {
     pub goal: Option<GoalConstraint>,
 }
 
+/// What WAIT needs to price a rested audience: the measured fatigue
+/// discount, and how many days ago each community audience last heard from
+/// the band (keyed like `audience_key_for`).
+#[derive(Default)]
+pub(super) struct WaitInputs {
+    pub fatigue: Option<crowdrelay_brain::fatigue::FatigueMeasure>,
+    pub audience_days_since_touch: HashMap<String, u32>,
+}
+
+impl WaitInputs {
+    pub(super) fn from_snapshots(
+        snapshots: &[crowdrelay_brain::GrowthIntelligenceSnapshot],
+    ) -> Self {
+        Self {
+            fatigue: snapshots.iter().find_map(|snapshot| snapshot.fatigue),
+            audience_days_since_touch: snapshots
+                .iter()
+                .flat_map(|snapshot| &snapshot.unengaged_targets)
+                .filter_map(|target| {
+                    target
+                        .days_since_last_engagement
+                        .map(|days| (format!("community:{}", target.target_id), days))
+                })
+                .collect(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn select_portfolio(
     scored: &[ScoredCandidate],
@@ -120,6 +148,7 @@ pub(super) fn select_portfolio(
     exchange: &crowdrelay_brain::ValueExchange,
     objective: Option<&ActiveObjective>,
     uncertainty_gate: &crowdrelay_brain::uncertainty_gate::UncertaintyGate,
+    wait_inputs: &WaitInputs,
     now: time::OffsetDateTime,
 ) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
@@ -207,10 +236,25 @@ pub(super) fn select_portfolio(
     // The WAIT candidate's opportunity_cost = -best_action_y30, and
     // wait_total = VOI + fatigue + option - best_action_y30.
     // WAIT wins when wait_total > 0 (net positive utility).
-    let best_y30 = candidates
-        .iter()
-        .map(|c| c.decision_value.total())
-        .fold(0.0_f64, f64::max);
+    let best = candidates.iter().max_by(|a, b| {
+        a.decision_value
+            .total()
+            .total_cmp(&b.decision_value.total())
+    });
+    let best_y30 = best.map_or(0.0, |c| c.decision_value.total().max(0.0));
+    // What waiting recovers: when the best candidate's audience heard from
+    // the band within the rest window, the measured share a tired audience
+    // costs. Zero until the band's own history measures it.
+    let fatigue_recovery = crowdrelay_brain::fatigue::recovery_value(
+        wait_inputs.fatigue.as_ref(),
+        best_y30,
+        best.and_then(|c| {
+            wait_inputs
+                .audience_days_since_touch
+                .get(&c.audience_key)
+                .copied()
+        }),
+    );
     let avg_treatment_std = {
         let stds: Vec<f64> = candidates
             .iter()
@@ -228,8 +272,12 @@ pub(super) fn select_portfolio(
     // The WAIT candidate competes via opportunity cost + VOI: if the
     // best action has low expected Y30 and there are pending measurements
     // whose outcomes could inform the decision, WAIT can win.
-    let wait =
-        WaitCandidateValue::compute(best_y30, pending_measurement_count, avg_treatment_std, 0.0);
+    let wait = WaitCandidateValue::compute(
+        best_y30,
+        pending_measurement_count,
+        avg_treatment_std,
+        fatigue_recovery,
+    );
     // P0-2: Wire the experimental dispatch budget from the policy into the
     // optimizer config. This allows additional treatment dispatches beyond
     // max_dispatches when the candidate is part of an active experiment.
@@ -599,6 +647,7 @@ mod tests {
                 &crowdrelay_brain::uncertainty_gate::uncertainty_gate(
                     &crowdrelay_brain::uncertainty_gate::IntervalCoverage::default(),
                 ),
+                &WaitInputs::default(),
                 now,
             )
         };
