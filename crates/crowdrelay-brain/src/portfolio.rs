@@ -249,6 +249,17 @@ pub struct PortfolioOptimizer {
     /// term uniform, and a uniform multiplier cannot reorder anything.
     #[serde(default)]
     pub act_history: std::collections::HashMap<WorkspaceId, u32>,
+    /// Past this many selections, only candidates whose audience is in
+    /// [`Self::proven_audiences`] (or that are experimental) take a further
+    /// slot. `None` leaves every slot open. The caller sets it when a slot
+    /// ceiling was raised above its base, so the raised slots go to lanes
+    /// with a measured record of fans who stayed rather than to more of the
+    /// same guesses — more slots, not lower standards.
+    #[serde(default)]
+    pub proven_only_beyond: Option<u32>,
+    /// Audience keys with a measured record of fans who stayed.
+    #[serde(default)]
+    pub proven_audiences: std::collections::BTreeSet<String>,
 }
 
 impl PortfolioOptimizer {
@@ -350,6 +361,16 @@ impl PortfolioOptimizer {
                     if experimental_slots_used >= self.config.experimental_dispatch_budget {
                         continue; // Experimental budget also exhausted.
                     }
+                }
+                // Past the base, a raised ceiling's extra slots are for lanes
+                // that have produced fans who stayed.
+                if !candidate.is_experimental
+                    && self.proven_only_beyond.is_some_and(|base| {
+                        selected.len() >= base as usize
+                            && !self.proven_audiences.contains(&candidate.audience_key)
+                    })
+                {
+                    continue;
                 }
                 let audience_count = audience_counts
                     .get(&candidate.audience_key)

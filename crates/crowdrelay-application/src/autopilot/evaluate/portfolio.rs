@@ -109,24 +109,46 @@ pub(super) struct PortfolioRun {
     pub goal: Option<GoalConstraint>,
 }
 
-/// What WAIT needs to price a rested audience: the measured fatigue
-/// discount, and how many days ago each community audience last heard from
-/// the band (keyed like `audience_key_for`).
+/// What the cycle's evidence says about audiences, keyed like
+/// `audience_key_for`: the measured fatigue discount and how many days ago
+/// each community last heard from the band (WAIT's recovery), and which
+/// audiences have produced fans who stayed (where a raised ceiling's extra
+/// slots may go).
 #[derive(Default)]
-pub(super) struct WaitInputs {
+pub(super) struct AudienceEvidence {
     pub fatigue: Option<crowdrelay_brain::fatigue::FatigueMeasure>,
     pub audience_days_since_touch: HashMap<String, u32>,
+    pub proven_audiences: std::collections::BTreeSet<String>,
 }
 
-impl WaitInputs {
+impl AudienceEvidence {
     pub(super) fn from_snapshots(
         snapshots: &[crowdrelay_brain::GrowthIntelligenceSnapshot],
+        workspace_id: WorkspaceId,
     ) -> Self {
-        Self {
-            fatigue: snapshots.iter().find_map(|snapshot| snapshot.fatigue),
-            audience_days_since_touch: snapshots
+        let targets = snapshots
+            .iter()
+            .flat_map(|snapshot| &snapshot.unengaged_targets);
+        let mut proven_audiences: std::collections::BTreeSet<String> = targets
+            .clone()
+            .filter(|target| target.durable_fans_90d > 0)
+            .map(|target| format!("community:{}", target.target_id))
+            .collect();
+        // The band's own channels share one audience key; any of them with a
+        // fan who stayed proves it.
+        if snapshots.first().is_some_and(|snapshot| {
+            snapshot
+                .world_model
+                .channel_yield
                 .iter()
-                .flat_map(|snapshot| &snapshot.unengaged_targets)
+                .any(|channel| channel.channel != "reddit" && channel.durable_90d > 0)
+        }) {
+            proven_audiences.insert(format!("workspace:{}", workspace_id.into_uuid()));
+        }
+        Self {
+            proven_audiences,
+            fatigue: snapshots.iter().find_map(|snapshot| snapshot.fatigue),
+            audience_days_since_touch: targets
                 .filter_map(|target| {
                     target
                         .days_since_last_engagement
@@ -148,7 +170,7 @@ pub(super) fn select_portfolio(
     exchange: &crowdrelay_brain::ValueExchange,
     objective: Option<&ActiveObjective>,
     uncertainty_gate: &crowdrelay_brain::uncertainty_gate::UncertaintyGate,
-    wait_inputs: &WaitInputs,
+    audience_evidence: &AudienceEvidence,
     now: time::OffsetDateTime,
 ) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
@@ -246,10 +268,10 @@ pub(super) fn select_portfolio(
     // the band within the rest window, the measured share a tired audience
     // costs. Zero until the band's own history measures it.
     let fatigue_recovery = crowdrelay_brain::fatigue::recovery_value(
-        wait_inputs.fatigue.as_ref(),
+        audience_evidence.fatigue.as_ref(),
         best_y30,
         best.and_then(|c| {
-            wait_inputs
+            audience_evidence
                 .audience_days_since_touch
                 .get(&c.audience_key)
                 .copied()
@@ -318,8 +340,17 @@ pub(super) fn select_portfolio(
     // same `act`, the fairness term is uniform across the pool, and a uniform
     // multiplier cannot reorder anything. The term does its work in the
     // roster's pooled read, where the acts differ.
+    // A goal that raised the ceiling raised it for lanes with a record: past
+    // the base, a slot goes only to an audience that has produced fans who
+    // stayed (or to an experiment). More slots, not lower standards.
+    let raised_beyond_base = goal
+        .as_ref()
+        .filter(|goal| goal.applied_max_dispatches > goal.base_max_dispatches)
+        .map(|goal| goal.base_max_dispatches);
     let optimizer = PortfolioOptimizer {
         config,
+        proven_only_beyond: raised_beyond_base,
+        proven_audiences: audience_evidence.proven_audiences.clone(),
         ..Default::default()
     };
     // The input vec is kept beside the selection: the roster read (5.1) needs
@@ -647,7 +678,7 @@ mod tests {
                 &crowdrelay_brain::uncertainty_gate::uncertainty_gate(
                     &crowdrelay_brain::uncertainty_gate::IntervalCoverage::default(),
                 ),
-                &WaitInputs::default(),
+                &AudienceEvidence::default(),
                 now,
             )
         };

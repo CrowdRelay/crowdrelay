@@ -857,3 +857,28 @@ fn the_fairness_term_reorders_on_share_and_respects_the_gate() {
         .expect("busy-b must pay 0.9^6 — the slot busy-a took counts too");
     assert!(busy_b_ledger.fairness_adjustment < 0.0);
 }
+
+#[test]
+fn slots_past_the_base_go_only_to_lanes_with_fans_who_stayed() {
+    let mut optimizer = PortfolioOptimizer::new(PortfolioConfig {
+        max_dispatches: 3,
+        ..PortfolioConfig::default()
+    });
+    optimizer.proven_only_beyond = Some(1);
+    optimizer.proven_audiences.insert("proven".to_owned());
+    let result = optimizer.select(vec![
+        make_candidate("guess-a", "t1", 9.0, "guess-a"),
+        make_candidate("guess-b", "t2", 8.0, "guess-b"),
+        make_candidate("known", "t3", 3.0, "proven"),
+    ]);
+    let chosen: Vec<&str> = result
+        .selected
+        .iter()
+        .map(|candidate| candidate.audience_key.as_str())
+        .collect();
+    assert_eq!(
+        chosen,
+        vec!["guess-a", "proven"],
+        "the base slot goes to the best guess; the raised one to the proven lane"
+    );
+}
