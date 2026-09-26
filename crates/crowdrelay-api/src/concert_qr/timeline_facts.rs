@@ -26,6 +26,10 @@ struct TimelineEventRow {
     /// The negotiation that produced this night, when one did. `None` for a
     /// show nobody had to win — a hometown gig is still a show.
     booking_opportunity_id: Option<Uuid>,
+    /// The catalogue city's name, when the night names one.
+    city: Option<String>,
+    /// Fans who asked to be told about this night.
+    interested: i64,
 }
 
 /// What it took to win the night: the negotiation behind this show.
@@ -201,16 +205,22 @@ async fn load_timeline_facts(
 ) -> Result<Option<TimelineFacts>, sqlx::Error> {
     let Some(event) = sqlx::query_as::<_, TimelineEventRow>(
         r#"
-        SELECT id, slug, title, venue, venue_address, status, starts_at, ends_at,
-               counterparty_name, counterparty_email, place_event_id,
-               booking_opportunity_id
-        FROM events
-        WHERE workspace_id = $1 AND slug = $2
+        SELECT event.id, event.slug, event.title, event.venue, event.venue_address,
+               event.status, event.starts_at, event.ends_at,
+               event.counterparty_name, event.counterparty_email, event.place_event_id,
+               event.booking_opportunity_id,
+               city.name AS city,
+               (SELECT count(*) FROM event_interests AS interest
+                WHERE interest.workspace_id = event.workspace_id
+                  AND interest.event_id = event.id)::bigint AS interested
+        FROM events AS event
+        LEFT JOIN cities AS city ON city.id = event.city_id
+        WHERE event.workspace_id = $1 AND event.slug = $2
           -- `draft` included since 0329. The ladder's first rung is
           -- "Announced", so a show that is booked and unannounced is the one
           -- case the timeline most needs to render, and it was the one case
           -- that resolved 404.
-          AND status IN ('draft','published','completed')
+          AND event.status IN ('draft','published','completed')
         "#,
     )
     .bind(state.workspace_id.into_uuid())
