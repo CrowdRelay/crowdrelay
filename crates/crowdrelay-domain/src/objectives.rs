@@ -75,7 +75,7 @@ pub struct GrowthObjective {
 }
 
 /// Why an objective cannot be judged.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectiveGap {
     /// The series has no observation, so there is nothing to compare.
@@ -110,7 +110,7 @@ impl ObjectiveGap {
 }
 
 /// Where an objective stands, measured only from its series.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ObjectiveState {
     /// The target has been reached. Terminal: a series that later falls back

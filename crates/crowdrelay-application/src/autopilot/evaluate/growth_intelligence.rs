@@ -290,7 +290,22 @@ pub fn evaluate_growth_intelligence(
     // cautiously). These terms enter EFE weights and budget — NEVER
     // DecisionValue.total(), because there is no fan-equivalent
     // conversion for "the brain feels uncertain".
-    let meta_exploration_boost = snapshot.metacognition.exploration_boost();
+    //
+    // A declared objective that is Behind withholds the boost: behind and
+    // short on time is a reason to spend on what is known to work, not to try
+    // novel things. This is exploration allocation — it changes which
+    // candidates rank first for generation, never what any is worth. See
+    // docs/GOAL_DIRECTED_CONTROL.md.
+    let goal_is_behind = snapshot
+        .world_model
+        .objective
+        .as_ref()
+        .is_some_and(crowdrelay_brain::ActiveObjective::is_behind);
+    let meta_exploration_boost = if goal_is_behind {
+        0.0
+    } else {
+        snapshot.metacognition.exploration_boost()
+    };
     let mut efe_weights = EfeWeights::default();
     efe_weights.exploration *= 1.0 + meta_exploration_boost;
 

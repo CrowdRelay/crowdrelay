@@ -918,6 +918,10 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         north_star_this_month,
     );
 
+    // The operator's declared objective, assessed by the same read the
+    // objectives endpoint serves — one definition of progress, two readers.
+    let objective = super::super::objectives::load_brain_objective(pool, workspace_id, now).await?;
+
     let world_model = WorldModel {
         total_fans,
         fans_this_month,
@@ -946,6 +950,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         days_to_next_event,
         has_upcoming_event,
         growth_target_progress,
+        objective,
     };
 
     // Agent execution health: is the worker layer currently producing

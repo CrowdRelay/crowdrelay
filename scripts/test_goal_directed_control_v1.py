@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
-"""Two definitions of the goal, and only one of them decides anything.
+"""The operator's goal, and the only two places it may change a decision.
 
 `domain::objectives::GrowthObjective` is an operator-declared target on a
 measured series: platform, metric key, scope, direction, a frozen baseline, a
 target and a deadline. `assess_objective` judges it and refuses to guess —
 no observation, or under 72 hours elapsed, is `Unmeasurable { reason }`, not
-"on track". It reaches the API and the chief briefing.
+"on track".
 
-`brain::world_model::GrowthTarget` is derived from a hardcoded fan-count table
-with no deadline and no operator input, and it is the one the brain optimises
-toward. So an operator can declare "100 durable fans by the 27th", watch it turn
-`Behind`, and the brain will not have changed a single decision — the number it
-is working toward is `max(north_star_current / 10, 5)`.
-
-That gap is documented in `docs/GOAL_DIRECTED_CONTROL.md`, which describes the
-contract for closing it. This gate holds the document to the code:
+It used to reach the API and the chief briefing and no decision: the brain
+worked toward `GrowthTarget::from_fan_count`, a hardcoded monthly bucket, and an
+objective turning `Behind` changed nothing. It is now wired, and
+`docs/GOAL_DIRECTED_CONTROL.md` is the contract. This gate holds the document
+and the code to it:
 
 1. The document exists and still names the four things it forbids.
-2. The claim it is built on — that no evaluation path reads an objective — is
-   still true. Closing the gap is the intended outcome; it has to arrive with
-   the "What is missing" section updated in the same change, rather than
-   leaving a document that describes a gap someone already closed.
+2. The objective reaches the brain through `goal.rs` alone, on
+   `WorldModel.objective`.
+3. It acts on the dispatch ceiling and the exploration boost, and nowhere else
+   on the evaluation path.
+4. It never enters `DecisionValue`, the optimizer's marginal, or anything about
+   authority and approval.
 """
 from __future__ import annotations
 
@@ -80,30 +79,86 @@ class GoalDirectedControlContract(unittest.TestCase):
             "pace term in total() is the weighted soup the invariant forbids",
         )
 
-    def test_no_evaluation_path_reads_an_objective_yet(self) -> None:
-        readers = [
+    def test_the_objective_reaches_the_brain_through_the_goal_module(self) -> None:
+        """Wired. The objective is read in the brain by `goal.rs` and carried on
+        `WorldModel.objective`, and nowhere else on the brain side."""
+        readers = sorted(
             str(path.relative_to(ROOT))
-            for path, text in rust_sources(EVALUATE) + rust_sources(BRAIN)
+            for path, text in rust_sources(BRAIN)
             if OBJECTIVE_TYPE.search(text)
-        ]
+        )
         self.assertEqual(
             readers,
-            [],
-            f"{readers} now reads an operator objective on a decision path. "
-            f"That is the intended destination — update the 'What is missing' "
-            f"section of docs/GOAL_DIRECTED_CONTROL.md and this gate together, "
-            f"and check the change lands in PortfolioConfig or DecisionMode "
-            f"rather than in DecisionValue::total()",
+            ["crates/crowdrelay-brain/src/goal.rs"],
+            f"{readers} read an operator objective in the brain. The goal "
+            f"module is the one place an objective becomes a pace; a second "
+            f"reader is a second definition of progress",
+        )
+        model = (BRAIN / "world_model.rs").read_text()
+        self.assertIn(
+            "pub objective: Option<crate::goal::ActiveObjective>",
+            model,
+            "WorldModel no longer carries the declared objective; the brain "
+            "cannot see what the operator asked for",
         )
 
-    def test_the_derived_target_is_still_the_one_the_brain_uses(self) -> None:
-        """The document's table is only true while this is."""
+    def test_the_goal_acts_only_on_the_ceiling_and_the_exploration_posture(self) -> None:
+        """The two places the contract allows, and only those."""
+        consumers = sorted(
+            str(path.relative_to(ROOT))
+            for path, text in rust_sources(EVALUATE)
+            if re.search(r"\bobjective\b|ActiveObjective|GoalConstraint|GoalPace", text)
+        )
+        self.assertEqual(
+            consumers,
+            [
+                "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence.rs",
+                "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs",
+                "crates/crowdrelay-application/src/autopilot/evaluate/portfolio.rs",
+            ],
+            f"{consumers} read the goal on a decision path. It may act on "
+            f"PortfolioConfig (portfolio.rs, called from the context arm) and "
+            f"on the exploration boost (growth_intelligence.rs), nowhere else",
+        )
+        portfolio = (EVALUATE / "portfolio.rs").read_text()
+        self.assertIn("goal.applied_max_dispatches", portfolio)
+        scoring = (EVALUATE / "growth_intelligence.rs").read_text()
+        self.assertIn("ActiveObjective::is_behind", scoring)
+
+    def test_urgency_never_enters_the_value(self) -> None:
+        """A deadline does not make a bad action better."""
+        for name in ("decision_value.rs", "portfolio.rs"):
+            text = (BRAIN / name).read_text()
+            self.assertIsNone(
+                re.search(r"ActiveObjective|GoalConstraint|GoalPace|goal::", text),
+                f"crates/crowdrelay-brain/src/{name} now reads the goal. The pace "
+                f"must not enter DecisionValue::total() or the optimizer's "
+                f"marginal — it is a ceiling on how many, never a term in how much",
+            )
+        goal = (BRAIN / "goal.rs").read_text()
+        marker = goal.find("#[cfg(test)]")
+        body = goal[:marker] if marker != -1 else goal
+        code = "\n".join(
+            line for line in body.splitlines() if not line.lstrip().startswith("//")
+        )
+        for forbidden in ("DecisionValue", "min_marginal_value", "authority", "approval"):
+            self.assertNotIn(
+                forbidden,
+                code,
+                f"goal.rs now touches `{forbidden}`. A goal may raise a budget "
+                f"inside the envelope; it may never change value or widen authority",
+            )
+
+    def test_the_derived_target_survives_as_a_readout(self) -> None:
+        """The monthly bucket stays for the operator; the declared objective is
+        the goal when one is live."""
         model = (BRAIN / "world_model.rs").read_text()
         self.assertIn(
             "pub fn from_fan_count(",
             model,
             "GrowthTarget::from_fan_count is gone; the document describes it as "
-            "the target the brain optimises toward and must be corrected",
+            "the operator readout kept beside the declared objective and must be "
+            "corrected",
         )
 
 

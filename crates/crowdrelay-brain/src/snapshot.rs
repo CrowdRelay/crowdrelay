@@ -263,6 +263,18 @@ pub struct GrowthIntelligencePolicy {
     /// DecisionValue.
     #[serde(default)]
     pub tenant_preference_policy: TenantPreferencePolicy,
+    /// The most dispatches a cycle may select while an operator's objective
+    /// is `Behind` — the ceiling the required pace can raise `max_dispatches`
+    /// to, and never past. Scaled by the same sizing multiplier as the normal
+    /// budget, so a degraded executor layer stays degraded under a deadline.
+    ///
+    /// A constraint, not a value: it widens how many candidates may be taken,
+    /// and every one of them still has to clear `min_marginal_value` on its
+    /// own. Authority, approvals and class ceilings sit downstream and are not
+    /// touched. See `docs/GOAL_DIRECTED_CONTROL.md`. Default 10 (twice the
+    /// normal five).
+    #[serde(default = "default_goal_max_dispatches")]
+    pub goal_max_dispatches: u32,
 }
 
 fn default_min_eligible_units_for_experiment() -> u32 {
@@ -271,6 +283,10 @@ fn default_min_eligible_units_for_experiment() -> u32 {
 
 fn default_experimental_dispatch_budget() -> u32 {
     3
+}
+
+fn default_goal_max_dispatches() -> u32 {
+    10
 }
 
 fn default_min_expected_control_units() -> u32 {
@@ -323,6 +339,7 @@ impl Default for GrowthIntelligencePolicy {
             min_expected_treatment_units: default_min_expected_treatment_units(),
             template_costs: default_template_costs(),
             tenant_preference_policy: TenantPreferencePolicy::default(),
+            goal_max_dispatches: default_goal_max_dispatches(),
         }
     }
 }

@@ -226,63 +226,112 @@ impl AutopilotObjectiveRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<GrowthObjectiveView>, RepositoryError> {
         self.bounded(async {
-            let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
-            let rows = sqlx::query_as::<_, ObjectiveRow>(
-                r#"
-                SELECT id, platform, metric_key, scope_kind, scope_id, direction,
-                       baseline_value, target_value, declared_at, deadline, declared_by
-                FROM growth_objectives
-                WHERE workspace_id = $1 AND retired_at IS NULL
-                ORDER BY deadline
-                LIMIT 64
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(map_sqlx)?;
-            let policy = ObjectivePolicy::default();
-            let mut views = Vec::with_capacity(rows.len());
-            for row in rows {
-                let observed = latest_series_value(
-                    &mut transaction,
-                    workspace_id,
-                    &row.platform,
-                    &row.metric_key,
-                )
-                .await?;
-                let direction =
-                    MetricDirection::parse(&row.direction).ok_or(RepositoryError::Unexpected)?;
-                let objective = GrowthObjective {
-                    platform: row.platform.clone(),
-                    metric_key: row.metric_key.clone(),
-                    scope: parse_objective_scope(&row.scope_kind, row.scope_id)?,
-                    direction,
-                    baseline_value: row.baseline_value,
-                    target_value: row.target_value,
-                    declared_at: row.declared_at,
-                    deadline: row.deadline,
-                };
-                views.push(GrowthObjectiveView {
-                    objective_id: row.id,
-                    platform: row.platform,
-                    metric_key: row.metric_key,
-                    scope_kind: row.scope_kind,
-                    scope_id: row.scope_id,
-                    baseline_value: row.baseline_value,
-                    target_value: row.target_value,
-                    declared_at: row.declared_at,
-                    deadline: row.deadline,
-                    declared_by: row.declared_by,
-                    observed_value: observed.map(|(value, _)| value),
-                    state: assess_objective(&objective, observed, policy, now),
-                });
-            }
-            transaction.commit().await.map_err(map_sqlx)?;
-            Ok(views)
+            Ok(assessed_objectives(&self.pool, workspace_id, now)
+                .await?
+                .into_iter()
+                .map(|(view, _)| view)
+                .collect())
         })
         .await
     }
+}
+
+/// Every live objective, each with the state its own series implies.
+///
+/// One read for both consumers: the operator's list and the brain's world
+/// model. Two readers of the same table assessing separately would be two
+/// definitions of progress, which the goal contract forbids.
+async fn assessed_objectives(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Vec<(GrowthObjectiveView, GrowthObjective)>, RepositoryError> {
+    let mut transaction = pool.begin().await.map_err(map_sqlx)?;
+    let rows = sqlx::query_as::<_, ObjectiveRow>(
+        r#"
+        SELECT id, platform, metric_key, scope_kind, scope_id, direction,
+               baseline_value, target_value, declared_at, deadline, declared_by
+        FROM growth_objectives
+        WHERE workspace_id = $1 AND retired_at IS NULL
+        ORDER BY deadline
+        LIMIT 64
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let policy = ObjectivePolicy::default();
+    let mut assessed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let observed = latest_series_value(
+            &mut transaction,
+            workspace_id,
+            &row.platform,
+            &row.metric_key,
+        )
+        .await?;
+        let direction =
+            MetricDirection::parse(&row.direction).ok_or(RepositoryError::Unexpected)?;
+        let objective = GrowthObjective {
+            platform: row.platform.clone(),
+            metric_key: row.metric_key.clone(),
+            scope: parse_objective_scope(&row.scope_kind, row.scope_id)?,
+            direction,
+            baseline_value: row.baseline_value,
+            target_value: row.target_value,
+            declared_at: row.declared_at,
+            deadline: row.deadline,
+        };
+        let view = GrowthObjectiveView {
+            objective_id: row.id,
+            platform: row.platform,
+            metric_key: row.metric_key,
+            scope_kind: row.scope_kind,
+            scope_id: row.scope_id,
+            baseline_value: row.baseline_value,
+            target_value: row.target_value,
+            declared_at: row.declared_at,
+            deadline: row.deadline,
+            declared_by: row.declared_by,
+            observed_value: observed.map(|(value, _)| value),
+            state: assess_objective(&objective, observed, policy, now),
+        };
+        assessed.push((view, objective));
+    }
+    transaction.commit().await.map_err(map_sqlx)?;
+    Ok(assessed)
+}
+
+/// The objective the brain works toward this cycle: the live workspace-scoped
+/// one with the nearest deadline, judged exactly as the operator sees it.
+///
+/// City, event and release-plan objectives stay operator readouts. The
+/// portfolio selects for the whole workspace, and a city being behind is not a
+/// reason to send more everywhere.
+pub(in crate::autopilot) async fn load_brain_objective(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Option<crowdrelay_brain::ActiveObjective>, RepositoryError> {
+    let assessed = assessed_objectives(pool, workspace_id, now).await?;
+    Ok(crowdrelay_brain::ActiveObjective::choose(
+        assessed
+            .into_iter()
+            .filter(|(_, objective)| objective.scope == ObjectiveScope::Workspace)
+            .map(|(view, objective)| crowdrelay_brain::ActiveObjective {
+                objective_id: view.objective_id,
+                platform: view.platform,
+                metric_key: view.metric_key,
+                direction: objective.direction,
+                baseline_value: view.baseline_value,
+                target_value: view.target_value,
+                observed_value: view.observed_value,
+                declared_at: view.declared_at,
+                deadline: view.deadline,
+                state: view.state,
+            }),
+    ))
 }
 
 fn parse_objective_scope(kind: &str, id: Option<Uuid>) -> Result<ObjectiveScope, RepositoryError> {

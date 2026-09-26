@@ -18,7 +18,7 @@ editing that gate in the same change.
 ## The loop
 
 ```
-OBJECTIVE        North Star metric + monthly target      world_model.rs
+OBJECTIVE        North Star metric + declared objective  world_model.rs, goal.rs
   ↓
 WORLD STATE      WorldModel, loaded once per cycle       operations/growth_intelligence.rs
   ↓
@@ -274,11 +274,12 @@ Wired or deleted since this table first listed them:
    produced them. Re-deriving them answers "what would the brain decide now",
    which is a different question and looks the same in a report. See the
    provenance section.
-4. **No goal-directed trajectory.** "100 durable fans in 21 days" has a
-   baseline, a remaining delta, a feasible action space and a portfolio
-   strategy. It has no expected trajectory and no replanning, so the deadline
-   cannot change what the brain does. Deliberately not built — a second planner
-   is worse than none.
+4. **Goal-directed control is a ceiling and a posture, not a planner.** A
+   declared objective that is `Behind` raises the dispatch ceiling by its pace
+   gap (capped) and withholds the exploration boost; on track, nothing
+   changes. The expected trajectory is the portfolio's own expected Y30,
+   recorded per decision beside the goal — there is no separate trajectory
+   model, deliberately. See `docs/GOAL_DIRECTED_CONTROL.md`.
 5. **The loop is correct and barely exercised.** Almost no outcome has
    resolved. Most of the arithmetic above is right and untested by reality; no
    code change fixes that.
