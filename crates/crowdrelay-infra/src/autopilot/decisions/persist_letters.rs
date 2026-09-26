@@ -68,7 +68,7 @@ async fn enrich_booking_draft(
 }
 
 /// The sender half of every letter — act name, declared style, the city the
-/// act has played most and its own site. Shared by the booking and outreach
+/// act calls home and its own site. Shared by the booking and outreach
 /// enrichers; reads run inside the caller's transaction so the letter is
 /// composed from the same snapshot the action is written against.
 ///
@@ -95,21 +95,19 @@ async fn sender_identity_in_tx(
         .map_err(map_sqlx)?
         .as_deref()
         .and_then(crowdrelay_domain::gig_letter::letter_style),
+        // The act's declared home city (`act_home_city`), trimmed like
+        // `site_url`: never measured — the most-played-city query it replaced
+        // counted upcoming shows as played and named the act after the city
+        // of its next gig. Unset means no city in the sentence.
         home_city: sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT city.name
-            FROM events AS event
-            JOIN cities AS city ON city.id = event.city_id
-            WHERE event.workspace_id = $1
-            GROUP BY city.id, city.name
-            ORDER BY count(*) DESC, city.name
-            LIMIT 1
-            "#,
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'act_home_city'",
         )
         .bind(workspace_id)
         .fetch_optional(&mut **transaction)
         .await
-        .map_err(map_sqlx)?,
+        .map_err(map_sqlx)?
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty()),
         site_url: sqlx::query_scalar::<_, String>(
             "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
         )
@@ -176,6 +174,28 @@ async fn enrich_outreach_draft(
     let (pitch_title, pitch_url) = pitch
         .map(|pitch| (pitch.title, pitch.url))
         .unwrap_or_default();
+    // An organiser letter cites the act's next confirmed show as the reason
+    // the ask is serious. Only that kind reads the field; the nearest
+    // published show is a fact, and a calendar without one writes no line.
+    let next_show = if kind == OutreachTargetKind::Organiser {
+        sqlx::query_as::<_, (OffsetDateTime, Option<String>)>(
+            "SELECT event.starts_at, city.name
+             FROM events AS event
+             LEFT JOIN cities AS city ON city.id = event.city_id
+             WHERE event.workspace_id = $1
+               AND event.status = 'published'
+               AND event.starts_at >= now()
+             ORDER BY event.starts_at
+             LIMIT 1",
+        )
+        .bind(ws)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .map(|(starts_at, city)| (starts_at.date(), city.unwrap_or_default()))
+    } else {
+        None
+    };
     let sender = sender_identity_in_tx(transaction, ws).await?;
     if let Ok(letter) = compose_outreach_letter(&OutreachLetterInput {
         sender: &sender,
@@ -185,6 +205,7 @@ async fn enrich_outreach_draft(
         pitch_url: &pitch_url,
         phase: *phase,
         language: crowdrelay_domain::outreach_letter::language_for_contact(&contact_email),
+        next_show,
     }) {
         *draft = letter;
     }

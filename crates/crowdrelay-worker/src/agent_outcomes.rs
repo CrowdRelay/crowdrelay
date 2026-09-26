@@ -67,7 +67,7 @@ const BATCH_LIMIT: i64 = 32;
 /// and rejects `support_slot`, which is the reverse of the other. Reaching for
 /// the enum because the column names match would accept `support_slot` here
 /// and hand it straight to the CHECK that forbids it.
-const AGENT_TARGET_KINDS: [&str; 7] = [
+const AGENT_TARGET_KINDS: [&str; 8] = [
     "press",
     "radio",
     "playlist",
@@ -75,6 +75,7 @@ const AGENT_TARGET_KINDS: [&str; 7] = [
     "endorsement",
     "creator",
     "community",
+    "organiser",
 ];
 
 #[derive(Debug, Error)]

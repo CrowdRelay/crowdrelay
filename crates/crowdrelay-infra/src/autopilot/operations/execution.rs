@@ -118,6 +118,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
             CASE target.target_kind
               WHEN 'media_patronage' THEN 'event.media_patronage.v1'
               WHEN 'endorsement' THEN 'event.endorsement.v1'
+              WHEN 'organiser' THEN 'event.organiser.v1'
               ELSE 'event.press.v1'
             END,
             GREATEST(7000,LEAST(10000,target.relationship_score*100)),8800,true,$3,$3 + INTERVAL '30 days'
@@ -128,7 +129,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
             -- a human answered — the autopilot does not re-pitch a served lead.
             -- Re-engagement is an operator decision that clears the disposition.
             AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
-            AND target.target_kind IN ('press','radio','creator','media_patronage','endorsement')
+            AND target.target_kind IN ('press','radio','creator','media_patronage','endorsement','organiser')
           ON CONFLICT(workspace_id,source,target_id,subject_kind,subject_key) DO UPDATE SET
             active=true,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,
             relevance_basis_points=EXCLUDED.relevance_basis_points,confidence_basis_points=EXCLUDED.confidence_basis_points

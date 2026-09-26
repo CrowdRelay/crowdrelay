@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::outreach::{OutreachPhase, OutreachTargetKind};
+use time::Date;
 
 /// A finished letter — the wire shape every letter executor reads.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,6 +45,11 @@ pub struct OutreachLetterInput<'a> {
     pub phase: OutreachPhase,
     /// The language the recipient reads. See [`language_for_contact`].
     pub language: LetterLanguage,
+    /// The act's nearest confirmed show — date and the city it is in. An
+    /// organiser reads "they have dates on the books" as the reason the ask
+    /// is serious; every other kind ignores it. `None` writes no citation —
+    /// a gig request with no show on record still reads true.
+    pub next_show: Option<(Date, String)>,
 }
 
 /// The language to write to a contact in, from the one fact the registry
@@ -135,6 +141,28 @@ pub fn compose_outreach_letter(
     if act.is_empty() {
         return Err(OutreachLetterRefusal::NoSenderName);
     }
+    // An organiser is asked for a slot, not a review — the ask names the act
+    // and its calendar, so the propose-a-release skeleton does not fit. The
+    // listen link still carries the newest material; a missing one refuses.
+    if input.target_kind == OutreachTargetKind::Organiser {
+        if url.is_empty() {
+            return Err(OutreachLetterRefusal::NoPitch);
+        }
+        return Ok(match (input.language, input.phase) {
+            (LetterLanguage::English, OutreachPhase::Initial) => {
+                organiser_initial_en(input, target, act)
+            }
+            (LetterLanguage::English, OutreachPhase::FollowUp) => {
+                organiser_follow_up_en(input, target, act)
+            }
+            (LetterLanguage::Polish, OutreachPhase::Initial) => {
+                organiser_initial_pl(input, target, act)
+            }
+            (LetterLanguage::Polish, OutreachPhase::FollowUp) => {
+                organiser_follow_up_pl(input, target, act)
+            }
+        });
+    }
     let Some(ask) = purpose(input.target_kind) else {
         return Err(OutreachLetterRefusal::RepresentationTarget);
     };
@@ -164,7 +192,9 @@ fn purpose_pl(kind: OutreachTargetKind) -> &'static str {
         OutreachTargetKind::SupportSlot => "i zapytać o granie jako support",
         OutreachTargetKind::Endorsement => "z prośbą o rekomendację",
         OutreachTargetKind::MediaPatronage => "z prośbą o patronat medialny",
-        OutreachTargetKind::Agent | OutreachTargetKind::Label => "",
+        // An organiser's ask lives in its own template — this arm answers so
+        // the match stays whole, and is unreachable by construction.
+        OutreachTargetKind::Organiser | OutreachTargetKind::Agent | OutreachTargetKind::Label => "",
     }
 }
 
@@ -276,7 +306,10 @@ fn purpose(kind: OutreachTargetKind) -> Option<&'static str> {
         OutreachTargetKind::SupportSlot => "a support slot",
         OutreachTargetKind::Endorsement => "an endorsement",
         OutreachTargetKind::MediaPatronage => "media patronage",
-        OutreachTargetKind::Agent | OutreachTargetKind::Label => return None,
+        // Composed by the organiser templates, not the release skeleton.
+        OutreachTargetKind::Organiser | OutreachTargetKind::Agent | OutreachTargetKind::Label => {
+            return None;
+        }
     })
 }
 
@@ -334,6 +367,162 @@ fn follow_up(
         subject: truncate(format!("Follow-up: {act} — {title}"), MAX_SUBJECT),
         body: lines.join("\n"),
     }
+}
+
+/// The organiser ask: a slot, not a review. The act's next confirmed show is
+/// cited when the calendar carries one — "we play {city} on {date}" is the
+/// proof the request is real, and the fact a contested gig made letters
+/// claim the band lived there is why the sentence names where the show is,
+/// never where the band is from.
+fn organiser_initial_en(
+    input: &OutreachLetterInput<'_>,
+    target: &str,
+    act: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Hi {target},"),
+        String::new(),
+        format!(
+            "{} and we would love to be considered for a slot on your bill.",
+            introduction(input.sender, act),
+        ),
+    ];
+    if let Some((date, city)) = &input.next_show {
+        let when_where = match city.trim() {
+            "" => format_show_date_en(*date),
+            city => format!("{}, {}", format_show_date_en(*date), city),
+        };
+        lines.push(String::new());
+        lines.push(format!("Next confirmed show: {when_where}."));
+    }
+    lines.push(String::new());
+    lines.push(format!("Listen: {}", input.pitch_url.trim()));
+    lines.push(String::new());
+    lines
+        .push("If it is not a fit, no worries — just say so and we will not follow up.".to_owned());
+    lines.extend(sign_off(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("{act} — gig request"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+fn organiser_follow_up_en(
+    input: &OutreachLetterInput<'_>,
+    target: &str,
+    act: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Hi {target},"),
+        String::new(),
+        "A quick follow-up on the note below — the offer to play stands. \
+         If it is not a fit, a short \"no\" is just as useful as a yes."
+            .to_owned(),
+        String::new(),
+        format!("Listen: {}", input.pitch_url.trim()),
+    ];
+    lines.extend(sign_off(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("Follow-up: {act} — gig request"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+fn organiser_initial_pl(
+    input: &OutreachLetterInput<'_>,
+    _target: &str,
+    act: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        // Same vocative rule as the release letter: "Dzień dobry," alone.
+        "Dzień dobry,".to_owned(),
+        String::new(),
+        format!(
+            "{} i chcielibyśmy zapytać o możliwość zagrania u Was.",
+            introduction_pl(input.sender, act),
+        ),
+    ];
+    if let Some((date, city)) = &input.next_show {
+        let when_where = match city.trim() {
+            "" => format_show_date_pl(*date),
+            city => format!("{}, {}", format_show_date_pl(*date), city),
+        };
+        lines.push(String::new());
+        lines.push(format!("Najbliższy potwierdzony koncert: {when_where}."));
+    }
+    lines.push(String::new());
+    lines.push(format!("Do posłuchania: {}", input.pitch_url.trim()));
+    lines.push(String::new());
+    lines.push(
+        "Jeśli to nie dla Was, nic nie szkodzi — wystarczy krótka odpowiedź \
+         i nie będziemy się więcej odzywać."
+            .to_owned(),
+    );
+    lines.extend(sign_off_pl(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("{act} — propozycja koncertu"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+fn organiser_follow_up_pl(
+    input: &OutreachLetterInput<'_>,
+    _target: &str,
+    act: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        "Dzień dobry,".to_owned(),
+        String::new(),
+        "Krótko wracamy do poprzedniej wiadomości — propozycja zagrania u Was \
+         nadal stoi. Jeśli to nie dla Was, krótkie „nie” też bardzo nam pomoże."
+            .to_owned(),
+        String::new(),
+        format!("Do posłuchania: {}", input.pitch_url.trim()),
+    ];
+    lines.extend(sign_off_pl(input.sender, act));
+    OutreachLetter {
+        subject: truncate(
+            format!("Przypomnienie: {act} — propozycja koncertu"),
+            MAX_SUBJECT,
+        ),
+        body: lines.join("\n"),
+    }
+}
+
+/// "17 Oct 2026" — day, the month's short English name, the year.
+fn format_show_date_en(date: Date) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS
+        .get(usize::from(u8::from(date.month()) - 1))
+        .copied()
+        .unwrap_or_default();
+    format!("{} {} {}", date.day(), month, date.year())
+}
+
+/// "17 października 2026" — the Polish month in the genitive, as a date is
+/// read after a number, with the year.
+fn format_show_date_pl(date: Date) -> String {
+    const MONTHS: [&str; 12] = [
+        "stycznia",
+        "lutego",
+        "marca",
+        "kwietnia",
+        "maja",
+        "czerwca",
+        "lipca",
+        "sierpnia",
+        "września",
+        "października",
+        "listopada",
+        "grudnia",
+    ];
+    let month = MONTHS
+        .get(usize::from(u8::from(date.month()) - 1))
+        .copied()
+        .unwrap_or_default();
+    format!("{} {} {}", date.day(), month, date.year())
 }
 
 /// Everything a thread follow-up is composed from.
@@ -541,6 +730,7 @@ mod tests {
             pitch_url: "https://virya.music/f/rytual",
             phase,
             language: LetterLanguage::English,
+            next_show: None,
         }
     }
 
@@ -799,5 +989,165 @@ mod tests {
             assert!(purpose(kind).is_some());
             assert!(!purpose_pl(kind).is_empty(), "{kind:?} has no Polish ask");
         }
+        // An organiser answers to its own templates, not the release ask —
+        // the loops above cover the kinds `purpose` and `purpose_pl` serve.
+        assert!(purpose(OutreachTargetKind::Organiser).is_none());
+        assert!(purpose_pl(OutreachTargetKind::Organiser).is_empty());
+    }
+
+    #[test]
+    fn an_organiser_is_asked_to_play_not_to_review() {
+        let sender = sender();
+        let show = Date::from_calendar_date(2026, time::Month::October, 17).unwrap();
+        let letter = compose_outreach_letter(&OutreachLetterInput {
+            target_name: "uROCK Młodych — organizator",
+            target_kind: OutreachTargetKind::Organiser,
+            next_show: Some((show, "Gorzów Wielkopolski".to_owned())),
+            ..input(
+                &sender,
+                OutreachTargetKind::Organiser,
+                OutreachPhase::Initial,
+            )
+        })
+        .expect("a complete input composes");
+        assert!(
+            letter.body.starts_with("Hi uROCK Młodych,"),
+            "{}",
+            letter.body
+        );
+        assert!(
+            letter
+                .body
+                .contains("VIRYA, a modern metal act from Wrocław")
+        );
+        assert!(letter.body.contains("considered for a slot on your bill"));
+        assert!(
+            letter
+                .body
+                .contains("Next confirmed show: 17 Oct 2026, Gorzów Wielkopolski."),
+            "{}",
+            letter.body
+        );
+        assert!(letter.body.contains("Listen: https://virya.music/f/rytual"));
+        assert!(letter.body.contains("will not follow up"));
+        assert!(letter.body.ends_with("https://virya.music"));
+        assert_eq!(letter.subject, "VIRYA — gig request");
+        // The failure this kind exists to end: no review request to a
+        // festival organiser.
+        let lower = letter.body.to_lowercase();
+        assert!(!lower.contains("review"), "{lower}");
+        assert!(!lower.contains("coverage"), "{lower}");
+        assert!(!lower.contains("submit"), "{lower}");
+        // The city named in the letter is where the band is *from* — the
+        // show city appears only inside the citation.
+        assert!(!letter.body.contains("act from Gorzów"), "{}", letter.body);
+    }
+
+    #[test]
+    fn an_organiser_letter_without_a_booked_show_still_reads_true() {
+        let sender = sender();
+        let letter = compose_outreach_letter(&input(
+            &sender,
+            OutreachTargetKind::Organiser,
+            OutreachPhase::Initial,
+        ))
+        .expect("a gig ask needs no citation");
+        assert!(letter.body.contains("considered for a slot on your bill"));
+        assert!(!letter.body.contains("confirmed show"), "{}", letter.body);
+        // A show with no city on record cites the date alone.
+        let show = Date::from_calendar_date(2026, time::Month::October, 17).unwrap();
+        let letter = compose_outreach_letter(&OutreachLetterInput {
+            next_show: Some((show, String::new())),
+            ..input(
+                &sender,
+                OutreachTargetKind::Organiser,
+                OutreachPhase::Initial,
+            )
+        })
+        .expect("composes");
+        assert!(
+            letter.body.contains("Next confirmed show: 17 Oct 2026."),
+            "{}",
+            letter.body
+        );
+    }
+
+    #[test]
+    fn a_polish_organiser_is_asked_for_a_slot_in_polish() {
+        let sender = sender();
+        let show = Date::from_calendar_date(2026, time::Month::October, 17).unwrap();
+        let letter = compose_outreach_letter(&OutreachLetterInput {
+            language: LetterLanguage::Polish,
+            next_show: Some((show, "Gorzów Wielkopolski".to_owned())),
+            ..input(
+                &sender,
+                OutreachTargetKind::Organiser,
+                OutreachPhase::Initial,
+            )
+        })
+        .expect("a complete input composes");
+        assert!(letter.body.starts_with("Dzień dobry,\n"));
+        assert!(letter.body.contains(
+            "Piszemy w imieniu VIRYA — zespołu modern metal z miasta Wrocław — i chcielibyśmy \
+             zapytać o możliwość zagrania u Was."
+        ));
+        assert!(letter.body.contains(
+            "Najbliższy potwierdzony koncert: 17 października 2026, Gorzów Wielkopolski."
+        ));
+        assert!(
+            letter
+                .body
+                .contains("Do posłuchania: https://virya.music/f/rytual")
+        );
+        assert!(letter.body.contains("i nie będziemy się więcej odzywać"));
+        assert!(
+            letter
+                .body
+                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music")
+        );
+        assert!(!letter.body.contains("recenzj"), "{}", letter.body);
+        assert!(!letter.body.contains("omówienia"), "{}", letter.body);
+        assert_eq!(letter.subject, "VIRYA — propozycja koncertu");
+    }
+
+    #[test]
+    fn an_organiser_follow_up_re_asks_the_slot() {
+        let sender = sender();
+        let letter = compose_outreach_letter(&input(
+            &sender,
+            OutreachTargetKind::Organiser,
+            OutreachPhase::FollowUp,
+        ))
+        .expect("a follow-up composes");
+        assert!(letter.body.contains("the offer to play stands"));
+        assert_eq!(letter.subject, "Follow-up: VIRYA — gig request");
+        let polish = compose_outreach_letter(&OutreachLetterInput {
+            language: LetterLanguage::Polish,
+            ..input(
+                &sender,
+                OutreachTargetKind::Organiser,
+                OutreachPhase::FollowUp,
+            )
+        })
+        .expect("composes");
+        assert!(polish.body.contains("propozycja zagrania"));
+        assert_eq!(polish.subject, "Przypomnienie: VIRYA — propozycja koncertu");
+    }
+
+    #[test]
+    fn an_organiser_still_refuses_without_a_listen_link() {
+        let sender = sender();
+        let no_pitch = OutreachLetterInput {
+            pitch_url: "",
+            ..input(
+                &sender,
+                OutreachTargetKind::Organiser,
+                OutreachPhase::Initial,
+            )
+        };
+        assert_eq!(
+            compose_outreach_letter(&no_pitch),
+            Err(OutreachLetterRefusal::NoPitch)
+        );
     }
 }
