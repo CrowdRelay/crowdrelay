@@ -411,6 +411,134 @@ fn required_artifacts(kind: ContentSourceKind) -> &'static [ContentArtifactKind]
     }
 }
 
+/// The shortest gap between two relay pushes to the same fans.
+///
+/// A relay carries one band post to the phones of fans who opted in. On
+/// 2026-09-26 the first four relays after a blocked week went out in the
+/// same tenth of a second, one of them twice: the band posts the same words
+/// to Facebook and Instagram, and each copy was its own relay. Four
+/// notifications at once from a band is how an app gets muted. Twelve hours
+/// keeps a band that posts daily at one push a day and drops the backlog
+/// that piles up while the relay is held; within the 72-hour freshness
+/// window a held post still gets its turn.
+pub const RELAY_PUSH_MIN_GAP_HOURS: i64 = 12;
+
+/// How long a relayed post's words are remembered, so the same words
+/// cross-posted to another platform are not pushed a second time.
+pub const RELAY_PUSH_DEDUPE_DAYS: i64 = 7;
+
+/// A relay push already raised, as the pacing reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentRelayPush {
+    pub at: OffsetDateTime,
+    pub title: String,
+    pub body: String,
+}
+
+/// Whether one more relay push may be raised now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelayPushVerdict {
+    Send,
+    /// The same words already reached these fans — a cross-post.
+    AlreadyRelayed,
+    /// Another relay went out less than [`RELAY_PUSH_MIN_GAP_HOURS`] ago.
+    TooSoon,
+}
+
+/// The words a relay carries, without links and case: a cross-post differs
+/// from the original only in its permalink.
+fn relay_words(title: &str, body: &str) -> String {
+    format!("{title} {body}")
+        .split_whitespace()
+        .filter(|word| !word.starts_with("http://") && !word.starts_with("https://"))
+        .flat_map(|word| word.chars().filter(|c| c.is_alphanumeric()))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+#[must_use]
+pub fn relay_push_verdict(
+    title: &str,
+    body: &str,
+    recent: &[RecentRelayPush],
+    now: OffsetDateTime,
+) -> RelayPushVerdict {
+    let words = relay_words(title, body);
+    let remembered = now - Duration::days(RELAY_PUSH_DEDUPE_DAYS);
+    if !words.is_empty()
+        && recent
+            .iter()
+            .any(|push| push.at >= remembered && relay_words(&push.title, &push.body) == words)
+    {
+        return RelayPushVerdict::AlreadyRelayed;
+    }
+    let gap = Duration::hours(RELAY_PUSH_MIN_GAP_HOURS);
+    if recent.iter().any(|push| now - push.at < gap) {
+        return RelayPushVerdict::TooSoon;
+    }
+    RelayPushVerdict::Send
+}
+
+#[cfg(test)]
+mod relay_pacing_tests {
+    use super::*;
+
+    fn at(hours_ago: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_790_000_000).expect("valid")
+            - Duration::hours(hours_ago)
+    }
+
+    fn push(hours_ago: i64, title: &str, body: &str) -> RecentRelayPush {
+        RecentRelayPush {
+            at: at(hours_ago),
+            title: title.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_same_words_cross_posted_are_not_pushed_twice() {
+        let title = "Terapia grupowa, spowiedź szaleńca, mental metal.";
+        let recent = [push(
+            30,
+            title,
+            "Terapia grupowa. Łapcie mordeczki\n\nhttps://www.facebook.com/1069/posts/1",
+        )];
+        assert_eq!(
+            relay_push_verdict(
+                title,
+                "Terapia grupowa. Łapcie mordeczki\n\nhttps://www.instagram.com/p/Dd1/",
+                &recent,
+                at(0)
+            ),
+            RelayPushVerdict::AlreadyRelayed
+        );
+    }
+
+    #[test]
+    fn a_second_post_waits_out_the_gap() {
+        let recent = [push(2, "Gramy w Gorzowie", "17.10")];
+        assert_eq!(
+            relay_push_verdict("Nowy klip", "Już jest", &recent, at(0)),
+            RelayPushVerdict::TooSoon
+        );
+        let older = [push(RELAY_PUSH_MIN_GAP_HOURS, "Gramy w Gorzowie", "17.10")];
+        assert_eq!(
+            relay_push_verdict("Nowy klip", "Już jest", &older, at(0)),
+            RelayPushVerdict::Send
+        );
+    }
+
+    #[test]
+    fn words_older_than_the_memory_may_be_relayed_again() {
+        let recent = [push(RELAY_PUSH_DEDUPE_DAYS * 24 + 1, "Gramy", "17.10")];
+        assert_eq!(
+            relay_push_verdict("Gramy", "17.10", &recent, at(0)),
+            RelayPushVerdict::Send
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

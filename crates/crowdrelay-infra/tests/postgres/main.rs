@@ -47,6 +47,7 @@ mod autopilot_post_show_report;
 mod autopilot_quota_per_class;
 mod autopilot_relay_ladder;
 mod autopilot_relay_loader;
+mod autopilot_relay_pacing;
 mod autopilot_release_tier;
 mod autopilot_reply_model;
 mod autopilot_reply_negotiation;

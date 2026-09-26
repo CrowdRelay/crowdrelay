@@ -161,6 +161,43 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         operations::push_segments::signal_push_audience(&self.pool, workspace_id, segment).await
     }
 
+    async fn load_recent_relay_pushes(
+        &self,
+        workspace_id: WorkspaceId,
+        since: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_supply::RecentRelayPush>, RepositoryError> {
+        // Every relay push carries the `action:relay:{source}:signal_push`
+        // key `relay_candidates` gives it; a push raised anywhere else is
+        // not a relay and is paced by its own rules. A push still awaiting
+        // approval counts: it will reach the same phones.
+        let rows = sqlx::query_as::<_, (OffsetDateTime, Option<String>, Option<String>)>(
+            r#"
+            SELECT created_at, payload->>'title', payload->>'body'
+            FROM autopilot_actions
+            WHERE workspace_id = $1
+              AND action_kind = 'signal.push.request'
+              AND idempotency_key LIKE 'action:relay:%:signal_push'
+              AND status <> 'cancelled'
+              AND created_at >= $2
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(at, title, body)| crowdrelay_domain::content_supply::RecentRelayPush {
+                    at,
+                    title: title.unwrap_or_default(),
+                    body: body.unwrap_or_default(),
+                },
+            )
+            .collect())
+    }
+
     async fn load_experiment_snapshots(
         &self,
         workspace_id: WorkspaceId,

@@ -514,8 +514,25 @@ where
                     } else {
                         None
                     };
+                    // Relay pushes are paced across cycles and within one:
+                    // see `relay_push_verdict`. Newest post first, so a held
+                    // backlog relays the freshest news, not the oldest.
+                    let mut recent_relays = if has_relay_material {
+                        self.repository
+                            .load_recent_relay_pushes(
+                                self.workspace_id,
+                                now - time::Duration::days(
+                                    crowdrelay_domain::content_supply::RELAY_PUSH_DEDUPE_DAYS,
+                                ),
+                            )
+                            .await?
+                    } else {
+                        Vec::new()
+                    };
+                    let mut ordered: Vec<&ContentSupplySnapshot> = snapshots.iter().collect();
+                    ordered.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.occurred_at));
                     let mut produced = 0usize;
-                    for snapshot in &snapshots {
+                    for snapshot in ordered {
                         for candidate in content_candidates(
                             snapshot,
                             &policy,
@@ -524,8 +541,35 @@ where
                             evidence.for_context(policy.context),
                             now,
                         )? {
+                            let relay_push = match &candidate.action {
+                                AutopilotActionPayload::RequestSignalPush {
+                                    title, body, ..
+                                } if candidate.decision_kind == "relay_owned_post" => {
+                                    Some((title.clone(), body.clone()))
+                                }
+                                _ => None,
+                            };
+                            if let Some((title, body)) = &relay_push
+                                && crowdrelay_domain::content_supply::relay_push_verdict(
+                                    title,
+                                    body,
+                                    &recent_relays,
+                                    now,
+                                ) != crowdrelay_domain::content_supply::RelayPushVerdict::Send
+                            {
+                                continue;
+                            }
                             produced += 1;
-                            self.persist(&candidate, &mut limits, &mut report).await?;
+                            let action = self.persist(&candidate, &mut limits, &mut report).await?;
+                            if let (Some(_), Some((title, body))) = (action, relay_push) {
+                                recent_relays.push(
+                                    crowdrelay_domain::content_supply::RecentRelayPush {
+                                        at: now,
+                                        title,
+                                        body,
+                                    },
+                                );
+                            }
                         }
                     }
                     report.supply_wait_reason =
