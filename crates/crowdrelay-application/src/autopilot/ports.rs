@@ -210,6 +210,14 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         segment: Option<&str>,
     ) -> Result<SignalPushAudience, RepositoryError>;
 
+    /// Relay pushes raised since `since` (not cancelled), for the pacing in
+    /// `content_supply::relay_push_verdict`.
+    async fn load_recent_relay_pushes(
+        &self,
+        workspace_id: WorkspaceId,
+        since: OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_domain::content_supply::RecentRelayPush>, RepositoryError>;
+
     async fn load_experiment_snapshots(
         &self,
         workspace_id: WorkspaceId,
