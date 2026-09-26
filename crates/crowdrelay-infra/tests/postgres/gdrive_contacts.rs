@@ -1050,3 +1050,121 @@ async fn an_inactive_agent_row_retires_the_agent() -> Result<(), Box<dyn std::er
     assert!(still_live, "a sighting with no verdict touched the flag");
     Ok(())
 }
+
+/// The Gmail lane's outbound sighting: mail the act sent from its own
+/// mailbox must land as an `outbound` interaction on the known contacts,
+/// or a conversation the band already answered keeps reading "your turn".
+/// Keyed on the message id so a rescan writes nothing twice, monotonic on
+/// the target's own clock, and refused for do-not-contact.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_outbound_sighting_marks_known_conversations_written()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("outbound-sighting").await?;
+    let city_id: Uuid = sqlx::query_scalar("SELECT id FROM cities WHERE slug = 'wroclaw'")
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    let outreach_target = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outreach_targets (id, workspace_id, target_kind, display_name, contact_email) \
+         VALUES ($1,$2,'press','Promoter One','promo@venue.pl')",
+    )
+    .bind(outreach_target)
+    .bind(fixture.workspace_id)
+    .execute(&fixture.pool)
+    .await?;
+    let booking_target = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO booking_targets \
+            (id, workspace_id, city_id, target_kind, display_name, contact_email, relationship_score) \
+         VALUES ($1,$2,$3,'promoter','Promoter Two','booker@club.pl',70)",
+    )
+    .bind(booking_target)
+    .bind(fixture.workspace_id)
+    .bind(city_id)
+    .execute(&fixture.pool)
+    .await?;
+    let dnc_target = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outreach_targets \
+            (id, workspace_id, target_kind, display_name, contact_email, do_not_contact) \
+         VALUES ($1,$2,'press','Do Not Call','dnc@venue.pl',true)",
+    )
+    .bind(dnc_target)
+    .bind(fixture.workspace_id)
+    .execute(&fixture.pool)
+    .await?;
+
+    let at = time::OffsetDateTime::now_utc() - time::Duration::hours(3);
+    for (email, key) in [
+        ("promo@venue.pl", "gmail:msg-out-1"),
+        ("booker@club.pl", "gmail:msg-out-2"),
+        ("dnc@venue.pl", "gmail:msg-out-3"),
+        ("nobody@nowhere.pl", "gmail:msg-out-4"),
+    ] {
+        fixture
+            .repository
+            .record_outbound_sighting(fixture.workspace_id, email, at, key)
+            .await?;
+    }
+
+    let (direction, phase, count): (String, String, i64) = sqlx::query_as(
+        "SELECT direction, phase, count(*)::bigint FROM outreach_interactions \
+         WHERE workspace_id = $1 AND target_id = $2 GROUP BY direction, phase",
+    )
+    .bind(fixture.workspace_id)
+    .bind(outreach_target)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        (direction.as_str(), phase.as_str(), count),
+        ("outbound", "initial", 1)
+    );
+    let booking_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM booking_interactions \
+         WHERE workspace_id = $1 AND target_id = $2 AND source_key = 'gmail:msg-out-2'",
+    )
+    .bind(fixture.workspace_id)
+    .bind(booking_target)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(booking_rows, 1);
+    let outreach_clock: time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT last_outreach_at FROM outreach_targets WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(fixture.workspace_id)
+    .bind(outreach_target)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(outreach_clock, at);
+
+    // A do-not-contact target and an unknown address record nothing, and a
+    // rescan of the same message is a no-op rather than a duplicate.
+    let dnc_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outreach_interactions WHERE workspace_id=$1 AND target_id=$2",
+    )
+    .bind(fixture.workspace_id)
+    .bind(dnc_target)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(dnc_rows, 0);
+    fixture
+        .repository
+        .record_outbound_sighting(
+            fixture.workspace_id,
+            "promo@venue.pl",
+            at,
+            "gmail:msg-out-1",
+        )
+        .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outreach_interactions WHERE workspace_id=$1 AND target_id=$2",
+    )
+    .bind(fixture.workspace_id)
+    .bind(outreach_target)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(total, 1, "a rescan must not write a second interaction");
+    Ok(())
+}

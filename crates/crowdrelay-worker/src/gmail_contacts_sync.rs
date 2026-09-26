@@ -43,10 +43,10 @@ use crowdrelay_infra::{
 };
 use sqlx::{PgPool, postgres::PgListener};
 use thiserror::Error;
-use time::OffsetDateTime;
 use tokio::{sync::watch, time::interval};
 use uuid::Uuid;
 
+use crate::gmail_sightings::{inbound_sighting, outbound_sightings};
 use crate::google_oauth::{access_token_for_connection, resolve_google_access_token};
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -919,6 +919,35 @@ impl GmailContactsSyncWorker {
             message.internal_date.as_deref(),
         )
         .await?;
+        // And the booking side: the act answering from its own mailbox. A
+        // sent message's To/Cc contacts become `outbound` interaction rows
+        // on whichever of them are known booking targets — the booking
+        // console's "waiting on a reply" reads that table, so a reply sent
+        // from Gmail must land there or a conversation the band already
+        // closed keeps asking for a response that exists.
+        if let Some((emails, at)) = outbound_sightings(
+            &from,
+            &recipients,
+            self_email,
+            message.internal_date.as_deref(),
+        ) {
+            for email in emails {
+                if let Err(error) = self
+                    .repo
+                    .record_outbound_sighting(
+                        self.workspace_id,
+                        &email,
+                        at,
+                        &format!("gmail:{message_id}"),
+                    )
+                    .await
+                {
+                    // A sighting write must not cost the rest of the
+                    // message — the contact upserts already landed.
+                    tracing::warn!(%error, %email, "gmail outbound sighting failed");
+                }
+            }
+        }
         Ok((upserted, attachments_failed))
     }
 
@@ -1108,23 +1137,6 @@ fn tabular_parts(parts: &[MessagePart]) -> Vec<&MessagePart> {
     found
 }
 
-/// An inbound sighting is one `From` contact that is not the tenant's own
-/// mailbox (`extract_header_contacts` already excludes it), on a message
-/// whose `internalDate` parses to an instant. The band's own outbound mail,
-/// a missing or malformed header, and a missing date all record nothing.
-fn inbound_sighting(
-    from_header: &str,
-    self_email: &str,
-    internal_date_ms: Option<&str>,
-) -> Option<(String, OffsetDateTime)> {
-    let ms = internal_date_ms?.parse::<i64>().ok()?;
-    let at = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()?;
-    match extract_header_contacts(&[from_header.to_string()], self_email).as_slice() {
-        [contact] => Some((contact.email.clone(), at)),
-        _ => None,
-    }
-}
-
 enum HistoryError {
     StaleCursor,
     Other(String),
@@ -1151,19 +1163,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn an_inbound_from_header_records_the_counterpartys_sighting() {
-        let ms = "1727740800000";
-        let (email, at) =
-            inbound_sighting("Promoter <promo@venue.pl>", "band@virya.music", Some(ms))
-                .expect("one non-self From contact is a sighting");
-        assert_eq!(email, "promo@venue.pl");
-        assert_eq!(
-            at,
-            OffsetDateTime::from_unix_timestamp_nanos(1_727_740_800_000_000_000).expect("in range")
-        );
-    }
 
     #[test]
     fn the_tenants_own_outbound_mail_records_nothing() {
