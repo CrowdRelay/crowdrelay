@@ -50,7 +50,16 @@ CRATES = ROOT / "crates"
 TRIGGER = ROOT / "migrations/0251_add_fan_growth_3d_check_constraint.sql"
 ACTION_CHECK = ROOT / "migrations/0189_autopilot_action_unknown_status.sql"
 ASSIGNMENT_CHECK = ROOT / "migrations/0191_execution_status_unknown.sql"
-TARGET_KIND_CHECK = ROOT / "migrations/0138_agent_outreach_targets_community.sql"
+# The constraint is redefined whenever the vocabulary grows (0138 added
+# `community`, 0364 added `organiser`); the live definition is the newest
+# migration that re-adds it, so the gate reads that rather than pinning one
+# file and going stale on the next widening.
+TARGET_KIND_CHECK = sorted(
+    path
+    for path in (ROOT / "migrations").glob("*.sql")
+    if "agent_outreach_targets_target_kind_check\n    CHECK (target_kind IN ("
+    in path.read_text()
+)[-1]
 EXPERIMENT = CRATES / "crowdrelay-brain/src/experiment.rs"
 AGENT_OUTCOMES = CRATES / "crowdrelay-worker/src/agent_outcomes.rs"
 
