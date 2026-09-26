@@ -421,6 +421,8 @@ async fn load_agent_scorecard(
                 WHEN action_kind = 'promotion.budget_change.request' THEN 'promotion.budget'
                 WHEN action_kind = 'representation.approach.request' THEN 'representation.approach'
                 WHEN action_kind = 'booking_agent.approach.request' THEN 'booking_agent.approach'
+                WHEN action_kind = 'booking_agent.approach_wave.request' THEN 'booking_agent.approach'
+                WHEN action_kind = 'booking_agent.reply.request' THEN 'booking_agent.approach'
                 WHEN action_kind = 'team.assignment.email' THEN 'team.email'
                 WHEN action_kind = 'community.engage.request' THEN 'community.engage'
                 WHEN action_kind = 'agent.content.request' THEN 'agent.content'

@@ -110,6 +110,40 @@ mod payload_tests {
         Ok(())
     }
 
+    /// The agent-lane reply round-trips with its conversation pin intact and
+    /// lands as `booking_agent.reply.request` — a third-party send like the
+    /// approach it answers, and never standing-approvable for the same reason
+    /// the outreach reply is not: a scaffold nobody completed must never
+    /// auto-send to a person.
+    #[test]
+    fn booking_agent_reply_payload_round_trips_and_stays_third_party()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let agent_id = BookingAgentId::new();
+        let payload = AutopilotActionPayload::RequestBookingAgentReply {
+            agent_id,
+            agent_version: 3,
+            agent_name: "Wielcy Agency".to_owned(),
+            agency: Some("Wielcy".to_owned()),
+            reply_interaction_id: 41,
+            reply_disposition: "positive".to_owned(),
+            draft: crowdrelay_domain::approach_letter::ApproachLetter {
+                subject: "Re: VIRYA — season dates".to_owned(),
+                body: "Hi,\n\nThank you for the quick answer.".to_owned(),
+            },
+        };
+        let json = serde_json::to_value(&payload)?;
+        assert_eq!(
+            json["kind"],
+            serde_json::json!("request_booking_agent_reply")
+        );
+        let back: AutopilotActionPayload = serde_json::from_value(json)?;
+        assert_eq!(back, payload);
+        assert_eq!(payload.action_kind(), "booking_agent.reply.request");
+        assert_eq!(payload.action_class(), ActionClass::ThirdParty);
+        assert_eq!(payload.standing_approval_target(), None);
+        Ok(())
+    }
+
     /// Every recurring outreach payload with a concrete counterpart exposes
     /// that counterpart's id to `standing_approval_target` — a grant is how
     /// the operator says "keep asking this promoter" without an approval per

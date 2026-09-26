@@ -83,6 +83,23 @@ pub struct BookingAgentListRow {
     /// An approach already queued or in flight — the second ask the season
     /// exists to prevent.
     pub approach_pending: bool,
+    /// An answer queued on the board — the card already exists, so the
+    /// row's draft affordance stands down until it lands.
+    pub reply_pending: bool,
+    /// Their last word is theirs: an answerable reply (`received`,
+    /// `positive`, `signed`) nobody has answered. The row's draft affordance
+    /// keys off this — a reply waiting is the one thing the season door's
+    /// state cannot say.
+    pub awaiting_reply: bool,
+    /// When their unanswered reply arrived.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub reply_waiting_at: Option<OffsetDateTime>,
+    /// What the operator filed their answer as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_waiting_disposition: Option<String>,
     /// Optimistic-concurrency token the approach request pins to.
     pub version: i64,
 }
@@ -92,6 +109,14 @@ pub struct BookingAgentListRow {
 /// its real stored status, which may already be `succeeded` or `failed`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BookingAgentApproachOutcome {
+    Queued { action_id: Uuid },
+    Replayed { action_id: Uuid, status: String },
+}
+
+/// What `request_reply` did — the same queued/replayed contract as the
+/// approach, named for its own lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BookingAgentReplyOutcome {
     Queued { action_id: Uuid },
     Replayed { action_id: Uuid, status: String },
 }
@@ -195,7 +220,24 @@ impl PostgresBookingAgentRepository {
                               THEN EXCLUDED.genres
                               ELSE booking_agents.genres END,
                 metadata = booking_agents.metadata || (EXCLUDED.metadata - 'imported_from'),
-                version = booking_agents.version + 1
+                -- The version is the optimistic lock parked approvals pin
+                -- to. Bumping it on a re-import that changed nothing would
+                -- fail a queued letter for a refresh that never moved the
+                -- row — the bump only counts a real change.
+                version = CASE WHEN
+                    booking_agents.name IS DISTINCT FROM EXCLUDED.name
+                    OR booking_agents.agency IS DISTINCT FROM
+                       COALESCE(EXCLUDED.agency, booking_agents.agency)
+                    OR booking_agents.roster_url IS DISTINCT FROM
+                       COALESCE(EXCLUDED.roster_url, booking_agents.roster_url)
+                    OR booking_agents.genres IS DISTINCT FROM
+                       CASE WHEN cardinality(EXCLUDED.genres) > 0
+                            THEN EXCLUDED.genres
+                            ELSE booking_agents.genres END
+                    OR NOT (booking_agents.metadata @>
+                            (EXCLUDED.metadata - 'imported_from'))
+                THEN booking_agents.version + 1
+                ELSE booking_agents.version END
             RETURNING (xmax = 0)
             "#,
         )
@@ -240,8 +282,57 @@ impl PostgresBookingAgentRepository {
                                  AND action.payload->'approaches' @>
                                      jsonb_build_array(jsonb_build_object('agent_id', agent.id::text)))
                          )
-                   ) AS approach_pending
+                   ) AS approach_pending,
+                   EXISTS (
+                       SELECT 1 FROM autopilot_actions action
+                       WHERE action.workspace_id = agent.workspace_id
+                         AND action.context = 'booking_agent'
+                         AND action.status IN ('awaiting_approval','queued','processing')
+                         AND action.action_kind = 'booking_agent.reply.request'
+                         AND action.subject_id = agent.id
+                   ) AS reply_pending,
+                   waiting.reply_at IS NOT NULL AS awaiting_reply,
+                   waiting.reply_at AS reply_waiting_at,
+                   waiting.reply_disposition AS reply_waiting_disposition
             FROM booking_agents AS agent
+            -- The reply lane's "waiting on you": the newest answerable
+            -- reply on the agent's ledger that no outbound touch has
+            -- answered. `declined` and `do_not_contact` ask nothing — those
+            -- rows already moved the door (`refused_until`, the flag).
+            LEFT JOIN LATERAL (
+                SELECT their.disposition AS reply_disposition,
+                       their.occurred_at AS reply_at
+                FROM booking_agent_interactions AS their
+                WHERE their.workspace_id = agent.workspace_id
+                  AND their.agent_id = agent.id
+                  AND their.direction = 'inbound'
+                  AND their.phase = 'reply'
+                  AND their.disposition IN ('received','positive','signed')
+                  AND NOT EXISTS (
+                      -- An outbound *reply* answers it; an outbound approach
+                      -- letter queued before it arrived is not an answer.
+                      SELECT 1
+                      FROM booking_agent_interactions AS ours
+                      WHERE ours.workspace_id = their.workspace_id
+                        AND ours.agent_id = their.agent_id
+                        AND ours.direction = 'outbound'
+                        AND ours.phase = 'reply'
+                        AND ours.occurred_at > their.occurred_at
+                  )
+                  AND NOT EXISTS (
+                      -- The conversation's latest word wins: a newer inbound
+                      -- filing — a decline arriving after a positive — is the
+                      -- state the board must read, not the stale warm one.
+                      SELECT 1
+                      FROM booking_agent_interactions AS newer
+                      WHERE newer.workspace_id = their.workspace_id
+                        AND newer.agent_id = their.agent_id
+                        AND newer.direction = 'inbound'
+                        AND newer.occurred_at > their.occurred_at
+                  )
+                ORDER BY their.occurred_at DESC, their.id DESC
+                LIMIT 1
+            ) AS waiting ON true
             WHERE agent.workspace_id = $1
             ORDER BY agent.do_not_contact, NOT agent.active,
                      agent.approached_at ASC NULLS FIRST, agent.name ASC
@@ -266,6 +357,10 @@ impl PostgresBookingAgentRepository {
                 approached_at: row.get("approached_at"),
                 refused_until: row.get("refused_until"),
                 approach_pending: row.get("approach_pending"),
+                reply_pending: row.get("reply_pending"),
+                awaiting_reply: row.get("awaiting_reply"),
+                reply_waiting_at: row.get("reply_waiting_at"),
+                reply_waiting_disposition: row.get("reply_waiting_disposition"),
                 version: row.get("version"),
             })
             .collect())
@@ -844,6 +939,272 @@ impl PostgresBookingAgentRepository {
             refused,
         })
     }
+
+    /// Queues an answer to an agent who wrote back — the reply lane's
+    /// counterpart of `request_approach`.
+    ///
+    /// The gate is the reply gate, not the approach gate: `SeasonWait` and
+    /// the draw floor do not apply because the reply spends nothing — the
+    /// agent already answered the season's ask. What still holds is the
+    /// row's own truth: the agent must be active, the route confirmed by a
+    /// person, `do_not_contact` the line that never moves, and there must
+    /// actually be an answerable reply waiting — the newest inbound `reply`
+    /// on their ledger with no later outbound touch.
+    ///
+    /// The draft composes at request time like every letter here — a
+    /// scaffold shaped by the filed disposition, because the ledger holds
+    /// the verdict and not the reply's words. The operator completes it on
+    /// the approval card; dispatch re-runs the same lock before a word
+    /// leaves.
+    ///
+    /// # Errors
+    ///
+    /// `Refused` carries the band-facing sentence — no reply waiting, the
+    /// door closed, the route unconfirmed, or a reply already queued.
+    /// `NotFound` means the id is not a booking agent of this workspace.
+    pub async fn request_reply(
+        &self,
+        workspace_id: Uuid,
+        agent_id: Uuid,
+        idempotency_key: &IdempotencyKey,
+    ) -> Result<BookingAgentReplyOutcome, BookingAgentError> {
+        let mut tx = self.pool.begin().await?;
+        let now = OffsetDateTime::now_utc();
+
+        // Same serialization point as the approach lanes and dispatch: a
+        // reply and a send count the same rows under the same lock.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+
+        if let Some((existing, status)) = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, status FROM autopilot_actions WHERE workspace_id = $1 AND idempotency_key = $2 AND action_kind = 'booking_agent.reply.request'",
+        )
+        .bind(workspace_id)
+        .bind(idempotency_key.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(BookingAgentReplyOutcome::Replayed {
+                action_id: existing,
+                status,
+            });
+        }
+
+        let agent = sqlx::query(
+            r#"
+            SELECT name, agency, active, do_not_contact, contact_verified_at, version
+            FROM booking_agents
+            WHERE workspace_id = $1 AND id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(BookingAgentError::NotFound)?;
+
+        if agent.get::<bool, _>("do_not_contact") {
+            return Err(BookingAgentError::Refused(
+                "the agent asked not to be contacted".to_owned(),
+            ));
+        }
+        if !agent.get::<bool, _>("active") {
+            return Err(BookingAgentError::Refused(
+                "the agent is inactive".to_owned(),
+            ));
+        }
+        if agent
+            .get::<Option<OffsetDateTime>, _>("contact_verified_at")
+            .is_none()
+        {
+            return Err(BookingAgentError::Refused(
+                "the agent's route was never confirmed".to_owned(),
+            ));
+        }
+
+        // One open reply card per agent — a second click while the first
+        // still waits for the board is a refusal, not a duplicate.
+        let reply_pending = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM autopilot_actions
+                WHERE workspace_id = $1 AND context = 'booking_agent'
+                  AND status IN ('awaiting_approval','queued','processing')
+                  AND action_kind = 'booking_agent.reply.request'
+                  AND subject_id = $2
+            )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if reply_pending {
+            return Err(BookingAgentError::Refused(
+                "a reply to this agent is already waiting for approval".to_owned(),
+            ));
+        }
+
+        // The newest answerable reply nobody answered — the same read the
+        // registry list makes, run under the lock so the draft the operator
+        // asked for cannot compose against a conversation that moved.
+        let waiting = sqlx::query_as::<_, (i64, String)>(
+            r#"
+            SELECT their.id, their.disposition
+            FROM booking_agent_interactions AS their
+            WHERE their.workspace_id = $1
+              AND their.agent_id = $2
+              AND their.direction = 'inbound'
+              AND their.phase = 'reply'
+              AND their.disposition IN ('received','positive','signed')
+              AND NOT EXISTS (
+                  -- An outbound *reply* answers it; an approach letter
+                  -- queued before it arrived is not an answer.
+                  SELECT 1
+                  FROM booking_agent_interactions AS ours
+                  WHERE ours.workspace_id = their.workspace_id
+                    AND ours.agent_id = their.agent_id
+                    AND ours.direction = 'outbound'
+                    AND ours.phase = 'reply'
+                    AND ours.occurred_at > their.occurred_at
+              )
+              AND NOT EXISTS (
+                  -- A newer inbound filing supersedes — the draft must be
+                  -- composed against the conversation's latest word.
+                  SELECT 1
+                  FROM booking_agent_interactions AS newer
+                  WHERE newer.workspace_id = their.workspace_id
+                    AND newer.agent_id = their.agent_id
+                    AND newer.direction = 'inbound'
+                    AND newer.occurred_at > their.occurred_at
+              )
+            ORDER BY their.occurred_at DESC, their.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((reply_interaction_id, reply_disposition)) = waiting else {
+            return Err(BookingAgentError::Refused(
+                "no reply from this agent is waiting on an answer".to_owned(),
+            ));
+        };
+
+        // The scaffold is composed now — the approver reads the words the
+        // agent would get, edits them against the real thread, and a send
+        // refuses an empty draft rather than composing after the approval.
+        let sender = crate::gig_outreach::sender_identity(&self.pool, workspace_id)
+            .await
+            .map_err(|_| BookingAgentError::Refused("the sender could not be read".to_owned()))?;
+        let draft = crowdrelay_domain::approach_letter::compose_booking_agent_reply_scaffold(
+            &crowdrelay_domain::approach_letter::BookingAgentReplyInput {
+                sender: &sender,
+                agent_name: agent.get("name"),
+                agency: agent.get::<Option<String>, _>("agency").as_deref(),
+                reply_disposition: &reply_disposition,
+            },
+        )
+        .map_err(|refusal| BookingAgentError::Refused(refusal.message().to_owned()))?;
+
+        let payload =
+            crowdrelay_application::autopilot::AutopilotActionPayload::RequestBookingAgentReply {
+                agent_id: BookingAgentId::from_uuid(agent_id),
+                agent_version: agent.get("version"),
+                agent_name: agent.get("name"),
+                agency: agent.get("agency"),
+                reply_interaction_id,
+                reply_disposition: reply_disposition.clone(),
+                draft,
+            };
+        let action_kind = payload.action_kind();
+        let action_class = payload.action_class().as_str();
+        let payload_json = serde_json::to_value(&payload)
+            .map_err(|_| BookingAgentError::Refused("the reply could not be encoded".to_owned()))?;
+
+        let trace = TraceContext::root(WorkspaceId::from_uuid(workspace_id));
+        let decision_key = format!("booking_agent.reply:{}", idempotency_key.as_str());
+        let decision_id = match sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO autopilot_decisions (
+                id, workspace_id, decision_key, context, subject_kind, subject_id,
+                decision_kind, confidence_basis_points, disposition, reason,
+                input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
+            ) VALUES ($1,$2,$3,'booking_agent','booking_agent',$4,
+                      'booking_agent.reply',10000,'require_approval',
+                      'Band-initiated answer to a booking-agent reply',
+                      $5,$6,$7,$8,$9)
+            ON CONFLICT (workspace_id, decision_key) DO NOTHING RETURNING id
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(&decision_key)
+        .bind(agent_id)
+        .bind(json!({
+            "agent_id": agent_id,
+            "reply_interaction_id": reply_interaction_id,
+            "reply_disposition": reply_disposition,
+        }))
+        .bind(json!({"require_approval": true}))
+        .bind(payload_json.clone())
+        .bind(now)
+        .bind(trace.trace_id().into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            Some(id) => id,
+            // The action lookup found nothing under this key but the
+            // decision survived — a prior attempt died between the two
+            // inserts. Reuse the decision rather than mint a twin.
+            None => sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM autopilot_decisions WHERE workspace_id = $1 AND decision_key = $2",
+            )
+            .bind(workspace_id)
+            .bind(&decision_key)
+            .fetch_one(&mut *tx)
+            .await?,
+        };
+
+        let action_id = Uuid::now_v7();
+        let action_trace = TraceContext::for_action(
+            WorkspaceId::from_uuid(workspace_id),
+            trace.trace_id(),
+            action_id,
+            Some(decision_id),
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_actions (
+                id, workspace_id, decision_id, context, action_kind,
+                subject_kind, subject_id, idempotency_key, payload, status,
+                action_class, approval_expires_at, trace_id, causation_id
+            ) VALUES ($1,$2,$3,'booking_agent',$4,'booking_agent',$5,$6,$7,
+                      'awaiting_approval',$8, now() + INTERVAL '72 hours',
+                      $9,$10)
+            "#,
+        )
+        .bind(action_id)
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(action_kind)
+        .bind(agent_id)
+        .bind(idempotency_key.as_str())
+        .bind(payload_json)
+        .bind(action_class)
+        .bind(action_trace.trace_id().into_uuid())
+        .bind(action_trace.causation_id().map(|c| c.into_uuid()))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(BookingAgentReplyOutcome::Queued { action_id })
+    }
 }
 
 // ── The dispatch half ────────────────────────────────────────────────
@@ -1062,6 +1423,132 @@ pub(crate) async fn lock_agent_for_execution(
         contact_email: agent.2,
         evidence,
     })
+}
+
+/// Locks the replied-to agent for the send — the reply lane's counterpart
+/// of `lock_agent_for_execution`, without the approach gate.
+///
+/// A reply answers somebody who wrote to us, so the checks that protect an
+/// ask — the unspent season, the draw floor, `ApproachPending` — do not
+/// apply here: they would refuse every real reply, since the agent being
+/// answered was by definition already approached. What still binds is the
+/// version pin, `active`, `do_not_contact` and the confirmed route — the
+/// lines that do not move because the email is an answer rather than an
+/// ask.
+pub(crate) async fn lock_agent_reply_for_execution(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    agent_id: BookingAgentId,
+    agent_version: i64,
+) -> Result<BookingAgentLock, crowdrelay_application::RepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
+        .bind(workspace_id.into_uuid())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
+
+    let agent = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            bool,
+            bool,
+            Option<OffsetDateTime>,
+        ),
+    >(
+        r#"
+        SELECT name, agency, contact_email, active, do_not_contact, contact_verified_at
+        FROM booking_agents
+        WHERE workspace_id = $1 AND id = $2 AND version = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(agent_id.into_uuid())
+    .bind(agent_version)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(crowdrelay_application::RepositoryError::Conflict)?;
+
+    let (name, agency, contact_email, active, do_not_contact, contact_verified_at) = agent;
+    if do_not_contact {
+        return Err(crowdrelay_application::RepositoryError::ConflictBecause(
+            "the agent asked not to be contacted",
+        ));
+    }
+    if !active {
+        return Err(crowdrelay_application::RepositoryError::ConflictBecause(
+            "the agent is inactive",
+        ));
+    }
+    if contact_verified_at.is_none() {
+        return Err(crowdrelay_application::RepositoryError::ConflictBecause(
+            "the agent's route was never confirmed",
+        ));
+    }
+    Ok(BookingAgentLock {
+        name,
+        agency,
+        contact_email,
+        evidence: AgentDrawEvidence::default(),
+    })
+}
+
+/// Records that the reply went out — the outbound half of the
+/// conversation, so the agents board's "waiting on you" closes the loop.
+///
+/// Phase is `reply`: direction `outbound` + phase `reply` is the pair every
+/// "is this conversation waiting on us" read keys off. The season's
+/// `approached_at` does not move — an answer is not a new ask.
+pub(crate) async fn record_agent_reply_sent(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: crowdrelay_domain::AutopilotActionId,
+    agent_id: BookingAgentId,
+    reply_interaction_id: i64,
+    now: OffsetDateTime,
+) -> Result<(), crowdrelay_application::RepositoryError> {
+    sqlx::query(
+        "UPDATE booking_agents SET version = version + 1 WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(agent_id.into_uuid())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    sqlx::query(
+        r#"INSERT INTO booking_agent_interactions
+           (workspace_id, agent_id, direction, phase, disposition, source_key, occurred_at, metadata)
+           VALUES ($1,$2,'outbound','reply','none',$3,$4,
+                   jsonb_build_object('answers_interaction_id', $5))
+           ON CONFLICT (workspace_id, agent_id, source_key) DO NOTHING"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(agent_id.into_uuid())
+    .bind(format!("autopilot:reply:{action_id}"))
+    .bind(now)
+    .bind(reply_interaction_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    sqlx::query(
+        r#"INSERT INTO reach_events
+           (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata)
+           VALUES ($1, $2, 'booking_agent', $3::text, 'email', 'booking_agent_reply', 1, 'sent',
+                   jsonb_build_object('kind', 'reply', 'answers_interaction_id', $4))
+           ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id.into_uuid())
+    .bind(agent_id.into_uuid())
+    .bind(reply_interaction_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(())
 }
 
 /// Records that an approach went out: the registry's `approached_at` (the

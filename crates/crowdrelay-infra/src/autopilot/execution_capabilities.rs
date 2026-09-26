@@ -25,6 +25,11 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         // claim it and have nothing to send. Until one advertises
         // `booking_agent.approach` these park, which is the honest state.
         "crowdrelay.booking_agent.approach_requested" => "booking_agent.approach",
+        // A reply sends through the same transport as the application it
+        // answers — one mailbox, one brokered address. The event is separate
+        // so an executor that does not know replies skips it rather than
+        // sending the wrong thing.
+        "crowdrelay.booking_agent.reply_requested" => "booking_agent.approach",
         "crowdrelay.beacon.discovery_requested" => "beacon.discovery",
         "crowdrelay.outreach.discovery_requested" => "outreach.discovery",
         "crowdrelay.booking.target_discovery_requested" => "booking.discovery",
@@ -150,6 +155,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestRepresentationApproach { .. }
                 | AutopilotActionPayload::RequestBookingAgentApproach { .. }
                 | AutopilotActionPayload::RequestBookingAgentApproachWave { .. }
+                | AutopilotActionPayload::RequestBookingAgentReply { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
@@ -209,7 +215,11 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         // the per-agent `approach_requested` event the executor already
         // knows, so no new contract is advertised for a batched ask.
         AutopilotActionPayload::RequestBookingAgentApproach { .. }
-        | AutopilotActionPayload::RequestBookingAgentApproachWave { .. } => {
+        | AutopilotActionPayload::RequestBookingAgentApproachWave { .. }
+        // The reply rides the same capability — one transport, one brokered
+        // address — while its event stays separate so an executor that does
+        // not know replies skips it rather than sending the wrong thing.
+        | AutopilotActionPayload::RequestBookingAgentReply { .. } => {
             "booking_agent.approach"
         }
         AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
@@ -458,6 +468,14 @@ pub(in crate::autopilot) const ORG_MONTHLY_CONTACT_BUDGET: u32 = 3;
 /// the cooldown it always had and gains the monthly cap — which is the point:
 /// the budget is owed to the person, not to the roster shape.
 ///
+/// `answers_inbound` marks the send that closes an inbound reply. The
+/// cooldown exists to space what we initiate; an answer to somebody waiting
+/// on us is not a fresh touch, so the workspace's own `next_contact_after`
+/// does not refuse it. Everything else still binds — `do_not_contact`, the
+/// sibling-org window, the monthly budget, the replay exemption — and the
+/// reply still writes the touch row, so the next initiated send is spaced
+/// from it.
+///
 /// # Errors
 ///
 /// `ConflictBecause(ORG_ATTENTION_BUDGET_ERROR_KIND)` when the organization's
@@ -472,6 +490,7 @@ pub(in crate::autopilot) async fn reserve_contact_window(
     context: &'static str,
     contact: &str,
     now: OffsetDateTime,
+    answers_inbound: bool,
 ) -> Result<(), RepositoryError> {
     let normalized = contact.trim().to_ascii_lowercase();
     if normalized.is_empty() || normalized.len() > 320 {
@@ -568,6 +587,11 @@ pub(in crate::autopilot) async fn reserve_contact_window(
           AND (
               contact_governor.next_contact_after <= EXCLUDED.last_outbound_at
               OR contact_governor.last_action_id = EXCLUDED.last_action_id
+              -- A reply answers somebody who wrote to us — the seven-day
+              -- cooldown throttles what we initiate, not the answer they
+              -- are waiting on. The wall and the org budget still bind;
+              -- only the own-row window is skipped.
+              OR $7
           )
         RETURNING normalized_contact
         "#,
@@ -578,6 +602,7 @@ pub(in crate::autopilot) async fn reserve_contact_window(
     .bind(action_id.into_uuid())
     .bind(now)
     .bind(i64::from(ORG_MONTHLY_CONTACT_BUDGET))
+    .bind(answers_inbound)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;

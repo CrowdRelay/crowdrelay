@@ -797,3 +797,265 @@ async fn the_reply_writes_the_door() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(first.operation_id, second.operation_id);
     Ok(())
 }
+
+/// §4h-10 — the reply lane: an agent who wrote back surfaces as waiting on
+/// an answer, the ask queues one approval card carrying the scaffold, and
+/// the send closes the loop without spending the season.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_reply_lane_surfaces_waits_and_sends_the_approved_answer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = test_pool().await?;
+    let workspace_id = insert_workspace(&pool).await?;
+    let other_workspace = insert_workspace(&pool).await?;
+    let repo = PostgresBookingAgentRepository::new(pool.clone());
+    let autopilot = autopilot(&pool, &url)?;
+
+    let agent_id = insert_agent(&pool, workspace_id, true).await?;
+
+    // The season's letter went out three days ago — the contact governor
+    // holds a window that has four more days on it. A reply must still send:
+    // the cooldown spaces what we initiate, not the answer the agent is
+    // waiting on. The DNC wall and the org budget still bind.
+    sqlx::query(
+        "INSERT INTO contact_governor \
+            (workspace_id, normalized_contact, last_context, last_action_id, \
+             last_outbound_at, next_contact_after) \
+         SELECT $1, lower(btrim(contact_email)), 'booking_agent', NULL, \
+                now() - interval '3 days', now() + interval '4 days' \
+         FROM booking_agents WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(agent_id)
+    .execute(&pool)
+    .await?;
+
+    // Before any reply, the ask refuses — there is nothing to answer.
+    match repo.request_reply(workspace_id, agent_id, &key()).await {
+        Err(BookingAgentError::Refused(reason)) => {
+            assert!(reason.contains("waiting"), "unexpected refusal: {reason}")
+        }
+        other => panic!("expected a nothing-waiting refusal, got {other:?}"),
+    }
+
+    // The operator files what the agent said — the inbound half of the
+    // conversation.
+    let replied_at = OffsetDateTime::now_utc() - Duration::from_secs(3600);
+    autopilot
+        .record_booking_agent_reply(
+            WorkspaceId::from_uuid(workspace_id),
+            RecordBookingAgentReply {
+                agent_id: BookingAgentId::from_uuid(agent_id),
+                disposition: BookingAgentReplyDisposition::Positive,
+                occurred_at: replied_at,
+            },
+            &key(),
+            None::<&RequestId>,
+        )
+        .await?;
+
+    // The registry row now says the conversation waits on the band.
+    let listed = repo.list_agents(workspace_id).await?;
+    let row = listed
+        .iter()
+        .find(|row| row.agent_id == agent_id)
+        .expect("the agent lists");
+    assert!(row.awaiting_reply, "a filed positive reply did not surface");
+    assert_eq!(row.reply_waiting_disposition.as_deref(), Some("positive"));
+    assert!(!row.reply_pending, "nothing is queued yet");
+
+    // Tenant isolation: another workspace cannot ask to answer an agent it
+    // does not own, and sees nothing waiting.
+    assert!(matches!(
+        repo.request_reply(other_workspace, agent_id, &key()).await,
+        Err(BookingAgentError::NotFound),
+    ));
+
+    // The ask queues the approval card with the scaffold inside — the
+    // operator completes the words on the card before it can leave.
+    let reply_key = key();
+    let action_id = match repo
+        .request_reply(workspace_id, agent_id, &reply_key)
+        .await?
+    {
+        crowdrelay_infra::booking_agents::BookingAgentReplyOutcome::Queued { action_id } => {
+            action_id
+        }
+        other => panic!("expected a queued reply, got {other:?}"),
+    };
+    let (status, action_kind): (String, String) = sqlx::query_as(
+        "SELECT status, action_kind FROM autopilot_actions \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (status.as_str(), action_kind.as_str()),
+        ("awaiting_approval", "booking_agent.reply.request"),
+        "the reply must wait on a person like every letter here"
+    );
+    let draft_ready: bool = sqlx::query_scalar(
+        "SELECT length(trim(payload->'draft'->>'subject')) > 0 \
+         AND length(trim(payload->'draft'->>'body')) > 0 \
+         AND (payload->>'reply_interaction_id') IS NOT NULL \
+         FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        draft_ready,
+        "the card must carry the scaffold and the reply it answers"
+    );
+
+    // A retried click replays the card; a different key refuses — one open
+    // answer card per agent.
+    match repo
+        .request_reply(workspace_id, agent_id, &reply_key)
+        .await?
+    {
+        crowdrelay_infra::booking_agents::BookingAgentReplyOutcome::Replayed {
+            action_id: replayed,
+            ..
+        } => assert_eq!(replayed, action_id),
+        other => panic!("expected a replayed reply, got {other:?}"),
+    }
+    match repo.request_reply(workspace_id, agent_id, &key()).await {
+        Err(BookingAgentError::Refused(reason)) => {
+            assert!(reason.contains("approval"), "unexpected refusal: {reason}")
+        }
+        other => panic!("expected an already-queued refusal, got {other:?}"),
+    }
+
+    let listed = repo.list_agents(workspace_id).await?;
+    let row = listed
+        .iter()
+        .find(|row| row.agent_id == agent_id)
+        .expect("the agent lists");
+    assert!(
+        row.reply_pending && row.awaiting_reply,
+        "the queued answer must show on the row while the reply still waits"
+    );
+
+    // Approve, ride out the outward hold, dispatch: the outbox event, the
+    // ledger's outbound half and the reach row all land — and the season
+    // stamp does not move, because an answer is not a new ask.
+    advertise_approach_capability(&pool, workspace_id).await?;
+    autopilot
+        .approve_action(
+            WorkspaceId::from_uuid(workspace_id),
+            AutopilotActionId::from_uuid(action_id),
+            &key(),
+            None::<&RequestId>,
+            None,
+        )
+        .await?;
+    let claimed = autopilot
+        .claim_due_autonomous_actions(
+            WorkspaceId::from_uuid(workspace_id),
+            8,
+            OffsetDateTime::now_utc() + Duration::from_secs(121),
+        )
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|claimed| claimed.id.into_uuid() == action_id)
+        .expect("the approved reply is claimable once the hold lapses");
+    autopilot
+        .execute_action(
+            WorkspaceId::from_uuid(workspace_id),
+            action,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+
+    let (ledger_row, answers_row, reach_row, outbox_row): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM booking_agent_interactions \
+              WHERE workspace_id = $1 AND agent_id = $2 \
+                AND direction = 'outbound' AND phase = 'reply'), \
+            (SELECT count(*) FROM booking_agent_interactions \
+              WHERE workspace_id = $1 AND agent_id = $2 \
+                AND direction = 'outbound' AND phase = 'reply' \
+                AND metadata->>'answers_interaction_id' IS NOT NULL), \
+            (SELECT count(*) FROM reach_events \
+              WHERE workspace_id = $1 AND recipient_kind = 'booking_agent' \
+                AND recipient_id = $2::text AND template_id = 'booking_agent_reply'), \
+            (SELECT count(*) FROM outbox_events \
+              WHERE workspace_id = $1 \
+                AND event_type = 'crowdrelay.booking_agent.reply_requested')",
+    )
+    .bind(workspace_id)
+    .bind(agent_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (ledger_row, answers_row, reach_row, outbox_row),
+        (1, 1, 1, 1),
+        "the send must leave the answered ledger row, the reach event and the outbox intent"
+    );
+    let still_unspent: bool = sqlx::query_scalar(
+        "SELECT approached_at IS NULL FROM booking_agents \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(agent_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(still_unspent, "an answer must not spend the season's ask");
+
+    // The loop is closed: the row no longer waits, and a fresh ask refuses
+    // honestly rather than double-answering.
+    let listed = repo.list_agents(workspace_id).await?;
+    let row = listed
+        .iter()
+        .find(|row| row.agent_id == agent_id)
+        .expect("the agent lists");
+    assert!(!row.awaiting_reply, "the send did not close the loop");
+
+    // A decline asks nothing — the newest inbound being `declined` leaves
+    // the row without a waiting reply.
+    let declined_id = insert_agent(&pool, workspace_id, true).await?;
+    autopilot
+        .record_booking_agent_reply(
+            WorkspaceId::from_uuid(workspace_id),
+            RecordBookingAgentReply {
+                agent_id: BookingAgentId::from_uuid(declined_id),
+                disposition: BookingAgentReplyDisposition::Declined,
+                occurred_at: OffsetDateTime::now_utc(),
+            },
+            &key(),
+            None::<&RequestId>,
+        )
+        .await?;
+    let listed = repo.list_agents(workspace_id).await?;
+    let declined_row = listed
+        .iter()
+        .find(|row| row.agent_id == declined_id)
+        .expect("the declined agent lists");
+    assert!(
+        !declined_row.awaiting_reply,
+        "a decline must not read as a reply waiting on an answer"
+    );
+
+    // The wall binds the reply lane too — no answer composes to a
+    // do-not-contact agent, and an unconfirmed route refuses the same way.
+    let walled_id = insert_agent(&pool, workspace_id, true).await?;
+    sqlx::query("UPDATE booking_agents SET do_not_contact = true WHERE id = $1")
+        .bind(walled_id)
+        .execute(&pool)
+        .await?;
+    match repo.request_reply(workspace_id, walled_id, &key()).await {
+        Err(BookingAgentError::Refused(reason)) => {
+            assert!(
+                reason.contains("not to be contacted"),
+                "unexpected refusal: {reason}"
+            )
+        }
+        other => panic!("expected a do-not-contact refusal, got {other:?}"),
+    }
+    Ok(())
+}

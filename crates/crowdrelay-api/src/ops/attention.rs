@@ -87,16 +87,19 @@ struct BlockedCommunity {
 /// it. Oldest first — the age is the point.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct UnansweredReply {
-    /// `outreach` or `booking` — which log the reply lives in.
+    /// `outreach`, `booking` or `booking agent` — which log the reply
+    /// lives in.
     channel: String,
     target_id: uuid::Uuid,
     /// The counterparty as the operator knows them.
     target_name: String,
     target_kind: String,
+    /// Null for booking agents — their route is brokered and the address
+    /// never leaves the upstream registry for the band to read.
     contact_email: Option<String>,
-    /// `positive` or `received` — both wait on a person; terminal
-    /// dispositions (`declined`, `do_not_contact`, `booked`) are closed
-    /// and never list.
+    /// `positive`, `received`, or — on the agent lane — `signed`; all
+    /// wait on a person, while terminal dispositions (`declined`,
+    /// `do_not_contact`, `booked`) are closed and never list.
     disposition: String,
     /// The sheet's own verdict code when the reply was imported
     /// (`POSITIVE`, `GMAIL_REPLY`, `NEGOTIATING`); null for replies that
@@ -508,6 +511,39 @@ async fn load_unanswered_replies(
                   SELECT 1 FROM booking_interactions newer
                   WHERE newer.workspace_id = i.workspace_id
                     AND newer.target_id = i.target_id
+                    AND newer.direction = 'inbound'
+                    AND newer.occurred_at > i.occurred_at
+              )
+            UNION ALL
+            -- The screened-agent lane: an agent who answered the season's
+            -- letter waits on the band exactly like a promoter does. The
+            -- contact address is brokered and never shown to the band, so
+            -- the leg reports NULL — the reply affordance lives on the
+            -- agents board, which knows the agent without the address.
+            SELECT 'booking agent', i.agent_id, t.name,
+                   'booking_agent',
+                   NULL::text,
+                   i.disposition,
+                   NULL::text,
+                   i.occurred_at
+            FROM booking_agent_interactions i
+            JOIN booking_agents t
+              ON t.workspace_id = i.workspace_id AND t.id = i.agent_id
+            WHERE i.workspace_id = $1
+              AND i.direction = 'inbound' AND i.phase = 'reply'
+              AND i.disposition IN ('positive', 'received', 'signed')
+              AND NOT EXISTS (
+                  SELECT 1 FROM booking_agent_interactions later
+                  WHERE later.workspace_id = i.workspace_id
+                    AND later.agent_id = i.agent_id
+                    AND later.direction = 'outbound'
+                    AND later.phase = 'reply'
+                    AND later.occurred_at > i.occurred_at
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM booking_agent_interactions newer
+                  WHERE newer.workspace_id = i.workspace_id
+                    AND newer.agent_id = i.agent_id
                     AND newer.direction = 'inbound'
                     AND newer.occurred_at > i.occurred_at
               )

@@ -137,6 +137,7 @@ pub(in crate::autopilot) async fn execute_outreach_reply(
         "outreach",
         &target.1,
         now,
+        true,
     )
     .await?;
     emit_outward_action(

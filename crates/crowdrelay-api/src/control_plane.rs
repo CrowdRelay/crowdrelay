@@ -591,6 +591,10 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/booking-agents/{agent_id}/reply",
             post(crate::booking_agents::record_booking_agent_reply),
         )
+        .route(
+            "/v1/control-plane/booking-agents/{agent_id}/reply-draft",
+            post(crate::booking_agents::request_booking_agent_reply_draft),
+        )
         // ── The shared night (§12-9) ────────────────────────────────
         // One read whose payload is the caller's resolved lens, and the
         // five writes around it: contribute, revoke, mint/revoke the

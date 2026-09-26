@@ -122,6 +122,14 @@ pub(super) async fn schedule_effect_measurement(
             0.0,
             now + time::Duration::days(30),
         )),
+        // A reply measures the same counter on the same subject — did the
+        // conversation continue after the answer.
+        AutopilotActionPayload::RequestBookingAgentReply { agent_id, .. } => plans.push((
+            AutopilotMeasurementKind::BookingAgentReply30d,
+            agent_id.into_uuid(),
+            0.0,
+            now + time::Duration::days(30),
+        )),
         // Each agent in the wave measures on their own ledger — a reply
         // answers that agent's ask, not the batch's.
         AutopilotActionPayload::RequestBookingAgentApproachWave { approaches, .. } => {

@@ -25,6 +25,7 @@ impl AutopilotActionPayload {
             Self::RequestBookingAgentApproachWave { .. } => {
                 "booking_agent.approach_wave.request"
             }
+            Self::RequestBookingAgentReply { .. } => "booking_agent.reply.request",
             Self::RequestBeaconDiscovery { .. } => "beacon.discovery.request",
             Self::RequestBookingTargetDiscovery { .. } => "booking.target_discovery.request",
             Self::RequestBeaconInviteBatch { .. } => "beacon.invite_batch.request",

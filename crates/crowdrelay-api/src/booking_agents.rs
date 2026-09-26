@@ -20,8 +20,8 @@ use crowdrelay_application::autopilot::{
 use crowdrelay_domain::BookingAgentId;
 use crowdrelay_domain::booking_agent::BookingAgentReplyDisposition;
 use crowdrelay_infra::booking_agents::{
-    BookingAgentApproachOutcome, BookingAgentError, BookingAgentWaveOutcome,
-    PostgresBookingAgentRepository,
+    BookingAgentApproachOutcome, BookingAgentError, BookingAgentReplyOutcome,
+    BookingAgentWaveOutcome, PostgresBookingAgentRepository,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -226,6 +226,48 @@ pub async fn request_booking_agent_approach_wave(
     }
 }
 
+/// POST — the band asks for a drafted answer to an agent who wrote back.
+/// The reply's own gate runs under the same lock the approach does — the
+/// agent must be active, the route confirmed, `do_not_contact` unmovable,
+/// and a reply actually waiting — then the action lands on the board as
+/// `awaiting_approval` carrying the scaffold the operator completes. No
+/// reply leaves unattended, same as every letter here.
+pub async fn request_booking_agent_reply_draft(
+    State(state): State<crate::AppState>,
+    Path(agent_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Some(idempotency_key) = headers
+        .get(&IDEMPOTENCY_KEY)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| IdempotencyKey::parse(value).ok())
+    else {
+        return Problem::bad_request(request_id_value)
+            .private()
+            .into_response();
+    };
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    match repo(&state)
+        .request_reply(workspace_id, agent_id, &idempotency_key)
+        .await
+    {
+        Ok(BookingAgentReplyOutcome::Queued { action_id }) => (
+            StatusCode::ACCEPTED,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({ "action_id": action_id, "status": "awaiting_approval" })),
+        )
+            .into_response(),
+        Ok(BookingAgentReplyOutcome::Replayed { action_id, status }) => (
+            StatusCode::ACCEPTED,
+            [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+            Json(json!({ "action_id": action_id, "status": status })),
+        )
+            .into_response(),
+        Err(error) => booking_agent_problem(error, request_id_value),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BookingAgentReplyBody {
@@ -258,6 +300,14 @@ pub async fn record_booking_agent_reply(
             .private()
             .into_response();
     };
+    // A reply stamped in the future would stand as the conversation's last
+    // word until that date passes — the same guard the outreach reply
+    // control carries.
+    if body.occurred_at > OffsetDateTime::now_utc() + time::Duration::minutes(5) {
+        return Problem::bad_request_because("occurred_at is in the future", request_id_value)
+            .private()
+            .into_response();
+    }
     let Some(idempotency_key) = headers
         .get(&IDEMPOTENCY_KEY)
         .and_then(|value| value.to_str().ok())

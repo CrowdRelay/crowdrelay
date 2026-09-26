@@ -53,6 +53,7 @@ pub(in crate::autopilot) async fn execute_booking_agent_approach_wave(
             "booking_agent",
             &agent.contact_email,
             now,
+            false,
         )
         .await?;
         // One letter per agent means one emission per agent — the agent's

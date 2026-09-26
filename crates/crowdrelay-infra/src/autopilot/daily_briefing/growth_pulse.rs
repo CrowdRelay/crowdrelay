@@ -155,6 +155,7 @@ pub(super) async fn growth_pulse_lines(
                                        'crowdrelay.outreach.reply_requested',
                                        'crowdrelay.booking.outreach_requested',
                                        'crowdrelay.booking_agent.approach_requested',
+                                       'crowdrelay.booking_agent.reply_requested',
                                        'crowdrelay.beacon.outreach_requested',
                                        'crowdrelay.representation.approach_requested',
                                        'crowdrelay.opportunity.application_requested')

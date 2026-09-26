@@ -238,7 +238,7 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                 AND NOT (action_kind='community.engage.request'
                          AND payload->>'source_id' IS NOT NULL)) awaiting_approval,
             (SELECT COALESCE(sum(CASE
-                WHEN action_kind IN ('booking.outreach.request','outreach.request','beacon.outreach.request','beacon.discovery.request','opportunity.live.apply','representation.approach.request','booking_agent.approach.request','latarnik.invite.request') THEN 10
+                WHEN action_kind IN ('booking.outreach.request','outreach.request','beacon.outreach.request','beacon.discovery.request','opportunity.live.apply','representation.approach.request','booking_agent.approach.request','booking_agent.approach_wave.request','booking_agent.reply.request','latarnik.invite.request') THEN 10
                 WHEN action_kind='show.growth.request' THEN 9
                 WHEN action_kind='content.artifact.request' THEN 8
                 WHEN action_kind IN ('fan.lifecycle.message.request','audience.campaign.request','release.milestone.execute') THEN 5

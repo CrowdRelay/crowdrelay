@@ -238,6 +238,74 @@ pub fn compose_booking_agent_letter(
     })
 }
 
+/// Everything the reply to a booking agent is composed from.
+///
+/// A reply knows less than an application: the interaction ledger records
+/// the disposition the operator filed — `received`, `positive` or `signed`
+/// — not the words the agent actually wrote. The draft is therefore a
+/// scaffold, shaped by the disposition and deliberately short: the approver
+/// completes it against the real thread, and the send goes verbatim as
+/// always, so what the card shows is what the agent gets.
+#[derive(Clone, Debug)]
+pub struct BookingAgentReplyInput<'a> {
+    pub sender: &'a SenderIdentity,
+    pub agent_name: &'a str,
+    /// The agency, where the agent declared one — the greeting stays honest
+    /// either way.
+    pub agency: Option<&'a str>,
+    /// `received`, `positive` or `signed` — the only dispositions a reply
+    /// is ever drafted for; a decline and a do-not-contact ask nothing.
+    pub reply_disposition: &'a str,
+}
+
+/// Compose the booking-agent reply scaffold.
+///
+/// `positive` and `signed` get the move-it-forward shape — thank them and
+/// offer the concrete next step; a bare `received` gets the acknowledgement
+/// that keeps the thread alive while the operator reads the actual reply.
+/// Neither shape quotes their words: the ledger never held them, and a
+/// scaffold that pretended otherwise would be the letter lying.
+pub fn compose_booking_agent_reply_scaffold(
+    input: &BookingAgentReplyInput<'_>,
+) -> Result<ApproachLetter, ApproachLetterRefusal> {
+    let agent_name = input.agent_name.trim();
+    if agent_name.is_empty() {
+        return Err(ApproachLetterRefusal::NoAgentName);
+    }
+    let sender = input.sender;
+    if sender.act_name.trim().is_empty() {
+        return Err(ApproachLetterRefusal::NoSenderName);
+    }
+
+    let greeting = match input.agency.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(agency) => format!("Dear {agent_name} ({agency}),"),
+        None => format!("Dear {agent_name},"),
+    };
+    let middle = match input.reply_disposition {
+        "signed" => {
+            "Thank you — that is wonderful news. We would love to talk through \
+             what the season looks like together: dates, territories, whatever \
+             helps you plan. Happy to send full draws or set up a call, whichever \
+             suits you best."
+        }
+        "positive" => {
+            "Thank you — great to hear. Happy to send full draws, current \
+             availability, or set up a short call — whichever is most useful \
+             on your side."
+        }
+        _ => {
+            "Thank you for getting back to us — much appreciated. We will come \
+             back to you with the details shortly."
+        }
+    };
+    let mut lines = vec![greeting, String::new(), middle.to_owned()];
+    lines.extend(sign_off(sender));
+    Ok(ApproachLetter {
+        subject: format!("Re: {} — booking representation", sender.act_name.trim()),
+        body: lines.join("\n"),
+    })
+}
+
 /// One shared opening sentence for both letters — who is writing, what the
 /// act is called, what it sounds like and where it is from, each part
 /// present only when the workspace declared it.
@@ -450,6 +518,59 @@ mod tests {
                 note: None,
             }),
             Err(ApproachLetterRefusal::NoEvidence)
+        );
+    }
+
+    #[test]
+    fn agent_reply_scaffold_thanks_and_offers_the_next_step() {
+        let letter = compose_booking_agent_reply_scaffold(&BookingAgentReplyInput {
+            sender: &sender(),
+            agent_name: "Jan Kowalski",
+            agency: Some("Stage Left"),
+            reply_disposition: "positive",
+        })
+        .expect("composes");
+        assert_eq!(letter.subject, "Re: Virya — booking representation");
+        assert!(letter.body.contains("Dear Jan Kowalski (Stage Left),"));
+        assert!(letter.body.contains("Thank you"));
+        assert!(letter.body.contains("— Virya"));
+
+        let holding = compose_booking_agent_reply_scaffold(&BookingAgentReplyInput {
+            sender: &sender(),
+            agent_name: "Agent Y",
+            agency: None,
+            reply_disposition: "received",
+        })
+        .expect("composes");
+        assert!(holding.body.contains("getting back"));
+        assert!(holding.body.contains("Dear Agent Y,"));
+    }
+
+    #[test]
+    fn agent_reply_scaffold_refuses_missing_facts() {
+        assert_eq!(
+            compose_booking_agent_reply_scaffold(&BookingAgentReplyInput {
+                sender: &sender(),
+                agent_name: "  ",
+                agency: None,
+                reply_disposition: "positive",
+            }),
+            Err(ApproachLetterRefusal::NoAgentName)
+        );
+        let no_sender = SenderIdentity {
+            act_name: String::new(),
+            style: None,
+            home_city: None,
+            site_url: None,
+        };
+        assert_eq!(
+            compose_booking_agent_reply_scaffold(&BookingAgentReplyInput {
+                sender: &no_sender,
+                agent_name: "Jan",
+                agency: None,
+                reply_disposition: "received",
+            }),
+            Err(ApproachLetterRefusal::NoSenderName)
         );
     }
 

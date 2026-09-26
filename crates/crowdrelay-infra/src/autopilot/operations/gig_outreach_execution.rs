@@ -83,6 +83,7 @@ pub(in crate::autopilot) async fn execute_gig_outreach(
             "gig_outreach",
             &target.2,
             now,
+            false,
         )
         .await?;
         addressed.push(json!({
