@@ -41,11 +41,12 @@ GREEN_ALIAS="crowdrelay-api-green"
 BLUE_ALIAS="crowdrelay-api"
 ACTIVE_ALIAS="crowdrelay-api-active"
 RELEASE_STATE_DIR="/var/lib/crowdrelay/releases"
-# The receipt helper is scp'd to /tmp by deploy.sh alongside this script,
-# because the remote repo may be stale (the deploy itself is what updates it).
-# Fall back to the repo copy for direct invocation on the remote.
-if [[ -f /tmp/release_receipt.py ]]; then
-  RECEIPT_HELPER="/tmp/release_receipt.py"
+# The receipt helper is scp'd to the release state dir by deploy.sh
+# alongside this script, because the remote repo may be stale (the deploy
+# itself is what updates it). Fall back to the repo copy for direct
+# invocation on the remote.
+if [[ -f "${RELEASE_STATE_DIR}/release_receipt.py" ]]; then
+  RECEIPT_HELPER="${RELEASE_STATE_DIR}/release_receipt.py"
 else
   RECEIPT_HELPER="${REPO_DIR}/scripts/release_receipt.py"
 fi
@@ -212,11 +213,12 @@ printf 'EDGE_PREFLIGHT=PASS config=synchronized cutover=graceful-reload\n'
 # Caddyfile. The blue-green app cutover does not touch it, so a stale
 # allowlist silently 404s new control-plane routes. Sync before the app
 # cutover so new routes are reachable the moment the edge switches.
-# deploy.sh scp's the current Caddyfile to /tmp; fall back to the repo copy.
-# If the area-management-proxy container was removed (consolidated into the
-# edge Caddy), skip the sync — the edge Caddy already handles those routes.
+# deploy.sh scp's the current Caddyfile to the release state dir; fall back
+# to the repo copy. If the area-management-proxy container was removed
+# (consolidated into the edge Caddy), skip the sync — the edge Caddy already
+# handles those routes.
 AREA_PROXY_CONTAINER="crowdrelay-area-management-proxy-1"
-AREA_CADDYFILE="/tmp/crowdrelay-area-management.Caddyfile"
+AREA_CADDYFILE="${RELEASE_STATE_DIR}/crowdrelay-area-management.Caddyfile"
 [[ -f "$AREA_CADDYFILE" ]] || AREA_CADDYFILE="$(absolute_path deploy/area-management.Caddyfile)"
 [[ -f "$AREA_CADDYFILE" ]] || fail "missing area-management Caddyfile"
 area_proxy_status="$(docker inspect "$AREA_PROXY_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || true)"
