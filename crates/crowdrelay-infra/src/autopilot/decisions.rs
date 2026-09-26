@@ -198,6 +198,33 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .collect())
     }
 
+    async fn load_show_growth_failures(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<std::collections::HashMap<(uuid::Uuid, String), u32>, RepositoryError> {
+        let rows = sqlx::query_as::<_, (uuid::Uuid, String, i64)>(
+            r#"
+            SELECT subject_id, payload->>'lever', count(*)::bigint
+            FROM autopilot_actions
+            WHERE workspace_id = $1
+              AND context = 'show_growth'
+              AND status = 'failed'
+              AND payload ? 'lever'
+            GROUP BY subject_id, payload->>'lever'
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|(event, lever, failed)| {
+                ((event, lever), u32::try_from(failed).unwrap_or(u32::MAX))
+            })
+            .collect())
+    }
+
     async fn capability_serviceable(
         &self,
         workspace_id: WorkspaceId,

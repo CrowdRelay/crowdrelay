@@ -705,6 +705,10 @@ where
                         .repository
                         .capability_serviceable(self.workspace_id, "show.growth")
                         .await?;
+                    let failures = self
+                        .repository
+                        .load_show_growth_failures(self.workspace_id)
+                        .await?;
                     for snapshot in snapshots {
                         // One snapshot can emit two candidates: the §4e-2
                         // refusal of an unreciprocated crossbill lever, and —
@@ -716,6 +720,7 @@ where
                             evidence.for_context(policy.context),
                             &standings,
                             external_executor_live,
+                            &failures,
                             now,
                         )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;

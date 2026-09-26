@@ -508,27 +508,28 @@ pub fn evaluate_show_growth(
     ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue)
 }
 
-/// [`evaluate_show_growth`], passing over levers nothing can carry out.
+/// Failed attempts at one lever before the ladder passes over it. A
+/// failed lever is retried under a new key, then skipped, so one bad
+/// attempt does not end the ladder. On 2026-08-23 the tracked link for
+/// Virya's Gorzów show failed once; its key could never be written again,
+/// and no lever for that show ran for a month.
+pub const MAX_LEVER_ATTEMPTS: u32 = 3;
+
+/// [`evaluate_show_growth`], passing over the levers `pass_over` names.
 ///
 /// The ladder is sequential: the first due lever that has not been
-/// requested is the only one proposed. A lever that needs the external
-/// `show.growth` executor, in a workspace where none is live, is never
-/// requested, because no action is written for work nothing can perform.
-/// Evaluated plainly, the ladder would stop at that lever for good. For the
-/// Virya show in Gorzów on 2026-10-17, the tracked link, the push to fans in
-/// the city and the last-mile push to interested fans all sat behind a free
-/// listing sweep that no executor could run.
-///
-/// With `external_executor_live` false, each external lever that comes up is
-/// masked and the ladder is evaluated again, so the first-party levers after
-/// it are proposed on their own schedule. The masked levers are returned too,
-/// so the caller can say what was passed over.
+/// requested is the only one proposed. A lever that can never be requested
+/// (no executor can run it, or it failed [`MAX_LEVER_ATTEMPTS`] times)
+/// would stop the ladder at itself for good. Each such lever is masked and
+/// the ladder evaluated again, so the levers after it are proposed on their
+/// own schedule. The masked levers are returned, so the caller can say what
+/// was passed over.
 #[must_use]
-pub fn evaluate_show_growth_serviceable(
+pub fn evaluate_show_growth_passing_over(
     snapshot: ShowGrowthSnapshot,
     policy: ShowGrowthPolicy,
     now: OffsetDateTime,
-    external_executor_live: bool,
+    pass_over: impl Fn(ShowGrowthLever) -> bool,
 ) -> (ShowGrowthDecision, Vec<ShowGrowthLever>) {
     let mut masked = snapshot;
     let mut passed_over = Vec::new();
@@ -536,9 +537,7 @@ pub fn evaluate_show_growth_serviceable(
         let decision = evaluate_show_growth(masked, policy, now);
         match decision {
             ShowGrowthDecision::Request { lever, .. }
-                if !external_executor_live
-                    && !lever.is_first_party()
-                    && !passed_over.contains(&lever) =>
+                if pass_over(lever) && !passed_over.contains(&lever) =>
             {
                 passed_over.push(lever);
                 masked.history.mark_requested(lever);
@@ -546,6 +545,23 @@ pub fn evaluate_show_growth_serviceable(
             _ => return (decision, passed_over),
         }
     }
+}
+
+/// [`evaluate_show_growth_passing_over`] for the one reason the executor
+/// registry decides: with no external executor live, a lever that needs one
+/// is passed over. For the Gorzów show on 2026-10-17 the push to fans in the
+/// city and the last-mile push to interested fans sat behind a free listing
+/// sweep no executor could run.
+#[must_use]
+pub fn evaluate_show_growth_serviceable(
+    snapshot: ShowGrowthSnapshot,
+    policy: ShowGrowthPolicy,
+    now: OffsetDateTime,
+    external_executor_live: bool,
+) -> (ShowGrowthDecision, Vec<ShowGrowthLever>) {
+    evaluate_show_growth_passing_over(snapshot, policy, now, |lever| {
+        !external_executor_live && !lever.is_first_party()
+    })
 }
 
 fn request(lever: ShowGrowthLever, basis_points: u16) -> ShowGrowthDecision {

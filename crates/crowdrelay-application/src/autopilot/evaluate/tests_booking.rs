@@ -252,6 +252,7 @@ mod tests_booking {
                 ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
                 &std::collections::HashMap::new(),
                 live,
+                &std::collections::HashMap::new(),
                 now,
             )?;
             match candidates.first().map(|candidate| &candidate.action) {
@@ -261,6 +262,96 @@ mod tests_booking {
         };
         assert_eq!(lever(true)?, ShowGrowthLever::FreeListingSweep);
         assert_eq!(lever(false)?, ShowGrowthLever::FreeFanChannelPush);
+        Ok(())
+    }
+
+    /// A failed lever is retried under its own key, then passed over: one
+    /// bad attempt at the tracked link (Gorzów, 2026-08-23) had frozen the
+    /// whole ladder for that show, because the failed row still held the key.
+    #[test]
+    fn a_failed_lever_is_retried_then_passed_over() -> Result<(), Box<dyn std::error::Error>> {
+        use crowdrelay_domain::show_growth::{
+            MAX_LEVER_ATTEMPTS, ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy,
+            ShowGrowthSnapshot,
+        };
+
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::ShowGrowth,
+            enabled: true,
+            autonomy_level: AutonomyLevel::BoundedAuto,
+            minimum_confidence: Confidence::from_basis_points(8_000)?,
+            max_actions_24h: 10,
+            config: AutopilotPolicyConfig::ShowGrowth(ShowGrowthPolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let snapshot = ShowGrowthSnapshot {
+            event_id: EventId::new(),
+            published: true,
+            communication_enabled: true,
+            starts_at: now + time::Duration::days(17),
+            capacity: 100,
+            paid_tickets: 0,
+            paid_buyers: 0,
+            paid_tickets_last_7d: 0,
+            interested_fans: 1,
+            city_signal_fans: 2,
+            qualified_referrers_in_city: 0,
+            beacon_partners: 0,
+            attendees: 0,
+            morning_after_send_at: None,
+            unreciprocated_crossbill_edge: false,
+            ladder_approved: false,
+            history: ShowGrowthHistory::default(),
+        };
+        let first = |failed: u32| -> Result<DecisionCandidate, Box<dyn std::error::Error>> {
+            let mut failures = std::collections::HashMap::new();
+            failures.insert(
+                (snapshot.event_id.into_uuid(), "canonical_link_setup".to_owned()),
+                failed,
+            );
+            show_growth::show_growth_candidates(
+                snapshot,
+                &policy,
+                ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
+                &std::collections::HashMap::new(),
+                false,
+                &failures,
+                now,
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "a lever is proposed".into())
+        };
+
+        let retry = first(1)?;
+        assert!(matches!(
+            retry.action,
+            AutopilotActionPayload::RequestShowGrowth {
+                lever: ShowGrowthLever::CanonicalLinkSetup,
+                ..
+            }
+        ));
+        assert!(
+            retry.action_idempotency_key.ends_with(":canonical_link_setup:retry1"),
+            "{}",
+            retry.action_idempotency_key
+        );
+
+        let past = first(MAX_LEVER_ATTEMPTS)?;
+        assert!(
+            matches!(
+                past.action,
+                AutopilotActionPayload::RequestShowGrowth {
+                    lever: ShowGrowthLever::FreeFanChannelPush,
+                    ..
+                }
+            ),
+            "after the last attempt the ladder moves on: {:?}",
+            past.action
+        );
         Ok(())
     }
 
@@ -312,7 +403,7 @@ mod tests_booking {
             },
         };
 
-        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(candidates.len(), 2, "the refusal and the next due lever");
         let declined = &candidates[0];
         assert_eq!(declined.decision_kind, "unreciprocated_crossbill");
@@ -339,7 +430,7 @@ mod tests_booking {
 
         // The same due lever fires the moment the edge is reciprocated —
         // one candidate, the ordinary request, no refusal row.
-        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, now)?;
+        let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(candidates.len(), 1);
         let proposed = &candidates[0];
         assert_eq!(proposed.decision_kind, "activate_show_growth_lever");
@@ -415,6 +506,7 @@ mod tests_booking {
             ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
             &standings,
             true,
+            &std::collections::HashMap::new(),
             now,
         )?;
         assert_eq!(candidates.len(), 1);
@@ -444,6 +536,7 @@ mod tests_booking {
             ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
             &standings,
             true,
+            &std::collections::HashMap::new(),
             now,
         )?;
         assert_eq!(candidates.len(), 1);
@@ -504,7 +597,7 @@ mod tests_booking {
             },
         };
 
-        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, now)?;
+        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
@@ -512,7 +605,7 @@ mod tests_booking {
         // The flag rides the policy snapshot — the disposition stays honest
         // about what the level and confidence computed; the class ceiling and
         // the envelope run before the action insert honours the ladder.
-        let released = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, now)?;
+        let released = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(
