@@ -338,8 +338,12 @@ pub(super) fn selected_keys(selection: &PortfolioSelection) -> HashSet<String> {
 /// - **epistemic** — which estimator produced the number and how much it was
 ///   standing on. Never combined into the economics.
 /// - **identity** — enough to know which code and which policy produced this.
-///   Not a reproducibility guarantee: the posteriors are not snapshotted, and
-///   claiming otherwise would be the exact lie this block exists to prevent.
+///   Not a reproducibility guarantee: the causal model's full state is not
+///   snapshotted, and claiming otherwise would be the exact lie this block
+///   exists to prevent. What *is* kept is the candidate's own posterior —
+///   mean, standard deviation and P(meaningful effect) — under `epistemic`,
+///   so "what did the brain believe this would do" is answerable against
+///   what it then did.
 #[must_use]
 pub(super) fn decision_provenance(
     selection: &PortfolioSelection,
@@ -392,6 +396,15 @@ pub(super) fn decision_provenance(
                     "uses_y30": value.uses_y30,
                     "bridge_confidence": value.bridge_confidence,
                     "bridge_is_reliable": value.bridge_is_reliable,
+                    // The Y30 posterior this candidate was valued on, as it
+                    // stood at decision time. Resolved outcomes are scored
+                    // against these three numbers; re-deriving them later
+                    // would score today's belief instead.
+                    "posterior": {
+                        "mean_y30": value.expected_incremental_y30,
+                        "std_y30": value.uncertainty,
+                        "p_meaningful_effect": value.p_meaningful_effect,
+                    },
                 },
                 "policy": {
                     "decision_mode": value.decision_mode,
@@ -673,6 +686,13 @@ mod tests {
             .get("decision_value")
             .expect("decision-time record");
         let competition = record.get("competition").expect("competition block");
+        let posterior = &record["epistemic"]["posterior"];
+        for key in ["mean_y30", "std_y30", "p_meaningful_effect"] {
+            assert!(
+                posterior[key].is_number(),
+                "the decision-time posterior must carry {key}"
+            );
+        }
 
         assert_eq!(
             competition["considered"], 3,
