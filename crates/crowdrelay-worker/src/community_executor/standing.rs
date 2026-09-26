@@ -6,7 +6,8 @@
 //! read, which is where a removal is first seen and recorded.
 
 use super::*;
-use crowdrelay_domain::community_register::{RegisterHold, review_community_register};
+use crowdrelay_domain::community_register::review_community_register;
+use crowdrelay_domain::community_reply::ReviewOutcome;
 use crowdrelay_domain::reddit_standing::{
     COMMUNITY_REMOVED_US, PostRecord, RedditStanding, RemovalCause, community_removed_us,
     reddit_standing,
@@ -93,15 +94,15 @@ impl CommunityExecutorWorker {
     pub(super) async fn standing_hold(
         &self,
         action: &ClaimedAction,
-    ) -> Result<Option<&'static str>, CommunityExecutorError> {
+    ) -> Result<Option<String>, CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
         let history = post_history(&self.pool, ws).await?;
         let now = OffsetDateTime::now_utc();
         if let RedditStanding::Halted(reason) = reddit_standing(&history, now) {
-            return Ok(Some(reason.as_str()));
+            return Ok(Some(reason.as_str().to_owned()));
         }
         if community_removed_us(&history, &normalized_subreddit(&action.subreddit), now) {
-            return Ok(Some(COMMUNITY_REMOVED_US));
+            return Ok(Some(COMMUNITY_REMOVED_US.to_owned()));
         }
         // Title and drafted body, as a reader sees them — before the tracked
         // link is appended, which carries a per-action slug and would make
@@ -118,7 +119,35 @@ impl CommunityExecutorWorker {
         .fetch_all(&self.pool)
         .await?;
         let draft = format!("{}\n{}", action.title, action.body);
-        Ok(review_community_register(&draft, &recent).map(RegisterHold::as_str))
+        if let Some(hold) = review_community_register(&draft, &recent) {
+            return Ok(Some(hold.as_str().to_owned()));
+        }
+        // Last, because it is the only check that spends a model call: the
+        // independent review. A failed review, or none at all, is a person.
+        let link = action
+            .source_url
+            .as_deref()
+            .or(action.smart_link.as_deref())
+            .unwrap_or("(no link)");
+        let context = format!(
+            "The post shares the band's own content, linked here: {link}\n\
+             Introducing or naming what that link carries is grounded; any \
+             other factual claim needs support in the post itself."
+        );
+        Ok(
+            match self
+                .review_text("reddit_post", &action.subreddit, &draft, &context, None)
+                .await
+            {
+                ReviewOutcome::Passed { .. } => None,
+                ReviewOutcome::Failed { score } => Some(format!(
+                    "held: the independent review scored it {score}/10 — rewrite before it goes out"
+                )),
+                ReviewOutcome::Unavailable => Some(
+                    "held: no reviewer could be reached — read it before it goes out".to_owned(),
+                ),
+            },
+        )
     }
 
     /// Whether the workspace has reached its earned 24h post limit.

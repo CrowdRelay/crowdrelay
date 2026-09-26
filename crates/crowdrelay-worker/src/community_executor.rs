@@ -1076,10 +1076,10 @@ impl CommunityExecutorWorker {
             return Ok(());
         }
 
-        // The account's standing: a halted account, or a community whose
-        // moderators removed one of our posts, sends the draft to a person.
+        // Standing (halted, a community that removed us), register, and the
+        // independent review: any of them sends the draft to a person.
         if let Some(reason) = self.standing_hold(action).await? {
-            self.hold_for_human(action.id, reason).await?;
+            self.hold_for_human(action.id, &reason).await?;
             return Ok(());
         }
 
