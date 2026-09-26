@@ -1230,7 +1230,19 @@ pub(crate) fn repository_error_kind(error: RepositoryError) -> &'static str {
         RepositoryError::ConflictBecause(reason) if reason == ORG_ATTENTION_BUDGET_ERROR_KIND => {
             ORG_ATTENTION_BUDGET_ERROR_KIND
         }
-        RepositoryError::Conflict | RepositoryError::ConflictBecause(_) => "state_changed",
+        // The reason a named conflict gives the operator is the answer to
+        // "why did this fail" — collapsing it into `state_changed` keeps the
+        // ledger honest and makes it blind. Production spent a week failing
+        // community engagements under this kind with the sentence discarded
+        // here; log it before it is lost, so the next burst names itself.
+        RepositoryError::ConflictBecause(reason) => {
+            tracing::warn!(
+                conflict_reason = reason,
+                "autopilot conflict with an unnamed reason — surfaces as error_kind=state_changed"
+            );
+            "state_changed"
+        }
+        RepositoryError::Conflict => "state_changed",
     }
 }
 

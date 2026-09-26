@@ -36,6 +36,7 @@ mod autopilot_insight_routing;
 mod autopilot_learning_proof;
 mod autopilot_measurement_spine;
 mod autopilot_metric_learning;
+mod autopilot_no_executor_ask;
 mod autopilot_objectives;
 mod autopilot_outreach_engine;
 mod autopilot_outreach_supply;
