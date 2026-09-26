@@ -125,9 +125,3 @@ pub async fn skip(
         Err(error) => error_response(error, request_id(&headers)),
     }
 }
-
-// The Postgres test lives in a `_tests.rs` file: its fixture inserts are
-// test scaffolding, which the decision-trace gate exempts by that name.
-#[cfg(test)]
-#[path = "community_replies_pg_tests.rs"]
-mod community_replies_pg_tests;

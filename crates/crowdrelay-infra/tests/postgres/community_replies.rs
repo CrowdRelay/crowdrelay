@@ -1,24 +1,20 @@
-// Executes the reply queue's writes against a real schema: a post, a waiting
-// draft, approve-as-edited, and the conflict answers for rows no longer
-// waiting. The `_tests` scope exempts the fixture inserts from the
-// decision-trace gate (test scaffolding, not a production write path).
-use super::*;
+//! The reply queue's writes against a real schema: a post, a waiting draft,
+//! approve-as-edited, and the conflict answers for rows no longer waiting.
+
+use crate::common;
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_infra::fanbase::{
+    CommunityReplyError, approve_community_reply, list_community_replies, skip_community_reply,
+};
+use time::OffsetDateTime;
+use uuid::Uuid;
 
 #[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_waiting_reply_is_approved_as_edited_once_and_skips_are_final() {
-    let Ok(database_url) = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL") else {
-        return;
-    };
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
+    let (pool, _) = common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL")
         .await
-        .expect("connect");
-    crowdrelay_infra::database::MIGRATOR
-        .run(&pool)
-        .await
-        .expect("migrate");
+        .expect("connect to the migrated suite database");
 
     let workspace_id = WorkspaceId::new();
     let ws = workspace_id.into_uuid();
@@ -106,12 +102,14 @@ async fn a_waiting_reply_is_approved_as_edited_once_and_skips_are_final() {
     )
     .await
     .expect("approve as edited");
-    let (status, draft): (String, String) =
-        sqlx::query_as("SELECT status, draft FROM community_comments WHERE id = $1")
-            .bind(waiting)
-            .fetch_one(&pool)
-            .await
-            .expect("read back");
+    let (status, draft): (String, String) = sqlx::query_as(
+        "SELECT status, draft FROM community_comments WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(ws)
+    .bind(waiting)
+    .fetch_one(&pool)
+    .await
+    .expect("read back");
     assert_eq!(status, "approved");
     assert_eq!(draft, "Drop C — the whole record.");
     assert!(matches!(
