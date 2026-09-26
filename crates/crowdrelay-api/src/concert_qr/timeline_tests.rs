@@ -62,6 +62,8 @@ mod timeline_tests {
                 counterparty_email: None,
                 place_event_id: None,
                 booking_opportunity_id: None,
+                city: None,
+                interested: 0,
             },
             emissions: Vec::new(),
             surfaces: Vec::new(),

@@ -66,6 +66,11 @@ struct TimelineEventView {
     /// The shared night this event resolves to, when it does — the key the
     /// "Shared night" block calls back with (4V.6b).
     place_event_id: Option<Uuid>,
+    /// The catalogue city's name, when the night names one.
+    city: Option<String>,
+    /// Fans who asked to be told about this night — the show page's
+    /// "interested" figure, so it needs no second read.
+    interested: i64,
 }
 
 /// `GET /v1/control-plane/events/{event_slug}/timeline` — the ten-step
@@ -112,6 +117,8 @@ pub async fn control_plane_event_timeline(
                 ends_at: facts.event.ends_at.map(format_time),
                 bill: bill_view(&facts.crossbill_acts),
                 place_event_id: facts.event.place_event_id,
+                city: facts.event.city.clone(),
+                interested: facts.event.interested,
                 counterparty_name: facts.event.counterparty_name.clone(),
                 counterparty_email: facts.event.counterparty_email.clone(),
                 venue_knowledge: facts

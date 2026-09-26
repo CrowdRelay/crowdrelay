@@ -228,5 +228,26 @@ async fn a_city_night_nobody_measured_reads_null_not_zero() -> Result<(), Box<dy
     assert!(door["event"]["tickets_sold"].is_null(), "{door}");
     assert_eq!(door["event"]["interested"], 1, "{door}");
     assert_eq!(door["event"]["city"], "Testowo", "{door}");
+
+    // The show list carries the same night with the same honesty.
+    let list = get(&pool, workspace_id, "/v1/control-plane/events").await?;
+    let night = list["events"]
+        .as_array()
+        .and_then(|events| events.iter().find(|e| e["slug"] == event_slug.as_str()))
+        .ok_or("the night is on the list")?;
+    assert!(night["tickets_sold"].is_null(), "{night}");
+    assert_eq!(night["interested"], 1, "{night}");
+    assert_eq!(night["door_campaigns"], 0, "{night}");
+    assert_eq!(night["city"], "Testowo", "{night}");
+
+    // And the timeline the show page opens on.
+    let timeline = get(
+        &pool,
+        workspace_id,
+        &format!("/v1/control-plane/events/{event_slug}/timeline"),
+    )
+    .await?;
+    assert_eq!(timeline["event"]["interested"], 1, "{timeline}");
+    assert_eq!(timeline["event"]["city"], "Testowo", "{timeline}");
     Ok(())
 }
