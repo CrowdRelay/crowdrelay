@@ -122,9 +122,15 @@ NEXT DECISION
 - `risk_penalty` is `None` — **not modelled**, not zero, and never derived from
   `uncertainty`.
 - `uncertainty`, `evidence_quality`,
-  `bridge_is_reliable` are **provenance**. None enters `total()`. That is a
-  real gap, taken deliberately: penalising uncertain candidates in a system
-  that has resolved almost no outcomes is how a young learner stops learning.
+  `bridge_is_reliable` are **provenance** — until the uncertainty gate opens.
+  Each resolved 30-day outcome is scored against the posterior its decision
+  recorded (`calibration.y30_interval`); once 200+ are scored and 70–90% land
+  inside the posterior's own 80% interval, exploit candidates that are not in
+  an experiment carry `uncertainty_penalty = -0.674 × uncertainty` (valued at
+  their posterior's 25th percentile). Shut, the term is `None`. Penalising
+  uncertain candidates before the spread is verified is how a young learner
+  stops learning; explore, learn and experimental candidates are never
+  penalised. Every cycle's dispatch log says whether the gate is open and why.
   `evidence_quality` is stamped from the live experiment design for
   treatment-armed candidates — a dispatch under an active holdout records
   `randomized_holdout`, not the `observational` default.
@@ -267,12 +273,15 @@ Wired or deleted since this table first listed them:
 
 ## Known weaknesses
 
-1. **No economic use of uncertainty.** Recorded above as deliberate. It stops
-   being defensible once there is enough resolved evidence to distinguish a
-   tight estimate from a wide one.
-2. **WAIT is under-valued by construction.** Two of its four declared terms are
-   never computed, both in the direction that would favour waiting. The fix is
-   to measure fatigue recovery, not to pick a number for it.
+1. **Uncertainty is gated, not yet exercised.** The penalty exists and opens
+   only on 200+ outcomes scored against their decision-time posterior with
+   honest 80% coverage. Until that record exists — and for decisions made
+   before posteriors were recorded, it never will — ranking ignores spread.
+2. **WAIT's option value is still uncomputed.** Fatigue recovery is now
+   measured (`brain::fatigue`: quick follow-ups vs rested posts in the band's
+   own communities, each against its community's median) and priced for the
+   best candidate when its audience heard from the band within a week. The
+   option value stays `0.0`, in the direction that favours acting.
 3. **Only the chosen candidate's posterior is durable per decision.** The
    `decision_value` block keeps its Y30 posterior (mean, std, P(meaningful))
    beside the regime, terms and competition, so a resolved outcome can be

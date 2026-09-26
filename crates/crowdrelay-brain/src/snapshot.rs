@@ -29,6 +29,11 @@ pub struct RecentInsight {
 /// A snapshot of one worker template's dispatch state.
 #[derive(Clone, Debug, Serialize)]
 pub struct GrowthIntelligenceSnapshot {
+    /// What a post to an audience that heard from the band within a week
+    /// loses against a rested one, measured from its own history. `None`
+    /// until both arms have enough posts. Feeds WAIT's recovery value.
+    #[serde(default)]
+    pub fatigue: Option<crate::fatigue::FatigueMeasure>,
     pub template_id: String,
     pub hours_since_last_run: Option<u32>,
     pub hours_since_last_effective_run: Option<u32>,

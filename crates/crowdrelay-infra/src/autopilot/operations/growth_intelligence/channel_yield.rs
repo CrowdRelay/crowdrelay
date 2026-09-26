@@ -31,20 +31,58 @@ pub(super) async fn load_channel_yield(
     pool: &PgPool,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<ChannelYield>, RepositoryError> {
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+    // Durable fans: the 90-day conversions whose fan is still active, still
+    // consented to marketing (latest record) and meaningfully active in the
+    // last 30 days — the acquisition-channel read's `activated` definition
+    // and the community pool's, so the three agree on who stayed.
+    let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
         r#"
-        SELECT channel,
-               COUNT(DISTINCT fan_id)
-                   FILTER (WHERE event_kind = 'conversion')::bigint
+        WITH evidence AS (
+            SELECT channel, event_kind, fan_id, anonymous_visitor_id, occurred_at
+            FROM fan_provenance_events
+            WHERE workspace_id = $1
+              AND event_kind IN ('conversion', 'interaction')
+              AND occurred_at >= now() - interval '90 days'
+        ), durable AS (
+            SELECT evidence.channel, COUNT(DISTINCT fan.id)::bigint AS durable
+            FROM evidence
+            JOIN fans AS fan
+              ON fan.workspace_id = $1
+             AND fan.id = evidence.fan_id
+             AND fan.status = 'active'
+            WHERE evidence.event_kind = 'conversion'
+              AND EXISTS (
+                  SELECT 1 FROM fan_consents AS consent
+                  WHERE consent.workspace_id = fan.workspace_id
+                    AND consent.fan_id = fan.id
+                    AND consent.purpose = 'marketing'
+                    AND consent.granted
+                    AND consent.recorded_at = (
+                        SELECT max(latest.recorded_at) FROM fan_consents AS latest
+                        WHERE latest.workspace_id = fan.workspace_id
+                          AND latest.fan_id = fan.id
+                          AND latest.purpose = 'marketing'
+                    )
+              )
+              AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
+                  >= now() - interval '30 days'
+            GROUP BY evidence.channel
+        )
+        SELECT evidence.channel,
+               COUNT(DISTINCT evidence.fan_id)
+                   FILTER (WHERE evidence.event_kind = 'conversion'
+                             AND evidence.occurred_at >= now() - interval '30 days')::bigint
                    AS conversions,
-               COUNT(DISTINCT COALESCE(fan_id::text, anonymous_visitor_id::text))
-                   FILTER (WHERE event_kind = 'interaction')::bigint
-                   AS unique_clickers
-        FROM fan_provenance_events
-        WHERE workspace_id = $1
-          AND event_kind IN ('conversion', 'interaction')
-          AND occurred_at >= now() - interval '30 days'
-        GROUP BY channel
+               COUNT(DISTINCT COALESCE(evidence.fan_id::text, evidence.anonymous_visitor_id::text))
+                   FILTER (WHERE evidence.event_kind = 'interaction'
+                             AND evidence.occurred_at >= now() - interval '30 days')::bigint
+                   AS unique_clickers,
+               COALESCE(MAX(durable.durable), 0)::bigint AS durable
+        FROM evidence
+        LEFT JOIN durable ON durable.channel = evidence.channel
+        GROUP BY evidence.channel
+        HAVING COUNT(*) FILTER (WHERE evidence.occurred_at >= now() - interval '30 days') > 0
+            OR COALESCE(MAX(durable.durable), 0) > 0
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -53,10 +91,11 @@ pub(super) async fn load_channel_yield(
     .map_err(map_sqlx)?;
     Ok(rows
         .into_iter()
-        .map(|(channel, conversions, clickers)| ChannelYield {
+        .map(|(channel, conversions, clickers, durable)| ChannelYield {
             channel,
             conversions_30d: u32::try_from(conversions.max(0)).unwrap_or(u32::MAX),
             unique_clickers_30d: u32::try_from(clickers.max(0)).unwrap_or(u32::MAX),
+            durable_90d: u32::try_from(durable.max(0)).unwrap_or(u32::MAX),
         })
         .collect())
 }

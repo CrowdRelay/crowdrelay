@@ -109,6 +109,56 @@ pub(super) struct PortfolioRun {
     pub goal: Option<GoalConstraint>,
 }
 
+/// What the cycle's evidence says about audiences, keyed like
+/// `audience_key_for`: the measured fatigue discount and how many days ago
+/// each community last heard from the band (WAIT's recovery), and which
+/// audiences have produced fans who stayed (where a raised ceiling's extra
+/// slots may go).
+#[derive(Default)]
+pub(super) struct AudienceEvidence {
+    pub fatigue: Option<crowdrelay_brain::fatigue::FatigueMeasure>,
+    pub audience_days_since_touch: HashMap<String, u32>,
+    pub proven_audiences: std::collections::BTreeSet<String>,
+}
+
+impl AudienceEvidence {
+    pub(super) fn from_snapshots(
+        snapshots: &[crowdrelay_brain::GrowthIntelligenceSnapshot],
+        workspace_id: WorkspaceId,
+    ) -> Self {
+        let targets = snapshots
+            .iter()
+            .flat_map(|snapshot| &snapshot.unengaged_targets);
+        let mut proven_audiences: std::collections::BTreeSet<String> = targets
+            .clone()
+            .filter(|target| target.durable_fans_90d > 0)
+            .map(|target| format!("community:{}", target.target_id))
+            .collect();
+        // The band's own channels share one audience key; any of them with a
+        // fan who stayed proves it.
+        if snapshots.first().is_some_and(|snapshot| {
+            snapshot
+                .world_model
+                .channel_yield
+                .iter()
+                .any(|channel| channel.channel != "reddit" && channel.durable_90d > 0)
+        }) {
+            proven_audiences.insert(format!("workspace:{}", workspace_id.into_uuid()));
+        }
+        Self {
+            proven_audiences,
+            fatigue: snapshots.iter().find_map(|snapshot| snapshot.fatigue),
+            audience_days_since_touch: targets
+                .filter_map(|target| {
+                    target
+                        .days_since_last_engagement
+                        .map(|days| (format!("community:{}", target.target_id), days))
+                })
+                .collect(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn select_portfolio(
     scored: &[ScoredCandidate],
@@ -119,6 +169,8 @@ pub(super) fn select_portfolio(
     sizing_multiplier: f64,
     exchange: &crowdrelay_brain::ValueExchange,
     objective: Option<&ActiveObjective>,
+    uncertainty_gate: &crowdrelay_brain::uncertainty_gate::UncertaintyGate,
+    audience_evidence: &AudienceEvidence,
     now: time::OffsetDateTime,
 ) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
@@ -151,6 +203,12 @@ pub(super) fn select_portfolio(
             )
             .with_economic_value(stats, exchange)
             .with_harm_cost(stats);
+            // Uncertainty ranks nothing until the gate has checked it against
+            // resolved outcomes — and never an experiment's candidate, whose
+            // uncertainty is what the experiment is for.
+            if !experimental_quality.contains_key(&c.decision_key) {
+                decision_value = decision_value.with_uncertainty_penalty(uncertainty_gate);
+            }
             // A treatment-assigned candidate's dispatch executes under its
             // experiment design, so the design — not the stats' Observational
             // default — states what quality the measurement will carry. The
@@ -200,10 +258,25 @@ pub(super) fn select_portfolio(
     // The WAIT candidate's opportunity_cost = -best_action_y30, and
     // wait_total = VOI + fatigue + option - best_action_y30.
     // WAIT wins when wait_total > 0 (net positive utility).
-    let best_y30 = candidates
-        .iter()
-        .map(|c| c.decision_value.total())
-        .fold(0.0_f64, f64::max);
+    let best = candidates.iter().max_by(|a, b| {
+        a.decision_value
+            .total()
+            .total_cmp(&b.decision_value.total())
+    });
+    let best_y30 = best.map_or(0.0, |c| c.decision_value.total().max(0.0));
+    // What waiting recovers: when the best candidate's audience heard from
+    // the band within the rest window, the measured share a tired audience
+    // costs. Zero until the band's own history measures it.
+    let fatigue_recovery = crowdrelay_brain::fatigue::recovery_value(
+        audience_evidence.fatigue.as_ref(),
+        best_y30,
+        best.and_then(|c| {
+            audience_evidence
+                .audience_days_since_touch
+                .get(&c.audience_key)
+                .copied()
+        }),
+    );
     let avg_treatment_std = {
         let stds: Vec<f64> = candidates
             .iter()
@@ -221,8 +294,12 @@ pub(super) fn select_portfolio(
     // The WAIT candidate competes via opportunity cost + VOI: if the
     // best action has low expected Y30 and there are pending measurements
     // whose outcomes could inform the decision, WAIT can win.
-    let wait =
-        WaitCandidateValue::compute(best_y30, pending_measurement_count, avg_treatment_std, 0.0);
+    let wait = WaitCandidateValue::compute(
+        best_y30,
+        pending_measurement_count,
+        avg_treatment_std,
+        fatigue_recovery,
+    );
     // P0-2: Wire the experimental dispatch budget from the policy into the
     // optimizer config. This allows additional treatment dispatches beyond
     // max_dispatches when the candidate is part of an active experiment.
@@ -263,8 +340,17 @@ pub(super) fn select_portfolio(
     // same `act`, the fairness term is uniform across the pool, and a uniform
     // multiplier cannot reorder anything. The term does its work in the
     // roster's pooled read, where the acts differ.
+    // A goal that raised the ceiling raised it for lanes with a record: past
+    // the base, a slot goes only to an audience that has produced fans who
+    // stayed (or to an experiment). More slots, not lower standards.
+    let raised_beyond_base = goal
+        .as_ref()
+        .filter(|goal| goal.applied_max_dispatches > goal.base_max_dispatches)
+        .map(|goal| goal.base_max_dispatches);
     let optimizer = PortfolioOptimizer {
         config,
+        proven_only_beyond: raised_beyond_base,
+        proven_audiences: audience_evidence.proven_audiences.clone(),
         ..Default::default()
     };
     // The input vec is kept beside the selection: the roster read (5.1) needs
@@ -384,6 +470,9 @@ pub(super) fn decision_provenance(
                     // unconfident, which is exactly when the term is absent.
                     "economic_value_fans": value.economic_value_fans,
                     "harm_fans": value.harm_fans,
+                    // Null until the uncertainty gate opens; then the value
+                    // the posterior's spread took off the mean.
+                    "uncertainty_penalty": value.uncertainty_penalty,
                     "exchange_minor_per_fan": exchange_minor_per_fan,
                     "resource_cost_units": value.resource_cost.units,
                     "adjustments": adjustments,
@@ -586,6 +675,10 @@ mod tests {
                 sizing,
                 &crowdrelay_brain::ValueExchange::default(),
                 objective,
+                &crowdrelay_brain::uncertainty_gate::uncertainty_gate(
+                    &crowdrelay_brain::uncertainty_gate::IntervalCoverage::default(),
+                ),
+                &AudienceEvidence::default(),
                 now,
             )
         };

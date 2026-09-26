@@ -272,6 +272,19 @@ pub struct DecisionValue {
     /// exchange rate nobody measured.
     #[serde(default)]
     pub harm_fans: Option<f64>,
+    /// The gated uncertainty term: `-z₂₅ × uncertainty`, valuing an exploit
+    /// candidate at the 25th percentile of its Y30 posterior instead of its
+    /// mean. `None` — absent, not zero — until `uncertainty_gate` opens:
+    /// 200+ resolved outcomes scored against their decision-time posterior,
+    /// landing inside its 80% interval 70–90% of the time. Before that the
+    /// posterior's spread is unverified and must not rank anything. Never set
+    /// on explore or learn candidates: uncertainty is why they exist.
+    ///
+    /// Not risk. Risk stays `risk_penalty` (the chance the effect is noise);
+    /// this is the width of an honest estimate, priced in the same fan units
+    /// as the mean it is subtracted from.
+    #[serde(default)]
+    pub uncertainty_penalty: Option<f64>,
 
     // ── Decision mode ──
     /// Why the brain is dispatching this candidate.
@@ -308,6 +321,7 @@ impl DecisionValue {
             + self.opportunity_cost
             + self.economic_value_fans.unwrap_or(0.0)
             + self.harm_fans.unwrap_or(0.0)
+            + self.uncertainty_penalty.unwrap_or(0.0)
     }
 
     /// Constructs a DecisionValue from treatment-aware stats and resource
@@ -403,6 +417,7 @@ impl DecisionValue {
             // `from_stats` has never seen the learned harm posteriors and
             // constructing the term without them would price harm at zero.
             harm_fans: None,
+            uncertainty_penalty: None,
             decision_mode,
         }
     }
@@ -469,6 +484,25 @@ impl DecisionValue {
         }
         self
     }
+
+    /// Values an exploit candidate at a lower quantile of its posterior once
+    /// the gate says the posterior's spread can be believed. A shut gate, a
+    /// non-exploit candidate or a non-positive spread leaves the term `None`.
+    #[must_use]
+    pub fn with_uncertainty_penalty(
+        mut self,
+        gate: &crate::uncertainty_gate::UncertaintyGate,
+    ) -> Self {
+        if gate.open
+            && self.decision_mode == DecisionMode::Exploit
+            && self.uncertainty.is_finite()
+            && self.uncertainty > 0.0
+        {
+            self.uncertainty_penalty =
+                Some(-crate::uncertainty_gate::LOWER_QUANTILE_Z * self.uncertainty);
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -517,6 +551,7 @@ mod tests {
             economic_value_fans: None,
             revenue_model_source: None,
             harm_fans: None,
+            uncertainty_penalty: None,
             decision_mode: DecisionMode::Exploit,
         };
         // total = 5.0 + (-0.2) + (-1.0) = 3.8
@@ -542,10 +577,44 @@ mod tests {
             economic_value_fans: None,
             revenue_model_source: None,
             harm_fans: None,
+            uncertainty_penalty: None,
             decision_mode: DecisionMode::Exploit,
         };
         // total = 5.0 + 0.0 + (-1.0) = 4.0
         assert!((dv.total() - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_uncertainty_penalty_waits_for_the_gate_and_spares_exploration() {
+        use crate::uncertainty_gate::{IntervalCoverage, LOWER_QUANTILE_Z, uncertainty_gate};
+        let stats = make_stats(10.0, 4.0, 20);
+        let shut = uncertainty_gate(&IntervalCoverage::default());
+        let open = uncertainty_gate(&IntervalCoverage {
+            n: 200,
+            within_80: 160,
+            sum_z_sq: 200.0,
+        });
+        let exploit =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Exploit);
+        assert_eq!(
+            exploit
+                .clone()
+                .with_uncertainty_penalty(&shut)
+                .uncertainty_penalty,
+            None
+        );
+        let penalised = exploit.clone().with_uncertainty_penalty(&open);
+        let penalty = penalised
+            .uncertainty_penalty
+            .expect("open gate prices the spread");
+        assert!((penalty + LOWER_QUANTILE_Z * exploit.uncertainty).abs() < 1e-9);
+        assert!((penalised.total() - (exploit.total() + penalty)).abs() < 1e-9);
+        let explore =
+            DecisionValue::from_stats(&stats, ResourceCost::configured(1.0), DecisionMode::Explore);
+        assert_eq!(
+            explore.with_uncertainty_penalty(&open).uncertainty_penalty,
+            None
+        );
     }
 
     #[test]
@@ -691,6 +760,7 @@ mod tests {
             economic_value_fans: None,
             revenue_model_source: None,
             harm_fans: None,
+            uncertainty_penalty: None,
             decision_mode: DecisionMode::Explore,
         };
         assert!(
@@ -741,6 +811,7 @@ mod tests {
             economic_value_fans: None,
             revenue_model_source: None,
             harm_fans: None,
+            uncertainty_penalty: None,
             decision_mode: DecisionMode::Exploit,
         };
         let json = serde_json::to_string(&dv).unwrap();

@@ -113,7 +113,15 @@ Three things, small on purpose, in the places the contract names.
      execution-health multiplier as the base, so a cautious or degraded brain
      stays so under a deadline, and a goal never shrinks the base. Every
      candidate still has to clear `min_marginal_value` on its own, and WAIT
-     still competes: more slots, not lower standards.
+     still competes: more slots, not lower standards. The raised slots are
+     also narrower than the base ones: past the base, a slot goes only to an
+     audience with a measured record of fans who stayed (a community whose
+     conversions are still active and consented, or the band's own channels
+     when any of them has one), or to an experiment. Losing is when estimates
+     are least trustworthy, so the extra capacity goes where the record is,
+     not to more of the same guesses. This is a slot rule inside the
+     optimizer (`proven_only_beyond`), set by the caller; the optimizer never
+     sees the goal.
    - **Exploration allocation.** Behind withholds the metacognition exploration
      boost on the EFE weights, so candidate generation leans on what is known
      to work. It changes which candidates rank first for generation; it does

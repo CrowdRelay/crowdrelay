@@ -1110,6 +1110,13 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         github_registry_sync_shutdown,
     )
     .context("invalid github registry sync worker configuration")?;
+    crowdrelay_worker::youtube_replies::YoutubeRepliesWorker::spawn_if_configured(
+        &mut runtime_tasks,
+        database.clone(),
+        workspace_id.into_uuid(),
+        config.response_encryption_key.clone(),
+        gmail_contacts_sync_shutdown.clone(),
+    );
     spawn_named(&mut runtime_tasks, "gmail contacts sync", async move {
         let _ = gmail_contacts_sync.run(gmail_contacts_sync_shutdown).await;
     });

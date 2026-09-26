@@ -52,6 +52,7 @@ include!("ops/outcomes.rs");
 include!("ops/outcomes_pg_tests.rs");
 include!("ops/goal.rs");
 include!("ops/goal_pg_tests.rs");
+include!("ops/hooks.rs");
 include!("ops/intelligence.rs");
 include!("ops/processes.rs");
 

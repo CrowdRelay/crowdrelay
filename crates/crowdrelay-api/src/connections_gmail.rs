@@ -19,14 +19,35 @@ use serde::Deserialize;
 
 use crate::{Problem, request_id};
 
-const STATE_COOKIE: &str = "gmail_oauth_state";
 const STATE_COOKIE_MAX_AGE: &str = "Max-Age=600";
 const STATE_COOKIE_FLAGS: &str = "HttpOnly; Secure; SameSite=Lax; Path=/";
 
-/// Read-only Gmail access + enough identity to name the account.
-const GMAIL_SCOPES: &str = "openid email https://www.googleapis.com/auth/gmail.readonly";
+/// One Google grant: the connection platform its tokens are stored and
+/// encrypted under, the scopes it asks for, and the state cookie that binds
+/// the callback to the browser that started it. Each grant is separate on
+/// purpose — connecting one must never silently grant another's scopes.
+pub(crate) struct GoogleGrant {
+    pub platform: &'static str,
+    pub scopes: &'static str,
+    pub state_cookie: &'static str,
+    pub label: &'static str,
+}
 
-const ALLOWED_POST_REDIRECTS: &[&str] = &["/connections", "/connections/gmail", "/audience", "/"];
+/// Read-only Gmail access + enough identity to name the account.
+const GMAIL: GoogleGrant = GoogleGrant {
+    platform: "gmail",
+    scopes: "openid email https://www.googleapis.com/auth/gmail.readonly",
+    state_cookie: "gmail_oauth_state",
+    label: "Gmail",
+};
+
+const ALLOWED_POST_REDIRECTS: &[&str] = &[
+    "/connections",
+    "/connections/gmail",
+    "/connections/youtube",
+    "/audience",
+    "/",
+];
 
 fn validate_post_redirect(path: &str) -> &str {
     if ALLOWED_POST_REDIRECTS.contains(&path) {
@@ -45,7 +66,7 @@ fn validate_post_redirect(path: &str) -> &str {
 }
 
 #[derive(Deserialize)]
-pub struct AuthorizeParams {
+pub(crate) struct AuthorizeParams {
     redirect: Option<String>,
 }
 
@@ -67,12 +88,30 @@ pub async fn authorize(
     Query(params): Query<AuthorizeParams>,
     headers: HeaderMap,
 ) -> Response {
-    let request_id_value = request_id(&headers);
+    authorize_grant(&GMAIL, &state, params, &headers)
+}
+
+/// Handles the Gmail OAuth callback.
+pub async fn callback(
+    State(state): State<crate::AppState>,
+    Query(params): Query<CallbackParams>,
+    headers: HeaderMap,
+) -> Response {
+    callback_grant(&GMAIL, &state, params, &headers).await
+}
+
+pub(crate) fn authorize_grant(
+    grant: &GoogleGrant,
+    state: &crate::AppState,
+    params: AuthorizeParams,
+    headers: &HeaderMap,
+) -> Response {
+    let request_id_value = request_id(headers);
     let Some(client_id) = google_client_id() else {
         return Problem::service_unavailable(request_id_value).into_response();
     };
     let redirect_uri =
-        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), "gmail");
+        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), grant.platform);
     let state = uuid::Uuid::new_v4().to_string();
 
     let post_redirect = params
@@ -87,11 +126,13 @@ pub async fn authorize(
          &redirect_uri={}&response_type=code\
          &scope={}&access_type=offline&prompt=consent&state={state}",
         urlencoding(&redirect_uri),
-        urlencoding(GMAIL_SCOPES),
+        urlencoding(grant.scopes),
     );
 
-    let cookie =
-        format!("{STATE_COOKIE}={state_value}; {STATE_COOKIE_MAX_AGE}; {STATE_COOKIE_FLAGS}");
+    let cookie = format!(
+        "{}={state_value}; {STATE_COOKIE_MAX_AGE}; {STATE_COOKIE_FLAGS}",
+        grant.state_cookie
+    );
 
     (
         StatusCode::FOUND,
@@ -104,20 +145,21 @@ pub async fn authorize(
 }
 
 #[derive(Deserialize)]
-pub struct CallbackParams {
+pub(crate) struct CallbackParams {
     code: String,
     state: String,
 }
 
-/// Handles the OAuth callback. Verifies the state cookie, exchanges the
-/// code, resolves the Google user id via userinfo, and stores encrypted
-/// tokens on platform 'gmail'.
-pub async fn callback(
-    State(state): State<crate::AppState>,
-    Query(params): Query<CallbackParams>,
-    headers: HeaderMap,
+/// Handles a grant's OAuth callback. Verifies the state cookie, exchanges
+/// the code, resolves the Google user id via userinfo, and stores encrypted
+/// tokens on the grant's platform.
+pub(crate) async fn callback_grant(
+    grant: &GoogleGrant,
+    state: &crate::AppState,
+    params: CallbackParams,
+    headers: &HeaderMap,
 ) -> Response {
-    let request_id_value = request_id(&headers);
+    let request_id_value = request_id(headers);
 
     let cookie_value = headers
         .get(axum::http::header::COOKIE)
@@ -125,7 +167,7 @@ pub async fn callback(
         .and_then(|cookies| {
             cookies
                 .split(';')
-                .find_map(|c| c.trim().strip_prefix(&format!("{STATE_COOKIE}=")))
+                .find_map(|c| c.trim().strip_prefix(&format!("{}=", grant.state_cookie)))
         });
 
     let Some(stored_state) = cookie_value else {
@@ -141,7 +183,7 @@ pub async fn callback(
         return Problem::service_unavailable(request_id_value).into_response();
     };
     let redirect_uri =
-        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), "gmail");
+        crate::oauth_redirect::oauth_redirect_uri(state.public_api_origin.as_ref(), grant.platform);
 
     let response = match state
         .http_client
@@ -225,25 +267,26 @@ pub async fn callback(
     let repo = crowdrelay_infra::fanbase::PostgresFanbaseRepository::new(state.database.clone())
         .with_encryption_key(state.response_encryption_key.clone());
     if let Err(error) = repo
-        .upsert_gmail_connection(
+        .upsert_google_grant(
+            grant.platform,
             workspace_id,
             &google_user_id,
             access_token,
             refresh_token,
             expires_at,
-            GMAIL_SCOPES,
-            "Gmail",
+            grant.scopes,
+            grant.label,
         )
         .await
     {
-        tracing::error!(error = %error, "failed to store Gmail connection");
+        tracing::error!(error = %error, platform = grant.platform, "failed to store Google connection");
         return Problem::service_unavailable(request_id_value).into_response();
     }
 
-    tracing::info!(google_user_id = %google_user_id, "Gmail connection established");
+    tracing::info!(google_user_id = %google_user_id, platform = grant.platform, "Google connection established");
 
     let validated_redirect = validate_post_redirect(post_redirect);
-    let clear_cookie = format!("{STATE_COOKIE}=; Max-Age=0; {STATE_COOKIE_FLAGS}");
+    let clear_cookie = format!("{}=; Max-Age=0; {STATE_COOKIE_FLAGS}", grant.state_cookie);
     let redirect_url = format!("https://control.crowdrelay.music{validated_redirect}");
 
     (

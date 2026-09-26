@@ -502,6 +502,16 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                 None,
                 earned_quality.as_str(),
             );
+            // The decision's own Y30 posterior against what happened — the
+            // record the uncertainty gate reads. `y30_fans` is the same
+            // incremental quantity the posterior estimated.
+            if let Some(posterior) = ev.decision_posterior {
+                model.calibration.y30_interval.record(
+                    posterior.mean_y30,
+                    posterior.std_y30,
+                    y30_fans,
+                );
+            }
             // Y14→Y30 bridge: update when both outcomes are available.
             //
             // Both sides must carry the same contrast. `y30_fans` has the
