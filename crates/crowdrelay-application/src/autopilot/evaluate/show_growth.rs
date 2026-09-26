@@ -3,7 +3,7 @@
 
 use crowdrelay_domain::show_growth::{
     ShowGrowthDecision, ShowGrowthHoldReason, ShowGrowthLever, ShowGrowthPolicy,
-    ShowGrowthSnapshot, evaluate_show_growth,
+    ShowGrowthSnapshot, evaluate_show_growth_serviceable,
 };
 use time::OffsetDateTime;
 
@@ -28,12 +28,18 @@ pub(super) fn show_growth_candidates(
     policy: &AutopilotPolicy,
     evidence: ContextEvidence,
     standings: &std::collections::HashMap<String, Standing>,
+    external_executor_live: bool,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ShowGrowth(domain_policy) = policy.config else {
         return Ok(Vec::new());
     };
-    match evaluate_show_growth(snapshot, domain_policy, now) {
+    // Levers only an external executor can carry out are passed over while
+    // none is live — see `evaluate_show_growth_serviceable`.
+    let evaluate = |snapshot| {
+        evaluate_show_growth_serviceable(snapshot, domain_policy, now, external_executor_live).0
+    };
+    match evaluate(snapshot) {
         ShowGrowthDecision::Request {
             lever,
             confidence,
@@ -64,7 +70,7 @@ pub(super) fn show_growth_candidates(
                 lever,
                 confidence,
                 send_at,
-            } = evaluate_show_growth(masked, domain_policy, now)
+            } = evaluate(masked)
             {
                 candidates.push(request_candidate(
                     snapshot,

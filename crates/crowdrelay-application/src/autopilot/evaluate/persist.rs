@@ -35,9 +35,16 @@ where
             .find_map(|(known, level)| (*known == class).then_some(*level))
             // An absent row is the safest ceiling, never an absent limit.
             .unwrap_or_else(|| class.safest_ceiling());
+        // What held this decision below the disposition its detector asked
+        // for, in the order the limits apply. Recorded on the decision's
+        // policy snapshot, so "why did it not act" is one read of the row
+        // rather than a reconstruction of seven interacting budgets — every
+        // starved lever found on 2026-09-25/26 took an afternoon to trace.
+        let mut held_by: Vec<String> = Vec::new();
         let clamped = clamp_disposition(candidate.disposition, ceiling);
         if clamped != candidate.disposition {
             report.actions_gated = report.actions_gated.saturating_add(1);
+            held_by.push(format!("class_ceiling:{}", class.as_str()));
         }
 
         // The volume limits apply after the class ceiling, never instead of it:
@@ -77,6 +84,7 @@ where
                 EnvelopeVerdict::Allow => clamped,
                 EnvelopeVerdict::Hold(block) => {
                     report.actions_held = report.actions_held.saturating_add(1);
+                    held_by.push(format!("envelope:{}", block.as_str()));
                     // A rehearsal produces the decision and its evidence but
                     // nothing anybody can press send on. Every other block still
                     // offers the work to a human, because "the budget is spent" is
@@ -105,13 +113,21 @@ where
             && !check_attention(limits.envelope, limits.usage).may_ask()
         {
             report.asks_withheld = report.asks_withheld.saturating_add(1);
+            held_by.push("attention_budget".to_owned());
             clamp_disposition(clamped, AutonomyLevel::Recommend)
         } else {
             clamped
         };
 
+        let mut policy_snapshot = candidate.policy_snapshot.clone();
+        if !held_by.is_empty()
+            && let Some(object) = policy_snapshot.as_object_mut()
+        {
+            object.insert("held_by".to_owned(), serde_json::json!(held_by));
+        }
         let candidate = &DecisionCandidate {
             disposition: clamped,
+            policy_snapshot,
             ..candidate.clone()
         };
         let persisted = match self

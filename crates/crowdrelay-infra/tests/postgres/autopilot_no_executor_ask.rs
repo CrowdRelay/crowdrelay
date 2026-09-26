@@ -198,6 +198,19 @@ async fn work_no_executor_can_perform_is_recommended_not_asked()
         decision_disposition(&pool, ws, &withheld.decision_key).await?,
         "recommend_only"
     );
+    let held_by: serde_json::Value = sqlx::query_scalar(
+        "SELECT policy_snapshot->'held_by' FROM autopilot_decisions
+         WHERE workspace_id=$1 AND decision_key=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(&withheld.decision_key)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        held_by,
+        serde_json::json!(["no_executor:outreach.send"]),
+        "the decision says what held it"
+    );
     assert_eq!(
         action_status(&pool, ws, &withheld.action_idempotency_key).await?,
         None,

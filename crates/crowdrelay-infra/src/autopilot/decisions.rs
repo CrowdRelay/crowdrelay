@@ -198,6 +198,14 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .collect())
     }
 
+    async fn capability_serviceable(
+        &self,
+        workspace_id: WorkspaceId,
+        capability: &str,
+    ) -> Result<bool, RepositoryError> {
+        super::capability_is_serviceable(&self.pool, workspace_id, capability).await
+    }
+
     async fn load_experiment_snapshots(
         &self,
         workspace_id: WorkspaceId,

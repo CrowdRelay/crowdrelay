@@ -701,6 +701,10 @@ where
                         .repository
                         .load_action_standings(self.workspace_id)
                         .await?;
+                    let external_executor_live = self
+                        .repository
+                        .capability_serviceable(self.workspace_id, "show.growth")
+                        .await?;
                     for snapshot in snapshots {
                         // One snapshot can emit two candidates: the §4e-2
                         // refusal of an unreciprocated crossbill lever, and —
@@ -711,6 +715,7 @@ where
                             &policy,
                             evidence.for_context(policy.context),
                             &standings,
+                            external_executor_live,
                             now,
                         )? {
                             self.persist(&candidate, &mut limits, &mut report).await?;

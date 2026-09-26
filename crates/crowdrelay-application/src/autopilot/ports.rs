@@ -218,6 +218,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         since: OffsetDateTime,
     ) -> Result<Vec<crowdrelay_domain::content_supply::RecentRelayPush>, RepositoryError>;
 
+    /// Whether a live executor advertises `capability` — `true` when no
+    /// executor has ever registered, the fail-open rule every executor gate
+    /// shares.
+    async fn capability_serviceable(
+        &self,
+        workspace_id: WorkspaceId,
+        capability: &str,
+    ) -> Result<bool, RepositoryError>;
+
     async fn load_experiment_snapshots(
         &self,
         workspace_id: WorkspaceId,

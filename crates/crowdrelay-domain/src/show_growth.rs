@@ -29,6 +29,29 @@ pub struct ShowGrowthHistory {
     pub post_show_recap_requested: bool,
 }
 
+impl ShowGrowthHistory {
+    /// Marks one lever as already requested. Used to mask a lever out of
+    /// the ladder so the levers after it are evaluated on their own
+    /// schedule.
+    pub const fn mark_requested(&mut self, lever: ShowGrowthLever) {
+        match lever {
+            ShowGrowthLever::CanonicalLinkSetup => self.canonical_link_setup_requested = true,
+            ShowGrowthLever::FreeListingSweep => self.free_listing_sweep_requested = true,
+            ShowGrowthLever::AudienceCaptureSetup => self.audience_capture_setup_requested = true,
+            ShowGrowthLever::PartnerCrossPromo => self.partner_cross_promo_requested = true,
+            ShowGrowthLever::GrassrootsSceneRelay => self.grassroots_scene_relay_requested = true,
+            ShowGrowthLever::FanAmbassadors => self.fan_ambassadors_requested = true,
+            ShowGrowthLever::SocialProofRelay => self.social_proof_relay_requested = true,
+            ShowGrowthLever::FreeFanChannelPush => self.free_fan_channel_push_requested = true,
+            ShowGrowthLever::MerchBuyerOffer => self.merch_buyer_offer_requested = true,
+            ShowGrowthLever::HighIntentLastMile => self.high_intent_last_mile_requested = true,
+            ShowGrowthLever::PostShowMerchFollowUp => self.post_show_merch_requested = true,
+            ShowGrowthLever::PostShowRecap => self.post_show_recap_requested = true,
+            ShowGrowthLever::PostShowFollowAsk => self.post_show_follow_ask_requested = true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ShowGrowthSnapshot {
     pub event_id: EventId,
@@ -485,6 +508,46 @@ pub fn evaluate_show_growth(
     ShowGrowthDecision::Hold(ShowGrowthHoldReason::NotDue)
 }
 
+/// [`evaluate_show_growth`], passing over levers nothing can carry out.
+///
+/// The ladder is sequential: the first due lever that has not been
+/// requested is the only one proposed. A lever that needs the external
+/// `show.growth` executor, in a workspace where none is live, is never
+/// requested, because no action is written for work nothing can perform.
+/// Evaluated plainly, the ladder would stop at that lever for good. For the
+/// Virya show in Gorzów on 2026-10-17, the tracked link, the push to fans in
+/// the city and the last-mile push to interested fans all sat behind a free
+/// listing sweep that no executor could run.
+///
+/// With `external_executor_live` false, each external lever that comes up is
+/// masked and the ladder is evaluated again, so the first-party levers after
+/// it are proposed on their own schedule. The masked levers are returned too,
+/// so the caller can say what was passed over.
+#[must_use]
+pub fn evaluate_show_growth_serviceable(
+    snapshot: ShowGrowthSnapshot,
+    policy: ShowGrowthPolicy,
+    now: OffsetDateTime,
+    external_executor_live: bool,
+) -> (ShowGrowthDecision, Vec<ShowGrowthLever>) {
+    let mut masked = snapshot;
+    let mut passed_over = Vec::new();
+    loop {
+        let decision = evaluate_show_growth(masked, policy, now);
+        match decision {
+            ShowGrowthDecision::Request { lever, .. }
+                if !external_executor_live
+                    && !lever.is_first_party()
+                    && !passed_over.contains(&lever) =>
+            {
+                passed_over.push(lever);
+                masked.history.mark_requested(lever);
+            }
+            _ => return (decision, passed_over),
+        }
+    }
+}
+
 fn request(lever: ShowGrowthLever, basis_points: u16) -> ShowGrowthDecision {
     request_at(lever, basis_points, None)
 }
@@ -557,6 +620,10 @@ const fn valid_policy(policy: ShowGrowthPolicy) -> bool {
         && policy.target_sold_14d_basis_points <= policy.target_sold_7d_basis_points
         && policy.target_sold_7d_basis_points <= 10_000
 }
+
+#[cfg(test)]
+#[path = "show_growth_serviceable_tests.rs"]
+mod serviceable_tests;
 
 #[cfg(test)]
 mod tests {

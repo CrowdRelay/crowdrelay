@@ -611,6 +611,10 @@ pub(in crate::autopilot) async fn load_beacon_campaign_snapshots(
 /// the same three.
 const MAX_RELAY_COMMUNITIES_PER_POST: i64 = 3;
 
+/// Community drafts that may wait for a person at once before the relay
+/// stops drafting more. See `load_relay_community_targets`.
+const MAX_WAITING_COMMUNITY_DRAFTS: i64 = 2;
+
 /// The communities a synced band post may be relayed into. The predicate is
 /// the same one the community executor re-checks at post time — admitted by
 /// screening and promoted — so a relay can only name a place the second wall
@@ -626,6 +630,28 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<CommunityRelayTarget>, RepositoryError> {
+    // Backpressure: no new drafts while earlier ones wait for somebody to
+    // post them. Every relay drafted per community costs an agent run and,
+    // once drafted, an approval ask — and with no automatic publisher the
+    // queue only empties by hand. In the week to 2026-09-26 the relay spent
+    // twenty agent runs and forty-one approval asks on community drafts;
+    // one community post had ever gone out and ten had failed. The owned
+    // push to fans is unaffected: it does not read this list.
+    let waiting = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM community_posts
+        WHERE workspace_id = $1
+          AND status IN ('pending', 'awaiting_manual_post')
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    if waiting >= MAX_WAITING_COMMUNITY_DRAFTS {
+        return Ok(Vec::new());
+    }
     let rows = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
         r#"
         SELECT t.id, t.subreddit, t.language

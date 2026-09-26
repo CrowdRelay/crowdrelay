@@ -652,6 +652,13 @@ fn outreach_candidate(
             // the sender identity, target name and pitch live in Postgres.
             draft: crowdrelay_domain::outreach_letter::OutreachLetter::default(),
         },
+        // The observation is keyed by its day, not its instant. The supply
+        // refresh re-observes live opportunities every cycle, so an instant
+        // made every five-minute cycle a new decision for every candidate:
+        // 18,757 `request_relationship_outreach` rows in the day to
+        // 2026-09-26, against about 150 decisions a day of every kind the
+        // week before. A day still lets a re-observed opportunity be decided
+        // afresh; the action key below is what dedupes the pitch.
         decision_key: format!(
             "decision:outreach:v{}:{}:{}:tv{}:{:?}:{}:{}",
             policy.version,
@@ -660,7 +667,7 @@ fn outreach_candidate(
             snapshot.target_version,
             phase,
             snapshot.relevance_basis_points,
-            snapshot.observed_at.unix_timestamp()
+            snapshot.observed_at.date()
         ),
         // The wave is part of the attempt's identity: a pitch that died with
         // one wave must not dedupe the re-draft into next month's, or a
