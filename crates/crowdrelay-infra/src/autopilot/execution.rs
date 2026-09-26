@@ -116,15 +116,10 @@ pub(super) async fn schedule_effect_measurement(
         // An agent decides on a season's timescale — thirty days is where a
         // reply is still this application's answer, and the reply lives on
         // the agent's own interaction ledger, not the outreach targets'.
-        AutopilotActionPayload::RequestBookingAgentApproach { agent_id, .. } => plans.push((
-            AutopilotMeasurementKind::BookingAgentReply30d,
-            agent_id.into_uuid(),
-            0.0,
-            now + time::Duration::days(30),
-        )),
-        // A reply measures the same counter on the same subject — did the
-        // conversation continue after the answer.
-        AutopilotActionPayload::RequestBookingAgentReply { agent_id, .. } => plans.push((
+        // Approach and reply measure the same counter on the same subject:
+        // did the conversation continue.
+        AutopilotActionPayload::RequestBookingAgentApproach { agent_id, .. }
+        | AutopilotActionPayload::RequestBookingAgentReply { agent_id, .. } => plans.push((
             AutopilotMeasurementKind::BookingAgentReply30d,
             agent_id.into_uuid(),
             0.0,
@@ -975,34 +970,6 @@ pub(super) async fn schedule_effect_measurement(
         }
     }
 
-    for (kind, subject_id, baseline_value, due_at) in plans {
-        if !baseline_value.is_finite() || baseline_value < 0.0 {
-            return Err(RepositoryError::Unexpected);
-        }
-        sqlx::query(
-            r#"
-            INSERT INTO autopilot_measurements (
-                id, workspace_id, action_id, measurement_kind, subject_id,
-                action_finished_at, baseline_value, due_at, available_at,
-                trace_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
-                (SELECT trace_id FROM autopilot_actions WHERE id = $3)
-            )
-            ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id) DO NOTHING
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(workspace_id.into_uuid())
-        .bind(action_id.into_uuid())
-        .bind(kind.as_str())
-        .bind(subject_id)
-        .bind(now)
-        .bind(baseline_value)
-        .bind(due_at)
-        .execute(&mut **transaction)
-        .await
-        .map_err(map_sqlx)?;
-    }
-    Ok(())
+    insert_measurement_plans(transaction, workspace_id, action_id, now, plans).await
 }
 

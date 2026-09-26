@@ -236,3 +236,43 @@ fn wave_reply_measurement(
         now + time::Duration::days(30),
     )
 }
+
+/// Persists the planned measurements — one idempotent row per
+/// (action, kind, subject), each inheriting the action's trace.
+async fn insert_measurement_plans(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    now: OffsetDateTime,
+    plans: Vec<(AutopilotMeasurementKind, uuid::Uuid, f64, OffsetDateTime)>,
+) -> Result<(), RepositoryError> {
+    for (kind, subject_id, baseline_value, due_at) in plans {
+        if !baseline_value.is_finite() || baseline_value < 0.0 {
+            return Err(RepositoryError::Unexpected);
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_measurements (
+                id, workspace_id, action_id, measurement_kind, subject_id,
+                action_finished_at, baseline_value, due_at, available_at,
+                trace_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,
+                (SELECT trace_id FROM autopilot_actions WHERE id = $3)
+            )
+            ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id) DO NOTHING
+            "#,
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(action_id.into_uuid())
+        .bind(kind.as_str())
+        .bind(subject_id)
+        .bind(now)
+        .bind(baseline_value)
+        .bind(due_at)
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+    }
+    Ok(())
+}
