@@ -59,6 +59,7 @@ pub mod efe;
 pub mod evidence;
 pub mod experiment;
 pub mod exploration;
+pub mod goal;
 pub mod hypothesis;
 pub mod metric_posterior;
 pub mod opportunity;
@@ -114,6 +115,7 @@ pub use experiment::{
     ProvenanceEventKind, TreatmentAssignment,
 };
 pub use exploration::{CROSS_TEMPLATE_FACTOR, ExplorationMemory, VISIT_DECAY, context_hash};
+pub use goal::{ActiveObjective, GoalConstraint, GoalPace, GoalPosture};
 pub use metric_posterior::MetricPosterior;
 pub use opportunity::{OpportunityAction, OpportunityId};
 pub use portfolio::{

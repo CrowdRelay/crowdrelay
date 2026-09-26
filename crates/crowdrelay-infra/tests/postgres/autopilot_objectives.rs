@@ -10,7 +10,9 @@ use std::time::Duration;
 use crate::common;
 use crowdrelay_application::{
     IdempotencyKey,
-    autopilot::{AutopilotObjectiveRepository, DeclareGrowthObjective},
+    autopilot::{
+        AutopilotDecisionRepository, AutopilotObjectiveRepository, DeclareGrowthObjective,
+    },
 };
 use crowdrelay_domain::{
     WorkspaceId,
@@ -128,6 +130,117 @@ async fn a_target_freezes_its_baseline_declares_once_and_is_read_back_from_the_s
         1,
         "and it is kept: a target that was declared and removed is what a review needs to see"
     );
+    Ok(())
+}
+
+/// The brain sees the objective the operator sees.
+///
+/// Declared ten days ago at 100 with a target of 300 in thirty days, the series
+/// read 130 yesterday: 30 in nine days projects to 200, so the objective is
+/// `Behind` by 170. The snapshot loader must carry exactly that verdict on
+/// `WorldModel.objective` — the same read the objectives endpoint serves, not
+/// a second assessment — or the goal cannot change a decision.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_behind_objective_reaches_the_world_model() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("objective-brain-{suffix}"))
+        .bind("Objective reaches the brain")
+        .execute(&pool)
+        .await?;
+    let series_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO growth_metric_series (id, workspace_id, platform, metric_key, display_name)
+         VALUES ($1,$2,'bandsintown','trackers','Bandsintown trackers')",
+    )
+    .bind(series_id)
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        "INSERT INTO growth_metric_points (workspace_id, series_id, captured_at, value, source)
+         VALUES ($1,$2,$3,130,'test')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(series_id)
+    .bind(now - time::Duration::days(1))
+    .execute(&pool)
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    // Nothing declared: the brain has no goal, not a zero one.
+    let before = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    assert!(
+        before
+            .iter()
+            .all(|snapshot| snapshot.world_model.objective.is_none())
+    );
+
+    let declared = repository
+        .declare_growth_objective(
+            workspace_id,
+            DeclareGrowthObjective {
+                platform: MetricPlatform::Bandsintown,
+                metric_key: "trackers".to_owned(),
+                scope: ObjectiveScope::Workspace,
+                direction: MetricDirection::HigherIsBetter,
+                target_value: 300,
+                deadline: now + time::Duration::days(20),
+                declared_by: "band".to_owned(),
+            },
+            &key(),
+            None,
+        )
+        .await?;
+    // Put the declaration ten days back at a baseline of 100, so a pace exists.
+    sqlx::query(
+        "UPDATE growth_objectives SET declared_at = $2, baseline_value = 100
+         WHERE id = $1",
+    )
+    .bind(declared.objective_id)
+    .bind(now - time::Duration::days(10))
+    .execute(&pool)
+    .await?;
+
+    let operator = repository.load_growth_objectives(workspace_id, now).await?;
+    let operator = operator.first().ok_or("the objective is read back")?;
+    assert_eq!(operator.state.as_str(), "behind");
+
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("at least one snapshot")?
+        .world_model;
+    let objective = world
+        .objective
+        .as_ref()
+        .ok_or("the world model carries the declared objective")?;
+    assert_eq!(objective.objective_id, declared.objective_id);
+    assert_eq!(
+        objective.state, operator.state,
+        "one verdict, two readers — the brain and the operator must agree"
+    );
+    assert!(objective.is_behind());
+    assert_eq!(objective.observed_value, Some(130));
     Ok(())
 }
 

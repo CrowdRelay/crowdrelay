@@ -28,7 +28,7 @@ use crowdrelay_domain::growth_metrics::NorthStarMetric;
 /// `signal_conversion_rate_bps`, `north_star`, `north_star_current`,
 /// `off_platform_audience`, `connected_platforms`, `fresh_platforms`,
 /// `platform_growth`, `days_to_next_event`, `has_upcoming_event`,
-/// `growth_target_progress`. These reach a decision: strategy selection,
+/// `growth_target_progress`, `objective`. These reach a decision: strategy selection,
 /// template priority, discovery planning, or the self-assessment.
 ///
 /// **Computed anyway.** `fans_this_month`, `fan_growth_rate_bps`,
@@ -153,7 +153,21 @@ pub struct WorldModel {
 
     // ── Growth target progress ──
     /// How close the brain is to its fan acquisition target this month.
+    ///
+    /// A readout. When an operator has declared an objective, `objective`
+    /// below is the goal and this monthly bucket is not a competing answer.
     pub growth_target_progress: GrowthTargetProgress,
+
+    // ── Declared objective ──
+    /// The operator's workspace objective the brain works toward this cycle,
+    /// judged by the domain's single assessment — the live one with the nearest
+    /// deadline. `None` when nothing is declared or nothing declared is live.
+    ///
+    /// Read by the growth-intelligence evaluator, and only in the two places
+    /// `docs/GOAL_DIRECTED_CONTROL.md` allows: the portfolio's dispatch
+    /// ceiling and the exploration posture. Never `DecisionValue::total()`.
+    #[serde(default)]
+    pub objective: Option<crate::goal::ActiveObjective>,
 }
 
 /// The trend of fan growth over time. The brain uses this to decide

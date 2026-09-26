@@ -611,7 +611,15 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             &experimental_quality,
             sizing_multiplier,
             &causal_model.value_exchange,
+            snapshots
+                .first()
+                .and_then(|snapshot| snapshot.world_model.objective.as_ref()),
+            now,
         );
+        let goal = run.goal;
+        if let Some(goal) = &goal {
+            report.gi_dispatch_log.push(goal.summary());
+        }
         let selection = run.selection;
         // 5.1: publish the pool this selection was drawn from. The roster's
         // pooled read re-ranks every member act's rows under the
@@ -649,6 +657,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             policy.version,
             &belief_origin,
             causal_model.value_exchange.minor_per_fan(),
+            goal.as_ref(),
         );
         // What learning did to this decision, recorded on the decision itself.
         // Without it the strategy is visible and its provenance is not, so

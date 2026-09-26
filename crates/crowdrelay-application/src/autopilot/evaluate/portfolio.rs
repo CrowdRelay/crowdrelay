@@ -12,9 +12,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crowdrelay_brain::{
-    DecisionMode, DecisionValue, EfeSignal, GrowthIntelligencePolicy, OpportunityAction,
-    OpportunityId, PortfolioCandidate, PortfolioConfig, PortfolioOptimizer, PortfolioSelection,
-    ResourceCost, WaitCandidateValue, context_hash,
+    ActiveObjective, DecisionMode, DecisionValue, EfeSignal, GoalConstraint,
+    GrowthIntelligencePolicy, OpportunityAction, OpportunityId, PortfolioCandidate,
+    PortfolioConfig, PortfolioOptimizer, PortfolioSelection, ResourceCost, WaitCandidateValue,
+    context_hash,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
@@ -103,8 +104,12 @@ fn template_cost(policy: &GrowthIntelligencePolicy, template_id: &str) -> Resour
 pub(super) struct PortfolioRun {
     pub selection: PortfolioSelection,
     pub pool: Vec<crate::autopilot::ports::PortfolioPoolEntry>,
+    /// What the operator's objective did to this run's dispatch ceiling.
+    /// `None` when no live objective has a pace.
+    pub goal: Option<GoalConstraint>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn select_portfolio(
     scored: &[ScoredCandidate],
     policy: &GrowthIntelligencePolicy,
@@ -113,6 +118,8 @@ pub(super) fn select_portfolio(
     experimental_quality: &std::collections::HashMap<String, crowdrelay_brain::EvidenceQuality>,
     sizing_multiplier: f64,
     exchange: &crowdrelay_brain::ValueExchange,
+    objective: Option<&ActiveObjective>,
+    now: time::OffsetDateTime,
 ) -> PortfolioRun {
     let candidates: Vec<PortfolioCandidate> = scored
         .iter()
@@ -229,8 +236,26 @@ pub(super) fn select_portfolio(
         .round()
         .max(1.0) as u32)
         .max(1);
+    // The operator's objective, as a constraint. Behind, the gap between the
+    // pace the deadline needs and the pace observed raises the ceiling —
+    // sized by the same multiplier, so a cautious or degraded brain stays
+    // cautious — and never past the operator's `goal_max_dispatches`.
+    //
+    // Only the ceiling moves. Every candidate still clears min_marginal_value
+    // on its own, WAIT still competes, and nothing here enters
+    // DecisionValue::total(): a deadline does not make a bad action better.
+    // See docs/GOAL_DIRECTED_CONTROL.md.
+    let goal_ceiling = ((f64::from(policy.goal_max_dispatches) * sizing_multiplier)
+        .round()
+        .max(1.0) as u32)
+        .max(1);
+    let goal = objective.and_then(|objective| {
+        GoalConstraint::apply(objective, now, scaled_max_dispatches, goal_ceiling)
+    });
     let config = PortfolioConfig {
-        max_dispatches: scaled_max_dispatches,
+        max_dispatches: goal
+            .as_ref()
+            .map_or(scaled_max_dispatches, |goal| goal.applied_max_dispatches),
         experimental_dispatch_budget: policy.experimental_dispatch_budget,
         ..Default::default()
     };
@@ -276,7 +301,11 @@ pub(super) fn select_portfolio(
             }
         })
         .collect();
-    PortfolioRun { selection, pool }
+    PortfolioRun {
+        selection,
+        pool,
+        goal,
+    }
 }
 
 /// Extracts the selected decision keys from a portfolio selection for
@@ -317,7 +346,19 @@ pub(super) fn decision_provenance(
     policy_version: i64,
     belief: &crate::autopilot::BeliefStateOrigin,
     exchange_minor_per_fan: Option<f64>,
+    goal: Option<&GoalConstraint>,
 ) -> HashMap<String, serde_json::Value> {
+    // The goal block is the same for every decision in the cycle: which
+    // objective, its state, the pace it implied and what that did to the
+    // ceiling — beside what the selection this cycle expects to produce, in
+    // expected Y30 fans. The expected trajectory is that number, the
+    // portfolio's own, not a second estimator's.
+    let goal = goal.map(|goal| {
+        serde_json::json!({
+            "constraint": goal,
+            "planned_y30_this_cycle": selection.total_expected_fans,
+        })
+    });
     selection
         .selected
         .iter()
@@ -380,6 +421,10 @@ pub(super) fn decision_provenance(
                         })
                         .collect::<Vec<_>>(),
                 },
+                // Null when no declared objective was live. Present, it names
+                // the one place a goal acts: the dispatch ceiling and the
+                // exploration posture, never the value above.
+                "goal": goal,
                 "identity": {
                     "optimizer": "submodular_greedy_marginal_v1",
                     "brain_version": env!("CARGO_PKG_VERSION"),
@@ -490,6 +535,62 @@ mod tests {
         );
     }
 
+    /// A declared objective that is Behind reaches the portfolio as a ceiling,
+    /// sized like the normal budget and capped by the operator's
+    /// `goal_max_dispatches` — and only as a ceiling.
+    #[test]
+    fn a_behind_objective_raises_the_dispatch_ceiling_within_the_sized_cap() {
+        use crowdrelay_domain::growth_metrics::MetricDirection;
+        use crowdrelay_domain::objectives::ObjectiveState;
+        use time::{Duration, OffsetDateTime};
+
+        let declared = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let objective = ActiveObjective {
+            objective_id: uuid::Uuid::from_u128(7),
+            platform: "signal".to_owned(),
+            metric_key: "activated_fans_30d".to_owned(),
+            direction: MetricDirection::HigherIsBetter,
+            baseline_value: 0,
+            target_value: 100,
+            observed_value: Some(10),
+            declared_at: declared,
+            deadline: declared + Duration::days(21),
+            state: ObjectiveState::Behind {
+                progress_basis_points: 1_000,
+                projected_value: 30,
+                shortfall: 90,
+            },
+        };
+        let now = declared + Duration::days(7);
+        let policy = GrowthIntelligencePolicy::default();
+        let run = |sizing: f64, objective: Option<&ActiveObjective>| {
+            select_portfolio(
+                &[],
+                &policy,
+                0,
+                WorkspaceId::from_uuid(uuid::Uuid::nil()),
+                &std::collections::HashMap::new(),
+                sizing,
+                &crowdrelay_brain::ValueExchange::default(),
+                objective,
+                now,
+            )
+        };
+
+        let full = run(1.0, Some(&objective)).goal.expect("behind has a pace");
+        assert_eq!(full.base_max_dispatches, 5);
+        assert_eq!(full.applied_max_dispatches, policy.goal_max_dispatches);
+        assert!(full.exploration_suppressed);
+
+        // A cautious brain stays cautious: the ceiling is sized too.
+        let cautious = run(0.5, Some(&objective)).goal.expect("pace");
+        assert_eq!(cautious.base_max_dispatches, 3);
+        assert_eq!(cautious.applied_max_dispatches, 5);
+
+        // No objective, no goal, no change.
+        assert!(run(1.0, None).goal.is_none());
+    }
+
     /// A historical decision explains why the winner beat the losers.
     ///
     /// A portfolio decision *is* a comparison, and only the winner used to
@@ -558,7 +659,7 @@ mod tests {
             checkpoint_updated_at: time::OffsetDateTime::UNIX_EPOCH,
             delta_evidence: 4,
         };
-        let provenance = decision_provenance(&selection, 7, &belief, Some(50_000.0));
+        let provenance = decision_provenance(&selection, 7, &belief, Some(50_000.0), None);
         let mut subject = candidate("decision:a");
         crate::autopilot::evaluate::attach_decision_provenance(
             &mut subject,
@@ -686,7 +787,7 @@ mod tests {
             checkpoint_updated_at: time::OffsetDateTime::UNIX_EPOCH,
             delta_evidence: 4,
         };
-        let provenance = decision_provenance(&selection, 7, &belief, Some(50_000.0));
+        let provenance = decision_provenance(&selection, 7, &belief, Some(50_000.0), None);
 
         let mut subject = candidate(decision_key);
         crate::autopilot::evaluate::attach_decision_provenance(
