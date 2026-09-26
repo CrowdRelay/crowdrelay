@@ -180,6 +180,13 @@ pub struct ChannelYield {
     /// Distinct visitors who clicked this channel's tracked links in the
     /// last 30 days — the early signal a conversion takes weeks to become.
     pub unique_clickers_30d: u32,
+    /// Fans this channel converted in the last 90 days who stayed: still
+    /// active, still consented to hear from the band, and meaningfully active
+    /// in the last 30 days — the North Star's own definition. A channel that
+    /// converts people who leave is a signup farm; this is what separates it
+    /// from one whose fans are still here.
+    #[serde(default)]
+    pub durable_90d: u32,
 }
 
 impl ChannelYield {
@@ -199,8 +206,12 @@ impl ChannelYield {
     /// with the unmeasured templates rather than ahead of them.
     #[must_use]
     pub fn rank_key(&self) -> RankKey {
+        // A fan who stayed counts again on top of the conversion that
+        // brought them: the North Star is fans who stay, so a channel whose
+        // arrivals remain outranks one with the same arrivals that left.
         let absolute = self
             .conversions_30d
+            .saturating_add(self.durable_90d)
             .saturating_mul(SIGNAL_VALUE_MULTIPLE)
             .saturating_add(self.unique_clickers_30d);
         (absolute > 0).then_some((0, absolute))
@@ -495,7 +506,20 @@ mod tests {
             channel: channel.to_owned(),
             conversions_30d: conversions,
             unique_clickers_30d: clickers,
+            durable_90d: 0,
         }
+    }
+
+    #[test]
+    fn a_channel_whose_fans_stayed_outranks_one_whose_fans_left() {
+        let mut stayed = yielded("telegram", 2, 0);
+        stayed.durable_90d = 2;
+        let ranked = rank_templates(PRIOR, &[], &[yielded("reddit", 3, 0), stayed]);
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-scanner"),
+            "two fans who stayed beat three who left"
+        );
     }
 
     #[test]

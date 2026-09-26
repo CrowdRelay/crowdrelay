@@ -116,7 +116,85 @@ async fn load_content_hooks(
             })
         })
         .collect();
-    Ok(json!({ "window_days": HOOK_WINDOW_DAYS, "posts": posts }))
+    let links = load_fan_links(pool, workspace_id, now).await?;
+    Ok(json!({ "window_days": HOOK_WINDOW_DAYS, "posts": posts, "links": links }))
+}
+
+/// The tracked links that brought fans over the last 90 days, and how many of
+/// those fans stayed — still active, consented to marketing (latest record)
+/// and meaningfully active in the last 30 days, the definition the channel
+/// and community rankings use. A post's own link (a story sticker, a bio
+/// link per drop) is how an owned-channel post earns credit; the view names
+/// the link's channel and creative label so the band can tell which one it
+/// was.
+async fn load_fan_links(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<Value>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i64, i64)>(
+        r#"
+        WITH converted AS (
+            SELECT DISTINCT pe.channel, pe.source_target AS slug, pe.fan_id
+            FROM fan_provenance_events AS pe
+            WHERE pe.workspace_id = $1
+              AND pe.event_kind = 'conversion'
+              AND pe.fan_id IS NOT NULL
+              AND pe.source_target IS NOT NULL
+              AND pe.occurred_at >= $2 - interval '90 days'
+        )
+        SELECT converted.channel,
+               converted.slug,
+               link.channel_creative,
+               link.destination_url,
+               COUNT(*)::bigint AS fans,
+               COUNT(*) FILTER (
+                   WHERE fan.status = 'active'
+                     AND EXISTS (
+                         SELECT 1 FROM fan_consents AS consent
+                         WHERE consent.workspace_id = fan.workspace_id
+                           AND consent.fan_id = fan.id
+                           AND consent.purpose = 'marketing'
+                           AND consent.granted
+                           AND consent.recorded_at = (
+                               SELECT max(latest.recorded_at) FROM fan_consents AS latest
+                               WHERE latest.workspace_id = fan.workspace_id
+                                 AND latest.fan_id = fan.id
+                                 AND latest.purpose = 'marketing'
+                           )
+                     )
+                     AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
+                         >= $2 - interval '30 days'
+               )::bigint AS stayed
+        FROM converted
+        JOIN fans AS fan
+          ON fan.workspace_id = $1
+         AND fan.id = converted.fan_id
+        LEFT JOIN smart_links AS link
+          ON link.workspace_id = $1
+         AND link.slug = converted.slug
+        GROUP BY 1, 2, 3, 4
+        ORDER BY stayed DESC, fans DESC, 1, 2
+        LIMIT 20
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(channel, slug, creative, destination, fans, stayed)| {
+            json!({
+                "channel": channel,
+                "slug": slug,
+                "creative": creative,
+                "destination_url": destination,
+                "fans": fans,
+                "stayed": stayed,
+            })
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -178,5 +256,6 @@ mod hooks_postgres_tests {
         assert_eq!(held["avg_watch_ms"], 6_000);
         assert_eq!(held["watch_index_bps"], 15_000);
         assert_eq!(held["opening"], "Opening line 4", "the first non-empty line");
+        assert_eq!(body["links"], json!([]), "no conversions yet, no links");
     }
 }
