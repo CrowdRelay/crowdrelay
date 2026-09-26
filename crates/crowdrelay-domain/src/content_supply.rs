@@ -133,6 +133,30 @@ pub struct PostResonance {
     pub peer_watch_median: Option<i64>,
 }
 
+/// How long an outlier stays relayable. A post that did twice the account's
+/// usual stays worth carrying for a week, not the normal three days: a
+/// community admitted later, or one the daily cap held back, still gets it.
+/// It never goes to the same community twice — the relay keys see to that.
+pub const OUTLIER_RELAY_HOURS: u32 = 168;
+
+/// Whether a post did at least twice the account's usual — by rate when the
+/// platform reported reach, by raw engagement otherwise.
+#[must_use]
+pub fn is_outlier(resonance: &PostResonance) -> bool {
+    if let (Some(rate), Some(peer_rate)) = (resonance.rate_per_mille, resonance.peer_rate_median)
+        && resonance.rate_peers >= RESONANCE_MIN_PEERS
+        && peer_rate > 0
+    {
+        return rate >= peer_rate.saturating_mul(2);
+    }
+    matches!(
+        resonance.peer_median,
+        Some(median) if resonance.peers >= RESONANCE_MIN_PEERS
+            && median > 0
+            && resonance.engagement >= median.saturating_mul(2)
+    )
+}
+
 /// Posts younger than this have not had time to show how they landed.
 pub const RESONANCE_SETTLE_HOURS: i64 = 36;
 /// Below this many earlier posts a median says nothing; any real engagement
@@ -369,8 +393,17 @@ pub fn evaluate_content_supply(
         // the post's own facts has nothing to carry, and a relay that would
         // have to invent the share is exactly what this path exists to
         // prevent.
-        let fresh = now - snapshot.occurred_at
-            <= Duration::hours(i64::from(policy.social_post_relay_hours.max(1)));
+        let relay_hours = if snapshot
+            .social_post
+            .as_ref()
+            .and_then(|post| post.resonance.as_ref())
+            .is_some_and(is_outlier)
+        {
+            policy.social_post_relay_hours.max(OUTLIER_RELAY_HOURS)
+        } else {
+            policy.social_post_relay_hours
+        };
+        let fresh = now - snapshot.occurred_at <= Duration::hours(i64::from(relay_hours.max(1)));
         return if fresh && snapshot.social_post.is_some() {
             ContentSupplyDecision::Relay {
                 confidence: Confidence::saturating_from_basis_points(9_000),
@@ -1073,5 +1106,45 @@ mod tests {
             posted,
             settled
         ));
+    }
+
+    #[test]
+    fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let snapshot = |resonance: PostResonance| ContentSupplySnapshot {
+            source_id: crate::ContentSourceId::new(),
+            source_kind: ContentSourceKind::SocialPost,
+            source_version: 1,
+            occurred_at: now - Duration::days(5),
+            expires_at: now + Duration::days(30),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
+            social_post: Some(fact(Some(resonance))),
+        };
+        let outlier = PostResonance {
+            engagement: 120,
+            peer_median: Some(50),
+            peers: 10,
+            ..Default::default()
+        };
+        let ordinary = PostResonance {
+            engagement: 60,
+            ..outlier
+        };
+        assert!(is_outlier(&outlier));
+        assert!(!is_outlier(&ordinary));
+        let policy = ContentSupplyPolicy::default();
+        assert!(matches!(
+            evaluate_content_supply(&snapshot(outlier), policy, now),
+            ContentSupplyDecision::Relay { .. }
+        ));
+        assert_eq!(
+            evaluate_content_supply(&snapshot(ordinary), policy, now),
+            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
+        );
     }
 }
