@@ -449,11 +449,16 @@ if [[ "$blue_green_eligible" == "eligible" ]]; then
   # drift and reload the area-management proxy without a separate manual step.
   # The receipt helper is scp'd because the remote repo may be stale — the
   # deploy itself is what updates it, and the script runs before that happens.
+  # It goes to the release state dir, not /tmp: a previous run lost the file
+  # mid-deploy (present at start, gone by finalize) and rolled back a healthy
+  # green stack for want of the helper.
+  ssh -T "$ORACLE" 'mkdir -p /var/lib/crowdrelay/releases' \
+    || fail "could not create release state dir on $ORACLE"
   scp -q "$ROOT_DIR/scripts/release_receipt.py" \
-       "$ORACLE:/tmp/release_receipt.py" \
+       "$ORACLE:/var/lib/crowdrelay/releases/release_receipt.py" \
     || fail "could not copy release_receipt.py to $ORACLE"
   scp -q "$ROOT_DIR/deploy/area-management.Caddyfile" \
-       "$ORACLE:/tmp/crowdrelay-area-management.Caddyfile" \
+       "$ORACLE:/var/lib/crowdrelay/releases/crowdrelay-area-management.Caddyfile" \
     || fail "could not copy area-management.Caddyfile to $ORACLE"
   ssh -T "$ORACLE" bash -s -- "$TARGET" "$CROWDRELAY_API_DIGEST" "$CROWDRELAY_WORKER_DIGEST" "$ORACLE_REPO" < "$BLUEGREEN"
   deploy_status=$?
