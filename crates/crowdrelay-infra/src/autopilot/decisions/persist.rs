@@ -77,8 +77,19 @@ async fn persist_decision_and_action_tx(
                  capability, so asking or queuing would spend budget on work \
                  nothing can perform"
             );
+            let mut policy_snapshot = candidate.policy_snapshot.clone();
+            if let Some(object) = policy_snapshot.as_object_mut() {
+                let mut held_by = object
+                    .get("held_by")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                held_by.push(serde_json::json!(format!("no_executor:{capability}")));
+                object.insert("held_by".to_owned(), serde_json::Value::Array(held_by));
+            }
             withheld = DecisionCandidate {
                 disposition: PolicyDisposition::RecommendOnly,
+                policy_snapshot,
                 ..candidate.clone()
             };
             &withheld

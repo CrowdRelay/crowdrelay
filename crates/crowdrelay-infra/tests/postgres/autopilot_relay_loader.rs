@@ -252,3 +252,31 @@ async fn the_relay_caps_at_three_and_rotates_least_recently_drafted()
     );
     Ok(())
 }
+
+/// Backpressure: with two drafts still waiting for somebody to post them,
+/// the relay drafts for nobody — a third draft would be one more agent run
+/// and one more approval ask for a queue that only empties by hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_relay_stops_drafting_while_drafts_wait_to_be_posted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let ws = WorkspaceId::new();
+    seed_workspace(&pool, ws).await?;
+    seed_community(&pool, ws, "freshsub", None).await?;
+    let first = seed_community(&pool, ws, "firstsub", None).await?;
+    let second = seed_community(&pool, ws, "secondsub", None).await?;
+
+    seed_post(&pool, ws, first, "firstsub", "awaiting_manual_post", 1).await?;
+    assert!(
+        !repo.load_relay_community_targets(ws).await?.is_empty(),
+        "one waiting draft does not stop the relay"
+    );
+
+    seed_post(&pool, ws, second, "secondsub", "awaiting_manual_post", 1).await?;
+    assert!(
+        repo.load_relay_community_targets(ws).await?.is_empty(),
+        "two waiting drafts stop new drafting"
+    );
+    Ok(())
+}

@@ -141,3 +141,76 @@ async fn one_relay_push_at_a_time_and_never_the_same_words_twice()
     );
     Ok(())
 }
+
+/// A decision the attention budget held says so on its own row: the relay
+/// push wanted an approval, the week's asks were spent, and the decision is
+/// a recommendation whose `held_by` names the budget.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_held_decision_names_what_held_it() -> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let repository = PostgresAutopilotRepository::new(
+        pool.clone(),
+        &DatabaseConfig {
+            url: database_url,
+            max_connections: 4,
+            connect_timeout: Duration::from_secs(3),
+            ping_timeout: Duration::from_secs(2),
+            operation_timeout: Duration::from_secs(5),
+            lock_timeout: Duration::from_secs(1),
+        },
+    );
+    let ws = WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Held')")
+        .bind(ws.into_uuid())
+        .bind(format!("held-{}", ws.into_uuid().simple()))
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run, weekly_approval_requests)
+         VALUES ($1, true, false, 0)
+         ON CONFLICT (workspace_id) DO UPDATE
+         SET agent_enabled = true, dry_run = false, weekly_approval_requests = 0",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+         (workspace_id, context, enabled, autonomy_level, max_actions_24h)
+         VALUES ($1, 'content_supply', true, 'require_approval', 30)
+         ON CONFLICT (workspace_id, context) DO UPDATE
+         SET enabled = true, autonomy_level = 'require_approval', max_actions_24h = 30",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    let now = OffsetDateTime::now_utc();
+    sqlx::query(
+        "INSERT INTO content_sources (
+             id, workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata
+         ) VALUES ($1,$2,'social_post',$3,'Gramy w Gorzowie',$4,$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws.into_uuid())
+    .bind(format!("facebook:held-{}", Uuid::now_v7()))
+    .bind(now - time::Duration::hours(1))
+    .bind(now + time::Duration::days(30))
+    .bind(serde_json::json!({ "platform": "facebook", "url": "https://www.facebook.com/1/posts/9", "body": "Gramy w Gorzowie" }))
+    .execute(&pool)
+    .await?;
+
+    EvaluateAutopilot::new(&repository, ws).execute(now).await?;
+
+    let (disposition, held_by): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT disposition, policy_snapshot->'held_by' FROM autopilot_decisions
+         WHERE workspace_id = $1 AND decision_kind = 'relay_owned_post'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(disposition, "recommend_only");
+    assert_eq!(held_by, serde_json::json!(["attention_budget"]));
+    Ok(())
+}

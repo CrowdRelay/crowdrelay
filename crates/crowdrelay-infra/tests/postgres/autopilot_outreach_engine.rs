@@ -393,6 +393,100 @@ async fn the_catalogue_is_pitched_in_one_wave_of_composed_letters()
     Ok(())
 }
 
+/// The supply refresh re-observes live opportunities every cycle. A
+/// re-observation on the same day is the same finding, not a new decision:
+/// keyed by the instant, the ledger grew by every candidate every five
+/// minutes (18,757 outreach decisions in one day of production).
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_re_observed_opportunity_is_not_a_new_decision_every_cycle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("supply-ledger").await?;
+    // The production shape: the week's asks are spent, so every pitch is a
+    // recommendation, no action goes in flight, and the same candidates come
+    // back every cycle.
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run, weekly_approval_requests)
+         VALUES ($1, true, false, 0)
+         ON CONFLICT (workspace_id) DO UPDATE
+         SET agent_enabled = true, dry_run = false, weekly_approval_requests = 0",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+             (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
+              max_actions_24h, config)
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20,
+                 '{\"waves\": {\"min_pitches_per_wave\": 2}}')
+         ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
+             autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
+             max_actions_24h = 20, config = EXCLUDED.config",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    f.release_source(
+        "Echoes",
+        "https://open.spotify.example/album/echoes",
+        "album",
+        Some(1_746_057_600),
+    )
+    .await?;
+    for index in 0..4 {
+        f.target(&format!("Radio {index}"), "radio", true, false, None)
+            .await?;
+    }
+    // An upcoming show: its pitches are loose, not wave-bound, which is the
+    // kind production re-decided every cycle.
+    f.event(20, "published").await?;
+    let decisions = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM autopilot_decisions
+             WHERE workspace_id = $1 AND decision_kind = 'request_relationship_outreach'",
+        )
+        .bind(f.ws())
+        .fetch_one(&f.pool)
+        .await
+    };
+
+    // Two cycles five minutes apart, each after its own refresh — early in
+    // the day, so both fall on the same date.
+    let first = f.now.replace_time(time::Time::from_hms(6, 0, 0)?);
+    for at in [first, first + time::Duration::minutes(5)] {
+        sqlx::query("UPDATE outreach_opportunities SET observed_at = $2 WHERE workspace_id = $1")
+            .bind(f.ws())
+            .bind(at)
+            .execute(&f.pool)
+            .await?;
+        f.repository
+            .refresh_outreach_supply(f.workspace_id, at)
+            .await?;
+        EvaluateAutopilot::new(&f.repository, f.workspace_id)
+            .execute(at)
+            .await?;
+    }
+    let after_two = decisions().await?;
+    assert!(after_two > 0, "the cycle decided something");
+
+    let third = first + time::Duration::minutes(10);
+    sqlx::query("UPDATE outreach_opportunities SET observed_at = $2 WHERE workspace_id = $1")
+        .bind(f.ws())
+        .bind(third)
+        .execute(&f.pool)
+        .await?;
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(third)
+        .await?;
+    assert_eq!(
+        decisions().await?,
+        after_two,
+        "re-observing the same opportunities later the same day writes no new decisions"
+    );
+    Ok(())
+}
+
 /// Half of the act's pitchable contacts have a `.pl` address. Their letter is
 /// written in Polish; everyone else's stays English.
 #[tokio::test]

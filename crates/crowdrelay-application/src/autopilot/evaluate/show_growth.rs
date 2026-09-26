@@ -2,12 +2,15 @@
 //! only turns that decision into a durable, idempotent Autopilot action.
 
 use crowdrelay_domain::show_growth::{
-    ShowGrowthDecision, ShowGrowthHoldReason, ShowGrowthLever, ShowGrowthPolicy,
-    ShowGrowthSnapshot, evaluate_show_growth,
+    MAX_LEVER_ATTEMPTS, ShowGrowthDecision, ShowGrowthHoldReason, ShowGrowthLever,
+    ShowGrowthPolicy, ShowGrowthSnapshot, evaluate_show_growth_passing_over,
 };
 use time::OffsetDateTime;
 
 use super::{policy_evidence, *};
+
+/// Failed attempts per `(event id, lever)`, as the cycle read them.
+pub(super) type ShowGrowthFailures = std::collections::HashMap<(uuid::Uuid, String), u32>;
 
 /// The crossbill gate's named reason — the token the decision ledger carries
 /// when the partner lever is declined (§4e-2).
@@ -28,12 +31,30 @@ pub(super) fn show_growth_candidates(
     policy: &AutopilotPolicy,
     evidence: ContextEvidence,
     standings: &std::collections::HashMap<String, Standing>,
+    external_executor_live: bool,
+    failures: &ShowGrowthFailures,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     let AutopilotPolicyConfig::ShowGrowth(domain_policy) = policy.config else {
         return Ok(Vec::new());
     };
-    match evaluate_show_growth(snapshot, domain_policy, now) {
+    let failed = |lever: ShowGrowthLever| {
+        failures
+            .get(&(snapshot.event_id.into_uuid(), lever.as_str().to_owned()))
+            .copied()
+            .unwrap_or(0)
+    };
+    // Passed over: levers only an external executor can carry out while none
+    // is live, and levers that failed `MAX_LEVER_ATTEMPTS` times. Either
+    // would otherwise hold every later lever of the ladder.
+    let evaluate = |snapshot| {
+        evaluate_show_growth_passing_over(snapshot, domain_policy, now, |lever| {
+            (!external_executor_live && !lever.is_first_party())
+                || failed(lever) >= MAX_LEVER_ATTEMPTS
+        })
+        .0
+    };
+    match evaluate(snapshot) {
         ShowGrowthDecision::Request {
             lever,
             confidence,
@@ -47,6 +68,7 @@ pub(super) fn show_growth_candidates(
             evidence,
             standings,
             send_at,
+            failed(lever),
         )?]),
         ShowGrowthDecision::Hold(ShowGrowthHoldReason::UnreciprocatedCrossbill) => {
             let mut candidates = vec![unreciprocated_crossbill_decline(
@@ -64,7 +86,7 @@ pub(super) fn show_growth_candidates(
                 lever,
                 confidence,
                 send_at,
-            } = evaluate_show_growth(masked, domain_policy, now)
+            } = evaluate(masked)
             {
                 candidates.push(request_candidate(
                     snapshot,
@@ -75,6 +97,7 @@ pub(super) fn show_growth_candidates(
                     evidence,
                     standings,
                     send_at,
+                    failed(lever),
                 )?);
             }
             Ok(candidates)
@@ -93,6 +116,7 @@ fn request_candidate(
     evidence: ContextEvidence,
     standings: &std::collections::HashMap<String, Standing>,
     send_at: Option<OffsetDateTime>,
+    failed_attempts: u32,
 ) -> Result<DecisionCandidate, serde_json::Error> {
     // Standing is the lever's own measured record — a run of worsened
     // outcomes retires it the same way it retires a worker template. An
@@ -154,13 +178,23 @@ fn request_candidate(
             snapshot.city_signal_fans,
             snapshot.beacon_partners,
         ),
-        // Each lever is intentionally one-shot per event. If a later policy wants
-        // another wave it should become a distinct lever, not an accidental retry.
-        action_idempotency_key: format!(
-            "action:show-growth:{}:{}",
-            snapshot.event_id,
-            lever.as_str()
-        ),
+        // Each lever is one-shot per event: a later wave should be a distinct
+        // lever, not a repeat. A failed attempt is the exception — it
+        // happened to nobody — so its retry carries its attempt number and
+        // gets a key of its own, up to `MAX_LEVER_ATTEMPTS`.
+        action_idempotency_key: if failed_attempts == 0 {
+            format!(
+                "action:show-growth:{}:{}",
+                snapshot.event_id,
+                lever.as_str()
+            )
+        } else {
+            format!(
+                "action:show-growth:{}:{}:retry{failed_attempts}",
+                snapshot.event_id,
+                lever.as_str()
+            )
+        },
     })
 }
 
