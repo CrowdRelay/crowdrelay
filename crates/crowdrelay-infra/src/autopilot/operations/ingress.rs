@@ -232,7 +232,7 @@ impl AutopilotOutreachStateRepository for PostgresAutopilotRepository {
                 // Representation kinds never enter the auto-pitch pipeline: an
                 // agent or label is approached only by the band's own request,
                 // not by an opportunity the evaluator dispatches.
-                "SELECT EXISTS(SELECT 1 FROM outreach_targets WHERE workspace_id=$1 AND id=$2 AND active AND verified AND NOT do_not_contact AND COALESCE(last_reply_disposition::text,'none') NOT IN ('received','positive','declined') AND target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage'))",
+                "SELECT EXISTS(SELECT 1 FROM outreach_targets WHERE workspace_id=$1 AND id=$2 AND active AND verified AND NOT do_not_contact AND COALESCE(last_reply_disposition::text,'none') NOT IN ('received','positive','declined') AND target_kind IN ('playlist','radio','press','creator','support_slot','endorsement','media_patronage','organiser'))",
             )
             .bind(workspace_id.into_uuid())
             .bind(command.target_id.into_uuid())
@@ -1375,6 +1375,7 @@ const fn outreach_target_kind_str(kind: OutreachTargetKind) -> &'static str {
         OutreachTargetKind::SupportSlot => "support_slot",
         OutreachTargetKind::Endorsement => "endorsement",
         OutreachTargetKind::MediaPatronage => "media_patronage",
+        OutreachTargetKind::Organiser => "organiser",
         OutreachTargetKind::Agent => "agent",
         OutreachTargetKind::Label => "label",
     }

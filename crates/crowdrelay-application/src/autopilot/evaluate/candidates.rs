@@ -619,6 +619,11 @@ fn outreach_candidate(
         crowdrelay_domain::outreach::OutreachTargetKind::MediaPatronage => {
             "outreach.media_patronage.v1"
         }
+        // An organiser is asked for a slot, not a review — the gig-request
+        // letter composes at persist time like every other kind.
+        crowdrelay_domain::outreach::OutreachTargetKind::Organiser => {
+            "outreach.organiser.v1"
+        }
         // Representation contacts are approached by the band through the
         // approach path, where consent, allowance and the published listing
         // are the gates. The evaluator proposing one would be an autopilot

@@ -358,23 +358,11 @@ pub(crate) async fn sender_identity(
     .await?
     .map(|value| value.trim().to_owned())
     .filter(|value| !value.is_empty());
-    // The home city is the one the act has played most from its own shows. It
-    // is a measured fact rather than a setting nobody would keep current, and
-    // an act with no shows on record simply has no city in the sentence.
-    let home_city = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT city.name
-        FROM events AS event
-        JOIN cities AS city ON city.id = event.city_id
-        WHERE event.workspace_id = $1
-        GROUP BY city.id, city.name
-        ORDER BY count(*) DESC, city.name
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await?;
+    // The home city is what the act declares (`act_home_city`), never a
+    // measurement: the old most-played-city query counted upcoming shows as
+    // played and once named an act after the city of its next gig. Unset
+    // reads as no city in the sentence.
+    let home_city = settings.act_home_city(workspace_id).await?;
     Ok(crowdrelay_domain::gig_letter::SenderIdentity {
         act_name,
         style,

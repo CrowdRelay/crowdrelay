@@ -735,6 +735,7 @@ fn conversation_next(
                         | "support_slot"
                         | "endorsement"
                         | "media_patronage"
+                        | "organiser"
                 )
                 && !matches!(
                     contact.last_reply_disposition.as_str(),
@@ -762,6 +763,7 @@ fn conversation_next(
                         | "support_slot"
                         | "endorsement"
                         | "media_patronage"
+                        | "organiser"
                 );
                 ConversationNext {
                     kind: "held",

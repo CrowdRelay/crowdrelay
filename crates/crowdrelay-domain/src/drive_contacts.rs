@@ -205,6 +205,13 @@ fn kind_for(raw: &str) -> Option<&'static str> {
         }
         "endorsement" | "endorser" => Some("endorsement"),
         "creator" | "influencer" | "youtuber" | "streamer" | "tiktok" => Some("creator"),
+        // The event organiser — a festival programme, a band contest, a
+        // cultural centre — pitched to *play*, not to review. Before this
+        // kind existed the promote fell back to "press" and organisers were
+        // sent a review request for the album.
+        "organiser" | "organizer" | "organizator" | "organizatorzy" | "event_organiser"
+        | "event_organizer" | "festival_organiser" | "festival_organizer" | "contest"
+        | "competition" | "band_contest" | "konkurs" => Some("organiser"),
         // Booking supply, not outreach: the kind names which queue the
         // promote lands in (booking_candidates), never the press
         // outreach vocabulary.
@@ -220,7 +227,7 @@ fn kind_for(raw: &str) -> Option<&'static str> {
             Some("booking_agent")
         }
         "venue" | "room" | "hall" | "live_venue" | "concert_venue" | "music_venue" => Some("venue"),
-        "festival" | "fest" | "festival_organizer" | "festival_organiser" => Some("festival"),
+        "festival" | "fest" | "festiwal" => Some("festival"),
         _ => None,
     }
 }
@@ -606,6 +613,34 @@ mod tests {
             ("agent", Some("booking_agent")),
             ("promoter", Some("promoter")),
             ("club", None),
+        ] {
+            let report = extract_contacts(&grid(&[
+                &["Email", "Type"],
+                &["route@agency.example", typed],
+            ]));
+            assert_eq!(
+                report.contacts[0].suggested_kind.as_deref(),
+                expected,
+                "typed {typed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn organiser_vocabulary_files_organiser_not_press() {
+        // A sheet cell reading "organizator" used to land as no suggestion,
+        // and the promote's blank fallback filed the contact as press — the
+        // festival organiser then got an album-review request.
+        for (typed, expected) in [
+            ("organizator", Some("organiser")),
+            ("Organiser", Some("organiser")),
+            ("organizer", Some("organiser")),
+            ("event organizer", Some("organiser")),
+            ("band contest", Some("organiser")),
+            ("konkurs", Some("organiser")),
+            // Booking directions stay booking — a festival the act plays
+            // for is a room to book, an organiser is a programme to join.
+            ("festival", Some("festival")),
         ] {
             let report = extract_contacts(&grid(&[
                 &["Email", "Type"],

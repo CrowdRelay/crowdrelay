@@ -41,7 +41,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 20] = [
+pub const EDITABLE_KEYS: [&str; 21] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_LIVE_PAGE_PATH,
@@ -56,6 +56,7 @@ pub const EDITABLE_KEYS: [&str; 20] = [
     KEY_TEAM_WEEKLY_ASK_CEILING,
     KEY_TENANT_INTENT,
     KEY_ACT_STYLE,
+    KEY_ACT_HOME_CITY,
     KEY_TICKETING_ENABLED,
     KEY_JOIN_ASK_VARIANTS,
     KEY_JOIN_ASK_CADENCE_DAYS,
@@ -106,6 +107,15 @@ pub const KEY_TENANT_INTENT: &str = "tenant_intent";
 /// Absent means the act has not said. That is a real state and the planner
 /// reads it as unmeasured, not as "no style".
 pub const KEY_ACT_STYLE: &str = "act_style";
+/// The city the act calls home, in the act's own words ("Wrocław").
+///
+/// Letters open with it — "Piszemy w imieniu {act} — zespołu z miasta
+/// {home}". It is a declaration, never a measurement: the sender identity
+/// used to take the city the act had played most, which counted *upcoming*
+/// shows as played and once announced a band as being from the city of its
+/// next gig. An act that has not said has no city in the sentence — the
+/// absent state is real and reads better than a guess.
+pub const KEY_ACT_HOME_CITY: &str = "act_home_city";
 /// The name this act signs its own messages with — push titles, play pushes,
 /// crew mail, invitations. Read through `crowdrelay_workspace_wordmark`, which
 /// falls back to the workspace's own name, so absent is the ordinary state: set
@@ -442,6 +452,27 @@ impl TenantSettingsRepository {
         )
         .bind(workspace_id)
         .bind(KEY_ACT_STYLE)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stored
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()))
+    }
+
+    /// Where the act says it is from, or `None` when it has never said.
+    ///
+    /// Same contract as `act_style`: raw text, trimmed, and the empty string
+    /// reads as absent — a declaration nobody made stays unsaid in letters.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error.
+    pub async fn act_home_city(&self, workspace_id: Uuid) -> Result<Option<String>, sqlx::Error> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = $2",
+        )
+        .bind(workspace_id)
+        .bind(KEY_ACT_HOME_CITY)
         .fetch_optional(&self.pool)
         .await?;
         Ok(stored

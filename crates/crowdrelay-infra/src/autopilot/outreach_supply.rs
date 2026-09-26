@@ -189,6 +189,7 @@ impl PostgresAutopilotRepository {
                        CASE target.target_kind
                            WHEN 'media_patronage' THEN 'event.media_patronage.v1'
                            WHEN 'endorsement' THEN 'event.endorsement.v1'
+                           WHEN 'organiser' THEN 'event.organiser.v1'
                            ELSE 'event.press.v1'
                        END,
                        GREATEST(7000, LEAST(10000, target.relationship_score * 100)), 8800,
@@ -200,7 +201,7 @@ impl PostgresAutopilotRepository {
                   AND event.starts_at > $2 + make_interval(days => $4)
                   AND event.starts_at <= $2 + make_interval(days => $3)
                   AND {ELIGIBLE_TARGET}
-                  AND target.target_kind IN ('press', 'radio', 'creator', 'media_patronage', 'endorsement')
+                  AND target.target_kind IN ('press', 'radio', 'creator', 'media_patronage', 'endorsement', 'organiser')
                 ON CONFLICT (workspace_id, source, target_id, subject_kind, subject_key) DO UPDATE SET
                     active = true, observed_at = EXCLUDED.observed_at,
                     expires_at = EXCLUDED.expires_at
@@ -253,7 +254,7 @@ impl PostgresAutopilotRepository {
                 WHERE target.workspace_id = $1
                   AND {ELIGIBLE_TARGET}
                   AND target.target_kind IN
-                      ('playlist', 'radio', 'press', 'creator', 'support_slot', 'endorsement', 'media_patronage')
+                      ('playlist', 'radio', 'press', 'creator', 'support_slot', 'endorsement', 'media_patronage', 'organiser')
                   AND last_out.occurred_at > $2 - interval '60 days'
                 ON CONFLICT (workspace_id, source, target_id, subject_kind, subject_key) DO UPDATE SET
                     active = true, observed_at = EXCLUDED.observed_at,
@@ -318,7 +319,8 @@ impl PostgresAutopilotRepository {
                                 AND {ELIGIBLE_TARGET}
                                 AND target.target_kind IN
                                     ('playlist', 'radio', 'press', 'creator',
-                                     'support_slot', 'endorsement', 'media_patronage')
+                                     'support_slot', 'endorsement', 'media_patronage',
+                                     'organiser')
                                 AND last_out.occurred_at > $3 - interval '60 days'
                           ))
                   )
