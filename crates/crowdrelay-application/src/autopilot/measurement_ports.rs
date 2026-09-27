@@ -406,6 +406,22 @@ impl AutopilotMeasurementKind {
     /// terminal answer, not a zero and not a retry.
     pub const NO_AGENT_SERVICE: &'static str = "no_agent_service";
 
+    /// The named reasons a measurement is abandoned because its outcome
+    /// cannot exist — nothing was published, the show was cancelled, nothing
+    /// was instrumented. These are answers, not faults: the worker records
+    /// them and moves on without marking the cycle degraded. Since fan
+    /// outcomes became attributed (#325), `no_tracked_link` is routine, and
+    /// counting it as a degraded phase turned the cycle ledger into noise.
+    pub const ABANDONMENTS: [&'static str; 7] = [
+        Self::NEVER_PUBLISHED,
+        Self::EVENT_CANCELLED,
+        Self::NO_ISSUED_PASSES,
+        Self::NO_RELEASE_LINK,
+        Self::NO_RELEASE_SERIES_DATA,
+        Self::NO_TRACKED_LINK,
+        Self::NO_AGENT_SERVICE,
+    ];
+
     /// Whether the kind's `subject_id` is an `events.id` — the kinds whose
     /// observation is a fact about a show. A cancelled show has no outcome
     /// to observe, and observing one anyway would write a zero that the

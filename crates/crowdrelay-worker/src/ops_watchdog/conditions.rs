@@ -353,11 +353,15 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                 "causal_observations": snapshot.causal_observations,
                 "checkpoint_present": snapshot.causal_observations.is_some(),
                 "remedy": "every prediction the brain makes is currently its prior. \
-                           Resolution is what corrects it, and resolution needs a \
-                           dispatch to land externally and its measurement window \
-                           to close — check publishing first, then \
-                           growth_evidence for rows with resolved_at set. \
-                           Until then, treat the brain's rankings as assumptions.",
+                           Fan outcomes count only fans traced to an action's own \
+                           tracked links (since #325); a dispatch whose posts carry \
+                           no live tracked link is abandoned as no_tracked_link and \
+                           teaches nothing, and rows measured before that change \
+                           (outcome_basis = workspace_window) are not learned from. \
+                           Correction needs a tracked post to go live and a fan to \
+                           sign up through it — check publishing and tracked-link \
+                           coverage first. Until then, treat the brain's rankings \
+                           as assumptions.",
             }),
         },
         Condition {
