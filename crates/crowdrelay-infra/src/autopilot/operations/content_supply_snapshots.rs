@@ -40,7 +40,7 @@ struct ContentRow {
 pub(in crate::autopilot) async fn load_content_supply_snapshots(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
-    _now: OffsetDateTime,
+    now: OffsetDateTime,
 ) -> Result<Vec<ContentSupplySnapshot>, RepositoryError> {
     let rows = sqlx::query_as::<_, ContentRow>(
         r#"
@@ -215,12 +215,32 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
         ) AS failed ON true
         WHERE source.workspace_id = $1
           AND source.active
+          -- Every artifact an `event` source owes is pre-show promotion: a
+          -- listing, a press hook, a push, feed and story posts, a
+          -- newsletter block. Once the night is over none of it is true any
+          -- more — the harvest chain runs from the `show_completed` source.
+          -- The source itself outlives the show (the projection trigger
+          -- keeps it to `starts_at + 14 days`, and stamps `occurred_at` with
+          -- the import time), so on 2026-09-24, when past shows were
+          -- imported, the brain asked for listings and newsletter blocks for
+          -- nights in February, May, June and July. A day of grace keeps the
+          -- day-of posts for a date-only show stored at midnight UTC.
+          AND NOT (
+              source.source_kind = 'event'
+              AND EXISTS (
+                  SELECT 1 FROM events AS event
+                  WHERE event.workspace_id = source.workspace_id
+                    AND 'event:' || event.id::text = source.source_key
+                    AND event.starts_at + INTERVAL '1 day' <= $3
+              )
+          )
         ORDER BY source.occurred_at DESC, source.id
         LIMIT $2
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(MAX_SNAPSHOTS_PER_CONTEXT)
+    .bind(now)
     .fetch_all(&repo.pool)
     .await
     .map_err(map_sqlx)?;

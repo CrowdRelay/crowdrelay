@@ -42,6 +42,7 @@ mod autopilot_no_executor_ask;
 mod autopilot_objectives;
 mod autopilot_outreach_engine;
 mod autopilot_outreach_supply;
+mod autopilot_past_show_sources;
 mod autopilot_placements;
 mod autopilot_play_outcomes;
 mod autopilot_plays;
