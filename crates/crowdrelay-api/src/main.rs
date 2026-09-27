@@ -14,6 +14,18 @@
 )]
 #![deny(clippy::dbg_macro)]
 
+/// The process allocator. glibc's malloc keeps freed memory in its arenas:
+/// one console page load (about fifteen concurrent control-plane reads)
+/// raised the API's resident memory by 180 MiB that never came back, loads
+/// ratcheted it to the 1 GiB container limit, and the cgroup OOM-killed the
+/// API 23 times in the three days to 2026-09-27 — `MALLOC_ARENA_MAX=2` did
+/// not stop it. mimalloc, with `MIMALLOC_PURGE_DELAY=0` set in the image,
+/// returns freed pages; measured on the same allocation pattern: glibc
+/// (arena max 2) settled at 796 MB, mimalloc with purge delay 0 at 38 MB.
+/// No unsafe code: a global allocator is a safe static.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{future::pending, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
