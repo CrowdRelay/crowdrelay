@@ -630,23 +630,23 @@ impl AgentOutcomeWorker {
             // not fifty.
             let mut batch_source_id: Option<Uuid> = None;
             if let Some(target_id) = community_target_id {
-                let admitted = sqlx::query_scalar::<_, bool>(
+                // `Some(language)` for an admitted community; its recorded
+                // language is what the draft is held to below.
+                let admitted = sqlx::query_scalar::<_, Option<String>>(
                     r#"
-                    SELECT EXISTS(
-                        SELECT 1 FROM agent_outreach_targets
-                        WHERE workspace_id = $1
-                          AND id = $2
-                          AND target_kind = 'community'
-                          AND screening_verdict = 'admitted'
-                          AND status = 'promoted'
-                    )
+                    SELECT language FROM agent_outreach_targets
+                    WHERE workspace_id = $1
+                      AND id = $2
+                      AND target_kind = 'community'
+                      AND screening_verdict = 'admitted'
+                      AND status = 'promoted'
                     "#,
                 )
                 .bind(outcome.workspace_id)
                 .bind(target_id)
-                .fetch_one(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
-                if !admitted {
+                let Some(community_language) = admitted else {
                     let rejection = OutcomeRejection::UnvettedCommunity { target_id };
                     tracing::warn!(
                         outcome_id = %outcome.id,
@@ -654,6 +654,26 @@ impl AgentOutcomeWorker {
                         rejection = %rejection,
                         "rejecting community post: target is not an admitted community"
                     );
+                    drop(tx);
+                    self.reject_outcome(outcome.id, &rejection.to_string())
+                        .await?;
+                    return Ok((None, None));
+                };
+                // Language gate: every draft, not only the sample a batch
+                // approval was given on. See `community_language`.
+                let draft_text = ["title", "body"]
+                    .iter()
+                    .filter_map(|key| outcome.payload.item.as_ref()?.get(*key)?.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Some((expected, found)) =
+                    crowdrelay_domain::community_language::community_language_mismatch(
+                        &draft_text,
+                        community_language.as_deref(),
+                    )
+                {
+                    let rejection = OutcomeRejection::CommunityLanguageMismatch { expected, found };
+                    tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
                     drop(tx);
                     self.reject_outcome(outcome.id, &rejection.to_string())
                         .await?;

@@ -9,6 +9,7 @@ mod agent_run_assignment;
 mod bootstrap_team_idempotence;
 mod city_geocoding;
 mod common;
+mod community_draft_language;
 mod community_recovery;
 mod community_relay_batch;
 mod community_replies_lane;
