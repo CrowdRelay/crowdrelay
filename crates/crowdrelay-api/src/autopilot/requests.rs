@@ -33,6 +33,13 @@ pub struct AssignActionRequest {
 /// revised is `draft_revision::REVISABLE_FIELDS` — the pending action's
 /// `revisable` map is the same definition, so a client renders the editable
 /// surface rather than guessing. An absent or empty body approves as before.
+/// `POST .../actions/{id}/revise` — the words to save, without approving.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviseDraftRequest {
+    pub revision: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApproveActionRequest {

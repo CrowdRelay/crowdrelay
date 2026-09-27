@@ -224,6 +224,71 @@ pub async fn approve_action(
     mutate_action(state, headers, action_id, true, revision, remember).await
 }
 
+/// `POST /v1/control-plane/autopilot/actions/{action_id}/revise`
+///
+/// Saves the band's fix to a waiting draft's words without approving it —
+/// the door a pitch inside an outreach wave needs, since the wave is
+/// approved as a batch and its pitches cannot take approve-with-edit one by
+/// one. Same review as approve-with-edit; answers with the draft's revisable
+/// fields as they now read.
+pub async fn revise_action_draft(
+    State(state): State<AppState>,
+    Path(action_id): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(action_id) = Uuid::parse_str(&action_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let Ok(request) = serde_json::from_slice::<ReviseDraftRequest>(&body) else {
+        return Problem::bad_request_because(
+            "The body must be a JSON object with `revision` (field to text).",
+            request_id(&headers),
+        )
+        .private()
+        .into_response();
+    };
+    for (field, text) in &request.revision {
+        let refusal = if !crowdrelay_domain::draft_revision::REVISABLE_FIELDS.contains(&field.as_str()) {
+            Some(crowdrelay_domain::draft_revision::RevisionRefusal::FieldNotRevisable {
+                field: field.clone(),
+            })
+        } else if text.trim().is_empty() {
+            Some(crowdrelay_domain::draft_revision::RevisionRefusal::FieldEmptied {
+                field: field.clone(),
+            })
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            return Problem::conflict_owned(refusal.message().into(), request_id(&headers))
+                .private()
+                .into_response();
+        }
+    }
+    let idempotency_key = match parse_idempotency_key(&headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request_id_value = parsed_request_id(&headers);
+    match state
+        .autopilot
+        .revise_pending_draft(
+            state.ops.workspace_id(),
+            action_id,
+            &request.revision,
+            &idempotency_key,
+            request_id_value.as_ref(),
+        )
+        .await
+    {
+        Ok(revisable) => private_json(StatusCode::OK, serde_json::json!({ "revisable": revisable })),
+        Err(error) => repository_problem(error, request_id(&headers)),
+    }
+}
+
 /// `GET /v1/control-plane/autopilot/actions/{action_id}/sent`
 ///
 /// What this action actually said, and to whom (O.4). The overview answers

@@ -325,6 +325,12 @@ impl PostgresAutopilotRepository {
                                 (workspace_id, action_id, operation_id, field,
                                  before_text, after_text, distance_chars)
                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            -- A field already saved before approval (a wave
+                            -- pitch's `revise`) keeps the machine's words as
+                            -- its `before`; this edit is the final text.
+                            ON CONFLICT (workspace_id, action_id, field) DO UPDATE SET
+                                operation_id = EXCLUDED.operation_id,
+                                after_text = EXCLUDED.after_text
                             "#,
                         )
                         .bind(workspace_id.into_uuid())

@@ -435,6 +435,27 @@ pub async fn upsert_setting(
         .await
     {
         Ok(()) => {
+            // The sender line of every letter still waiting on a person is
+            // re-composed from what the band just said about itself — a fixed
+            // home city must not wait for each stale draft to expire.
+            if matches!(
+                key.as_str(),
+                "act_home_city" | "act_style" | "member_site_base_url"
+            ) {
+                match state
+                    .autopilot
+                    .recompose_pending_letters(state.ticketing.workspace_id())
+                    .await
+                {
+                    Ok(changed) if changed > 0 => {
+                        tracing::info!(changed, key = %key, "pending letters re-composed");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, "pending letters could not be re-composed");
+                    }
+                }
+            }
             let repository = repository(&state);
             let updated = match key.as_str() {
                 "growth_cadence_moments_per_month" | "growth_cadence_fillers_enabled" => repository

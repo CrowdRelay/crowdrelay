@@ -417,3 +417,220 @@ async fn enrich_application_draft(
     }
     Ok(())
 }
+
+/// Letters re-composed per call — a bound, not a policy: a queue this deep is
+/// already a backlog nobody will read in one sitting.
+const RECOMPOSE_BATCH: i64 = 200;
+
+impl PostgresAutopilotRepository {
+    /// Re-composes the letters still waiting on a person from the current
+    /// sender settings and returns how many changed.
+    ///
+    /// A letter is composed when its action is written, so its sender line —
+    /// the act's name, sound, home city and site — is frozen at that moment.
+    /// A band that fixes "where the act is from" after the fact, or letters
+    /// composed by the most-played-city heuristic before `act_home_city`
+    /// existed, would otherwise keep proposing a letter that names the wrong
+    /// city until each one expired. Re-running the same composer the write
+    /// ran fixes the words and changes nothing else: recipients, targets and
+    /// cost are the payload's facts and the enrichers never touch them.
+    ///
+    /// Skipped: pitches inside a sealed outreach wave — the batch review
+    /// covered those exact words — drafts the band already edited, and reply
+    /// scaffolds and threads, whose text does not carry the sender line.
+    ///
+    /// # Errors
+    ///
+    /// Database errors propagate.
+    pub async fn recompose_pending_letters(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<u64, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        let rows = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+            r#"
+            SELECT action.id, action.payload
+            FROM autopilot_actions AS action
+            WHERE action.workspace_id = $1
+              AND action.status = 'awaiting_approval'
+              AND action.action_kind IN
+                  ('booking.outreach.request', 'outreach.request', 'opportunity.live.apply')
+              AND NOT EXISTS (
+                  SELECT 1 FROM outreach_waves AS wave
+                  WHERE wave.workspace_id = action.workspace_id
+                    AND action.payload->>'wave_id' = wave.id::text
+                    AND wave.state = 'sealed'
+              )
+              -- A draft the band already edited is theirs: re-composing it
+              -- would throw their words away.
+              AND NOT EXISTS (
+                  SELECT 1 FROM draft_revisions AS revision
+                  WHERE revision.workspace_id = action.workspace_id
+                    AND revision.action_id = action.id
+              )
+            ORDER BY action.created_at
+            LIMIT $2
+            FOR UPDATE OF action SKIP LOCKED
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(RECOMPOSE_BATCH)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+        let mut changed = 0u64;
+        for (id, stored) in rows {
+            let Ok(mut action) = serde_json::from_value::<AutopilotActionPayload>(stored.clone())
+            else {
+                continue;
+            };
+            match &action {
+                AutopilotActionPayload::RequestBookingOutreach { .. } => {
+                    enrich_booking_draft(&mut transaction, workspace_id, &mut action).await?;
+                }
+                AutopilotActionPayload::RequestOutreach { template_key, .. }
+                    if template_key != "outreach.thread.v1" =>
+                {
+                    enrich_outreach_draft(&mut transaction, workspace_id, &mut action).await?;
+                }
+                AutopilotActionPayload::ApplyLiveOpportunity { .. } => {
+                    enrich_application_draft(&mut transaction, workspace_id, &mut action).await?;
+                }
+                _ => continue,
+            }
+            let recomposed = serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
+            if recomposed == stored {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE autopilot_actions SET payload = $3, updated_at = now() \
+                 WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval'",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(id)
+            .bind(&recomposed)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+            changed += 1;
+        }
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(changed)
+    }
+}
+
+impl PostgresAutopilotRepository {
+    /// Saves an operator's fix to a waiting draft's words without approving
+    /// it, and returns the draft's revisable fields as they now read.
+    ///
+    /// Approve-with-edit is the usual door, but a pitch inside an outreach
+    /// wave cannot be approved on its own — the wave is approved as a batch —
+    /// so a wrong sentence in one letter had no way to be fixed before the
+    /// batch went out. The same review gate applies (`draft_revision`: words
+    /// only, never who reads them or what they point at), and the edit is
+    /// recorded in `draft_revisions` like an approve-time edit, so the voice
+    /// signal sees it and `recompose_pending_letters` leaves the letter alone.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when no waiting action has this id; `ConflictBecause` with
+    /// the review's reason when the revision is refused.
+    pub async fn revise_pending_draft(
+        &self,
+        workspace_id: WorkspaceId,
+        action_id: Uuid,
+        revision: &std::collections::BTreeMap<String, String>,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<std::collections::BTreeMap<String, String>, RepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+        // The audit row first — it is also the revision ledger's operation.
+        // A replayed key answers with the draft as it reads now.
+        let operation_id = Uuid::now_v7();
+        let replay = operator_actions::insert_operator_action(
+            &mut transaction,
+            workspace_id,
+            operation_id,
+            "revise_autopilot_action_draft",
+            "autopilot_action",
+            action_id,
+            "admin_api_key",
+            idempotency_key,
+            request_id,
+            &serde_json::json!({ "fields": revision.keys().collect::<Vec<_>>() }),
+        )
+        .await?;
+        if replay.is_some() {
+            let payload = sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT payload FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?
+            .ok_or(RepositoryError::NotFound)?;
+            transaction.commit().await.map_err(map_sqlx)?;
+            return Ok(crowdrelay_domain::draft_revision::revisable_fields(&payload));
+        }
+        let Some(mut payload) = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT payload FROM autopilot_actions \
+             WHERE workspace_id = $1 AND id = $2 AND status = 'awaiting_approval' \
+             FOR UPDATE",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?
+        else {
+            return Err(RepositoryError::NotFound);
+        };
+        let draft = crowdrelay_domain::draft_revision::revisable_fields(&payload);
+        let changed = crowdrelay_domain::draft_revision::review_revision(&draft, revision)
+            .map_err(|refusal| RepositoryError::ConflictBecause(refusal.conflict_reason()))?;
+        crowdrelay_domain::draft_revision::apply_revision(&mut payload, &changed);
+        sqlx::query(
+            "UPDATE autopilot_actions SET payload = $3, updated_at = now() \
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .bind(&payload)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+        for (field, after) in &changed {
+            let mut single = std::collections::BTreeMap::new();
+            single.insert(field.clone(), after.clone());
+            let distance = crowdrelay_domain::draft_revision::revision_distance(&draft, &single);
+            // A second save of the same field keeps the machine's words as the
+            // `before` — the distance is how far the band moved the machine's
+            // draft, not the band's own previous edit.
+            sqlx::query(
+                r#"
+                INSERT INTO draft_revisions
+                    (workspace_id, action_id, operation_id, field,
+                     before_text, after_text, distance_chars)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (workspace_id, action_id, field) DO UPDATE SET
+                    operation_id = EXCLUDED.operation_id,
+                    after_text = EXCLUDED.after_text,
+                    distance_chars = EXCLUDED.distance_chars
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id)
+            .bind(operation_id)
+            .bind(field)
+            .bind(draft.get(field).cloned().unwrap_or_default())
+            .bind(after)
+            .bind(i64::try_from(distance).unwrap_or(i64::MAX))
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+        }
+        transaction.commit().await.map_err(map_sqlx)?;
+        Ok(crowdrelay_domain::draft_revision::revisable_fields(&payload))
+    }
+}
