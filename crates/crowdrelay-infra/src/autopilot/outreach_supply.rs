@@ -41,6 +41,25 @@ const CATALOGUE_OPPORTUNITY_DAYS: i32 = 30;
 const SHOW_PITCH_FROM_DAYS: i32 = 60;
 const SHOW_PITCH_UNTIL_DAYS: i32 = 3;
 
+/// Which contacts a show is news to, over the aliases `target` and `event`.
+///
+/// A show opportunity used to be written for every press, radio, creator and
+/// patronage contact in the registry, wherever they were: the Gorzów show on
+/// 2026-10-17 queued letters to a festival in Bratislava, a youth contest in
+/// Berlin and a site in Kufstein. The registry holds one fact about where a
+/// contact is — the domain of their address — so a show is offered to the
+/// contacts whose address is under the show city's own country domain (the
+/// ISO code is the ccTLD for every country the act has played). A free-mail
+/// address says nothing about where its owner is and is left out; the
+/// catalogue pitch still reaches it. Organisers are asked for a slot, not
+/// about this night, and are not filtered.
+pub(crate) const SHOW_LOCAL_TARGET: &str = "(target.target_kind = 'organiser' OR EXISTS (\
+    SELECT 1 FROM cities AS show_city \
+    WHERE show_city.id = event.city_id \
+      AND show_city.country_code IS NOT NULL \
+      AND lower(split_part(target.contact_email, '@', 2)) \
+          LIKE '%.' || lower(show_city.country_code)))";
+
 /// What the act is pitching, and the subject its opportunities are keyed by.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OutreachPitch {
@@ -201,6 +220,7 @@ impl PostgresAutopilotRepository {
                   AND event.starts_at > $2 + make_interval(days => $4)
                   AND event.starts_at <= $2 + make_interval(days => $3)
                   AND {ELIGIBLE_TARGET}
+                  AND {SHOW_LOCAL_TARGET}
                   AND target.target_kind IN ('press', 'radio', 'creator', 'media_patronage', 'endorsement', 'organiser')
                 ON CONFLICT (workspace_id, source, target_id, subject_kind, subject_key) DO UPDATE SET
                     active = true, observed_at = EXCLUDED.observed_at,
@@ -285,6 +305,17 @@ impl PostgresAutopilotRepository {
                   AND (
                       (opportunity.source = 'catalogue_autopilot'
                        AND opportunity.subject_key IS DISTINCT FROM $2)
+                      OR (opportunity.source = 'event_autopilot'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM outreach_targets AS target
+                              JOIN events AS event
+                                ON event.workspace_id = target.workspace_id
+                               AND 'event:' || event.id::text = opportunity.subject_key
+                              WHERE target.workspace_id = opportunity.workspace_id
+                                AND target.id = opportunity.target_id
+                                AND NOT {SHOW_LOCAL_TARGET}
+                          ))
                       OR (opportunity.source = 'event_autopilot'
                           AND NOT EXISTS (
                               SELECT 1 FROM events AS event
