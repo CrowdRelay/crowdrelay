@@ -494,12 +494,19 @@ async fn unlabelled_link_records_interaction_but_never_converts()
         Some("smart_link"),
         "an unlabelled link falls back to the generic channel"
     );
-    assert!(
-        conversion_rows(&pool, workspace_id, fan_id)
-            .await?
-            .is_empty(),
-        "an unlabelled link writes no conversion — unattributable, not zero-attributed"
+    // The click credits nothing: no `last_tracked_click` row, no action. The
+    // signup still arrived, and says so as a direct arrival that names no
+    // channel it cannot prove.
+    let conversions = conversion_rows(&pool, workspace_id, fan_id).await?;
+    assert_eq!(
+        conversions.len(),
+        1,
+        "exactly one conversion — the direct arrival, never a click credit: {conversions:?}"
     );
+    let (channel, method, community, action_id, _) = &conversions[0];
+    assert_eq!(method, "direct_arrival", "an unlabelled link is not attribution");
+    assert_ne!(channel, "smart_link", "the channel is the signup's own source, not the link");
+    assert!(community.is_none() && action_id.is_none(), "credits no community or action");
 
 
     Ok(())

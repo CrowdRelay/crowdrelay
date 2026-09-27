@@ -45,11 +45,37 @@ impl PostgresAcquisitionRepository {
         .execute(&mut **transaction)
         .await
         .map_err(StoreError::from_sqlx)?;
-        self.record_community_conversion(transaction, workspace_id, fan_id, signup)
+        let clicked = self
+            .record_community_conversion(transaction, workspace_id, fan_id, signup)
             .await?;
         if let Some(referral) = referral {
             self.record_referral_conversion(transaction, workspace_id, fan_id, referral)
                 .await?;
+        } else if !clicked {
+            // A signup nothing can be credited with still arrived. Until
+            // 2026-09-27 it left no provenance row at all — the ticket, QR
+            // and Synesthesia paths wrote `direct_arrival`, the public signup
+            // did not — so every channel breakdown summed to less than the
+            // fans that exist (1 conversion row against 23 signups).
+            sqlx::query(
+                r#"
+                INSERT INTO fan_provenance_events (
+                    workspace_id, fan_id, event_kind, channel, campaign_id,
+                    attribution_method, attribution_confidence, occurred_at
+                )
+                SELECT $1, $2, 'conversion', $3, $4, 'direct_arrival', 1.0, fan.created_at
+                FROM fans AS fan
+                WHERE fan.workspace_id = $1
+                  AND fan.id = $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(fan_id.into_uuid())
+            .bind(signup.consent().source())
+            .bind(signup.campaign_id().map(Into::<Uuid>::into))
+            .execute(&mut **transaction)
+            .await
+            .map_err(StoreError::from_sqlx)?;
         }
         Ok(())
     }
@@ -145,9 +171,9 @@ impl PostgresAcquisitionRepository {
         workspace_id: WorkspaceId,
         fan_id: FanId,
         signup: &FanSignup,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let Some(visitor_id) = signup.visitor_id() else {
-            return Ok(());
+            return Ok(false);
         };
         // occurred_at must be the fan's created_at — the actual conversion
         // time — not now() (write time). If the fan does not exist, the JOIN
@@ -181,7 +207,7 @@ impl PostgresAcquisitionRepository {
         // outcome-ingest gate means every posted thread names a live source,
         // so a NULL here says "the source was filed without a format", which
         // is an honest unrecorded, not a join failure.
-        sqlx::query(
+        let converted = sqlx::query(
             r#"
             INSERT INTO fan_provenance_events (
                 workspace_id, fan_id, event_kind, channel, source_target,
@@ -265,6 +291,7 @@ impl PostgresAcquisitionRepository {
         .execute(&mut **transaction)
         .await
         .map_err(StoreError::from_sqlx)?;
+        let clicked = converted.rows_affected() > 0;
         // Link the visitor's anonymous history to the fan they just became.
         // Interaction rows are written at click time with fan_id NULL — this
         // is the "once the fan converts, the fan_id is linked" half the
@@ -286,7 +313,7 @@ impl PostgresAcquisitionRepository {
         .execute(&mut **transaction)
         .await
         .map_err(StoreError::from_sqlx)?;
-        Ok(())
+        Ok(clicked)
     }
 
 }
