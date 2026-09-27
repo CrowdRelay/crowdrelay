@@ -92,6 +92,11 @@ RUN groupadd --gid 10001 crowdrelay \
 WORKDIR /app
 
 ENV RUST_LOG=info
+# The binaries use mimalloc (see `GLOBAL` in each main.rs). Purge delay 0
+# returns freed pages to the OS immediately; mimalloc's default delay kept a
+# load's peak resident (876 MB in the allocation probe) the same way glibc
+# did, which is what OOM-killed the API at its 1 GiB limit.
+ENV MIMALLOC_PURGE_DELAY=0
 
 FROM runtime AS api
 

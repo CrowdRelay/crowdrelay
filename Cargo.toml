@@ -19,6 +19,7 @@ authors = ["Wojciech Bator"]
 repository = "https://github.com/CrowdRelay/crowdrelay"
 
 [workspace.dependencies]
+mimalloc = { version = "0.1.52", default-features = false }
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
