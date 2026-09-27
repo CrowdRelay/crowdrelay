@@ -226,6 +226,19 @@ impl PostgresAutopilotRepository {
                         *target_version,
                     )
                     .await?;
+                    // A show opportunity's letter must be the show letter. Until
+                    // #322 every one composed the catalogue pitch instead —
+                    // "we would love to submit {album} for coverage" — and on
+                    // 2026-09-27 thirty-five of those were still waiting for a
+                    // wave approval that would have sent them as written.
+                    // Fresh show letters carry the opportunity's own template
+                    // key; anything else under an `event.*` opportunity is a
+                    // stale draft and is refused, never re-composed here.
+                    if crate::autopilot::outreach_supply::stale_show_letter(&target.2, template_key) {
+                        return Err(RepositoryError::ConflictBecause(
+                            "outreach refused: this show's letter was composed as an album pitch before show letters existed — it names no show",
+                        ));
+                    }
                     reserve_contact_window(
                         &mut transaction,
                         workspace_id,
