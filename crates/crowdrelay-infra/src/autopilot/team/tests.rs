@@ -4,21 +4,52 @@ mod tests {
 
     #[test]
     fn the_email_frame_follows_the_crew_locale() {
-        let (subject, greeting, intro) =
-            team_email_frame(BriefingLocale::Pl, "VIRYA", "Wojtek", "Zatwierdź artefakt treści", 0);
-        assert_eq!(subject, "VIRYA — nowe zadanie: Zatwierdź artefakt treści");
+        let (subject, greeting, intro) = team_email_frame(
+            BriefingLocale::Pl,
+            "Wojtek",
+            "Zatwierdź artefakt treści",
+            0,
+            false,
+        );
+        assert_eq!(subject, "Zadanie: Zatwierdź artefakt treści");
         assert_eq!(greeting, "Cześć Wojtek!");
         assert!(intro.contains("nowe zadanie"));
 
         let (subject, greeting, _) = team_email_frame(
             BriefingLocale::En,
-            "VIRYA",
             "Wojtek",
             "Approve the content artifact",
             0,
+            false,
         );
-        assert_eq!(subject, "VIRYA — new task: Approve the content artifact");
+        assert_eq!(subject, "Task: Approve the content artifact");
         assert_eq!(greeting, "Hi Wojtek!");
+    }
+
+    /// A mail with nothing to act on is not "a new task" — the subject is the
+    /// title itself, which already says briefing/summary/notice.
+    #[test]
+    fn an_informational_mail_speaks_for_itself() {
+        let (subject, _, intro) = team_email_frame(
+            BriefingLocale::Pl,
+            "Wojtek",
+            "CrowdRelay — poranne podsumowanie",
+            0,
+            true,
+        );
+        assert_eq!(subject, "CrowdRelay — poranne podsumowanie");
+        assert!(intro.contains("powiadomienie"), "{intro}");
+        assert!(!intro.contains("zadanie"), "{intro}");
+
+        let (subject, _, intro) = team_email_frame(
+            BriefingLocale::En,
+            "Wojtek",
+            "CrowdRelay — morning briefing",
+            0,
+            true,
+        );
+        assert_eq!(subject, "CrowdRelay — morning briefing");
+        assert!(intro.contains("notice"), "{intro}");
     }
 
     /// The recipient is told when nobody will chase again. The reminder lane
@@ -29,24 +60,17 @@ mod tests {
     fn the_last_reminder_says_it_is_the_last() {
         let (subject, _, intro) = team_email_frame(
             BriefingLocale::En,
-            "VIRYA",
             "Wojtek",
             "Approve the content artifact",
             MAX_REMINDERS_PER_ASSIGNMENT as u8,
+            false,
         );
-        assert!(subject.starts_with("VIRYA — last reminder:"), "{subject}");
+        assert!(subject.starts_with("Last reminder:"), "{subject}");
         assert!(intro.contains("no more will follow"), "{intro}");
 
-        let (subject, _, _) = team_email_frame(BriefingLocale::En, "VIRYA", "Wojtek", "Approve it", 1);
-        assert!(subject.starts_with("VIRYA — reminder:"), "{subject}");
-    }
-
-    /// A roster's crew serves several acts; each task says whose it is.
-    #[test]
-    fn a_task_names_the_act_it_belongs_to() {
-        let (subject, _, _) = team_email_frame(BriefingLocale::Pl, "Mgła", "Ola", "Zatwierdź post", 0);
-        assert_eq!(subject, "Mgła — nowe zadanie: Zatwierdź post");
-        assert!(!subject.contains("VIRYA"), "{subject}");
+        let (subject, _, _) =
+            team_email_frame(BriefingLocale::En, "Wojtek", "Approve it", 1, false);
+        assert!(subject.starts_with("Reminder:"), "{subject}");
     }
 
     /// The inbox this was reported from: four approvals of one kind, four
@@ -84,8 +108,8 @@ mod tests {
     #[test]
     fn a_reminder_frame_is_not_the_first_send() {
         let (subject, _, intro) =
-            team_email_frame(BriefingLocale::Pl, "VIRYA", "Wojtek", "Domknij zadanie", 2);
-        assert!(subject.starts_with("VIRYA — przypomnienie:"));
+            team_email_frame(BriefingLocale::Pl, "Wojtek", "Domknij zadanie", 2, false);
+        assert!(subject.starts_with("Przypomnienie:"));
         assert!(intro.contains("przypominamy"));
     }
 }

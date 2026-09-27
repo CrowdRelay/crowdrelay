@@ -1088,6 +1088,12 @@ pub enum AutopilotActionPayload {
         due_at: Option<time::OffsetDateTime>,
         action_url_path: String,
         reminder_number: u8,
+        /// Whether the mail carries anything to act on. Briefings and briefs
+        /// carry none — they are read, not answered — and the subject must
+        /// say so: calling a summary "new task" lies about what arrived.
+        /// Defaulted so rows written before the field existed still parse.
+        #[serde(default)]
+        informational: bool,
         /// One-click links for the pending approval this single notice
         /// fronts. Absent on every other team mail — a notice whose window
         /// never ends gets no link rather than a link that cannot expire.

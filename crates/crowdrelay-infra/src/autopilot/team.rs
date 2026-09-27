@@ -526,6 +526,12 @@ pub(super) async fn queue_team_email_action(
     due_at: Option<OffsetDateTime>,
     reminder_number: u8,
     source_action_id: Option<Uuid>,
+    // Who declares what arrived — the producer, not the plumbing. A briefing
+    // passes `true` and its own title is the subject; every task asks for
+    // work, so it passes `false` and the subject says "task". Deriving this
+    // from `source_action_id` mislabels show-task, capture-plan and
+    // making-of mail, which carries no approval link but asks for real work.
+    informational: bool,
     links: EmailApprovalLinks,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
@@ -631,6 +637,7 @@ pub(super) async fn queue_team_email_action(
         task_title,
         task_detail,
         due_at,
+        informational,
         action_url_path: match source_action_id {
             Some(id) => format!("/staff/?tab=overview#needs-you&action={id}"),
             None => "/staff/?tab=overview#needs-you".to_owned(),
@@ -757,6 +764,9 @@ async fn flush_initial_notices(
             primary.due_at,
             0,
             primary.source_action_id,
+            // Every notice flushed here is work: an approval to answer or a
+            // checklist task to do — none of it is read-only.
+            false,
             EmailApprovalLinks {
                 direct,
                 pending: Vec::new(),

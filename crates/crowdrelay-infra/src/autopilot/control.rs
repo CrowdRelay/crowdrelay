@@ -1124,6 +1124,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     due_at,
                     0,
                     Some(action_id.into_uuid()),
+                    false,
                     links,
                     OffsetDateTime::now_utc(),
                 )

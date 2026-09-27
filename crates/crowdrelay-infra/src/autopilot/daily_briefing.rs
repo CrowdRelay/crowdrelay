@@ -374,6 +374,8 @@ pub(in crate::autopilot) async fn issue_daily_briefings(
             due_at,
             0,
             None,
+            // The briefing is read, not answered — its title is the subject.
+            true,
             super::team::EmailApprovalLinks {
                 direct: None,
                 pending: pending_links.clone(),

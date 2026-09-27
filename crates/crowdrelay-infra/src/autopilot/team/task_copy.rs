@@ -14,43 +14,60 @@
 /// interpolate `email_subject`, `email_greeting` and `email_intro`.
 pub(super) fn team_email_frame(
     locale: BriefingLocale,
-    wordmark: &str,
     recipient_name: &str,
     task_title: &str,
     reminder_number: u8,
+    informational: bool,
 ) -> (String, String, String) {
     let reminder = reminder_number > 0;
     // The last rung of the ladder. Saying so is the difference between a
     // reminder and a nag: the recipient learns that nothing further will
     // arrive, so ignoring it is a decision rather than a delay.
     let final_reminder = reminder && i32::from(reminder_number) >= MAX_REMINDERS_PER_ASSIGNMENT;
-    let subject = match (locale, reminder, final_reminder) {
-        (BriefingLocale::Pl, false, _) => format!("{wordmark} — nowe zadanie: {task_title}"),
-        (BriefingLocale::Pl, true, false) => format!("{wordmark} — przypomnienie: {task_title}"),
-        (BriefingLocale::Pl, true, true) => {
-            format!("{wordmark} — ostatnie przypomnienie: {task_title}")
+    // The subject names what arrived, not a brand prefix: an informational
+    // mail speaks for itself (its title already says briefing/summary), a
+    // task gets the task label, a reminder the reminder ladder — nothing is
+    // "a new task" when there is nothing in it to do.
+    let subject = match (locale, reminder, final_reminder, informational) {
+        (_, _, _, true) => task_title.to_owned(),
+        (BriefingLocale::Pl, false, _, _) => format!("Zadanie: {task_title}"),
+        (BriefingLocale::Pl, true, false, _) => format!("Przypomnienie: {task_title}"),
+        (BriefingLocale::Pl, true, true, _) => {
+            format!("Ostatnie przypomnienie: {task_title}")
         }
-        (BriefingLocale::En, false, _) => format!("{wordmark} — new task: {task_title}"),
-        (BriefingLocale::En, true, false) => format!("{wordmark} — reminder: {task_title}"),
-        (BriefingLocale::En, true, true) => format!("{wordmark} — last reminder: {task_title}"),
+        (BriefingLocale::En, false, _, _) => format!("Task: {task_title}"),
+        (BriefingLocale::En, true, false, _) => format!("Reminder: {task_title}"),
+        (BriefingLocale::En, true, true, _) => format!("Last reminder: {task_title}"),
     };
     let greeting = match locale {
         BriefingLocale::Pl => format!("Cześć {recipient_name}!"),
         BriefingLocale::En => format!("Hi {recipient_name}!"),
     };
-    let intro = match (locale, reminder, final_reminder) {
-        (BriefingLocale::Pl, false, _) => "Wpadło do Ciebie nowe zadanie od CrowdRelay.".to_owned(),
-        (BriefingLocale::Pl, true, false) => {
+    let intro = match (locale, reminder, final_reminder, informational) {
+        (BriefingLocale::Pl, _, _, true) => {
+            "Wpadło do Ciebie nowe powiadomienie od CrowdRelay.".to_owned()
+        }
+        (BriefingLocale::En, _, _, true) => {
+            "A new notice from CrowdRelay landed for you.".to_owned()
+        }
+        (BriefingLocale::Pl, false, _, _) => {
+            "Wpadło do Ciebie nowe zadanie od CrowdRelay.".to_owned()
+        }
+        (BriefingLocale::Pl, true, false, _) => {
             "To zadanie nadal czeka na Ciebie — przypominamy.".to_owned()
         }
-        (BriefingLocale::Pl, true, true) => {
+        (BriefingLocale::Pl, true, true, _) => {
             "To ostatnie przypomnienie o tym zadaniu — kolejnych nie wyślemy. \
              Jeśli nie jest już potrzebne, zamknij je w panelu."
                 .to_owned()
         }
-        (BriefingLocale::En, false, _) => "A new task from CrowdRelay landed for you.".to_owned(),
-        (BriefingLocale::En, true, false) => "This task is still waiting for you.".to_owned(),
-        (BriefingLocale::En, true, true) => {
+        (BriefingLocale::En, false, _, _) => {
+            "A new task from CrowdRelay landed for you.".to_owned()
+        }
+        (BriefingLocale::En, true, false, _) => {
+            "This task is still waiting for you.".to_owned()
+        }
+        (BriefingLocale::En, true, true, _) => {
             "This is the last reminder for this task — no more will follow. \
              If it is no longer needed, close it in the panel."
                 .to_owned()

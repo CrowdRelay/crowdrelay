@@ -1118,7 +1118,7 @@ impl PostgresAutopilotRepository {
                 }
                 AutopilotActionPayload::SendTeamAssignmentEmail {
                     assignment_id, recipient_email, recipient_name, task_title, task_detail,
-                    due_at, action_url_path, reminder_number,
+                    due_at, action_url_path, reminder_number, informational,
                     approve_url, skip_url, pending_approvals,
                 } => {
                     // The frame the executor wraps around the task body is
@@ -1127,16 +1127,13 @@ impl PostgresAutopilotRepository {
                     // second copy of the wording living inside n8n.
                     let locale =
                         super::team::crew_locale_in_tx(&mut transaction, workspace_id).await;
-                    // A roster's crew serves several acts; the subject says which.
-                    let wordmark =
-                        super::workspace_wordmark(&mut transaction, workspace_id).await?;
                     let (email_subject, email_greeting, email_intro) =
                         super::team::team_email_frame(
                             locale,
-                            &wordmark,
                             recipient_name,
                             task_title,
                             *reminder_number,
+                            *informational,
                         );
                     emit_external_action(
                         &mut transaction,

@@ -420,6 +420,9 @@ impl PostgresAutopilotRepository {
                             due_at,
                             0,
                             None,
+                            // A weekly brief is read, not answered — its
+                            // title is the subject.
+                            true,
                             super::team::EmailApprovalLinks::default(),
                             now,
                         )
