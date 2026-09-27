@@ -1002,3 +1002,100 @@ async fn a_release_milestone_leaves_dispatch_with_envelope_and_measurements()
     assert_eq!(campaign, 1, "the milestone executor still owns its link");
     Ok(())
 }
+
+/// Install checkpoints are planned against new installs in a pre-window of
+/// their own width, never against the standing install total. With the old
+/// total as baseline every dispatch that added none scored −100%, which is
+/// how 43 of one week's 87 worsened outcomes were produced.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn install_checkpoints_are_planned_against_a_matched_pre_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    let suffix = f.workspace_id.into_uuid().simple().to_string();
+
+    // Three installs a month old, one three days old: the 7-day pre-window
+    // holds one, the 1-day pre-window holds none, the total is four.
+    for (index, age_days) in [40_i64, 35, 30, 3].into_iter().enumerate() {
+        let fan_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, display_name, status)
+             VALUES ($1, $2, $3, 'Fan', 'active')",
+        )
+        .bind(fan_id)
+        .bind(f.workspace_id.into_uuid())
+        .bind(format!("window-{suffix}-{index}@example.test"))
+        .execute(&f.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source)
+             VALUES ($1,$2,'marketing',true,'v1','test')",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(fan_id)
+        .execute(&f.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO fan_push_endpoints
+               (id, workspace_id, fan_id, installation_id, transport, endpoint_address, active,
+                created_at)
+             VALUES ($1, $2, $3, $4, 'android_fcm', $5, true, $6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(format!("window-install-{suffix}-{index}"))
+        .bind(format!("window-token-{suffix}-{index}"))
+        .bind(now - time::Duration::days(age_days))
+        .execute(&f.pool)
+        .await?;
+    }
+
+    let action_id = seed_outcome_action(
+        &f,
+        "signal.push.request",
+        json!({
+            "kind": "request_signal_push",
+            "task_id": Uuid::now_v7(),
+            "title": "window push",
+            "body": "window push body",
+            "target_path": null,
+            "event_id": null,
+            "segment": null,
+        }),
+        now,
+    )
+    .await?;
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued push action must be claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    let baselines = sqlx::query_as::<_, (String, f64)>(
+        "SELECT measurement_kind, baseline_value FROM autopilot_measurements \
+         WHERE workspace_id = $1 AND action_id = $2 \
+           AND measurement_kind IN ('agent_run_signal_installs_7d', 'signal_installs_1d') \
+         ORDER BY measurement_kind",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_all(&f.pool)
+    .await?;
+    assert_eq!(
+        baselines,
+        vec![
+            ("agent_run_signal_installs_7d".to_owned(), 1.0),
+            ("signal_installs_1d".to_owned(), 0.0),
+        ],
+        "each install checkpoint counts its own pre-window, not the total of four"
+    );
+    Ok(())
+}

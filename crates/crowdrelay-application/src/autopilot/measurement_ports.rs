@@ -310,6 +310,35 @@ impl AutopilotMeasurementKind {
         )
     }
 
+    /// Kinds that grade the worker's own output — did it produce a usable
+    /// draft, find targets, write insights — rather than anything a fan did.
+    ///
+    /// They are real signals about the machine, but they are not outcomes.
+    /// A summary that adds them to fan and revenue verdicts reads as
+    /// "23 improved" when every one of the 23 was the system approving of
+    /// its own work (production, week to 2026-09-27). Readers that report
+    /// outcomes must keep them apart.
+    pub const PROCESS_CHECKS: [Self; 5] = [
+        Self::AgentRunOutcomeQuality1h,
+        Self::ScannerDiscoveryQuality1h,
+        Self::ScannerDiscoveryQuality14d,
+        Self::StrategistInsightQuality1h,
+        Self::StrategistInsightQuality14d,
+    ];
+
+    /// Whether the signed effect is a count of fans minus a counterfactual
+    /// built from a daily rate — so it can be fractional even though fans
+    /// arrive whole. See the fractional-fan floor in `assess_primary`.
+    #[must_use]
+    pub const fn counts_fans_against_counterfactual(self) -> bool {
+        matches!(
+            self,
+            Self::IncrementalFanGrowth14d
+                | Self::IncrementalFanGrowth3d
+                | Self::DurableFanGrowth30d
+        )
+    }
+
     /// Why a measurement was abandoned when its dispatch never reached anyone.
     ///
     /// Recorded as the measurement's `last_error_kind`, which is bounded at 96
@@ -733,7 +762,27 @@ fn assess_primary(
     if measurement.kind.is_signed_effect() {
         // The observation is already an effect. Classify it against zero and
         // express it against the counterfactual it was measured against.
-        return assess_signed_effect(measurement.counterfactual_value(), observed_value, 500);
+        let result = assess_signed_effect(measurement.counterfactual_value(), observed_value, 500)?;
+        // A fan-count effect smaller than one whole fan is a fractional
+        // counterfactual, not a result. A quiet workspace that gained three
+        // fans in the fortnight before a dispatch expects 0.43 in the three
+        // days after it; observing zero — the most likely count under that
+        // expectation — subtracts to −0.43 and saturates the signed scale to
+        // −100%. Production on 2026-09-27 had nineteen such rows in one week,
+        // every one the same fractional miss charged to a different action,
+        // and all of them fed the two-worsened demotion guard. Under one fan
+        // the honest verdict is Neutral; the raw effect still lands in
+        // `observed_metrics` for the posterior.
+        let fractional_fan =
+            measurement.kind.counts_fans_against_counterfactual() && observed_value.abs() < 1.0;
+        return Some(EffectResult {
+            assessment: if fractional_fan {
+                EffectAssessment::Neutral
+            } else {
+                result.assessment
+            },
+            delta_basis_points: result.delta_basis_points,
+        });
     }
     assess_effect(
         measurement.baseline_value,
@@ -790,6 +839,59 @@ mod tests {
         let improved = assess_measurement_effect(&measurement, 40.0, &HarmObservation::default())
             .expect("improved");
         assert_eq!(improved.assessment, EffectAssessment::Improved);
+    }
+
+    /// Zero fans observed against a fractional counterfactual is the most
+    /// likely count, not a loss. Under one whole fan the verdict is Neutral;
+    /// a real shortfall of a fan or more keeps Worsened.
+    #[test]
+    fn incremental_fan_growth_reads_fractional_misses_as_neutral() {
+        for kind in [
+            AutopilotMeasurementKind::IncrementalFanGrowth3d,
+            AutopilotMeasurementKind::IncrementalFanGrowth14d,
+            AutopilotMeasurementKind::DurableFanGrowth30d,
+        ] {
+            let measurement = ClaimedAutopilotMeasurement {
+                baseline_value: 0.143,
+                ..claimed(kind)
+            };
+            for observed in [-0.429, -0.99, 0.0, 0.5] {
+                let result =
+                    assess_measurement_effect(&measurement, observed, &HarmObservation::default())
+                        .expect("fan growth assessment");
+                assert_eq!(
+                    result.assessment,
+                    EffectAssessment::Neutral,
+                    "{kind:?} effect {observed} should classify Neutral"
+                );
+            }
+            let lost = assess_measurement_effect(&measurement, -2.0, &HarmObservation::default())
+                .expect("lost");
+            assert_eq!(lost.assessment, EffectAssessment::Worsened, "{kind:?}");
+            let gained = assess_measurement_effect(&measurement, 2.0, &HarmObservation::default())
+                .expect("gained");
+            assert_eq!(gained.assessment, EffectAssessment::Improved, "{kind:?}");
+        }
+    }
+
+    /// Install checkpoints compare a window's new installs against the same
+    /// width of new installs before the action. Nothing before and nothing
+    /// after is Neutral — the case production scored Worsened 43 times in
+    /// one week when the baseline was the standing install total.
+    #[test]
+    fn signal_installs_compare_like_windows() {
+        for kind in [
+            AutopilotMeasurementKind::SignalInstalls1d,
+            AutopilotMeasurementKind::AgentRunSignalInstalls7d,
+        ] {
+            let quiet = claimed(kind);
+            let flat =
+                assess_measurement_effect(&quiet, 0.0, &HarmObservation::default()).expect("flat");
+            assert_eq!(flat.assessment, EffectAssessment::Neutral, "{kind:?}");
+            let one = assess_measurement_effect(&quiet, 1.0, &HarmObservation::default())
+                .expect("one install");
+            assert_eq!(one.assessment, EffectAssessment::Improved, "{kind:?}");
+        }
     }
 
     /// A send's unsubscribe rate under half a percent is baseline churn, not

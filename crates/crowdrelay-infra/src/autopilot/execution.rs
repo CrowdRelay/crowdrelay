@@ -526,22 +526,10 @@ pub(super) async fn schedule_effect_measurement(
         // the 7 days *after*. The effect is then a pre/post comparison —
         // did the push accelerate installs beyond the baseline rate?
         AutopilotActionPayload::RequestSignalPush { .. } => {
-            let baseline_installs = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COUNT(*)::double precision
-                FROM fan_push_endpoints
-                WHERE workspace_id = $1
-                  AND active = true
-                  AND invalidated_at IS NULL
-                  AND created_at >= $2 - INTERVAL '7 days'
-                  AND created_at < $2
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            let baseline_installs =
+                pre_action_signal_installs(transaction, workspace_id, now, 7).await?;
+            let baseline_installs_1d =
+                pre_action_signal_installs(transaction, workspace_id, now, 1).await?;
             plans.push((
                 AutopilotMeasurementKind::AgentRunSignalInstalls7d,
                 action_id.into_uuid(),
@@ -558,14 +546,14 @@ pub(super) async fn schedule_effect_measurement(
             plans.push((
                 AutopilotMeasurementKind::SignalInstalls1d,
                 action_id.into_uuid(),
-                baseline_installs,
+                baseline_installs_1d,
                 now + time::Duration::days(1),
             ));
         }
         // Agent dispatches: measure whether the worker's intelligence
-        // gathering actually grew fans. The baseline is the fan count at
-        // dispatch time; the observation counts new fans in the 14-day
-        // window after the dispatch. This closes the learning loop: the
+        // gathering actually grew fans. The baseline is the non-suppressed
+        // fans that arrived in the matched window before dispatch; the
+        // observation counts the same in the window after it. This closes the learning loop: the
         // brain can retire workers that consistently produce no growth and
         // shorten the cadence of workers that do.
         AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
@@ -607,6 +595,7 @@ pub(super) async fn schedule_effect_measurement(
                     WHERE workspace_id = $1
                       AND created_at >= $2 - INTERVAL '14 days'
                       AND created_at < $2
+                      AND status != 'suppressed'
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
@@ -637,6 +626,7 @@ pub(super) async fn schedule_effect_measurement(
                     WHERE workspace_id = $1
                       AND created_at >= $2 - INTERVAL '3 days'
                       AND created_at < $2
+                      AND status != 'suppressed'
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
@@ -727,17 +717,10 @@ pub(super) async fn schedule_effect_measurement(
                 pre_action_durable_daily_rate,
                 now + time::Duration::days(44),
             ));
-            let baseline_installs = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COUNT(*)::double precision
-                FROM fan_push_endpoints
-                WHERE workspace_id = $1 AND invalidated_at IS NULL
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
+            let baseline_installs =
+                pre_action_signal_installs(transaction, workspace_id, now, 7).await?;
+            let baseline_installs_1d =
+                pre_action_signal_installs(transaction, workspace_id, now, 1).await?;
             plans.push((
                 AutopilotMeasurementKind::AgentRunSignalInstalls7d,
                 action_id.into_uuid(),
@@ -746,12 +729,12 @@ pub(super) async fn schedule_effect_measurement(
             ));
             // Fast checkpoint: 1-day signal installs. The brain gets
             // next-cycle feedback on whether the worker moved fans toward
-            // Signal within 24 hours, not a week. Same baseline as the 7d
-            // measurement — the pre-action total install count.
+            // Signal within 24 hours, not a week. Its baseline is the one day
+            // of installs before the dispatch, matched to its own width.
             plans.push((
                 AutopilotMeasurementKind::SignalInstalls1d,
                 action_id.into_uuid(),
-                baseline_installs,
+                baseline_installs_1d,
                 now + time::Duration::days(1),
             ));
             } else {

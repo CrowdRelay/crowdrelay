@@ -160,6 +160,8 @@ struct ChiefStatsRow {
     measured_improved_7d: i64,
     measured_neutral_7d: i64,
     measured_worsened_7d: i64,
+    process_checks_7d: i64,
+    process_checks_improved_7d: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -202,7 +204,20 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         ChiefOfStaffShowTask,
     };
 
+    let process_check_keys: Vec<String> =
+        crowdrelay_application::autopilot::AutopilotMeasurementKind::PROCESS_CHECKS
+            .iter()
+            .map(|kind| format!("effect.{}", kind.as_str()))
+            .collect();
     let stats = sqlx::query_as::<_, ChiefStatsRow>(r#"
+        WITH latest_outcome AS (
+            SELECT DISTINCT ON (action_id) effect_assessment
+            FROM autopilot_outcomes
+            WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND action_id IS NOT NULL
+              AND observed_at >= $2 - INTERVAL '7 days'
+              AND metric_key <> ALL($3)
+            ORDER BY action_id, observed_at DESC, id DESC
+        )
         SELECT
             (SELECT count(*)::bigint FROM autopilot_actions action
               WHERE action.workspace_id=$1 AND action.status='succeeded'
@@ -275,13 +290,21 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
                AND completed_at >= $2 - INTERVAL '7 days'
                AND completed_at > assigned_at
             ) assignments_completed_7d,
+            -- One verdict per action: the latest outcome-kind measurement
+            -- that resolved for it this week. Counting rows instead charged a
+            -- single quiet fortnight to every metric of every action measured
+            -- over it — 87 "worsened" from 61 actions — and mixed in the
+            -- process checks, which are the machine grading its own output.
+            (SELECT count(*) FILTER (WHERE effect_assessment='improved')::bigint FROM latest_outcome) measured_improved_7d,
+            (SELECT count(*) FILTER (WHERE effect_assessment='neutral')::bigint FROM latest_outcome) measured_neutral_7d,
+            (SELECT count(*) FILTER (WHERE effect_assessment='worsened')::bigint FROM latest_outcome) measured_worsened_7d,
             (SELECT count(*)::bigint FROM autopilot_outcomes
-              WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='improved') measured_improved_7d,
+              WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days'
+                AND metric_key = ANY($3)) process_checks_7d,
             (SELECT count(*)::bigint FROM autopilot_outcomes
-              WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='neutral') measured_neutral_7d,
-            (SELECT count(*)::bigint FROM autopilot_outcomes
-              WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days' AND effect_assessment='worsened') measured_worsened_7d
-    "#).bind(workspace_id.into_uuid()).bind(now).fetch_one(&repo.pool).await.map_err(map_sqlx)?;
+              WHERE workspace_id=$1 AND measurement_id IS NOT NULL AND observed_at >= $2 - INTERVAL '7 days'
+                AND metric_key = ANY($3) AND effect_assessment='improved') process_checks_improved_7d
+    "#).bind(workspace_id.into_uuid()).bind(now).bind(&process_check_keys).fetch_one(&repo.pool).await.map_err(map_sqlx)?;
 
     let opportunity_rows = sqlx::query_as::<_, ChiefOpportunityRow>(r#"
         SELECT decision.context, decision.decision_kind, decision.subject_kind, decision.subject_id,
@@ -475,6 +498,8 @@ pub(in crate::autopilot) async fn load_chief_of_staff(
         measured_improved_7d: stats.measured_improved_7d,
         measured_neutral_7d: stats.measured_neutral_7d,
         measured_worsened_7d: stats.measured_worsened_7d,
+        process_checks_7d: stats.process_checks_7d,
+        process_checks_improved_7d: stats.process_checks_improved_7d,
         attention_items,
         top_opportunities,
         show_tasks,
