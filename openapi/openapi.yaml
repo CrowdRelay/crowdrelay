@@ -14723,7 +14723,7 @@ components:
     AutopilotChiefOfStaff:
       type: object
       additionalProperties: false
-      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, estimated_minutes_basis, median_assignment_turnaround_minutes_7d, assignments_completed_7d, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved, objectives_at_risk]
+      required: [executed_24h, failed_24h, needs_you, estimated_minutes_saved_24h, estimated_minutes_basis, median_assignment_turnaround_minutes_7d, assignments_completed_7d, measured_improved_7d, measured_neutral_7d, measured_worsened_7d, process_checks_7d, process_checks_improved_7d, attention_items, top_opportunities, show_tasks, acted_alone_24h, about_to_act, parked_for_approval, stopped, moved, objectives_at_risk]
       properties:
         executed_24h: { type: integer, format: int64, minimum: 0 }
         failed_24h: { type: integer, format: int64, minimum: 0 }
@@ -14750,9 +14750,19 @@ components:
           type: integer
           format: int64
           minimum: 0
-        measured_improved_7d: { type: integer, format: int64, minimum: 0 }
+        measured_improved_7d:
+          description: Actions whose outcome was measured in the last 7 days and improved — one verdict per action, its latest outcome measurement. Process checks are excluded.
+          type: integer
+          format: int64
+          minimum: 0
         measured_neutral_7d: { type: integer, format: int64, minimum: 0 }
         measured_worsened_7d: { type: integer, format: int64, minimum: 0 }
+        process_checks_7d:
+          description: Measurements in the last 7 days that graded the worker's own output (usable draft, targets found, insights written). Not fan outcomes.
+          type: integer
+          format: int64
+          minimum: 0
+        process_checks_improved_7d: { type: integer, format: int64, minimum: 0 }
         emitted_24h: { type: integer, format: int64, minimum: 0 }
         executor_confirmed_24h: { type: integer, format: int64, minimum: 0 }
         executor_failed_24h: { type: integer, format: int64, minimum: 0 }

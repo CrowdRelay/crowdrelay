@@ -737,9 +737,17 @@ pub struct AutopilotChiefOfStaff {
     /// How many completions the median covers — the n to check before
     /// reading a trend into it.
     pub assignments_completed_7d: i64,
+    /// Actions whose outcome was measured in the last 7 days, one verdict
+    /// per action (its latest outcome-kind measurement). Process checks are
+    /// excluded — they are counted in `process_checks_*` below.
     pub measured_improved_7d: i64,
     pub measured_neutral_7d: i64,
     pub measured_worsened_7d: i64,
+    /// Measurements in the last 7 days that graded the worker's own output
+    /// (`AutopilotMeasurementKind::PROCESS_CHECKS`), and how many of those
+    /// the worker passed. Not outcomes: no fan did anything.
+    pub process_checks_7d: i64,
+    pub process_checks_improved_7d: i64,
     pub emitted_24h: i64,
     pub executor_confirmed_24h: i64,
     pub executor_failed_24h: i64,
