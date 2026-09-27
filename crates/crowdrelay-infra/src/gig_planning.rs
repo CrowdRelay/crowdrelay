@@ -32,7 +32,7 @@ use sqlx::{PgPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::place_reach::{audience_overlaps_by_city, reachable_in_city};
+use crate::place_reach::audience_overlaps_by_city;
 use crate::tenant_settings::TenantSettingsRepository;
 
 /// How many cities the planner considers in one pass.
@@ -154,174 +154,9 @@ async fn candidate_cities(
     .await
 }
 
-/// The best room on record in a city, with what we know about reaching it.
-///
-/// "Best" is the one with the most marked shows — the registry's own measure of
-/// a room that programmes. Capacity and the booking route come from the
-/// tenant's own booking target joined through migration 0296's `venue_id`,
-/// which is why that join had to exist before this could. `comparable_acts`
-/// counts distinct billed acts at the room whose genres intersect the
-/// tenant's — the peer-act graph (4V.6) read through `my_genres`, the same
-/// shape `city_venues` and the booking snapshot use, so one answer follows
-/// the room wherever it is asked about.
-async fn best_venue(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    city_id: Uuid,
-    now: OffsetDateTime,
-    my_genres: &[String],
-) -> Result<Option<VenueEvidence>, sqlx::Error> {
-    let row = sqlx::query_as::<_, VenueRow>(
-        r#"
-        WITH marks AS (
-            SELECT mark.venue_id, event.starts_at, sale.id AS sale_id,
-                   mark.workspace_id, mark.event_id
-            FROM place_venue_marks AS mark
-            JOIN events AS event ON event.id = mark.event_id
-            LEFT JOIN ticket_sales AS sale
-              ON sale.workspace_id = mark.workspace_id
-             AND sale.event_id = mark.event_id
-        ), per_show AS (
-            SELECT marks.venue_id, marks.event_id,
-                   count(ticket_order.id)::double precision AS paid_orders
-            FROM marks
-            JOIN ticket_orders AS ticket_order
-              ON ticket_order.workspace_id = marks.workspace_id
-             AND ticket_order.ticket_sale_id = marks.sale_id
-             AND ticket_order.status IN ('paid', 'partially_refunded')
-            GROUP BY marks.venue_id, marks.event_id
-        )
-        SELECT venue.display_name,
-               -- DISTINCT because the target join can fan a venue's marks
-               -- out — two targets pointing at one room, or one promoter
-               -- edge-joined beside its own primary link, must not double
-               -- the room's show count.
-               count(DISTINCT marks.event_id) FILTER (
-                   WHERE marks.starts_at > $3 - INTERVAL '12 months'
-                     AND marks.starts_at <= $3
-               )::bigint AS shows_last_12_months,
-               -- NULL when the room has never hosted anything we know about,
-               -- which the planner reads as "never seen" rather than "a long
-               -- time ago". The two need different next steps.
-               FLOOR(EXTRACT(EPOCH FROM (
-                   $3 - max(marks.starts_at) FILTER (WHERE marks.starts_at <= $3)
-               )) / 86400)::bigint AS days_since_last_event,
-               -- Averaged over ticketed shows only. An unticketed night is
-               -- unmeasurable, not a night nobody came to, so it stays out of
-               -- the mean instead of dragging it down.
-               avg(per_show.paid_orders) AS typical_draw,
-               -- Distinct bill acts at the room whose genres intersect the
-               -- tenant's, both sides canonicalised through
-               -- place_genre_aliases — the same shape `city_venues` and the
-               -- booking snapshot use, so one answer follows the room
-               -- wherever it is asked about. The requesting workspace's own
-               -- acts never count: a tenant is not its own comparable.
-               COALESCE(max(comparable.comparable_acts), 0) AS comparable_acts,
-               max(target.capacity) AS capacity,
-               COALESCE(bool_or(target.active AND target.accepts_booking), false)
-                   AS has_booking_route,
-               FLOOR(EXTRACT(EPOCH FROM ($3 - max(target.last_outreach_at))) / 86400)::bigint
-                   AS contact_verified_days_ago
-        FROM place_venues AS venue
-        JOIN cities AS city ON city.id = venue.city_id AND city.id = $2
-        LEFT JOIN marks ON marks.venue_id = venue.id
-        LEFT JOIN per_show
-          ON per_show.venue_id = marks.venue_id
-         AND per_show.event_id = marks.event_id
-        LEFT JOIN LATERAL (
-            SELECT count(DISTINCT COALESCE(
-                       act.act_workspace_id::text, act.peer_act_id::text))::bigint
-                   AS comparable_acts
-            FROM place_venue_marks AS mark
-            JOIN event_acts AS act
-              ON act.event_id = mark.event_id
-             AND act.workspace_id = mark.workspace_id
-            WHERE mark.venue_id = venue.id
-              AND (act.act_workspace_id IS NULL OR act.act_workspace_id <> $1)
-              AND EXISTS (
-                  SELECT 1
-                  FROM (
-                      SELECT COALESCE(mine_alias.canonical, mine_tag.genre) AS genre
-                      FROM unnest($4::text[]) AS mine_tag(genre)
-                      LEFT JOIN place_genre_aliases AS mine_alias
-                        ON mine_alias.alias = mine_tag.genre
-                  ) AS mine
-                  JOIN (
-                      SELECT COALESCE(their_alias.canonical,
-                                      lower(btrim(their_genre.genre))) AS genre
-                      FROM (
-                          SELECT unnest(listing.genre_tags) AS genre
-                          FROM band_listings AS listing
-                          WHERE listing.workspace_id = act.act_workspace_id
-                          UNION ALL
-                          SELECT peer_genre.genre_tag
-                          FROM place_peer_act_genres AS peer_genre
-                          WHERE peer_genre.peer_act_id = act.peer_act_id
-                      ) AS their_genre
-                      LEFT JOIN place_genre_aliases AS their_alias
-                        ON their_alias.alias = lower(btrim(their_genre.genre))
-                  ) AS theirs ON theirs.genre = mine.genre
-              )
-        ) AS comparable ON true
-        -- The tenant's own booking targets for this room, if they have one —
-        -- the primary venue_id union the promoter↔venue edges, so a room a
-        -- promoter works reads as reachable even when the target's primary
-        -- link names another room (§12-5 entity 6).
-        -- Scoped to the workspace: capacity is shared knowledge, but whether
-        -- *we* can write to the room is ours.
-        LEFT JOIN booking_targets AS target
-          ON target.workspace_id = $1
-         AND (
-             target.venue_id = venue.id
-             OR EXISTS (
-                 SELECT 1
-                 FROM booking_target_venues AS edge
-                 WHERE edge.workspace_id = target.workspace_id
-                   AND edge.target_id = target.id
-                   AND edge.venue_id = venue.id
-             )
-         )
-        -- A room reported shut is not a proposal — but only the *resolved*
-        -- status may disqualify: a stale 'closed' must lose to a newer
-        -- 'active', or a reopened room would stay excluded forever. The
-        -- ladder is the registry's own — provenance trust order, then the
-        -- newest claim — applied to the global facts and this tenant's
-        -- private marks alike. No status fact at all is the common case and
-        -- carries no verdict.
-        WHERE COALESCE((
-            SELECT lower(btrim(closed_fact.value))
-            FROM place_venue_facts AS closed_fact
-            WHERE closed_fact.venue_id = venue.id
-              AND closed_fact.attribute = 'status'
-              AND (closed_fact.workspace_id IS NULL
-                   OR closed_fact.workspace_id = $1)
-              AND (closed_fact.expires_at IS NULL
-                   OR closed_fact.expires_at > $3)
-            ORDER BY CASE closed_fact.provenance
-                         WHEN 'played' THEN 0 WHEN 'researched' THEN 1
-                         WHEN 'event_evidence' THEN 2
-                         WHEN 'open_directory' THEN 3
-                         ELSE 4 END,
-                     closed_fact.observed_at DESC
-            LIMIT 1
-        ), '') <> 'closed'
-        GROUP BY venue.id, venue.display_name
-        -- DISTINCT here is load-bearing, not cosmetic: the target join can
-        -- fan a venue's marks out, and a raw count would let a room win on
-        -- booking-target cardinality rather than shows. `venue.id` is the
-        -- deterministic tiebreak `city_venues` uses.
-        ORDER BY count(DISTINCT marks.event_id) DESC, venue.id
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(city_id)
-    .bind(now)
-    .bind(my_genres)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|row| VenueEvidence {
+/// The planner's view of one room row — see `per_city::best_venues`.
+fn venue_evidence(row: VenueRow) -> VenueEvidence {
+    VenueEvidence {
         name: row.display_name,
         shows_last_12_months: bounded_u16(row.shows_last_12_months),
         comparable_acts: bounded_u16(row.comparable_acts),
@@ -336,7 +171,7 @@ async fn best_venue(
             .days_since_last_event
             .and_then(|days| u16::try_from(days.max(0)).ok()),
         has_booking_route: row.has_booking_route,
-    }))
+    }
 }
 
 /// Promoters this workspace can write to in a city.
@@ -392,139 +227,22 @@ pub async fn promoter_targets_in_city(
     workspace_id: Uuid,
     city_id: Uuid,
 ) -> Result<Vec<PromoterTarget>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, PromoterRow>(
-        r#"
-        SELECT target.id,
-               target.version,
-               target.display_name,
-               target.relationship_score,
-               EXISTS (
-                   SELECT 1 FROM booking_interactions AS interaction
-                   WHERE interaction.workspace_id = target.workspace_id
-                     AND interaction.target_id = target.id
-                     AND interaction.direction = 'inbound'
-               ) AS answered_last_time
-        FROM booking_targets AS target
-        WHERE target.workspace_id = $1
-          AND target.city_id = $2
-          AND target.target_kind IN ('promoter', 'venue')
-          AND target.active
-          AND target.accepts_booking
-          -- A venue-kind target whose room is on record as closed is not a
-          -- proposal recipient — the resolved status decides, so a newer
-          -- 'active' claim lifts the exclusion (same ladder `best_venue`
-          -- uses). A promoter linked to a dead room stays: the room is
-          -- dead, the booker is not.
-          AND NOT (
-              target.target_kind = 'venue'
-              AND EXISTS (
-                  SELECT 1
-                  FROM (
-                      SELECT target.venue_id AS linked_venue_id
-                      UNION
-                      SELECT edge.venue_id
-                      FROM booking_target_venues AS edge
-                      WHERE edge.workspace_id = target.workspace_id
-                        AND edge.target_id = target.id
-                  ) AS linked
-                  WHERE COALESCE((
-                      SELECT lower(btrim(status_fact.value))
-                      FROM place_venue_facts AS status_fact
-                      WHERE status_fact.venue_id = linked.linked_venue_id
-                        AND status_fact.attribute = 'status'
-                        AND (status_fact.workspace_id IS NULL
-                             OR status_fact.workspace_id = $1)
-                        AND (status_fact.expires_at IS NULL
-                             OR status_fact.expires_at > now())
-                      ORDER BY CASE status_fact.provenance
-                                   WHEN 'played' THEN 0 WHEN 'researched' THEN 1
-                                   WHEN 'event_evidence' THEN 2
-                                   WHEN 'open_directory' THEN 3
-                                   ELSE 4 END,
-                               status_fact.observed_at DESC
-                      LIMIT 1
-                  ), '') = 'closed'
-              )
-          )
-        ORDER BY target.relationship_score DESC, target.display_name
-        LIMIT 8
-        "#,
+    Ok(
+        per_city::promoter_targets_in_cities(pool, workspace_id, &[city_id])
+            .await?
+            .remove(&city_id)
+            .unwrap_or_default(),
     )
-    .bind(workspace_id)
-    .bind(city_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| PromoterTarget {
-            target_id: row.id,
-            target_version: row.version,
-            name: row.display_name,
-            relationship_score: bounded_u16(i64::from(row.relationship_score)),
-            answered_last_time: row.answered_last_time,
-        })
-        .collect())
 }
 
-async fn promoters_in_city(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    city_id: Uuid,
-) -> Result<Vec<PromoterRef>, sqlx::Error> {
-    Ok(promoter_targets_in_city(pool, workspace_id, city_id)
-        .await?
-        .iter()
-        .map(PromoterTarget::as_promoter_ref)
-        .collect())
-}
-
-/// Fans attributed to this city, grouped by the channel that produced them —
-/// strongest channel first, ties broken by name so the ranking is stable —
-/// plus the city's true distinct-fan total.
-///
-/// The join is `fan_city_interests`: where a fan said they live is the only
-/// city claim the fanbase makes, and a conversion row with no city interest
-/// is honestly unlocated rather than guessed. The total is a separate
-/// `ROLLUP` row because `DISTINCT` does not commute with the sum: a fan who
-/// carries two attributions — a tracked click and a referral — counts once
-/// per channel but must still count once in the city's total.
-async fn converted_fans_by_channel(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    city_id: Uuid,
-) -> Result<(u32, Vec<(String, u32)>), sqlx::Error> {
-    let rows = sqlx::query_as::<_, (Option<String>, i64)>(
-        r#"
-        SELECT provenance.channel,
-               COUNT(DISTINCT provenance.fan_id)::bigint AS fans
-        FROM fan_provenance_events AS provenance
-        JOIN fan_city_interests AS interest
-          ON interest.workspace_id = provenance.workspace_id
-         AND interest.fan_id = provenance.fan_id
-         AND interest.city_id = $2
-        WHERE provenance.workspace_id = $1
-          AND provenance.event_kind = 'conversion'
-          AND provenance.fan_id IS NOT NULL
-          AND provenance.occurred_at >= now() - interval '90 days'
-        GROUP BY ROLLUP (provenance.channel)
-        ORDER BY fans DESC, provenance.channel
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(city_id)
-    .fetch_all(pool)
-    .await?;
-    let mut total = 0u32;
-    let mut channels = Vec::with_capacity(rows.len());
-    for (channel, fans) in rows {
-        match channel {
-            // The ROLLUP row — the distinct-fan total across all channels.
-            None => total = bounded_u16(fans).into(),
-            Some(channel) => channels.push((channel, bounded_u16(fans).into())),
-        }
+fn promoter_target(row: PromoterRow) -> PromoterTarget {
+    PromoterTarget {
+        target_id: row.id,
+        target_version: row.version,
+        name: row.display_name,
+        relationship_score: bounded_u16(i64::from(row.relationship_score)),
+        answered_last_time: row.answered_last_time,
     }
-    Ok((total, channels))
 }
 
 fn bounded_u16(value: i64) -> u16 {
@@ -673,13 +391,16 @@ async fn city_opportunities_inner(
         audience_overlaps_by_city(pool, &ids, &city_ids).await?
     };
 
+    // Every city's evidence in five statements, run together — see `per_city`.
+    let mut evidence = per_city::load(pool, workspace_id, &city_ids, now, &my_genres).await?;
     let mut opportunities = Vec::with_capacity(cities.len());
     for city in cities {
+        let found = evidence.remove(&city.city_id).unwrap_or_default();
         // `None` means the city cannot be measured — no coordinates on
         // record. Handed through as `None` so the planner refuses it as
         // unmeasurable rather than inventing a zero it never counted.
-        let reachable = reachable_in_city(pool, workspace_id, city.city_id).await?;
-        let local_acts = local_peer_acts(pool, workspace_id, city.city_id, &my_genres).await?;
+        let reachable = found.reachable;
+        let local_acts = found.local_acts;
         let co_bill = siblings
             .iter()
             .filter_map(|(sibling_id, sibling_name)| {
@@ -716,7 +437,7 @@ async fn city_opportunities_inner(
         // is the one that actually delivers here. A city with no attributed
         // arrivals returns empty: the count is a measured zero, not a guess.
         let (converted_fans_90d, conversion_channels) =
-            converted_fans_by_channel(pool, workspace_id, city.city_id).await?;
+            (found.converted_fans_90d, found.conversion_channels);
         let (top_conversion_channel, top_conversion_channel_fans) = conversion_channels
             .first()
             .map(|(channel, count)| (Some(channel.clone()), *count))
@@ -735,181 +456,17 @@ async fn city_opportunities_inner(
             converted_fans_90d,
             top_conversion_channel,
             top_conversion_channel_fans,
-            venue: best_venue(pool, workspace_id, city.city_id, now, &my_genres).await?,
-            promoters: promoters_in_city(pool, workspace_id, city.city_id).await?,
+            venue: found.venue,
+            promoters: found
+                .promoters
+                .iter()
+                .map(PromoterTarget::as_promoter_ref)
+                .collect(),
             co_bill,
             local_acts,
         });
     }
     Ok(opportunities)
-}
-
-/// Non-tenant acts tied to a city — the "who could we ask onto this bill"
-/// half of the peer registry.
-///
-/// An act qualifies on either tie: its researched home town is this city
-/// (`home_city_id`), or it has billed at one of the city's rooms
-/// (`event_acts` → `place_venue_marks` → the room's city). Genre is a
-/// ranking signal, not a gate: an act whose genres intersect the tenant's —
-/// both sides canonicalised through `place_genre_aliases`, the same shape
-/// the comparable-acts count uses — outranks one whose genre nobody has
-/// stated, but a local act with no genre on record still answers the
-/// support-slot question, because "who is based here" is the part the sheet
-/// seed exists to answer.
-///
-/// `billed_rooms` counts the whole registry, not this tenant's view — the
-/// same shared-knowledge rule `propose_peers` applies to tracked rooms.
-///
-/// The gate that keeps a suggestion realistic is reachability: an act joins
-/// the list only when there is a way to actually ask — this workspace holds
-/// its `contact_email` lead, the act has billed a tracked room (the venue
-/// or promoter on that billing is the intro route), or a public page is on
-/// record (`link:social`/`link:website` facts). A name in a directory with
-/// none of the three — however famous, however genre-fitting — is research
-/// debt, not a support suggestion, which is the whole difference between
-/// "ask the opener from last month's bill" and "ask Rammstein".
-///
-/// # Errors
-///
-/// Propagates the database error.
-async fn local_peer_acts(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    city_id: Uuid,
-    my_genres: &[String],
-) -> Result<Vec<crowdrelay_domain::gig_plan::LocalAct>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, LocalActRow>(
-        r#"
-        SELECT act.display_name,
-               COALESCE(shared.shared_genres, '{}') AS shared_genres,
-               billing.billed_rooms,
-               CASE
-                   WHEN lead.value IS NOT NULL THEN 'email on file'
-                   WHEN billing.billed_rooms > 0 THEN 'billed in tracked rooms'
-                   ELSE 'public page'
-               END AS reachable_via
-        FROM place_peer_acts AS act
-        CROSS JOIN LATERAL (
-            SELECT array_agg(DISTINCT their.genre ORDER BY their.genre)
-                AS shared_genres
-            FROM (
-                SELECT COALESCE(their_alias.canonical,
-                                lower(btrim(their_genre.genre_tag))) AS genre
-                FROM place_peer_act_genres AS their_genre
-                LEFT JOIN place_genre_aliases AS their_alias
-                    ON their_alias.alias = lower(btrim(their_genre.genre_tag))
-                WHERE their_genre.peer_act_id = act.id
-            ) AS their
-            JOIN (
-                SELECT COALESCE(mine_alias.canonical, mine_tag.genre) AS genre
-                FROM unnest($2::text[]) AS mine_tag(genre)
-                LEFT JOIN place_genre_aliases AS mine_alias
-                    ON mine_alias.alias = mine_tag.genre
-            ) AS mine ON mine.genre = their.genre
-        ) AS shared
-        CROSS JOIN LATERAL (
-            -- Reachability is about rooms that can still be played: a room
-            -- on record as closed is not one the act can be reached through
-            -- now, so it does not count. The resolved status decides — a
-            -- newer 'active' claim lifts the exclusion.
-            SELECT count(DISTINCT mark.venue_id) AS billed_rooms
-            FROM event_acts AS billed
-            JOIN place_venue_marks AS mark
-                ON mark.event_id = billed.event_id
-            WHERE billed.peer_act_id = act.id
-              AND COALESCE((
-                  SELECT lower(btrim(status_fact.value))
-                  FROM place_venue_facts AS status_fact
-                  WHERE status_fact.venue_id = mark.venue_id
-                    AND status_fact.attribute = 'status'
-                    AND (status_fact.workspace_id IS NULL
-                         OR status_fact.workspace_id = $3)
-                    AND (status_fact.expires_at IS NULL
-                         OR status_fact.expires_at > now())
-                  ORDER BY CASE status_fact.provenance
-                               WHEN 'played' THEN 0 WHEN 'researched' THEN 1
-                               WHEN 'event_evidence' THEN 2
-                               WHEN 'open_directory' THEN 3 ELSE 4 END,
-                           status_fact.observed_at DESC
-                  LIMIT 1
-              ), '') <> 'closed'
-        ) AS billing
-        LEFT JOIN LATERAL (
-            SELECT fact.value
-            FROM place_peer_act_facts AS fact
-            WHERE fact.peer_act_id = act.id
-              AND fact.workspace_id = $3
-              AND fact.attribute = 'contact_email'
-            ORDER BY fact.observed_at DESC
-            LIMIT 1
-        ) AS lead ON true
-        WHERE (act.home_city_id = $1
-               OR EXISTS (
-                   SELECT 1
-                   FROM event_acts AS billed
-                   JOIN place_venue_marks AS mark
-                       ON mark.event_id = billed.event_id
-                   JOIN place_venues AS venue ON venue.id = mark.venue_id
-                   WHERE billed.peer_act_id = act.id
-                     AND venue.city_id = $1
-               ))
-          -- Reachability: a suggestion the tenant cannot act on is the
-          -- absurd case this gate exists to kill. The private lead is this
-          -- tenant's alone; the link facts and the billing are the shared
-          -- half of the registry.
-          AND (lead.value IS NOT NULL
-               OR billing.billed_rooms > 0
-               OR EXISTS (
-                   SELECT 1
-                   FROM place_peer_act_facts AS fact
-                   WHERE fact.peer_act_id = act.id
-                     AND fact.workspace_id IS NULL
-                     AND fact.attribute IN ('link:social', 'link:website')
-               ))
-          -- A band reported dead is not a suggestion — the same resolved-
-          -- status rule rooms follow: the winning claim decides, so a stale
-          -- 'inactive' loses to a newer 'active' and a re-formed band comes
-          -- back. Peer facts have no 'played' provenance; the ladder is the
-          -- registry's own order minus it.
-          AND COALESCE((
-              SELECT lower(btrim(status_fact.value))
-              FROM place_peer_act_facts AS status_fact
-              WHERE status_fact.peer_act_id = act.id
-                AND status_fact.attribute = 'status'
-                AND (status_fact.workspace_id IS NULL
-                     OR status_fact.workspace_id = $3)
-                AND (status_fact.expires_at IS NULL
-                     OR status_fact.expires_at > now())
-              ORDER BY CASE status_fact.provenance
-                           WHEN 'researched' THEN 0
-                           WHEN 'event_evidence' THEN 1
-                           WHEN 'open_directory' THEN 2 ELSE 3 END,
-                       status_fact.observed_at DESC
-              LIMIT 1
-          ), '') <> 'inactive'
-        ORDER BY COALESCE(array_length(shared.shared_genres, 1), 0) DESC,
-                 billing.billed_rooms DESC,
-                 act.name_key
-        -- A proposal can hold a handful of names; a longer list is a
-        -- directory dump, and the room it decorates is the same.
-        LIMIT 8
-        "#,
-    )
-    .bind(city_id)
-    .bind(my_genres)
-    .bind(workspace_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| crowdrelay_domain::gig_plan::LocalAct {
-            name: row.display_name,
-            shared_genres: row.shared_genres,
-            billed_rooms: bounded_u16(row.billed_rooms),
-            reachable_via: row.reachable_via,
-        })
-        .collect())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1159,6 +716,7 @@ struct SupportSlotRow {
     days_until_show: i64,
 }
 
+mod per_city;
 mod track_record;
 
 pub use track_record::{GigPlanTrackRecord, ProposalOutcome, ReasonScore, proposal_track_record};

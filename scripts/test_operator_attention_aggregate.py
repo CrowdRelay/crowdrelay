@@ -31,8 +31,21 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
         self.assertIn("load_summary(&state.ops)", self.handlers)
 
     def test_aggregate_seeds_lazy_flag_defaults_like_the_overview(self):
-        self.assertIn("ensure_default_flags(state)", self.attention)
-        self.assertIn("ensure_default_flags(&state)", self.ecosystem)
+        # One statement seeds the defaults and reads the flags back, and both
+        # paths run that same constant: the aggregate cannot list fewer flags
+        # than the overview because it cannot run a different query.
+        self.assertIn("crate::ecosystem::SEEDED_FLAGS_SQL", self.attention)
+        self.assertIn("pub(crate) const SEEDED_FLAGS_SQL", self.ecosystem)
+        self.assertIn("query_as::<_, FeatureFlag>(SEEDED_FLAGS_SQL)", self.ecosystem)
+        seeded = self.ecosystem[self.ecosystem.index("SEEDED_FLAGS_SQL: &str") :]
+        seeded = seeded[: seeded.index('"#;')]
+        self.assertIn("INSERT INTO ecosystem_feature_flags", seeded)
+        self.assertIn("ON CONFLICT (workspace_id, key) DO NOTHING", seeded)
+        self.assertIn("UNION ALL", seeded)
+        # The overview no longer seeds as a separate step; a leftover call
+        # would put the serial round trip back in front of its fan-out.
+        self.assertNotIn("ensure_default_flags", self.ecosystem)
+        self.assertNotIn("ensure_default_flags", self.attention)
 
     def test_aggregate_reports_the_shared_snapshot_schema(self):
         self.assertIn(

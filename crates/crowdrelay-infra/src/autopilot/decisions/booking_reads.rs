@@ -301,6 +301,16 @@ macro_rules! decision_booking_reads {
                       ON mark_event.id = mark.event_id
                      AND mark_event.workspace_id = mark.workspace_id
                     WHERE mark_event.starts_at <= $2
+                      -- Only the rooms this workspace targets: the join
+                      -- below reads nothing else, and without this the CTE
+                      -- ranked every mark on the platform before the join
+                      -- threw most of them away.
+                      AND mark.venue_id IN (
+                          SELECT scoped.venue_id
+                          FROM booking_targets AS scoped
+                          WHERE scoped.workspace_id = $1
+                            AND scoped.venue_id IS NOT NULL
+                      )
                 )
                 SELECT target.id AS target_id,
                        room_shows.starts_at, room_shows.created_at,

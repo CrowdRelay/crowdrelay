@@ -46,6 +46,7 @@ check: fmt lint test
     python3 scripts/api-sql-ratchet.py
     python3 scripts/workspace-scope-ratchet.py
     python3 scripts/sql-result-types.py
+    python3 scripts/fk-index-ratchet.py
     python3 scripts/test_sql_row_shapes_v1.py
     python3 scripts/test_sql_check_vocabulary_v1.py
     python3 scripts/test_sql_typed_params_v1.py

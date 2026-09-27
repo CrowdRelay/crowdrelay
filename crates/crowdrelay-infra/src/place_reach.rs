@@ -32,6 +32,8 @@
 //! radius counts; somebody in the city who set 10 km and turned notifications
 //! off does not.
 
+use std::collections::HashMap;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -137,33 +139,55 @@ pub async fn reachable_in_city(
     workspace_id: Uuid,
     city_id: Uuid,
 ) -> Result<Option<u32>, sqlx::Error> {
-    let value = sqlx::query_scalar::<_, Option<i64>>(&format!(
+    Ok(reachable_in_cities(pool, workspace_id, &[city_id])
+        .await?
+        .remove(&city_id)
+        .flatten())
+}
+
+/// [`reachable_in_city`] for many cities in one statement, keyed by city.
+///
+/// Every asked city gets an entry: `None` for a city that is not in the
+/// catalogue or carries no coordinates (unmeasurable), a real count — zero
+/// included — otherwise.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn reachable_in_cities(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    city_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Option<u32>>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (Uuid, Option<i64>)>(&format!(
         r#"
         WITH reachable AS ({rows})
         -- Measurable is a property of the city, not of the count: a city that
         -- is not in the catalogue or carries no coordinates answers NULL, and
         -- a city that exists with nobody inside anybody's radius answers a
         -- real zero. Reading the empty row set as zero would erase that.
-        SELECT CASE WHEN NOT EXISTS (
-                        SELECT 1 FROM cities
-                        WHERE id = $2
-                          AND latitude IS NOT NULL
-                          AND longitude IS NOT NULL
-                    ) THEN NULL
-                    ELSE (SELECT count(DISTINCT fan_id) FROM reachable)
+        SELECT want.city_id,
+               CASE WHEN city.latitude IS NULL OR city.longitude IS NULL THEN NULL
+                    ELSE (SELECT count(DISTINCT reachable.fan_id)
+                          FROM reachable
+                          WHERE reachable.city_id = want.city_id)
                END::bigint
+        FROM unnest($2::uuid[]) AS want(city_id)
+        LEFT JOIN cities AS city ON city.id = want.city_id
         "#,
         rows = REACHABLE_ROWS
             .replace("{workspace}", "$1")
-            .replace("{cities}", "target.id = $2")
+            .replace("{cities}", "target.id = ANY($2::uuid[])")
             .replace("{consent}", &LATEST_MARKETING_GRANT.replace("{fan}", "fan"))
     ))
     .bind(workspace_id)
-    .bind(city_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-    Ok(value.and_then(|count| u32::try_from(count).ok()))
+    .bind(city_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(city_id, count)| (city_id, count.and_then(|count| u32::try_from(count).ok())))
+        .collect())
 }
 
 /// One unordered pair of workspaces, in one city, and what their audiences

@@ -321,7 +321,6 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
     // the join below can hold five connections at once, so it pays five.
     let budget = &state.read_budget;
     let future = async {
-        crate::ops::hold(budget, ensure_default_flags(&state)).await?;
         let (flags, last_reconciliation, open_findings, next_event, bandsintown_sync) = tokio::try_join!(
             crate::ops::hold(budget, load_flags(&state)),
             crate::ops::hold(budget, load_last_reconciliation(&state)),
@@ -342,10 +341,7 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
 }
 
 pub async fn list_flags(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
-    let future = async {
-        ensure_default_flags(&state).await?;
-        load_flags(&state).await
-    };
+    let future = load_flags(&state);
     respond(run(&state, future).await, request_id(&headers))
 }
 
@@ -523,51 +519,53 @@ pub(crate) async fn feature_enabled(
     Ok(enabled)
 }
 
-pub(crate) async fn ensure_default_flags(state: &crate::AppState) -> Result<(), EcosystemError> {
-    sqlx::query(
-        r#"
+/// Every flag of this workspace, seeding the declared defaults first.
+///
+/// One statement: the INSERT's RETURNING rows (the defaults that did not
+/// exist yet) union with the rows that already did. The outer SELECT reads
+/// the statement's snapshot, which does not contain the rows this statement
+/// inserts, so each flag appears exactly once. This used to be an INSERT
+/// followed by a SELECT — two round trips, the first serial in front of every
+/// caller's own fan-out.
+pub(crate) const SEEDED_FLAGS_SQL: &str = r#"
+    WITH defaults(key, enabled) AS (VALUES
+        ('ticket_sales_enabled', true),
+        ('ticket_delivery_enabled', true),
+        ('gate_redemption_enabled', true),
+        ('mailer_enabled', true),
+        ('communication_campaigns_enabled', false),
+        ('meta_publish_enabled', true),
+        ('bandsintown_sync_enabled', true),
+        ('n8n_ingress_enabled', true),
+        ('automatic_retry_enabled', true),
+        ('draw_proofs_enabled', true),
+        ('external_proof_anchoring_enabled', false),
+        ('merch_inventory_enabled', false),
+        ('reward_campaigns_enabled', false),
+        ('merch_inventory_writes_enabled', false)
+    ),
+    seeded AS (
         INSERT INTO ecosystem_feature_flags (workspace_id, key, enabled, reason)
         SELECT $1, defaults.key, defaults.enabled, 'lazy default'
-        FROM (VALUES
-            ('ticket_sales_enabled', true),
-            ('ticket_delivery_enabled', true),
-            ('gate_redemption_enabled', true),
-            ('mailer_enabled', true),
-            ('communication_campaigns_enabled', false),
-            ('meta_publish_enabled', true),
-            ('bandsintown_sync_enabled', true),
-            ('n8n_ingress_enabled', true),
-            ('automatic_retry_enabled', true),
-            ('draw_proofs_enabled', true),
-            ('external_proof_anchoring_enabled', false),
-            ('merch_inventory_enabled', false),
-            ('reward_campaigns_enabled', false),
-            ('merch_inventory_writes_enabled', false)
-        ) AS defaults(key, enabled)
+        FROM defaults
         ON CONFLICT (workspace_id, key) DO NOTHING
-        "#,
+        RETURNING key, enabled, reason, version, updated_at
     )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .execute(state.ticketing.pool())
-    .await
-    .map_err(EcosystemError::sqlx)?;
-    Ok(())
-}
+    SELECT key, enabled, reason, version, updated_at
+    FROM ecosystem_feature_flags
+    WHERE workspace_id = $1
+    UNION ALL
+    SELECT key, enabled, reason, version, updated_at FROM seeded
+    ORDER BY key
+"#;
 
 async fn load_flags(state: &crate::AppState) -> Result<Vec<FeatureFlag>, EcosystemError> {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
-    let flags = sqlx::query_as::<_, FeatureFlag>(
-        r#"
-        SELECT key, enabled, reason, version, updated_at
-        FROM ecosystem_feature_flags
-        WHERE workspace_id = $1
-        ORDER BY key
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(state.ticketing.pool())
-    .await
-    .map_err(EcosystemError::sqlx)?;
+    let flags = sqlx::query_as::<_, FeatureFlag>(SEEDED_FLAGS_SQL)
+        .bind(workspace_id)
+        .fetch_all(state.ticketing.pool())
+        .await
+        .map_err(EcosystemError::sqlx)?;
     for flag in &flags {
         if let Some((key, _)) = flag_definition(&flag.key) {
             write_cached_flag(workspace_id, key, flag.enabled).await;

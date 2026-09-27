@@ -135,13 +135,31 @@ pub(crate) async fn load_worker_summary(pool: &PgPool) -> Result<WorkerSummary, 
     let (cycle_age_seconds, decision_age_seconds): (i64, i64) = sqlx::query_as(
         r#"
         SELECT
+            -- Fleet-wide, as before, but one indexed probe per workspace
+            -- instead of reading both tables end to end: every index on them
+            -- leads with workspace_id (0370 adds the two these probes walk).
             COALESCE((
                 SELECT EXTRACT(EPOCH FROM (now() - MAX(finished_at)))::bigint
-                FROM autopilot_cycle_runs
+                FROM workspaces AS workspace
+                CROSS JOIN LATERAL (
+                    SELECT run.finished_at
+                    FROM autopilot_cycle_runs AS run
+                    WHERE run.workspace_id = workspace.id
+                      AND run.finished_at IS NOT NULL
+                    ORDER BY run.finished_at DESC
+                    LIMIT 1
+                ) AS latest
             ), 999999),
             COALESCE((
                 SELECT EXTRACT(EPOCH FROM (now() - MAX(evaluated_at)))::bigint
-                FROM autopilot_decisions
+                FROM workspaces AS workspace
+                CROSS JOIN LATERAL (
+                    SELECT decision.evaluated_at
+                    FROM autopilot_decisions AS decision
+                    WHERE decision.workspace_id = workspace.id
+                    ORDER BY decision.evaluated_at DESC
+                    LIMIT 1
+                ) AS latest
             ), 999999)
         "#,
     )
