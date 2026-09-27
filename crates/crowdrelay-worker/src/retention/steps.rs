@@ -793,6 +793,7 @@ async fn sweep_lapsed_autopilot_asks(
     Ok(stats.approvals_expired
         + stats.insufficient_evidence
         + stats.opportunities_retired
+        + stats.community_language_mismatches
         + stats.suggestions_expired
         + stats.arcs_retired)
 }

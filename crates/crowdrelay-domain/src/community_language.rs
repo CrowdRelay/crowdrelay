@@ -23,6 +23,11 @@
 //! 2026-09-27, 41 of them with no language recorded); a Polish community gets
 //! `pl` recorded when it is admitted, and a draft for it is then held to that.
 
+/// `last_error_kind` for a community draft stopped because it is not in
+/// its community's language — withdrawn from the approval queue, or refused
+/// at dispatch if it was already approved.
+pub const COMMUNITY_LANGUAGE_MISMATCH: &str = "community_language_mismatch";
+
 /// The language a draft reads as.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DraftLanguage {
@@ -89,6 +94,17 @@ fn has_polish_letter(word: &str) -> bool {
         .any(|c| matches!(c, 'ą' | 'ć' | 'ę' | 'ł' | 'ń' | 'ó' | 'ś' | 'ź' | 'ż'))
 }
 
+/// Polish spells four sounds with digraphs English words almost never
+/// contain. Slang drops the diacritics and the function words both: "Wariacie
+/// wpadasz na gigusa?" — queued on 2026-09-26 for r/deathmetal and
+/// r/metalcore — has one listed word ("na") and no Polish letter, so it read
+/// as undetermined and passed. "wpadasz" is the second vote.
+fn has_polish_digraph(word: &str) -> bool {
+    ["sz", "cz", "rz", "dz"]
+        .iter()
+        .any(|digraph| word.contains(digraph))
+}
+
 /// Reads a draft's language from the words only one of the two languages
 /// uses. A word with a Polish letter counts for Polish — but a place name
 /// in an English sentence ("we play Gorzów") is outvoted by the English
@@ -102,7 +118,7 @@ pub fn detect_draft_language(text: &str) -> DraftLanguage {
         .split(|c: char| !c.is_alphabetic() && c != '\'')
         .filter(|word| !word.is_empty())
     {
-        if has_polish_letter(word) || POLISH_WORDS.contains(&word) {
+        if has_polish_letter(word) || has_polish_digraph(word) || POLISH_WORDS.contains(&word) {
             polish += 1;
         } else if ENGLISH_WORDS.contains(&word) {
             english += 1;
@@ -147,6 +163,28 @@ pub fn community_language_mismatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Slang with no diacritics and one function word, queued for two
+    /// English-language communities before the ingest gate existed.
+    #[test]
+    fn diacritic_free_slang_still_reads_polish() {
+        let title_only = "Wariacie wpadasz na gigusa?\n#modernmetal";
+        assert_eq!(detect_draft_language(title_only), DraftLanguage::Polish);
+        assert_eq!(
+            community_language_mismatch(title_only, None),
+            Some(("en".to_owned(), "pl"))
+        );
+        // Its English sibling, and a hashtag-only body, stay English or
+        // undetermined — never Polish.
+        assert_ne!(
+            detect_draft_language("Crazy, you drop into the gig?\n#modernmetal"),
+            DraftLanguage::Polish
+        );
+        assert_eq!(
+            detect_draft_language("Catch the faces. See you at therapy."),
+            DraftLanguage::English
+        );
+    }
 
     /// The post a moderator removed on 2026-09-26, and the English drafts of
     /// the same caption that were written for the other two communities.
