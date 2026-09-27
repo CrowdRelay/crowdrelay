@@ -101,6 +101,7 @@ mod outreach_mail;
 mod peer_acts;
 mod place_url_canonical;
 mod referrals_rewards;
+mod retired_opportunity_letters;
 mod roster_act_report;
 mod roster_catalogue_rotation;
 mod roster_counterparty_archive;
