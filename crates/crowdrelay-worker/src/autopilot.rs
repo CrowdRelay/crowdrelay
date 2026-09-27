@@ -548,19 +548,19 @@ impl AutopilotWorker {
                 // about it each tick would bury the case that is genuinely
                 // odd: a tenant that *did* write its ask and still cannot
                 // post.
-                // `OnCadence` is not a gap either: the ask went out and the
-                // next is not due (`JoinAskHold::needs_a_person`). It was
-                // warned about every poll — seven warnings in half an hour of
-                // production logs for a feature that was working.
+                // `OnCadence` is not a gap either (`needs_a_person`). An actionable
+                // gap warns on change: a missing executor warned 288 times a day.
                 if !report.join_ask_held.is_empty() {
-                    let actionable = report.join_ask_held.iter().any(|(_, hold)| {
+                    static WARNED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+                    let held = report.join_ask_held.iter().filter(|(_, hold)| {
                         hold.needs_a_person() && !matches!(hold, JoinAskHold::NoVariants)
                     });
-                    if actionable {
-                        tracing::warn!(
-                            held = ?report.join_ask_held,
-                            "join-ask platforms held this cycle"
-                        );
+                    let now_held = format!("{:?}", held.collect::<Vec<_>>());
+                    let changed = WARNED.lock().map_or(true, |mut last| {
+                        std::mem::replace(&mut *last, now_held.clone()) != now_held
+                    });
+                    if now_held != "[]" && changed {
+                        tracing::warn!(held = ?report.join_ask_held, "join-ask platforms held");
                     } else {
                         tracing::debug!(
                             held = ?report.join_ask_held,
