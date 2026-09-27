@@ -392,6 +392,17 @@ impl AutopilotWorker {
         let mut north_star_metric = None;
         let mut wait_reason = None;
 
+        // Letters waiting on a person follow the act's current sender line:
+        // a home city fixed after they were composed, or composed by the old
+        // most-played-city guess, is re-written before anyone approves it.
+        if let Err(error) = self
+            .repository
+            .recompose_pending_letters(self.workspace_id)
+            .await
+        {
+            tracing::warn!(error = %error, "pending letters could not be re-composed");
+        }
+
         // Recording first-party observations runs before evaluation so a cycle
         // reasons about the newest evidence it can. It is a separate phase
         // because a metric write failing must not stop already-authorized work:

@@ -322,6 +322,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/actions/{action_id}/approve",
             post(crate::autopilot::approve_action),
         )
+        // Fix a waiting draft's words without approving it — a wave pitch
+        // can only be approved with its batch.
+        .route(
+            "/v1/control-plane/autopilot/actions/{action_id}/revise",
+            post(crate::autopilot::revise_action_draft),
+        )
         // The same decision, several at a time. Approvals expire at 72 hours
         // and the queue refills every cycle; answering them one at a time is
         // a race the operator loses.

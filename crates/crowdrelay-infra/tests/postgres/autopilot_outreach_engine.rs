@@ -798,6 +798,86 @@ async fn an_organiser_gets_a_gig_request_citing_the_next_show()
     let lower = body.to_lowercase();
     assert!(!lower.contains("review"), "{body}");
     assert!(!lower.contains("submit"), "{body}");
+
+    // A draft composed before the home city was declared — or by the old
+    // most-played-city guess — still waits in the queue naming the show's
+    // city as home. The re-compose the cycle runs writes the declared one.
+    sqlx::query(
+        "UPDATE autopilot_actions
+         SET payload = jsonb_set(payload, '{draft,body}', to_jsonb(replace(payload->'draft'->>'body',
+                 'from Wrocław', 'from Gorzów Wielkopolski')))
+         WHERE workspace_id = $1 AND payload->>'target_id' = $2",
+    )
+    .bind(f.ws())
+    .bind(organiser.to_string())
+    .execute(&f.pool)
+    .await?;
+    let changed = f
+        .repository
+        .recompose_pending_letters(f.workspace_id)
+        .await?;
+    assert!(changed >= 1, "the stale letter is re-composed");
+    let body: String = sqlx::query_scalar(
+        "SELECT payload->'draft'->>'body' FROM autopilot_actions
+         WHERE workspace_id = $1 AND payload->>'target_id' = $2",
+    )
+    .bind(f.ws())
+    .bind(organiser.to_string())
+    .fetch_one(&f.pool)
+    .await?;
+    assert!(body.contains("from Wrocław"), "{body}");
+    assert!(!body.contains("from Gorzów"), "{body}");
+    assert_eq!(
+        f.repository
+            .recompose_pending_letters(f.workspace_id)
+            .await?,
+        0,
+        "a letter already current is left alone"
+    );
+
+    // The band fixes a sentence without approving — the pitch sits in a wave
+    // and cannot be approved on its own. The edit is saved, recorded, and the
+    // next re-compose leaves the band's words alone.
+    let action_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM autopilot_actions WHERE workspace_id = $1 AND payload->>'target_id' = $2",
+    )
+    .bind(f.ws())
+    .bind(organiser.to_string())
+    .fetch_one(&f.pool)
+    .await?;
+    let edited = body.replace("from Wrocław", "from Wrocław, Poland");
+    let mut revision = std::collections::BTreeMap::new();
+    revision.insert("body".to_owned(), edited.clone());
+    let revisable = f
+        .repository
+        .revise_pending_draft(
+            f.workspace_id,
+            action_id,
+            &revision,
+            &crowdrelay_application::IdempotencyKey::parse(format!("revise-{action_id}"))?,
+            None,
+        )
+        .await?;
+    assert_eq!(revisable.get("body"), Some(&edited));
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM draft_revisions WHERE workspace_id = $1 AND action_id = $2",
+    )
+    .bind(f.ws())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(recorded, 1, "the edit is recorded as a revision");
+    f.repository
+        .recompose_pending_letters(f.workspace_id)
+        .await?;
+    let kept: String = sqlx::query_scalar(
+        "SELECT payload->'draft'->>'body' FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(f.ws())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(kept, edited, "a draft the band edited is never re-composed");
     Ok(())
 }
 
