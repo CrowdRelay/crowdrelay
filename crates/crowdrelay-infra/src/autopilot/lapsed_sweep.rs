@@ -20,6 +20,10 @@ pub struct LapsedSweepStats {
     /// confidence — a connector failure wearing the shape of a proposal,
     /// not a question a person could answer.
     pub insufficient_evidence: u64,
+    /// Letters withdrawn because the opportunity they were written for
+    /// retired — the contact stopped being one this subject is news to, the
+    /// show moved or was cancelled, or its pitch window closed.
+    pub opportunities_retired: u64,
     /// Content suggestions flipped to `expired` because their ask died.
     pub suggestions_expired: u64,
     /// Proposed arcs retired for the same reason.
@@ -144,6 +148,58 @@ pub async fn sweep_lapsed_approval_asks(
     .await?
     .rows_affected();
 
+    // A letter whose opportunity retired cannot be sent.
+    //
+    // `lock_outreach_for_execution` refuses a retired or expired opportunity,
+    // so approving one of these ends in a bare conflict and nothing leaves.
+    // Safe, but the operator is the throughput limit and every such row is a
+    // click that can only fail. On 2026-09-27, after #322 narrowed show
+    // letters to the show's country, fifteen of the thirty-seven queued
+    // letters for the Gorzów show were addressed to contacts in Germany,
+    // Austria, Czechia, Slovakia or behind a free-mail address, and their
+    // opportunities had already retired underneath them. The supply refresh
+    // retires opportunities every cycle; this is the same fact applied to the
+    // asks written against them. Re-keyed like an expired ask, so an
+    // opportunity that comes back live — a show re-published — may be
+    // written for again.
+    let opportunities_retired = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT action.workspace_id, action.id
+            FROM autopilot_actions AS action
+            WHERE action.status = 'awaiting_approval'
+              AND action.action_kind = 'outreach.request'
+              AND action.payload ? 'opportunity_id'
+              AND ($1::uuid IS NULL OR action.workspace_id = $1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM outreach_opportunities AS opportunity
+                  WHERE opportunity.workspace_id = action.workspace_id
+                    AND opportunity.id::text = action.payload->>'opportunity_id'
+                    AND opportunity.active
+                    AND opportunity.expires_at > $2
+              )
+            ORDER BY action.approval_expires_at NULLS LAST, action.id
+            FOR UPDATE OF action SKIP LOCKED
+            LIMIT $3
+        )
+        UPDATE autopilot_actions AS action
+        SET status = 'cancelled',
+            finished_at = $2,
+            last_error_kind = 'opportunity_retired',
+            idempotency_key = idempotency_key || ':retired:' || action.id::text
+        FROM candidates
+        WHERE action.workspace_id = candidates.workspace_id
+          AND action.id = candidates.id
+          AND action.status = 'awaiting_approval'
+        "#,
+    )
+    .bind(workspace_uuid)
+    .bind(now)
+    .bind(limit)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+
     // A suggestion whose ask died in the queue — window lapsed or evidence
     // too thin to ask — is itself dead. Without this pair it stays `raised`
     // forever: invisible to the evaluator (which skips lapsed rows),
@@ -217,6 +273,7 @@ pub async fn sweep_lapsed_approval_asks(
     Ok(LapsedSweepStats {
         approvals_expired,
         insufficient_evidence,
+        opportunities_retired,
         suggestions_expired,
         arcs_retired,
     })
