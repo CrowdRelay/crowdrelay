@@ -413,24 +413,25 @@ pub(super) async fn schedule_effect_measurement(
         // seen the thing. The subject is the content source the artifact was
         // made from, which is also the entity read models can point at.
         AutopilotActionPayload::RequestContentArtifact { source_id, .. } => {
-            let (pre_action_daily_rate, pre_action_durable_daily_rate) =
-                fan_growth_baselines(transaction, workspace_id, action_id, now).await?;
+            // The fan kinds count fans traced to the action; their
+            // counterfactual is zero by construction, so no pre-period rate
+            // is read (`counts_attributed_fans`).
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 source_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(14),
             ));
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth3d,
                 source_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(3),
             ));
             plans.push((
                 AutopilotMeasurementKind::DurableFanGrowth30d,
                 source_id.into_uuid(),
-                pre_action_durable_daily_rate,
+                0.0,
                 now + time::Duration::days(44),
             ));
             // Did the produced artifact reach an audience — posts filed
@@ -581,140 +582,44 @@ pub(super) async fn schedule_effect_measurement(
                 now + time::Duration::hours(1),
             ));
             if !is_scanner && !is_strategist {
-                // Direct-action workers: measure fan growth (the existing
-                // path). These workers (community-engager, social-post,
-                // signal-inviter, press-pitch) can directly acquire fans.
-                // Baseline is the pre-period fan arrival rate: new fans in
-                // the 14 days *before* the dispatch. The observer counts new
-                // fans in the 14 days *after*. The effect is then a pre/post
-                // comparison — did the worker accelerate fan growth beyond
-                // the baseline rate?
-                let baseline_fans = sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2 - INTERVAL '14 days'
-                      AND created_at < $2
-                      AND status != 'suppressed'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?;
+                // Direct-action workers (community-engager, social-post,
+                // signal-inviter, press-pitch) can acquire fans directly, so
+                // they are measured on the fans traced to them — 14 days and
+                // an early 3-day checkpoint. No baseline: a traced count's
+                // counterfactual is zero (`counts_attributed_fans`).
                 plans.push((
                     AutopilotMeasurementKind::AgentRunFanGrowth14d,
                     action_id.into_uuid(),
-                    baseline_fans,
+                    0.0,
                     now + time::Duration::days(14),
                 ));
-                // Early 3-day checkpoint — the fastest feedback signal for
-                // the learning loop. The brain can learn from this partial
-                // observation while waiting for the full 14-day and 30-day
-                // measurements. Mirrors Kern's 1-day checkpoint settling.
-                //
-                // The baseline must match the observation window length: a
-                // 3-day post-period needs a 3-day pre-period baseline, not
-                // the 14-day baseline used by the 14-day measurement. Using
-                // the 14-day count here would always produce a large negative
-                // delta (3 days of arrivals vs 14 days of arrivals) and
-                // corrupt the early learning signal.
-                let baseline_fans_3d = sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2 - INTERVAL '3 days'
-                      AND created_at < $2
-                      AND status != 'suppressed'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?;
                 plans.push((
                     AutopilotMeasurementKind::AgentRunFanGrowth3d,
                     action_id.into_uuid(),
-                    baseline_fans_3d,
+                    0.0,
                     now + time::Duration::days(3),
                 ));
-            // North Star: incremental fan growth with a difference-in-
-            // differences (DiD) counterfactual. The baseline is the pre-
-            // action daily fan arrival rate computed from a matched 14-day
-            // window (the same length as the observation window). This is
-            // a quasi-experimental counterfactual: the 14-day pre-period
-            // is the "control" and the 14-day post-period is the
-            // "treatment". The DiD estimate is:
-            //
-            //   τ = (fans_post - fans_pre) = observed - (rate × 14)
-            //
-            // Using a matched 14-day window (instead of the previous 30-day
-            // average) makes the counterfactual more robust to time-varying
-            // trends: if fan growth was already declining before the action,
-            // the 30-day average would overstate the counterfactual and
-            // understate the treatment effect. The 14-day matched window
-            // captures the most recent trend.
-            //
-            // The evidence quality is `Observational` — this is a
-            // quasi-experimental estimate, not a randomized experiment.
-            // The treatment-effect posterior weights it accordingly.
-            // The baseline counts fans the same way Y14 counts them:
-            // everything that arrived and was not suppressed. Counting all
-            // fans regardless of status would compare an outcome that
-            // excludes suppressed arrivals against a counterfactual that
-            // includes them.
-            // When the experimental unit is a community, the outcome will be
-            // read from that community's own conversion ledger. A workspace
-            // arrival rate is then the wrong counterfactual by both population
-            // and unit: it subtracts everything the whole workspace acquired
-            // from what one subreddit sent, which makes a community that
-            // performed exactly at its own baseline look like it destroyed a
-            // fortnight of growth. Same ledger, same width, same community.
-            let (pre_action_daily_rate, pre_action_durable_daily_rate) =
-                fan_growth_baselines(transaction, workspace_id, action_id, now).await?;
+            // North Star: the fans traced to this dispatch at 14 days, an
+            // early 3-day read, and at 44 days those still active 30 days
+            // after arriving. It used to be a difference-in-differences
+            // against the workspace's pre-period arrival rate, which credited
+            // every dispatch with every arrival; see `attributed_fans`.
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(14),
             ));
-            // The same counterfactual, eleven days earlier. Shares the
-            // pre-action daily rate: the baseline is a rate, and the window it
-            // is multiplied by lives on the kind, so one reading serves both
-            // widths and the two cannot disagree about what the world looked
-            // like before the dispatch.
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth3d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(3),
             ));
-            // Y30 durable fan growth (North Star): fans created in the
-            // 14-day post-action window that are still active 30 days
-            // after creation. The measurement window is 44 days (14-day
-            // observation + 30-day durability check).
-            //
-            // Y30 needs its own baseline, and this is the whole point of the
-            // query below. It used to reuse `pre_action_daily_rate`, which
-            // counts every arrival — while the Y30 outcome counts only the
-            // arrivals that were still active thirty days later. Subtracting
-            // a counterfactual built from all arrivals from an outcome built
-            // from durable ones biases Y30 negative by exactly the churn
-            // rate: a workspace where ten fans arrive per fortnight and six
-            // stick would measure roughly -4 durable fans for an action that
-            // performed precisely at baseline. The brain would have learned
-            // that every action it takes is harmful.
-            //
-            // The matched comparison has to be aged, not just filtered: fans
-            // from the last fourteen days cannot have a thirty-day durability
-            // outcome yet. So the baseline window is the fourteen days ending
-            // thirty days ago — same width, old enough to have been observed.
             plans.push((
                 AutopilotMeasurementKind::DurableFanGrowth30d,
                 action_id.into_uuid(),
-                pre_action_durable_daily_rate,
+                0.0,
                 now + time::Duration::days(44),
             ));
             let baseline_installs =
@@ -781,62 +686,23 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::days(7),
             ));
-            // North Star: the post exists to grow fans, so the action carries
-            // the same incremental counterfactual every publishing action
-            // does — community-scoped when the experiment unit is one, the
-            // workspace rate otherwise. The window anchor is dispatch time
-            // for now; `anchor_measurements_to_publication` re-anchors to
-            // `community_posts.posted_at` when the post actually lands, and
-            // `measures_outbound_reach` abandons the measurement entirely if
-            // it never does — the absence of an outcome is not an outcome
-            // of zero.
-            let community =
-                measurement_unit_community(transaction, workspace_id, action_id).await?;
-            let pre_action_daily_rate = if let Some(handle) = &community {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(DISTINCT fan_id)::double precision / 14.0
-                    FROM fan_provenance_events
-                    WHERE workspace_id = $1
-                      AND community = $3
-                      AND event_kind = 'conversion'
-                      AND fan_id IS NOT NULL
-                      AND occurred_at >= $2::timestamptz - INTERVAL '14 days'
-                      AND occurred_at < $2::timestamptz
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .bind(handle)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?
-            } else {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision / 14.0 FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2::timestamptz - INTERVAL '14 days'
-                      AND created_at < $2::timestamptz
-                      AND status != 'suppressed'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(now)
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(map_sqlx)?
-            };
+            // North Star: the post exists to grow fans, so it is measured on
+            // the fans traced to its own link. The window anchor is dispatch
+            // time for now; `anchor_measurements_to_publication` re-anchors
+            // to `community_posts.posted_at` when the post lands, and a post
+            // that never goes live with a tracked link is abandoned
+            // (`no_tracked_link`) — the absence of an outcome is not an
+            // outcome of zero.
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(14),
             ));
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth3d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(3),
             ));
             // No AgentRunOutcomeQuality1h here: that measure links through
@@ -846,9 +712,8 @@ pub(super) async fn schedule_effect_measurement(
             // the brain the intervention failed when nothing failed at all.
         }
         // Agent content (social/telegram/discord posts): measure whether the
-        // published content actually grew fans. The baseline is the pre-action
-        // daily fan arrival rate (same counterfactual as RequestAgentRun's
-        // IncrementalFanGrowth14d). The content action materializes the draft
+        // published content actually grew fans — the fans traced to its own
+        // link (`attributed_fans`). The content action materializes the draft
         // and triggers the post; the measurement closes the learning loop by
         // observing whether fans actually arrived in the 14-day window after.
         //
@@ -861,35 +726,16 @@ pub(super) async fn schedule_effect_measurement(
         // operator registers the manual post URL, the measurement window is
         // re-anchored to the actual publication time.
         AutopilotActionPayload::RequestAgentContent { draft, .. } => {
-            let pre_action_daily_rate = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COUNT(*)::double precision / 14.0 FROM fans
-                WHERE workspace_id = $1
-                  AND created_at >= $2::timestamptz - INTERVAL '14 days'
-                  AND created_at < $2::timestamptz
-                  AND status != 'suppressed'
-                "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(14),
             ));
-            // The same counterfactual, eleven days earlier. Shares the
-            // pre-action daily rate: the baseline is a rate, and the window it
-            // is multiplied by lives on the kind, so one reading serves both
-            // widths and the two cannot disagree about what the world looked
-            // like before the dispatch.
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth3d,
                 action_id.into_uuid(),
-                pre_action_daily_rate,
+                0.0,
                 now + time::Duration::days(3),
             ));
             // What the post's own tracked link did — clicks on the `/l/`

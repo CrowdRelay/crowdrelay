@@ -255,10 +255,11 @@ impl SocialPostSourceSyncWorker {
     /// Facebook Page posts — `/{page}/posts` answers with the band's own
     /// published posts under the Page token.
     async fn sync_facebook(&self, page_id: &str) -> Result<(), String> {
-        let token = self
+        let configured = self
             .facebook_page_access_token
             .as_ref()
             .ok_or_else(|| "no Facebook Page access token configured".to_owned())?;
+        let token = self.page_token(page_id, configured).await;
         let url = format!(
             "{GRAPH_API_BASE}/{page_id}/posts?fields=id,message,created_time,permalink_url,full_picture,reactions.summary(total_count).limit(0),comments.summary(total_count).limit(0),shares&limit={MAX_POSTS_PER_ACCOUNT}&access_token={token}"
         );
@@ -314,6 +315,36 @@ impl SocialPostSourceSyncWorker {
             self.upsert_post("facebook", &entry).await?;
         }
         Ok(())
+    }
+
+    /// The Page's own access token, read with whatever token is configured.
+    ///
+    /// `/{page}/posts` answers only to a Page token. Production's configured
+    /// credential stopped being one on or after 2026-09-24 and every hourly
+    /// sweep failed from then on with `OAuthException` 190/2069032 ("a Page
+    /// access token is required") — the band's Facebook posts stopped
+    /// arriving, so nothing new from Facebook was relayed. A user token that
+    /// manages the Page can read the Page's token from `/{page}?fields=
+    /// access_token`; a Page token either answers the same or refuses, and
+    /// then the configured token is used as it always was. Read per sweep,
+    /// never stored, never logged.
+    async fn page_token(&self, page_id: &str, configured: &str) -> String {
+        #[derive(Deserialize)]
+        struct PageToken {
+            access_token: Option<String>,
+        }
+        let url =
+            format!("{GRAPH_API_BASE}/{page_id}?fields=access_token&access_token={configured}");
+        let exchanged = match self.http_client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => response
+                .json::<PageToken>()
+                .await
+                .ok()
+                .and_then(|page| page.access_token)
+                .filter(|token| !token.is_empty()),
+            _ => None,
+        };
+        exchanged.unwrap_or_else(|| configured.to_owned())
     }
 
     /// Instagram Business media — `/{ig_user}/media` under the Page token the
