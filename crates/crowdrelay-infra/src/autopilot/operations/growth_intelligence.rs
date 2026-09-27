@@ -1470,11 +1470,12 @@ async fn full_replay(
         // and fall back to observed_incremental_fans only for legacy rows
         // that don't have the raw count populated.
         let outcome_fans = observed_fans.or(observed_incremental_fans).unwrap_or(0.0);
-        let outcome = PredictionOutcome::from_observation(
-            prediction,
-            outcome_fans,
-            observed_signal.unwrap_or(0.0),
-        );
+        let outcome = match observed_signal {
+            Some(installs) => {
+                PredictionOutcome::from_observation(prediction, outcome_fans, installs)
+            }
+            None => PredictionOutcome::fans_only(prediction, outcome_fans),
+        };
         model.update(&outcome);
     }
 

@@ -1128,3 +1128,37 @@ fn the_signal_seed_moves_the_first_learned_value() {
     );
     assert_eq!(low, 0.0, "a zero seed and a zero observation stay at zero");
 }
+
+/// A fan outcome with no install measurement leaves the install estimate
+/// where it was; a measured one moves it. Replay used to pass `0.0` for the
+/// unmeasured count and taught every template it produced zero installs.
+#[test]
+fn an_unmeasured_install_count_does_not_teach_zero() {
+    let prediction = || DispatchPrediction {
+        template_id: "signal-inviter".to_owned(),
+        expected_new_fans: 2.0,
+        expected_signal_installs: 0.2,
+        ..DispatchPrediction::default()
+    };
+    let mut model = CausalModel::new();
+    for _ in 0..5 {
+        model.update(&PredictionOutcome::fans_only(prediction(), 1.0));
+    }
+    // No install estimate is learned from outcomes that never measured one;
+    // the prediction keeps falling back to its share of the fan prediction.
+    assert!(
+        !model
+            .template_expected_signal
+            .contains_key("signal-inviter"),
+        "an unmeasured count wrote an install estimate: {:?}",
+        model.template_expected_signal
+    );
+
+    model.update(&PredictionOutcome::from_observation(prediction(), 1.0, 0.0));
+    assert!(
+        model
+            .template_expected_signal
+            .contains_key("signal-inviter"),
+        "a measured zero still teaches"
+    );
+}
