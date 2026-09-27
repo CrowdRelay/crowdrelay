@@ -78,6 +78,10 @@ const AGENT_TARGET_KINDS: [&str; 8] = [
     "organiser",
 ];
 
+/// How long an outcome keeps being retried through transient database
+/// failures before it is refused.
+const TRANSIENT_RETRY_WINDOW: time::Duration = time::Duration::hours(24);
+
 #[derive(Debug, Error)]
 pub enum AgentOutcomeError {
     #[error("database error: {0}")]
@@ -250,7 +254,8 @@ impl AgentOutcomeWorker {
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING id, workspace_id, task_id, result_id, kind, schema_version,
-                      payload, confidence_basis_points, idempotency_key, trace_id
+                      payload, confidence_basis_points, idempotency_key, trace_id,
+                      created_at
             "#,
         )
         .bind(self.workspace_id.into_uuid())
@@ -260,6 +265,7 @@ impl AgentOutcomeWorker {
 
         let mut processed = 0;
         for row in rows {
+            let row_created_at = row.created_at;
             let outcome = match validate(
                 row.id,
                 row.workspace_id,
@@ -287,6 +293,23 @@ impl AgentOutcomeWorker {
             match self.map_outcome(&outcome).await {
                 Ok(_) => {
                     processed += 1;
+                }
+                // A database that was briefly unavailable says nothing about
+                // the outcome. Rejecting here is terminal: on 2026-09-22 four
+                // generated press pitches were thrown away over one pool
+                // timeout. The row stays `processing`, and the stale-claim
+                // recovery returns it to `pending` on a later run. A day of
+                // that is no longer a blip, and the outcome is refused then.
+                Err(AgentOutcomeError::Database(error))
+                    if crowdrelay_infra::database::is_transient_sqlx_error(&error)
+                        && time::OffsetDateTime::now_utc() - row_created_at
+                            < TRANSIENT_RETRY_WINDOW =>
+                {
+                    tracing::warn!(
+                        outcome_id = %outcome.id,
+                        error = %error,
+                        "agent outcome hit a transient database failure; left for retry"
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -1796,6 +1819,7 @@ struct OutcomeRow {
     confidence_basis_points: i32,
     idempotency_key: String,
     trace_id: Option<Uuid>,
+    created_at: time::OffsetDateTime,
 }
 
 /// The validated content source behind a community post — read by the source
