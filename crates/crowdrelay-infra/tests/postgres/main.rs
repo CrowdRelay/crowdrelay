@@ -29,6 +29,7 @@ mod autopilot_decision_prefilter;
 mod autopilot_decline_advisories;
 mod autopilot_dispatch_envelope;
 mod autopilot_dormant_revival;
+mod autopilot_event_local_time;
 mod autopilot_experiment_integrity;
 mod autopilot_fan_source_snapshots;
 mod autopilot_gated_claim;

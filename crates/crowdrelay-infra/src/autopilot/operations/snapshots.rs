@@ -10,6 +10,7 @@ struct EventCampaignRow {
     published: bool,
     communication_enabled: bool,
     starts_at: OffsetDateTime,
+    timezone: String,
     title: String,
     sender_name: String,
     city_name: Option<String>,
@@ -37,6 +38,7 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
             event.status IN ('published','completed') AS published,
             COALESCE(flag.enabled, false) AS communication_enabled,
             event.starts_at,
+            event.timezone,
             event.title,
             workspace.name AS sender_name,
             city.name AS city_name,
@@ -98,7 +100,7 @@ pub(in crate::autopilot) async fn load_event_campaign_snapshots(
                 event_id: EventId::from_uuid(row.event_id),
                 published: row.published,
                 communication_enabled: row.communication_enabled,
-                starts_at: row.starts_at,
+                starts_at: crate::regional::at_event_timezone(row.starts_at, &row.timezone),
                 interested_fans: u32::try_from(row.interested_fans)
                     .map_err(|_| RepositoryError::Unexpected)?,
                 paid_buyers: u32::try_from(row.paid_buyers)
