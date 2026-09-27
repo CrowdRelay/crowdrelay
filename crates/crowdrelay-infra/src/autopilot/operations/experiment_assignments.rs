@@ -722,13 +722,11 @@ pub(in crate::autopilot) async fn evaluate_contamination(
 /// their pre/post differences an intent-to-treat effect. It was treatment-only
 /// data wearing the label of a comparison.
 ///
-/// The control unit does not need an action to have an outcome. It is a
-/// community, and its outcome is the same quantity measured on the treated
-/// communities: conversions the provenance ledger attributes to it, over a
-/// window of the same width, minus the same kind of pre-period counterfactual.
-/// The window starts at assignment, which is when randomisation put the unit in
-/// the control arm — the moment from which "what happened to units we did not
-/// act on" is well defined.
+/// The control unit does not need an action to have an outcome. Its outcome is
+/// the same quantity measured on the treated units — fans traced to our action
+/// on it (`attributed_fans`) — and for a unit we did not act on that is zero.
+/// The window is still the assignment's: the row resolves once 44 days have
+/// passed, matching how treatment evidence becomes model-ready.
 ///
 /// Only windows that have fully elapsed are written. A control row resolves
 /// once, at the point both its outcomes exist, matching how treatment evidence
@@ -763,69 +761,16 @@ pub(in crate::autopilot) async fn resolve_control_evidence(
     .fetch_all(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    for (assignment_id, community, assigned_at) in controls {
-        // Y14: conversions attributed to this community in the fourteen days
-        // after assignment, against its own preceding fourteen days. Identical
-        // in population, unit and width to what the treated communities are
-        // measured on — a contrast between two differently-measured quantities
-        // would not be a contrast at all.
-        let y14 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT (
-                SELECT COUNT(DISTINCT fan_id)::double precision
-                FROM fan_provenance_events
-                WHERE workspace_id = $1 AND community = $2
-                  AND event_kind = 'conversion' AND fan_id IS NOT NULL
-                  AND occurred_at >= $3 AND occurred_at < $3 + INTERVAL '14 days'
-            ) - (
-                SELECT COUNT(DISTINCT fan_id)::double precision
-                FROM fan_provenance_events
-                WHERE workspace_id = $1 AND community = $2
-                  AND event_kind = 'conversion' AND fan_id IS NOT NULL
-                  AND occurred_at >= $3 - INTERVAL '14 days' AND occurred_at < $3
-            )
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(&community)
-        .bind(assigned_at)
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(map_sqlx)?;
-        // Y30: of those converts, the ones still active thirty days on, against
-        // the same aged comparison the treated units use.
-        let y30 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT (
-                SELECT COUNT(DISTINCT fan.id)::double precision
-                FROM fan_provenance_events AS conversion
-                JOIN fans AS fan
-                  ON fan.workspace_id = conversion.workspace_id AND fan.id = conversion.fan_id
-                WHERE conversion.workspace_id = $1 AND conversion.community = $2
-                  AND conversion.event_kind = 'conversion'
-                  AND conversion.occurred_at >= $3
-                  AND conversion.occurred_at < $3 + INTERVAL '14 days'
-                  AND fan.created_at + INTERVAL '30 days' <= now()
-                  AND fan.status = 'active'
-            ) - (
-                SELECT COUNT(DISTINCT fan.id)::double precision
-                FROM fan_provenance_events AS conversion
-                JOIN fans AS fan
-                  ON fan.workspace_id = conversion.workspace_id AND fan.id = conversion.fan_id
-                WHERE conversion.workspace_id = $1 AND conversion.community = $2
-                  AND conversion.event_kind = 'conversion'
-                  AND conversion.occurred_at >= $3 - INTERVAL '44 days'
-                  AND conversion.occurred_at < $3 - INTERVAL '30 days'
-                  AND fan.status = 'active'
-            )
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(&community)
-        .bind(assigned_at)
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(map_sqlx)?;
+    for (assignment_id, _community, _assigned_at) in controls {
+        // Measured the way the treated rows now are: fans traced to *our*
+        // action on this unit. A control unit received no action and no
+        // tracked link, so that count is zero by construction — not an
+        // estimate. It used to be this community's conversions against its
+        // own preceding fortnight, which matched the workspace-window
+        // difference the treated rows were measured on until 2026-09-27;
+        // against a traced count it would subtract the community's own drift
+        // from a number that never contained it.
+        let (y14, y30) = (0.0_f64, 0.0_f64);
         sqlx::query(
             r#"
             UPDATE growth_evidence

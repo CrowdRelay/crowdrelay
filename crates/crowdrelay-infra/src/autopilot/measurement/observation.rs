@@ -4,19 +4,20 @@
 //! because this is one job with one shape: every arm answers "what happened in
 //! the window this measurement covers", and returns a number.
 //!
-//! Two rules hold across every arm. A kind that reports an *effect* subtracts
-//! its counterfactual here and may return a negative — the brain has to be
-//! able to learn that an action did harm. A kind that reports a *level* never
-//! does. `AutopilotMeasurementKind::is_signed_effect` is which is which, and
-//! the classification downstream reads the same flag, so the two cannot drift
-//! into disagreeing about what a negative number means.
+//! Two rules hold across every arm. A kind that reports an *effect* is
+//! classified against zero downstream and may be negative — the brain has to
+//! be able to learn that an action did harm. A kind that reports a *level*
+//! never is. `AutopilotMeasurementKind::is_signed_effect` is which is which.
+//! The fan kinds are effects whose counterfactual is zero by construction:
+//! they count fans traced to the action (`attributed_fans`).
 
+mod attributed_fans;
 mod campaigns;
 mod content_synergy;
 pub(super) mod harm;
 
 use super::super::*;
-use super::{dispatch_reached_an_audience, observable_community};
+use super::dispatch_reached_an_audience;
 
 /// Observes one claimed measurement.
 pub(super) async fn observe(
@@ -35,9 +36,7 @@ pub(super) async fn observe(
     // its evidence row open forever if nobody ever publishes, and
     // `resolved_at` never stamps; a failed one is terminal, the
     // horizon stays NULL, and the learner skips it. That is the honest
-    // reading of "we tried and could not find out" — the same rule
-    // `observable_community` already applies to one kind on one
-    // channel.
+    // reading of "we tried and could not find out".
     if measurement.kind.measures_outbound_reach()
         && !dispatch_reached_an_audience(pool, workspace_id, measurement.action_id).await?
     {
@@ -533,174 +532,16 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::ArtifactOutcome7d => {
                 content_synergy::artifact_outcome(pool, workspace_id, measurement).await?
             }
-            // Fan growth after an agent dispatch: count new fans created
-            // in the 14-day window after the action finished. The
-            // subject_id is the action_id (which maps to the
-            // agent_service_tasks row via metadata->>'action_id'). We
-            // count all new fans in the workspace because agent
-            // intelligence gathering has indirect, diffuse effects — a
-            // reddit scan doesn't create a specific fan, it creates the
-            // conditions for fans to find the band.
-            AutopilotMeasurementKind::AgentRunFanGrowth14d => {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2
-                      AND created_at < $2 + INTERVAL '14 days'
-                      AND status != 'suppressed'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(measurement.action_finished_at)
-                .fetch_one(pool)
-                .await
-                .map_err(map_sqlx)?
-            }
-            // Early 3-day checkpoint — same query as the 14-day
-            // measurement but with a 3-day window. This is the
-            // fastest feedback signal for the learning loop.
-            AutopilotMeasurementKind::AgentRunFanGrowth3d => {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision FROM fans
-                    WHERE workspace_id = $1
-                      AND created_at >= $2
-                      AND created_at < $2 + INTERVAL '3 days'
-                      AND status != 'suppressed'
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(measurement.action_finished_at)
-                .fetch_one(pool)
-                .await
-                .map_err(map_sqlx)?
-            }
-            // Incremental fan growth (North Star): difference-in-
-            // differences (DiD) estimate. New fans in the 14-day post-
-            // action window minus the counterfactual (pre-action daily
-            // rate from a matched 14-day window × 14, stored as
-            // baseline_value).
-            //
-            // COMMUNITY-LEVEL MEASUREMENT via fan_provenance_events:
-            // When the experiment assignment's unit_kind is
-            // TargetCommunity, we count DISTINCT fans from provenance
-            // events attributed to that community (event_kind =
-            // 'conversion', fan_id IS NOT NULL). This gives a
-            // community-level outcome that matches the experimental
-            // unit — the core requirement for valid causal inference.
-            //
-            // PROVENANCE ≠ CAUSALITY. Community-attributed conversion
-            // is an outcome signal. The incremental causal effect
-            // still requires treatment/control comparison via the
-            // experiment design. When provenance is missing or
-            // insufficient, we fall back to workspace-level DiD and
-            // downgrade evidence quality to MatchedQuasiExperiment.
-            //
-            // Allows negative values — the brain must be able to learn
-            // that an action *harmed* fan growth (e.g. a community post
-            // that alienated the audience). The treatment-effect
-            // posterior supports negative τ via `update_signed`.
-            AutopilotMeasurementKind::IncrementalFanGrowth14d => {
-                let community =
-                    observable_community(pool, workspace_id, measurement.action_id)
-                        .await?;
-                let observed = if let Some(handle) = &community {
-                    // Community-level outcome: fans whose conversion was
-                    // attributed to this community's smart link inside the
-                    // window. The counterfactual is scoped to the same
-                    // community by `record_measurement_plans`, so both
-                    // sides of the subtraction count the same kind of
-                    // thing over the same width of time.
-                    sqlx::query_scalar::<_, f64>(
-                        r#"
-                        SELECT COUNT(DISTINCT fan_id)::double precision
-                        FROM fan_provenance_events
-                        WHERE workspace_id = $1
-                          AND community = $2
-                          AND event_kind = 'conversion'
-                          AND fan_id IS NOT NULL
-                          AND occurred_at >= $3
-                          AND occurred_at < $3 + INTERVAL '14 days'
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(handle)
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(map_sqlx)?
-                } else {
-                    sqlx::query_scalar::<_, f64>(
-                        r#"
-                        SELECT COUNT(*)::double precision FROM fans
-                        WHERE workspace_id = $1
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '14 days'
-                          AND status != 'suppressed'
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(map_sqlx)?
-                };
-                observed - measurement.counterfactual_value()
-            }
-            // The same difference-in-differences estimate over three days.
-            //
-            // Identical arithmetic to the fourteen-day arm above, at the
-            // same two levels — the community when the unit is one, the
-            // workspace otherwise — so the two differ only in the width of
-            // the window and never in what they mean. The counterfactual
-            // is `baseline_value × 3`, scaled by `counterfactual_window_days`.
-            //
-            // Weaker on purpose and treated as weaker downstream: three
-            // days of arrivals is a noisier sample, and an effect that
-            // takes a week to show up is invisible here. It exists so a
-            // strategy belief can move at three days instead of fourteen,
-            // not because it is the better number.
-            AutopilotMeasurementKind::IncrementalFanGrowth3d => {
-                let community =
-                    observable_community(pool, workspace_id, measurement.action_id)
-                        .await?;
-                let observed = if let Some(handle) = &community {
-                    sqlx::query_scalar::<_, f64>(
-                        r#"
-                        SELECT COUNT(DISTINCT fan_id)::double precision
-                        FROM fan_provenance_events
-                        WHERE workspace_id = $1
-                          AND community = $2
-                          AND event_kind = 'conversion'
-                          AND fan_id IS NOT NULL
-                          AND occurred_at >= $3
-                          AND occurred_at < $3 + INTERVAL '3 days'
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(handle)
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(map_sqlx)?
-                } else {
-                    sqlx::query_scalar::<_, f64>(
-                        r#"
-                        SELECT COUNT(*)::double precision FROM fans
-                        WHERE workspace_id = $1
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '3 days'
-                          AND status != 'suppressed'
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(map_sqlx)?
-                };
-                observed - measurement.counterfactual_value()
+            // The fans the action earned — conversions credited to its
+            // lineage's live tracked links — not every fan the workspace
+            // gained in the window. See `attributed_fans`.
+            AutopilotMeasurementKind::AgentRunFanGrowth14d
+            | AutopilotMeasurementKind::AgentRunFanGrowth3d
+            | AutopilotMeasurementKind::IncrementalFanGrowth14d
+            | AutopilotMeasurementKind::IncrementalFanGrowth3d
+            | AutopilotMeasurementKind::DurableFanGrowth30d => {
+                attributed_fans::observe_attributed_fans(pool, workspace_id, measurement, now)
+                    .await?
             }
             // Signal install growth after an agent dispatch: count new
             // active push endpoints in the 7-day window. A push endpoint
@@ -752,81 +593,6 @@ pub(super) async fn observe(
                 .fetch_one(pool)
                 .await
                 .map_err(map_sqlx)?
-            }
-            // Durable fan growth (Y30): fans created in the 14-day
-            // post-action window that are still active 30 days after
-            // creation. This is the true North Star — fans that stick,
-            // not just fans that sign up.
-            //
-            // COMMUNITY-LEVEL MEASUREMENT via fan_provenance_events:
-            // When the experiment assignment's unit_kind is
-            // TargetCommunity, we count DISTINCT fans from provenance
-            // events with event_kind = 'durability' attributed to that
-            // community. This gives a community-level durable outcome
-            // that matches the experimental unit.
-            //
-            // The measurement is incremental: it subtracts the
-            // counterfactual (baseline daily rate × 14) so Y30 is a
-            // causal incremental outcome, not a raw count. Allows
-            // negative values — the brain must learn when actions
-            // produce *non-durable* fans.
-            //
-            // SQL fix: the second status check was `!= 'suppressed'`
-            // (same as the first) instead of `= 'active'`. This meant
-            // the query never actually verified the fan was still
-            // active — it only checked not-suppressed twice.
-            AutopilotMeasurementKind::DurableFanGrowth30d => {
-                let community =
-                    observable_community(pool, workspace_id, measurement.action_id)
-                        .await?;
-                let observed = if let Some(handle) = &community {
-                    // Durability is a state of the converted fan, not a
-                    // separate event: the fans this community converted
-                    // inside the window who are still active thirty days
-                    // after they arrived. Reading it from the conversion
-                    // ledger joined to the fan keeps one writer for the
-                    // provenance chain instead of requiring a second one
-                    // to stamp a durability event that nothing emits.
-                    sqlx::query_scalar::<_, f64>(
-                        r#"
-                        SELECT COUNT(DISTINCT fan.id)::double precision
-                        FROM fan_provenance_events AS conversion
-                        JOIN fans AS fan
-                          ON fan.workspace_id = conversion.workspace_id
-                         AND fan.id = conversion.fan_id
-                        WHERE conversion.workspace_id = $1
-                          AND conversion.community = $2
-                          AND conversion.event_kind = 'conversion'
-                          AND conversion.occurred_at >= $3
-                          AND conversion.occurred_at < $3 + INTERVAL '14 days'
-                          AND fan.created_at + INTERVAL '30 days' <= now()
-                          AND fan.status = 'active'
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(handle)
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(map_sqlx)?
-                } else {
-                    sqlx::query_scalar::<_, f64>(
-                        r#"
-                        SELECT COUNT(*)::double precision FROM fans
-                        WHERE workspace_id = $1
-                          AND created_at >= $2
-                          AND created_at < $2 + INTERVAL '14 days'
-                          AND created_at + INTERVAL '30 days' <= now()
-                          AND status = 'active'
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(measurement.action_finished_at)
-                    .fetch_one(pool)
-                    .await
-                    .map_err(map_sqlx)?
-                };
-                observed - measurement.counterfactual_value()
             }
             // Scanner discovery quality: counts new outreach targets
             // discovered in the 14-day post-action window. The scanner's

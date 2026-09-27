@@ -11,6 +11,7 @@ mod attestation;
 mod audience_portfolio;
 mod autopilot_approve_revision;
 mod autopilot_attention_budget;
+mod autopilot_attributed_fans;
 mod autopilot_attribution_outbox;
 mod autopilot_beacon_discovery;
 mod autopilot_booking_discovery;

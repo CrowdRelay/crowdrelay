@@ -331,6 +331,7 @@ async fn load_evidence(
         replayed_14d_at: Option<OffsetDateTime>,
         replayed_30d_at: Option<OffsetDateTime>,
         observed_metrics: serde_json::Value,
+        outcome_basis: String,
         posterior_mean_y30: Option<f64>,
         posterior_std_y30: Option<f64>,
     }
@@ -351,7 +352,7 @@ async fn load_evidence(
                ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
                COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
                ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at,
-               ge.observed_metrics,
+               ge.observed_metrics, ge.outcome_basis,
                posterior.mean_y30 AS posterior_mean_y30,
                posterior.std_y30 AS posterior_std_y30
         FROM growth_evidence ge
@@ -645,6 +646,7 @@ async fn load_evidence(
                             .collect()
                     })
                     .unwrap_or_default(),
+                outcome_basis: crowdrelay_brain::OutcomeBasis::parse(&row.outcome_basis),
             }
         })
         .collect();

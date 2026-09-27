@@ -209,8 +209,12 @@ async fn load_lanes_60d(
                action.action_kind::text,
                count(*)::bigint,
                count(*) FILTER (WHERE evidence.resolved_at IS NOT NULL)::bigint,
+               -- Only rows whose fans were traced to the action: summing
+               -- workspace-window rows counts one arrival once per
+               -- overlapping dispatch (`OutcomeBasis`).
                COALESCE(sum(evidence.observed_fans)
-                        FILTER (WHERE evidence.resolved_at IS NOT NULL), 0)::double precision
+                        FILTER (WHERE evidence.resolved_at IS NOT NULL
+                                  AND evidence.outcome_basis = 'attributed'), 0)::double precision
         FROM growth_evidence AS evidence
         JOIN autopilot_actions AS action
           ON action.workspace_id = evidence.workspace_id

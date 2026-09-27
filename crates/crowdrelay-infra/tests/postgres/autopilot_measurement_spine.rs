@@ -38,14 +38,14 @@ use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseC
 use std::time::Duration;
 use time::OffsetDateTime;
 
-struct Fixture {
-    pool: sqlx::PgPool,
-    repository: PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    now: OffsetDateTime,
+pub(crate) struct Fixture {
+    pub(crate) pool: sqlx::PgPool,
+    pub(crate) repository: PostgresAutopilotRepository,
+    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) now: OffsetDateTime,
 }
 
-async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
+pub(crate) async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
     let (pool, database_url) =
         common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
     let workspace_id = WorkspaceId::new();
@@ -80,7 +80,7 @@ async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
 /// `dispatched_at` is deliberately a parameter: several of these invariants
 /// only bite when the dispatch is old and its outcome is new, which is the
 /// exact shape the delta cursor used to get wrong.
-async fn insert_dispatch(
+pub(crate) async fn insert_dispatch(
     f: &Fixture,
     opportunity_id: &str,
     dispatched_at: OffsetDateTime,
@@ -138,7 +138,7 @@ async fn insert_dispatch(
 }
 
 /// Queues one measurement and hands back the claim shape the worker would see.
-async fn queue_measurement(
+pub(crate) async fn queue_measurement(
     f: &Fixture,
     action_id: uuid::Uuid,
     kind: AutopilotMeasurementKind,
@@ -439,32 +439,32 @@ async fn c_a_negative_signed_effect_resolves_as_a_result() {
     assert_eq!(y14, Some(-3.0), "the negative outcome is what gets learned");
     assert!(resolved_at.is_some(), "and the row is model-ready");
 
-    // The level-based kinds keep their old protection.
+    // The level-based kinds keep their old protection. (The fan kinds are no
+    // longer levels: they count fans traced to the action, an effect against
+    // a counterfactual of zero — see `counts_attributed_fans`.)
     let raw = queue_measurement(
         &f,
         action_id,
-        AutopilotMeasurementKind::AgentRunFanGrowth14d,
+        AutopilotMeasurementKind::AgentRunSignalInstalls7d,
         4.0,
         f.now,
     )
     .await;
     assert!(
         assess_measurement_effect(&raw, -1.0, &HarmObservation::default()).is_none(),
-        "a negative fan *count* is still a malformed reading"
+        "a negative install *count* is still a malformed reading"
     );
 }
 
-/// D and E: the community outcome and its counterfactual come from the same
-/// place, and an unpublished post reports nothing rather than zero.
+/// D and E: the outcome is the fans traced to this action, and a post that
+/// never went live with a tracked link reports nothing rather than zero.
 ///
-/// The unit id on a community assignment is an `agent_outreach_targets` UUID
-/// while the ledger is keyed by handle, so the old query matched nothing — and
-/// `COUNT` renders nothing as `0`, which is indistinguishable from a community
-/// that genuinely converted no one. Subtracting a workspace-wide arrival rate
-/// from that zero made every community post look actively harmful.
+/// It used to be read from the community's ledger, and before that from the
+/// workspace's arrivals; both credited the action with fans it did not earn.
+/// Fans credited elsewhere are pinned in `autopilot_attributed_fans`.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn d_community_outcome_is_read_from_the_community_ledger() {
+async fn d_the_outcome_is_the_fans_traced_to_the_action() {
     let f = setup().await.expect("fixture");
     let action_id = insert_dispatch(&f, "community-engager:d", f.now).await;
     let target_id = uuid::Uuid::now_v7();
@@ -519,29 +519,27 @@ async fn d_community_outcome_is_read_from_the_community_ledger() {
     )
     .await;
 
-    // No published post yet: the outcome does not exist, and that is not the
-    // same fact as an outcome of zero.
+    // No live tracked post yet: the outcome does not exist, and that is not
+    // the same fact as an outcome of zero.
     let unpublished = f
         .repository
         .observe_measurement(f.workspace_id, &measurement, f.now)
         .await;
-    // And it says so in the kind every never-reached dispatch records, not
-    // as a missing subject: production listed fourteen of these as
-    // `subject_not_found` when each was a draft nobody had posted.
     assert!(
         matches!(
             unpublished,
             Err(RepositoryError::ConflictBecause(reason))
-                if reason == AutopilotMeasurementKind::NEVER_PUBLISHED
+                if reason == AutopilotMeasurementKind::NO_TRACKED_LINK
         ),
-        "a community whose post is still a draft has no outcome to report, got {unpublished:?}"
+        "an action with no live tracked post has no outcome to report, got {unpublished:?}"
     );
 
-    // Publish, and give the community two real conversions.
+    // Publish with a tracked link, and give the action two real conversions.
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, target_id, subreddit, title, body, status, posted_at)
-           VALUES ($1,$2,$3,'r/spinetest','t','b','posted',$4)"#,
+           (workspace_id, action_id, target_id, subreddit, title, body, status, posted_at,
+            smart_link)
+           VALUES ($1,$2,$3,'r/spinetest','t','b','posted',$4,'/l/spinetest-d')"#,
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
@@ -564,36 +562,38 @@ async fn d_community_outcome_is_read_from_the_community_ledger() {
         .expect("fan");
         sqlx::query(
             r#"INSERT INTO fan_provenance_events
-               (workspace_id, fan_id, event_kind, channel, community,
+               (workspace_id, fan_id, event_kind, channel, community, action_id,
                 attribution_method, attribution_confidence, occurred_at)
-               VALUES ($1,$2,'conversion','reddit','r/spinetest',
+               VALUES ($1,$2,'conversion','reddit','r/spinetest',$4,
                        'last_tracked_click',1.0,$3)"#,
         )
         .bind(f.workspace_id.into_uuid())
         .bind(fan_id)
         .bind(f.now + time::Duration::hours(1))
+        .bind(action_id)
         .execute(&f.pool)
         .await
         .expect("conversion");
     }
-
     let observed = f
         .repository
         .observe_measurement(f.workspace_id, &measurement, f.now)
         .await
-        .expect("a published community reports its own conversions");
-    // Baseline is zero for a first post, so the effect is the outcome itself:
-    // two real conversions from this community, not a workspace-wide count.
+        .expect("a live tracked post reports its own conversions");
     assert!(
         (observed - 2.0).abs() < f64::EPSILON,
-        "expected the two community conversions, got {observed}"
+        "expected the two conversions traced to this action, got {observed}"
     );
 
-    // E: the counterfactual is expressed in the same unit and window as the
-    // outcome, so a community with no history subtracts nothing.
+    // E: the counterfactual of a traced count is zero, whatever rate the
+    // measurement was scheduled with.
+    let scheduled_with_a_rate = ClaimedAutopilotMeasurement {
+        baseline_value: 0.8,
+        ..measurement
+    };
     assert!(
-        (measurement.counterfactual_value() - 0.0).abs() < f64::EPSILON,
-        "a community with no prior conversions has no arrivals to subtract"
+        scheduled_with_a_rate.counterfactual_value().abs() < f64::EPSILON,
+        "a traced count subtracts nothing"
     );
 }
 
@@ -1392,8 +1392,9 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
     .expect("assignment");
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, target_id, subreddit, title, body, status, posted_at)
-           VALUES ($1,$2,$3,'r/spinetest','t','b','posted',$4)"#,
+           (workspace_id, action_id, target_id, subreddit, title, body, status, posted_at,
+            smart_link)
+           VALUES ($1,$2,$3,'r/spinetest','t','b','posted',$4,'/l/spinetest-h')"#,
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
@@ -1403,26 +1404,27 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
     .await
     .expect("post");
 
-    async fn conversion(
-        pool: &sqlx::PgPool,
-        workspace: uuid::Uuid,
-        fan: uuid::Uuid,
-        at: OffsetDateTime,
-    ) {
+    // Every conversion names this action — the other tenant's too, the worst
+    // case for scoping: only the workspace predicate keeps them apart.
+    let conversion = |pool: sqlx::PgPool,
+                      workspace: uuid::Uuid,
+                      fan: uuid::Uuid,
+                      at: OffsetDateTime| async move {
         sqlx::query(
             r#"INSERT INTO fan_provenance_events
-               (workspace_id, fan_id, event_kind, channel, community,
+               (workspace_id, fan_id, event_kind, channel, community, action_id,
                 attribution_method, attribution_confidence, occurred_at)
-               VALUES ($1,$2,'conversion','reddit','r/spinetest',
+               VALUES ($1,$2,'conversion','reddit','r/spinetest',$4,
                        'last_tracked_click',1.0,$3)"#,
         )
         .bind(workspace)
         .bind(fan)
         .bind(at)
-        .execute(pool)
+        .bind(action_id)
+        .execute(&pool)
         .await
         .expect("conversion");
-    }
+    };
     async fn fan_in(pool: &sqlx::PgPool, workspace: uuid::Uuid, fan: uuid::Uuid) {
         sqlx::query(
             "INSERT INTO fans (id, workspace_id, normalized_email, status) \
@@ -1442,7 +1444,13 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
     let converted_at = f.now + time::Duration::hours(1);
     fan_in(&f.pool, f.workspace_id.into_uuid(), ours).await;
     for _ in 0..3 {
-        conversion(&f.pool, f.workspace_id.into_uuid(), ours, converted_at).await;
+        conversion(
+            f.pool.clone(),
+            f.workspace_id.into_uuid(),
+            ours,
+            converted_at,
+        )
+        .await;
     }
 
     // A second tenant engaging the same community handle, at the same time.
@@ -1457,7 +1465,7 @@ async fn h_a_community_outcome_is_tenant_scoped_and_counts_each_fan_once() {
     for _ in 0..5 {
         let theirs = uuid::Uuid::now_v7();
         fan_in(&f.pool, other_workspace, theirs).await;
-        conversion(&f.pool, other_workspace, theirs, converted_at).await;
+        conversion(f.pool.clone(), other_workspace, theirs, converted_at).await;
     }
 
     let measurement = queue_measurement(

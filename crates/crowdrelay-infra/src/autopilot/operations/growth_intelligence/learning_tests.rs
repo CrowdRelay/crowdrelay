@@ -775,3 +775,78 @@ fn metrics_wait_for_full_resolution() {
         "a row still mid-resolution teaches its metrics to nobody"
     );
 }
+
+/// A workspace-window row teaches no per-action learner.
+///
+/// Its fan columns count every fan the workspace gained in the dispatch's
+/// window, so the same arrivals were credited once per overlapping dispatch —
+/// 145 fan-observations against 23 fans ever, on 2026-09-27. The identical row
+/// marked `Attributed` does move the outcome model, the treatment effect and
+/// the strategy posterior; marked `WorkspaceWindow` it moves none of them.
+#[test]
+fn a_workspace_window_row_teaches_no_per_action_learner() {
+    use super::evidence_replay::apply_evidence_to_strategy_posterior;
+    use crowdrelay_brain::{OutcomeBasis, StateConditionedStrategyPosterior};
+
+    let ctx = DispatchContext::default();
+    let template = "community-engager";
+    let row = |basis: OutcomeBasis| GrowthEvidence {
+        opportunity_id: Some(format!("{template}:target:post:ctx")),
+        strategy: Some("community_first".to_owned()),
+        treatment: TreatmentAssignment::Treatment,
+        observed_fans: Some(12.0),
+        observed_incremental_fans: Some(12.0),
+        predicted_fans: 3.0,
+        outcome_basis: basis,
+        ..GrowthEvidence::default()
+    };
+
+    let untouched = CausalModel::new().predict_stats_with_treatment(template, &ctx);
+
+    let mut window = CausalModel::new();
+    apply_evidence_to_model(&mut window, &[row(OutcomeBasis::WorkspaceWindow)]);
+    let after_window = window.predict_stats_with_treatment(template, &ctx);
+    assert_eq!(
+        (after_window.expected_fans, after_window.treatment_effect),
+        (untouched.expected_fans, untouched.treatment_effect),
+        "a workspace-window row moved a per-action posterior"
+    );
+    assert_eq!(window.confidence(template), 0);
+
+    let mut attributed = CausalModel::new();
+    apply_evidence_to_model(&mut attributed, &[row(OutcomeBasis::Attributed)]);
+    let after_attributed = attributed.predict_stats_with_treatment(template, &ctx);
+    assert_ne!(
+        after_attributed.expected_fans, untouched.expected_fans,
+        "the same row, attributed, is learned from"
+    );
+
+    let state = ("community_first", "steady", "far");
+    let mut posterior = StateConditionedStrategyPosterior::new();
+    apply_evidence_to_strategy_posterior(
+        &mut posterior,
+        &[row(OutcomeBasis::WorkspaceWindow)],
+        None,
+    );
+    assert_eq!(posterior.confidence(state.0, state.1, state.2), 0);
+    apply_evidence_to_strategy_posterior(&mut posterior, &[row(OutcomeBasis::Attributed)], None);
+    assert_eq!(posterior.confidence(state.0, state.1, state.2), 1);
+}
+
+/// A checkpoint written before the evidence basis existed deserializes as
+/// version 0, which the loader rebuilds rather than extends.
+#[test]
+fn an_old_checkpoint_reads_as_basis_version_zero() {
+    let mut stored = serde_json::to_value(CausalModel::new()).expect("serialize");
+    stored
+        .as_object_mut()
+        .expect("object")
+        .remove("evidence_basis_version");
+    let model: CausalModel = serde_json::from_value(stored).expect("an old checkpoint loads");
+    assert_eq!(model.evidence_basis_version, 0);
+    assert!(model.evidence_basis_version < crowdrelay_brain::EVIDENCE_BASIS_VERSION);
+    assert_eq!(
+        CausalModel::new().evidence_basis_version,
+        crowdrelay_brain::EVIDENCE_BASIS_VERSION
+    );
+}

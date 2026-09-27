@@ -627,7 +627,10 @@ async fn load_relay_run(
             latest.upvote_ratio,
             latest.measured_at,
             re.status AS reach_status,
-            ge.observed_fans,
+            -- A workspace-window count is not this post's fans: NULL, not
+            -- a number that looks like one (`OutcomeBasis`).
+            CASE WHEN ge.outcome_basis = 'attributed' THEN ge.observed_fans END
+                AS observed_fans,
             ge.converted,
             count(*) OVER () AS total_targets
         FROM targets t

@@ -302,6 +302,10 @@ impl AutopilotMeasurementKind {
             Self::IncrementalFanGrowth14d
                 | Self::IncrementalFanGrowth3d
                 | Self::DurableFanGrowth30d
+                // Attributed fan counts are effects against a counterfactual
+                // of zero — see `counts_attributed_fans`.
+                | Self::AgentRunFanGrowth14d
+                | Self::AgentRunFanGrowth3d
                 // The lift observation is post-window delta minus pre-window
                 // delta — already signed, already a difference. Classifying
                 // it as a level would refuse the negative reading a release
@@ -326,14 +330,30 @@ impl AutopilotMeasurementKind {
         Self::StrategistInsightQuality14d,
     ];
 
-    /// Whether the signed effect is a count of fans minus a counterfactual
-    /// built from a daily rate — so it can be fractional even though fans
-    /// arrive whole. See the fractional-fan floor in `assess_primary`.
+    /// The kinds whose observation is the fans traced to the action — the
+    /// conversions its own live, tracked links earned — rather than every fan
+    /// the workspace gained in the window.
+    ///
+    /// Until 2026-09-27 these five counted `fans` created in the window, so
+    /// each dispatch was credited with every arrival from any cause, and
+    /// overlapping dispatches were credited with the same ones. The workspace
+    /// had 23 fans ever; dispatches had been credited with 145. The brain's
+    /// worker ranking was learned from that. See
+    /// `~/.devin/plans/ATTRIBUTED_OUTCOME_PLAN.md`.
+    ///
+    /// A fan cannot click a link that was never posted, so the untreated
+    /// outcome is zero by construction: the traced count *is* the effect, and
+    /// a lower bound — it misses anyone who saw the post and signed up
+    /// without clicking. `counterfactual_window_days` is zero for all five.
+    /// An action with no live tracked link anywhere in its lineage is
+    /// abandoned as [`Self::NO_TRACKED_LINK`] rather than counted as zero.
     #[must_use]
-    pub const fn counts_fans_against_counterfactual(self) -> bool {
+    pub const fn counts_attributed_fans(self) -> bool {
         matches!(
             self,
-            Self::IncrementalFanGrowth14d
+            Self::AgentRunFanGrowth14d
+                | Self::AgentRunFanGrowth3d
+                | Self::IncrementalFanGrowth14d
                 | Self::IncrementalFanGrowth3d
                 | Self::DurableFanGrowth30d
         )
@@ -490,17 +510,14 @@ impl AutopilotMeasurementKind {
 
     /// Days of counterfactual the stored `baseline_value` rate covers.
     ///
-    /// The observation subtracts `baseline_value × window` and the
-    /// classification divides by the same quantity, so the window lives here
-    /// rather than being spelled out at both call sites where the two could
-    /// drift apart.
+    /// Zero for every kind today. The fan kinds used to subtract a workspace
+    /// arrival rate × 14 or × 3; they now count attributed fans, whose
+    /// counterfactual is zero by construction (`counts_attributed_fans`).
+    /// Measurements scheduled before that change still carry the old rate in
+    /// `baseline_value`, and this is what keeps it out of the arithmetic.
     #[must_use]
     pub const fn counterfactual_window_days(self) -> f64 {
-        match self {
-            Self::IncrementalFanGrowth14d | Self::DurableFanGrowth30d => 14.0,
-            Self::IncrementalFanGrowth3d => 3.0,
-            _ => 0.0,
-        }
+        0.0
     }
 }
 
@@ -774,7 +791,7 @@ fn assess_primary(
         // the honest verdict is Neutral; the raw effect still lands in
         // `observed_metrics` for the posterior.
         let fractional_fan =
-            measurement.kind.counts_fans_against_counterfactual() && observed_value.abs() < 1.0;
+            measurement.kind.counts_attributed_fans() && observed_value.abs() < 1.0;
         return Some(EffectResult {
             assessment: if fractional_fan {
                 EffectAssessment::Neutral
@@ -871,6 +888,37 @@ mod tests {
             let gained = assess_measurement_effect(&measurement, 2.0, &HarmObservation::default())
                 .expect("gained");
             assert_eq!(gained.assessment, EffectAssessment::Improved, "{kind:?}");
+        }
+    }
+
+    /// A fan measurement scheduled before attribution still carries the
+    /// workspace rate it was planned with. That rate is not what a traced
+    /// count is compared with: zero traced fans is Neutral, one is Improved —
+    /// never "−100% against the 14.8 the workspace averaged".
+    #[test]
+    fn a_traced_fan_count_ignores_the_rate_it_was_scheduled_with() {
+        for kind in [
+            AutopilotMeasurementKind::AgentRunFanGrowth14d,
+            AutopilotMeasurementKind::AgentRunFanGrowth3d,
+            AutopilotMeasurementKind::IncrementalFanGrowth14d,
+            AutopilotMeasurementKind::IncrementalFanGrowth3d,
+            AutopilotMeasurementKind::DurableFanGrowth30d,
+        ] {
+            let measurement = ClaimedAutopilotMeasurement {
+                baseline_value: 14.8,
+                ..claimed(kind)
+            };
+            assert!(kind.counts_attributed_fans(), "{kind:?}");
+            assert!(
+                measurement.counterfactual_value().abs() < f64::EPSILON,
+                "{kind:?}"
+            );
+            let none = assess_measurement_effect(&measurement, 0.0, &HarmObservation::default())
+                .expect("zero traced fans");
+            assert_eq!(none.assessment, EffectAssessment::Neutral, "{kind:?}");
+            let one = assess_measurement_effect(&measurement, 1.0, &HarmObservation::default())
+                .expect("one traced fan");
+            assert_eq!(one.assessment, EffectAssessment::Improved, "{kind:?}");
         }
     }
 

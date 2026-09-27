@@ -252,7 +252,10 @@ pub fn evidence_to_walk_forward(
     evidence
         .iter()
         .filter(|e| {
-            e.observed_incremental_fans.is_some()
+            // A workspace-window row is not this template's outcome — see
+            // `OutcomeBasis`.
+            e.outcome_basis.teaches_per_action()
+                && e.observed_incremental_fans.is_some()
                 && matches!(
                     e.treatment,
                     crate::experiment::TreatmentAssignment::Treatment

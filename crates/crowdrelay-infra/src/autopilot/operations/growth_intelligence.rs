@@ -1201,6 +1201,14 @@ pub(in crate::autopilot) async fn load_causal_model(
         // true after the row moves on.
         let checkpoint_content_hash = checkpoint_content_hash(&state_json);
         match serde_json::from_value::<CausalModel>(state_json) {
+            // Built on evidence the learners no longer read: rebuild, don't
+            // extend (`EVIDENCE_BASIS_VERSION`). Full replay rebuilds strategy too.
+            Ok(model)
+                if model.evidence_basis_version < crowdrelay_brain::EVIDENCE_BASIS_VERSION =>
+            {
+                tracing::info!(stale = model.evidence_basis_version, "checkpoint rebuilt");
+                full_replay_with_origin(repo, workspace_id).await?
+            }
             Ok(mut model) => {
                 // Load only delta evidence since the checkpoint.
                 let delta = super::evidence::load_growth_evidence(
