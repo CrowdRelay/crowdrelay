@@ -140,6 +140,7 @@ async fn enrich_outreach_draft(
     let AutopilotActionPayload::RequestOutreach {
         draft,
         target_id,
+        opportunity_id,
         phase,
         template_key,
         ..
@@ -197,6 +198,43 @@ async fn enrich_outreach_draft(
         None
     };
     let sender = sender_identity_in_tx(transaction, ws).await?;
+    // A show opportunity writes the show letter. Until 2026-09-27 it fell
+    // through to the catalogue pitch below — "we would love to submit
+    // {album} for coverage" — so every letter the event lifecycle queued
+    // was an album review request that never named the show it was for.
+    // An organiser is the exception: its letter asks for a slot and
+    // already cites the calendar.
+    if kind != OutreachTargetKind::Organiser
+        && let Some(show) = show_for_opportunity(transaction, ws, opportunity_id.into_uuid()).await?
+    {
+        use crowdrelay_domain::show_pitch_letter::{ShowPitchInput, compose_show_pitch_letter};
+        match compose_show_pitch_letter(&ShowPitchInput {
+            sender: &sender,
+            target_name: &target_name,
+            target_kind: kind,
+            phase: *phase,
+            language: crowdrelay_domain::outreach_letter::language_for_contact(&contact_email),
+            show_date: show.starts_at.date(),
+            city: &show.city,
+            venue: show.venue.as_deref(),
+            ticket_url: show.ticket_url.as_deref(),
+            listen_url: Some(pitch_url.as_str()),
+        }) {
+            Ok(letter) => {
+                *draft = letter;
+                *template_key = show.template_key;
+            }
+            // Leaving the draft empty is the refusal: the executor will not
+            // send an empty letter, and the catalogue pitch is exactly the
+            // wrong letter to fall back to.
+            Err(refusal) => tracing::info!(
+                opportunity_id = %opportunity_id.into_uuid(),
+                refusal = refusal.message(),
+                "show opportunity composed no letter"
+            ),
+        }
+        return Ok(());
+    }
     if let Ok(letter) = compose_outreach_letter(&OutreachLetterInput {
         sender: &sender,
         target_name: &target_name,
@@ -633,4 +671,48 @@ impl PostgresAutopilotRepository {
         transaction.commit().await.map_err(map_sqlx)?;
         Ok(crowdrelay_domain::draft_revision::revisable_fields(&payload))
     }
+}
+
+/// The show a show opportunity is about, with what its letter cites.
+struct OpportunityShow {
+    starts_at: OffsetDateTime,
+    city: String,
+    venue: Option<String>,
+    ticket_url: Option<String>,
+    template_key: String,
+}
+
+/// `Some` when the opportunity is an `event` opportunity whose show still
+/// stands; `None` for every other subject, which keeps its own letter.
+async fn show_for_opportunity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ws: Uuid,
+    opportunity_id: Uuid,
+) -> Result<Option<OpportunityShow>, RepositoryError> {
+    let row = sqlx::query_as::<_, (OffsetDateTime, Option<String>, Option<String>, Option<String>, String)>(
+        r#"
+        SELECT event.starts_at, city.name, event.venue, event.ticket_url,
+               opportunity.template_key
+        FROM outreach_opportunities AS opportunity
+        JOIN events AS event
+          ON event.workspace_id = opportunity.workspace_id
+         AND 'event:' || event.id::text = opportunity.subject_key
+        LEFT JOIN cities AS city ON city.id = event.city_id
+        WHERE opportunity.workspace_id = $1
+          AND opportunity.id = $2
+          AND opportunity.subject_kind = 'event'
+        "#,
+    )
+    .bind(ws)
+    .bind(opportunity_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(row.map(|(starts_at, city, venue, ticket_url, template_key)| OpportunityShow {
+        starts_at,
+        city: city.unwrap_or_default(),
+        venue,
+        ticket_url,
+        template_key,
+    }))
 }

@@ -70,6 +70,28 @@ impl Fixture {
         do_not_contact: bool,
         last_reply: Option<&str>,
     ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        self.target_at(
+            name,
+            kind,
+            verified,
+            do_not_contact,
+            last_reply,
+            "test.example",
+        )
+        .await
+    }
+
+    /// A contact whose address is under `domain` — the one fact the registry
+    /// holds about where a contact is, and what a show's reach is read from.
+    async fn target_at(
+        &self,
+        name: &str,
+        kind: &str,
+        verified: bool,
+        do_not_contact: bool,
+        last_reply: Option<&str>,
+        domain: &str,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO outreach_targets
@@ -82,7 +104,7 @@ impl Fixture {
         .bind(kind)
         .bind(name)
         .bind(format!(
-            "{}-{}@test.example",
+            "{}-{}@{domain}",
             name.to_lowercase().replace(' ', "-"),
             id.simple()
         ))
@@ -122,20 +144,9 @@ impl Fixture {
         Ok(id)
     }
 
+    /// A show in a Polish city: its opportunities reach `.pl` contacts only.
     async fn event(&self, days_out: i64, status: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
-        let id = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
-             VALUES ($1, $2, $3, 'A show', $4, $5, CASE WHEN $5 = 'published' THEN now() END)",
-        )
-        .bind(id)
-        .bind(self.ws())
-        .bind(format!("show-{}", id.simple()))
-        .bind(self.now + time::Duration::days(days_out))
-        .bind(status)
-        .execute(&self.pool)
-        .await?;
-        Ok(id)
+        self.event_in_city(days_out, status, "Test City").await
     }
 
     /// A published show with a city on record — the fact an organiser's
@@ -259,6 +270,9 @@ async fn the_refresh_keeps_the_pitch_and_the_next_shows_supplied()
 
     f.target("Zine", "press", true, false, None).await?;
     f.target("Station", "radio", true, false, None).await?;
+    // The only contact in the show's country: the show is news to it alone.
+    f.target_at("Local Zine", "press", true, false, None, "zine.example.pl")
+        .await?;
     f.target("Answered Blog", "press", true, false, Some("received"))
         .await?;
     f.target("Unverified Mag", "press", false, false, None)
@@ -285,6 +299,11 @@ async fn the_refresh_keeps_the_pitch_and_the_next_shows_supplied()
             (
                 "catalogue_autopilot".to_owned(),
                 catalogue_key.clone(),
+                "Local Zine".to_owned()
+            ),
+            (
+                "catalogue_autopilot".to_owned(),
+                catalogue_key.clone(),
                 "Station".to_owned()
             ),
             (
@@ -292,15 +311,13 @@ async fn the_refresh_keeps_the_pitch_and_the_next_shows_supplied()
                 catalogue_key.clone(),
                 "Zine".to_owned()
             ),
+            // The show reaches the contact in its own country and no one
+            // else: a `test.example` address says nothing about where its
+            // owner is.
             (
                 "event_autopilot".to_owned(),
                 show_key.clone(),
-                "Station".to_owned()
-            ),
-            (
-                "event_autopilot".to_owned(),
-                show_key.clone(),
-                "Zine".to_owned()
+                "Local Zine".to_owned()
             ),
         ]
     );
@@ -312,7 +329,8 @@ async fn the_refresh_keeps_the_pitch_and_the_next_shows_supplied()
     assert_eq!(f.live().await?.len(), 4);
 
     // A contact imported after the announcement is supplied next cycle.
-    f.target("Late Import", "press", true, false, None).await?;
+    f.target_at("Late Import", "press", true, false, None, "late.example.pl")
+        .await?;
     f.repository
         .refresh_outreach_supply(f.workspace_id, f.now)
         .await?;
@@ -342,10 +360,10 @@ async fn the_refresh_keeps_the_pitch_and_the_next_shows_supplied()
     assert_eq!(report.pitch.as_deref(), Some("The Plan"));
     assert_eq!(
         report.opportunities_retired, 6,
-        "three catalogue rows and three show rows"
+        "four catalogue rows and two show rows"
     );
     let live = f.live().await?;
-    assert_eq!(live.len(), 3, "{live:?}");
+    assert_eq!(live.len(), 4, "{live:?}");
     assert!(live.iter().all(|(source, key, _)| {
         source == "release_autopilot" && *key == format!("release:{plan}")
     }));
@@ -483,8 +501,15 @@ async fn a_re_observed_opportunity_is_not_a_new_decision_every_cycle()
     )
     .await?;
     for index in 0..4 {
-        f.target(&format!("Radio {index}"), "radio", true, false, None)
-            .await?;
+        f.target_at(
+            &format!("Radio {index}"),
+            "radio",
+            true,
+            false,
+            None,
+            "radio.example.pl",
+        )
+        .await?;
     }
     // An upcoming show: its pitches are loose, not wave-bound, which is the
     // kind production re-decided every cycle.
@@ -899,7 +924,8 @@ async fn the_home_city_is_declared_never_measured() -> Result<(), Box<dyn std::e
         "INSERT INTO autopilot_policies
              (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
               max_actions_24h, config)
-         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20, '{}')
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20,
+                 '{\"waves\": {\"min_pitches_per_wave\": 1}}')
          ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
              autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
              max_actions_24h = 20, config = EXCLUDED.config",
@@ -914,6 +940,9 @@ async fn the_home_city_is_declared_never_measured() -> Result<(), Box<dyn std::e
         Some(1_746_057_600),
     )
     .await?;
+    // The catalogue letter is the one under test: a show letter names the
+    // show's city by design, and the `test.example` contacts here are not in
+    // the show's country, so the show writes them nothing.
     // The only city in the workspace's calendar — the old heuristic would
     // have announced the act as being from here.
     f.event_in_city(20, "published", "Gorzów Wielkopolski")
@@ -964,6 +993,115 @@ async fn the_home_city_is_declared_never_measured() -> Result<(), Box<dyn std::e
     assert!(
         bodies.iter().all(|body| !body.contains("from Gorzów")),
         "the show's city is never the act's: {bodies:?}"
+    );
+    Ok(())
+}
+
+/// A show opportunity writes the show letter — city, date, room, tickets —
+/// and only to contacts in the show's country. Before 2026-09-27 it wrote the
+/// catalogue pitch ("we would love to submit {album} for coverage") to every
+/// press contact anywhere, and thirty-four such letters about one Gorzów show
+/// sat in the approval queue.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_show_opportunity_writes_the_show_letter_to_local_contacts_only()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("supply-show-letter").await?;
+    sqlx::query(
+        "INSERT INTO growth_envelope (workspace_id, agent_enabled, dry_run) VALUES ($1, true, false)
+         ON CONFLICT (workspace_id) DO UPDATE SET agent_enabled = true, dry_run = false",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+             (workspace_id, context, enabled, autonomy_level, minimum_confidence_basis_points,
+              max_actions_24h, config)
+         VALUES ($1, 'outreach', true, 'require_approval', 7500, 20,
+                 '{\"waves\": {\"min_pitches_per_wave\": 2}}')
+         ON CONFLICT (workspace_id, context) DO UPDATE SET enabled = true,
+             autonomy_level = 'require_approval', minimum_confidence_basis_points = 7500,
+             max_actions_24h = 20, config = EXCLUDED.config",
+    )
+    .bind(f.ws())
+    .execute(&f.pool)
+    .await?;
+    f.release_source(
+        "Echoes",
+        "https://open.spotify.example/album/echoes",
+        "album",
+        Some(1_746_057_600),
+    )
+    .await?;
+    let local = f
+        .target_at(
+            "Radio Lokalne",
+            "radio",
+            true,
+            false,
+            None,
+            "radio.example.pl",
+        )
+        .await?;
+    let abroad = f
+        .target_at(
+            "Festival Abroad",
+            "radio",
+            true,
+            false,
+            None,
+            "festival.example.sk",
+        )
+        .await?;
+    let show = f
+        .event_in_city(20, "published", "Gorzów Wielkopolski")
+        .await?;
+    sqlx::query("UPDATE events SET venue = 'MagnetOffOn', ticket_url = 'https://tickets.example/gorzow' WHERE id = $1")
+        .bind(show)
+        .execute(&f.pool)
+        .await?;
+
+    f.repository
+        .refresh_outreach_supply(f.workspace_id, f.now)
+        .await?;
+    EvaluateAutopilot::new(&f.repository, f.workspace_id)
+        .execute(f.now)
+        .await?;
+
+    let letters = sqlx::query_as::<_, (Uuid, String, String, String)>(
+        "SELECT (action.payload->>'target_id')::uuid, action.payload->>'template_key',
+                action.payload->'draft'->>'subject', action.payload->'draft'->>'body'
+         FROM autopilot_actions AS action
+         JOIN outreach_opportunities AS opportunity
+           ON opportunity.id = (action.payload->>'opportunity_id')::uuid
+         WHERE action.workspace_id = $1 AND action.context = 'outreach'
+           AND opportunity.source = 'event_autopilot'",
+    )
+    .bind(f.ws())
+    .fetch_all(&f.pool)
+    .await?;
+    assert!(
+        letters.iter().all(|(target, ..)| *target != abroad),
+        "a show is not news to a contact in another country: {letters:?}"
+    );
+    let (_, template_key, subject, body) = letters
+        .iter()
+        .find(|(target, ..)| *target == local)
+        .expect("the local contact gets a show letter");
+    assert_eq!(template_key, "event.press.v1");
+    assert!(subject.contains("Gorzów Wielkopolski"), "{subject}");
+    assert!(
+        body.contains("gramy koncert w mieście Gorzów Wielkopolski (MagnetOffOn)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("Bilety: https://tickets.example/gorzow"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("zaproponować Wam Echoes"),
+        "the album pitch: {body}"
     );
     Ok(())
 }

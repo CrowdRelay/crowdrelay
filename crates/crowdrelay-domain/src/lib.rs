@@ -145,6 +145,7 @@ pub mod roster_weekly_brief;
 pub mod scan_scope;
 pub mod show_growth;
 pub mod show_operations;
+pub mod show_pitch_letter;
 pub mod show_settlement;
 pub mod standing_approval;
 pub mod target_discovery;

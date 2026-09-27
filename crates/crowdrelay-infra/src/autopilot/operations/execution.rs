@@ -110,7 +110,7 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
         phase,
         crowdrelay_domain::campaign_lifecycle::EventCampaignPhase::Announcement
     ) {
-        sqlx::query(r#"
+        sqlx::query(&format!(r#"
           INSERT INTO outreach_opportunities(
             workspace_id,target_id,source,subject_kind,subject_key,template_key,
             relevance_basis_points,confidence_basis_points,active,observed_at,expires_at)
@@ -130,10 +130,17 @@ pub(in crate::autopilot) async fn execute_audience_campaign(
             -- Re-engagement is an operator decision that clears the disposition.
             AND COALESCE(target.last_reply_disposition::text,'none') NOT IN ('received','positive','declined')
             AND target.target_kind IN ('press','radio','creator','media_patronage','endorsement','organiser')
+            -- Only contacts the show is news to: see `SHOW_LOCAL_TARGET`.
+            AND EXISTS (
+                SELECT 1 FROM events AS event
+                WHERE event.workspace_id = target.workspace_id
+                  AND 'event:' || event.id::text = $2
+                  AND {SHOW_LOCAL_TARGET}
+            )
           ON CONFLICT(workspace_id,source,target_id,subject_kind,subject_key) DO UPDATE SET
             active=true,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at,
             relevance_basis_points=EXCLUDED.relevance_basis_points,confidence_basis_points=EXCLUDED.confidence_basis_points
-        "#).bind(workspace_id.into_uuid()).bind(format!("event:{}",event_id)).bind(now)
+        "#, SHOW_LOCAL_TARGET = crate::autopilot::outreach_supply::SHOW_LOCAL_TARGET)).bind(workspace_id.into_uuid()).bind(format!("event:{}",event_id)).bind(now)
           .execute(&mut **tx).await.map_err(map_sqlx)?;
     }
     Ok(())

@@ -120,7 +120,7 @@ pub fn salutation_name(display_name: &str) -> &str {
 
 /// Subjects stay well under the executor's 220 cap — a subject a mail client
 /// truncates is a subject nobody read.
-const MAX_SUBJECT: usize = 160;
+pub(crate) const MAX_SUBJECT: usize = 160;
 
 /// Composes the letter, or refuses with the fact that is missing.
 ///
@@ -259,7 +259,7 @@ fn follow_up_pl(
 /// "Piszemy w imieniu {act}{ — zespołu {style}}{ z miasta {home}}". The city
 /// is named after "z miasta" so it stays in the nominative: "z Wrocław" is
 /// not Polish, and declining a city name without a dictionary is a guess.
-fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
+pub(crate) fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
     let style = sender
         .style
         .as_deref()
@@ -280,7 +280,7 @@ fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
     }
 }
 
-fn sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
+pub(crate) fn sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
     let mut lines = vec![String::new(), "Pozdrawiamy,".to_owned(), act.to_owned()];
     if let Some(url) = sender
         .site_url
@@ -490,7 +490,7 @@ fn organiser_follow_up_pl(
 }
 
 /// "17 Oct 2026" — day, the month's short English name, the year.
-fn format_show_date_en(date: Date) -> String {
+pub(crate) fn format_show_date_en(date: Date) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -503,7 +503,7 @@ fn format_show_date_en(date: Date) -> String {
 
 /// "17 października 2026" — the Polish month in the genitive, as a date is
 /// read after a number, with the year.
-fn format_show_date_pl(date: Date) -> String {
+pub(crate) fn format_show_date_pl(date: Date) -> String {
     const MONTHS: [&str; 12] = [
         "stycznia",
         "lutego",
@@ -661,7 +661,7 @@ fn thread_sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
 
 /// "I am writing from {act}{, a {style} act}{ from {home_city}}" — each part
 /// present only when the tenant's own records say it.
-fn introduction(sender: &SenderIdentity, act: &str) -> String {
+pub(crate) fn introduction(sender: &SenderIdentity, act: &str) -> String {
     let style = sender
         .style
         .as_deref()
@@ -684,7 +684,7 @@ fn introduction(sender: &SenderIdentity, act: &str) -> String {
 
 /// The closing block — the act's name and, where the tenant declared one,
 /// its own site. No link line when there is no link to give.
-fn sign_off(sender: &SenderIdentity, act: &str) -> Vec<String> {
+pub(crate) fn sign_off(sender: &SenderIdentity, act: &str) -> Vec<String> {
     let mut lines = vec![String::new(), "Best,".to_owned(), act.to_owned()];
     if let Some(url) = sender
         .site_url
@@ -697,7 +697,7 @@ fn sign_off(sender: &SenderIdentity, act: &str) -> Vec<String> {
     lines
 }
 
-fn truncate(value: String, max: usize) -> String {
+pub(crate) fn truncate(value: String, max: usize) -> String {
     if value.chars().count() <= max {
         return value;
     }
