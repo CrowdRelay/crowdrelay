@@ -167,6 +167,14 @@ fn normalize_bandsintown_event(
             Some(city) => format!("{} live — {city}", source.artist_name),
             None => format!("{} live", source.artist_name),
         });
+    // The venue field is whatever the artist typed on Bandsintown, and the
+    // Gorzów show on 2026-10-17 arrived with the tour's own name in it:
+    // title "Sanity Check Tour", venue "Sanity Check Tour". Every letter and
+    // fan email then named the tour as the room. A venue that only repeats
+    // the title names no room, so it is absent — "gramy koncert: Gorzów
+    // Wielkopolski" is true, "…, Sanity Check Tour" is not.
+    let venue = clean_optional(event.venue.name)
+        .filter(|venue| venue.trim().to_lowercase() != title.trim().to_lowercase());
     let ticket_url = event
         .offers
         .unwrap_or_default()
@@ -204,7 +212,7 @@ fn normalize_bandsintown_event(
             .longitude
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| (-180.0..=180.0).contains(value)),
-        venue: clean_optional(event.venue.name),
+        venue,
         venue_address: clean_optional(event.venue.location),
         timezone: source.timezone.clone(),
         starts_at,

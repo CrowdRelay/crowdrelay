@@ -460,7 +460,10 @@ async fn upsert_event(
                     WHEN events.description_origin = 'manual' THEN events.description_source_hash
                     ELSE EXCLUDED.description_source_hash
                 END,
-                venue = EXCLUDED.venue,
+                -- A provider that stops naming a room does not erase the
+                -- one on record — an operator correction included — the
+                -- same rule the update arm above applies.
+                venue = COALESCE(EXCLUDED.venue, events.venue),
                 venue_address = COALESCE(EXCLUDED.venue_address, events.venue_address),
                 timezone = EXCLUDED.timezone,
                 starts_at = EXCLUDED.starts_at,

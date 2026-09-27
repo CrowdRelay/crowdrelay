@@ -636,6 +636,22 @@ mod tests {
     }
 
     #[test]
+    fn a_venue_that_repeats_the_title_names_no_room() {
+        let source = bandsintown_source();
+        let mut event = bandsintown_event("1", "2026-10-17T19:30:00");
+        event.title = Some("Sanity Check Tour".to_owned());
+        event.venue.name = Some(" sanity check tour ".to_owned());
+        let normalized =
+            normalize_bandsintown_event(event, &source).expect("valid event should normalize");
+        assert_eq!(normalized.venue, None);
+
+        let normalized =
+            normalize_bandsintown_event(bandsintown_event("2", "2026-10-17T19:30:00"), &source)
+                .expect("valid event should normalize");
+        assert_eq!(normalized.venue.as_deref(), Some("Klub"));
+    }
+
+    #[test]
     fn fully_parseable_batch_stays_authoritative() {
         let source = bandsintown_source();
         let batch = ProviderBatch {
