@@ -628,8 +628,16 @@ async fn load_relay_run(
             latest.measured_at,
             re.status AS reach_status,
             -- A workspace-window count is not this post's fans: NULL, not
-            -- a number that looks like one (`OutcomeBasis`).
-            CASE WHEN ge.outcome_basis = 'attributed' THEN ge.observed_fans END
+            -- a number that looks like one (`OutcomeBasis`). The basis lives
+            -- on the evidence row; `ge` is the derived episode, which has no
+            -- such column — #325 read it from `ge` and would have failed
+            -- this whole query on its first run.
+            CASE WHEN EXISTS (
+                     SELECT 1 FROM growth_evidence AS evidence
+                     WHERE evidence.workspace_id = $1
+                       AND evidence.action_id = e.action_id
+                       AND evidence.outcome_basis = 'attributed'
+                 ) THEN ge.observed_fans END
                 AS observed_fans,
             ge.converted,
             count(*) OVER () AS total_targets
