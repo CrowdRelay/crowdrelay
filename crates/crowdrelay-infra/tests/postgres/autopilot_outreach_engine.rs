@@ -1092,7 +1092,7 @@ async fn a_show_opportunity_writes_the_show_letter_to_local_contacts_only()
     assert_eq!(template_key, "event.press.v1");
     assert!(subject.contains("Gorzów Wielkopolski"), "{subject}");
     assert!(
-        body.contains("gramy koncert w mieście Gorzów Wielkopolski (MagnetOffOn)"),
+        body.contains("gramy koncert: Gorzów Wielkopolski, MagnetOffOn."),
         "{body}"
     );
     assert!(

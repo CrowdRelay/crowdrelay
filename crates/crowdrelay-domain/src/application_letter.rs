@@ -245,10 +245,12 @@ fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
         .filter(|value| !value.is_empty());
     match (style, home) {
         (Some(style), Some(home)) => {
-            format!("Piszemy w imieniu {act} — zespołu {style} z miasta {home},")
+            // Nominative city in a parenthesis, style after "grającego": see
+            // `outreach_letter::introduction_pl`.
+            format!("Piszemy w imieniu {act} ({home}) — zespołu grającego {style},")
         }
-        (Some(style), None) => format!("Piszemy w imieniu {act} — zespołu {style},"),
-        (None, Some(home)) => format!("Piszemy w imieniu {act} — zespołu z miasta {home},"),
+        (Some(style), None) => format!("Piszemy w imieniu {act} — zespołu grającego {style},"),
+        (None, Some(home)) => format!("Piszemy w imieniu {act} ({home}),"),
         (None, None) => format!("Piszemy w imieniu {act},"),
     }
 }
@@ -353,7 +355,7 @@ mod tests {
         assert!(
             letter
                 .body
-                .contains("zespołu modern metal z miasta Wrocław")
+                .contains("Piszemy w imieniu VIRYA (Wrocław) — zespołu grającego modern metal,")
         );
         assert!(
             !letter.body.contains(" fit"),
