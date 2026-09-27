@@ -109,8 +109,7 @@ pub const KEY_TENANT_INTENT: &str = "tenant_intent";
 pub const KEY_ACT_STYLE: &str = "act_style";
 /// The city the act calls home, in the act's own words ("Wrocław").
 ///
-/// Letters open with it — "Piszemy w imieniu {act} — zespołu z miasta
-/// {home}". It is a declaration, never a measurement: the sender identity
+/// Letters open with it — "Piszemy w imieniu {act} ({home})". It is a declaration, never a measurement: the sender identity
 /// used to take the city the act had played most, which counted *upcoming*
 /// shows as played and once announced a band as being from the city of its
 /// next gig. An act that has not said has no city in the sentence — the

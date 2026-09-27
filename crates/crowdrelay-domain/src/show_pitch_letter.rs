@@ -192,25 +192,27 @@ pub fn compose_show_pitch_letter(
         LetterLanguage::Polish => {
             let ask = ask_pl(input.target_kind).ok_or(ShowPitchRefusal::NoShowAsk)?;
             let date = format_show_date_pl(input.show_date);
-            // "w mieście {city}" keeps the city in the nominative, the same
-            // rule `introduction_pl` follows with "z miasta": declining a
-            // city name without a dictionary is a guess.
-            let place = venue.map_or_else(
-                || format!("w mieście {city}"),
-                |venue| format!("w mieście {city} ({venue})"),
+            // The city stays in the nominative, the same rule
+            // `introduction_pl` follows: declining a city name without a
+            // dictionary is a guess. "gramy koncert w mieście Gorzów
+            // Wielkopolski" was grammatical and read as a template; a colon
+            // and a parenthesis are how an announcement carries the place.
+            let (place, place_aside) = venue.map_or_else(
+                || (format!(": {city}"), format!(" ({city})")),
+                |venue| (format!(": {city}, {venue}"), format!(" ({city}, {venue})")),
             );
             let mut lines = vec!["Dzień dobry,".to_owned(), String::new()];
             match input.phase {
                 OutreachPhase::Initial => {
                     lines.push(format!(
-                        "{} i {date} gramy koncert {place}.",
+                        "{} i {date} gramy koncert{place}.",
                         introduction_pl(input.sender, act),
                     ));
                     lines.push(ask.to_owned());
                 }
                 OutreachPhase::FollowUp => {
                     lines.push(format!(
-                        "Krótko wracamy do poprzedniej wiadomości o koncercie {date} {place}. \
+                        "Krótko wracamy do poprzedniej wiadomości o koncercie {date}{place_aside}. \
                          Jeśli to nie dla Was, krótkie „nie” też bardzo nam pomoże."
                     ));
                 }
@@ -342,7 +344,7 @@ mod tests {
         assert!(letter.body.starts_with("Dzień dobry,\n"), "{}", letter.body);
         assert!(
             letter.body.contains(
-                "i 17 października 2026 gramy koncert w mieście Gorzów Wielkopolski (MagnetOffOn)."
+                "i 17 października 2026 gramy koncert: Gorzów Wielkopolski, MagnetOffOn."
             ),
             "{}",
             letter.body

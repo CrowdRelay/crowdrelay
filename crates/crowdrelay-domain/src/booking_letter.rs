@@ -248,12 +248,14 @@ fn introduction(sender: &SenderIdentity, act: &str, language: LetterLanguage) ->
         (LetterLanguage::English, None, Some(home)) => format!("We are {act} from {home},"),
         (LetterLanguage::English, None, None) => format!("We are {act},"),
         (LetterLanguage::Polish, Some(style), Some(home)) => {
-            format!("Jesteśmy {act}, gramy {style} i jesteśmy z miasta {home},")
+            // Nominative city in a parenthesis: see
+            // `outreach_letter::introduction_pl`.
+            format!("Jesteśmy {act} ({home}), gramy {style},")
         }
         (LetterLanguage::Polish, Some(style), None) => {
             format!("Jesteśmy {act}, gramy {style},")
         }
-        (LetterLanguage::Polish, None, Some(home)) => format!("Jesteśmy {act} z miasta {home},"),
+        (LetterLanguage::Polish, None, Some(home)) => format!("Jesteśmy {act} ({home}),"),
         (LetterLanguage::Polish, None, None) => format!("Jesteśmy {act},"),
     }
 }

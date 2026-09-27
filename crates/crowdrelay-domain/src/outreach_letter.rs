@@ -256,9 +256,15 @@ fn follow_up_pl(
     }
 }
 
-/// "Piszemy w imieniu {act}{ — zespołu {style}}{ z miasta {home}}". The city
-/// is named after "z miasta" so it stays in the nominative: "z Wrocław" is
-/// not Polish, and declining a city name without a dictionary is a guess.
+/// "Piszemy w imieniu {act}{ ({home})}{ — zespołu grającego {style} —}".
+///
+/// The city stays in the nominative because declining a city name without a
+/// dictionary is a guess ("z Wrocław" is not Polish). It used to be kept that
+/// way with "z miasta Wrocław", which no Polish writer says and which a press
+/// contact reads as a template on the first line. A parenthesis is how Polish
+/// press notes carry a place, and it takes the nominative. The style follows
+/// "grającego" because a genre name in the accusative reads as written —
+/// "zespołu metalcore, modern metal" did not.
 pub(crate) fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
     let style = sender
         .style
@@ -272,10 +278,10 @@ pub(crate) fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
         .filter(|value| !value.is_empty());
     match (style, home) {
         (Some(style), Some(home)) => {
-            format!("Piszemy w imieniu {act} — zespołu {style} z miasta {home} —")
+            format!("Piszemy w imieniu {act} ({home}) — zespołu grającego {style} —")
         }
-        (Some(style), None) => format!("Piszemy w imieniu {act} — zespołu {style} —"),
-        (None, Some(home)) => format!("Piszemy w imieniu {act} z miasta {home}"),
+        (Some(style), None) => format!("Piszemy w imieniu {act} — zespołu grającego {style} —"),
+        (None, Some(home)) => format!("Piszemy w imieniu {act} ({home})"),
         (None, None) => format!("Piszemy w imieniu {act}"),
     }
 }
@@ -938,7 +944,7 @@ mod tests {
         .expect("a complete input composes");
         assert!(letter.body.starts_with("Dzień dobry,\n"));
         assert!(letter.body.contains(
-            "Piszemy w imieniu VIRYA — zespołu modern metal z miasta Wrocław — i chcielibyśmy \
+            "Piszemy w imieniu VIRYA (Wrocław) — zespołu grającego modern metal — i chcielibyśmy \
              zaproponować Wam our new single \"Rytuał\" do omówienia lub recenzji."
         ));
         assert!(
@@ -1088,7 +1094,7 @@ mod tests {
         .expect("a complete input composes");
         assert!(letter.body.starts_with("Dzień dobry,\n"));
         assert!(letter.body.contains(
-            "Piszemy w imieniu VIRYA — zespołu modern metal z miasta Wrocław — i chcielibyśmy \
+            "Piszemy w imieniu VIRYA (Wrocław) — zespołu grającego modern metal — i chcielibyśmy \
              zapytać o możliwość zagrania u Was."
         ));
         assert!(letter.body.contains(
