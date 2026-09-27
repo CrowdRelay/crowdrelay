@@ -30,6 +30,34 @@ pub(crate) enum SqlxErrorClass {
     Unexpected,
 }
 
+/// Whether a failure is the database being briefly unavailable — pool
+/// exhaustion, a dropped connection, a serialization or lock conflict, a
+/// cancelled statement — rather than anything about the work itself. Work
+/// that failed this way is retried, never recorded as refused.
+///
+/// Pure: no logging, no fault counting. [`classify_sqlx_error`] is the
+/// logging classifier and reads its `Unavailable` class from here.
+#[must_use]
+pub fn is_transient_sqlx_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Database(database) => {
+            let code = database.code();
+            let code = code.as_deref().unwrap_or_default();
+            code.starts_with("08")
+                || matches!(
+                    code,
+                    "40001" | "40P01" | "53300" | "55P03" | "57014" | "57P01" | "57P02" | "57P03"
+                )
+        }
+        _ => false,
+    }
+}
+
 /// Classifies PostgreSQL and pool failures consistently across repositories.
 ///
 /// Only constraint failures that can reasonably be caused by a conflicting
@@ -38,23 +66,12 @@ pub(crate) enum SqlxErrorClass {
 #[must_use]
 pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> SqlxErrorClass {
     let class = match error {
+        _ if is_transient_sqlx_error(error) => SqlxErrorClass::Unavailable,
         sqlx::Error::RowNotFound => SqlxErrorClass::NotFound,
-        sqlx::Error::Io(_)
-        | sqlx::Error::Tls(_)
-        | sqlx::Error::PoolTimedOut
-        | sqlx::Error::PoolClosed
-        | sqlx::Error::WorkerCrashed => SqlxErrorClass::Unavailable,
         sqlx::Error::Database(database) => {
             let code = database.code();
             let code = code.as_deref().unwrap_or_default();
-            if code.starts_with("08")
-                || matches!(
-                    code,
-                    "40001" | "40P01" | "53300" | "55P03" | "57014" | "57P01" | "57P02" | "57P03"
-                )
-            {
-                SqlxErrorClass::Unavailable
-            } else if code == "23505" {
+            if code == "23505" {
                 // The row becomes `error_kind = "state_changed"` and nothing
                 // else — the constraint name that would say *which* unique key
                 // fired is dropped here, one frame from the only place it
@@ -388,6 +405,18 @@ mod tests {
             classify_sqlx_error(&sqlx::Error::RowNotFound),
             SqlxErrorClass::NotFound
         );
+    }
+
+    /// Work that fails on a briefly unavailable database is retried; work
+    /// that fails on anything about itself is not.
+    #[test]
+    fn only_availability_failures_are_transient() {
+        assert!(is_transient_sqlx_error(&sqlx::Error::PoolTimedOut));
+        assert!(is_transient_sqlx_error(&sqlx::Error::PoolClosed));
+        assert!(!is_transient_sqlx_error(&sqlx::Error::RowNotFound));
+        assert!(!is_transient_sqlx_error(&sqlx::Error::ColumnNotFound(
+            "missing".to_owned()
+        )));
     }
 
     /// The embedded migrator agrees with the migrations directory.
