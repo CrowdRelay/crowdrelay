@@ -746,14 +746,26 @@ impl AutopilotWorker {
                         Err(error) => {
                             failed += 1;
                             let error_kind = repository_error_kind(error);
-                            degraded.failed(phase::MEASUREMENT_RESOLUTION, error_kind);
                             let retryable = repository_error_retryable(error);
-                            tracing::warn!(
-                                measurement_id = %measurement.id,
-                                measurement_kind = measurement.kind.as_str(),
-                                error_kind,
-                                "CrowdRelay Autopilot delayed effect measurement failed"
-                            );
+                            // An abandonment is the measurement's answer
+                            // ("there is no outcome to read"), not a failure
+                            // of the phase — see `ABANDONMENTS`.
+                            if AutopilotMeasurementKind::ABANDONMENTS.contains(&error_kind) {
+                                tracing::info!(
+                                    measurement_id = %measurement.id,
+                                    measurement_kind = measurement.kind.as_str(),
+                                    error_kind,
+                                    "CrowdRelay Autopilot measurement abandoned: no outcome to observe"
+                                );
+                            } else {
+                                degraded.failed(phase::MEASUREMENT_RESOLUTION, error_kind);
+                                tracing::warn!(
+                                    measurement_id = %measurement.id,
+                                    measurement_kind = measurement.kind.as_str(),
+                                    error_kind,
+                                    "CrowdRelay Autopilot delayed effect measurement failed"
+                                );
+                            }
                             // `harm` rides along: a terminal failure merges
                             // its keys in the same transaction that resolves
                             // readiness, so the evidence row closes with the
@@ -1265,6 +1277,20 @@ mod tests {
     /// than collapsing into `state_changed` — the funnel is the only thing
     /// keeping "the roster spent this person's monthly share" readable as
     /// itself on the action row.
+    /// Every abandonment reaches `last_error_kind` as itself — the worker
+    /// matches that string against `ABANDONMENTS` to decide the cycle is not
+    /// degraded, so a reason collapsed into `state_changed` would silently
+    /// count as a fault again.
+    #[test]
+    fn every_abandonment_keeps_its_name() {
+        for reason in AutopilotMeasurementKind::ABANDONMENTS {
+            assert_eq!(
+                repository_error_kind(RepositoryError::ConflictBecause(reason)),
+                reason
+            );
+        }
+    }
+
     #[test]
     fn repository_error_kind_keeps_named_conflicts() {
         assert_eq!(
