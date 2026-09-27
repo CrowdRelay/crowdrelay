@@ -20,3 +20,16 @@ CREATE INDEX IF NOT EXISTS fan_provenance_reddit_community_norm_idx
 CREATE INDEX IF NOT EXISTS community_posts_posted_subreddit_norm_idx
     ON community_posts (workspace_id, normalize_subreddit(subreddit), posted_at)
     WHERE posted_at IS NOT NULL;
+
+-- Two reads that look for a handful of decisions among every decision the
+-- workspace ever wrote. On production (2026-09-27, 21,732 decisions): the
+-- latest metacognition snapshot (159 rows carry one) took 621 ms, and the
+-- learning-applied read (124 rows) 339 ms — both sequential scans that
+-- detoast every `input_snapshot`. Partial indexes over just those rows.
+CREATE INDEX IF NOT EXISTS autopilot_decisions_metacognition_idx
+    ON autopilot_decisions (workspace_id, evaluated_at DESC)
+    WHERE (input_snapshot -> 'snapshot') ? 'metacognition';
+
+CREATE INDEX IF NOT EXISTS autopilot_decisions_learning_idx
+    ON autopilot_decisions (workspace_id, evaluated_at)
+    WHERE input_snapshot ? 'learning';

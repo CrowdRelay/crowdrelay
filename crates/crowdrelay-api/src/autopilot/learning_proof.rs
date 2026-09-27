@@ -314,7 +314,12 @@ async fn load_influences(
           -- from a build before that block existed cannot say whether the
           -- belief influenced it, and guessing would be the fabrication this
           -- endpoint exists to avoid.
-          AND input_snapshot -> 'learning' IS NOT NULL
+          -- `?` rather than `-> 'learning' IS NOT NULL`: the same rows (a
+          -- JSON null still has the key), but the planner has a selectivity
+          -- for `?` and none for the expression, so only this form uses
+          -- `autopilot_decisions_learning_idx` instead of detoasting every
+          -- decision (339 ms on production, 2026-09-27).
+          AND input_snapshot ? 'learning'
         ORDER BY evaluated_at ASC
         LIMIT $3
         "#,
