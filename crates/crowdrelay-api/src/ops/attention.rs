@@ -925,22 +925,15 @@ async fn load_rejected_agent_outcomes(
 async fn load_attention_ecosystem(
     state: &crate::AppState,
 ) -> Result<AttentionEcosystemOverview, OpsError> {
-    // Seed the lazy defaults exactly as `/ecosystem/overview` does. Without
-    // this a workspace whose flags have never been written reports an empty
-    // flag list here while the dedicated endpoint reports the full default
-    // set, so the two views of the same tenant disagree.
+    // Seed the lazy defaults exactly as `/ecosystem/overview` does, in the
+    // same single statement. Without the seeding a workspace whose flags have
+    // never been written reports an empty flag list here while the dedicated
+    // endpoint reports the full default set, so the two views of the same
+    // tenant disagree.
     let budget = &state.read_budget;
-    hold(budget, crate::ecosystem::ensure_default_flags(state))
-        .await
-        .map_err(|_| OpsError::Unexpected)?;
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     let flags = sqlx::query_as::<_, crate::ecosystem::FeatureFlag>(
-        r#"
-        SELECT key, enabled, reason, version, updated_at
-        FROM ecosystem_feature_flags
-        WHERE workspace_id = $1
-        ORDER BY key
-        "#,
+        crate::ecosystem::SEEDED_FLAGS_SQL,
     )
     .bind(workspace_id);
     let flags = hold(budget, flags.fetch_all(state.ticketing.pool()));

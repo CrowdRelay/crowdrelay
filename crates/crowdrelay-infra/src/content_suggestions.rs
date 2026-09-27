@@ -442,62 +442,49 @@ impl PostgresContentEngineRepository {
         // same way. 'expired' is the honest label — the window closed;
         // whether the band played the beat anyway is unmeasured, and the
         // reason says so rather than guess a done.
-        let lapsed = sqlx::query_scalar::<_, Uuid>(
+        // Each expiry and its outcome row commit in one statement: the
+        // UPDATE's RETURNING feeds the INSERT directly, instead of a round
+        // trip per expired suggestion.
+        sqlx::query(
             r#"
-            UPDATE content_suggestions
-            SET status = 'expired', updated_at = now()
-            WHERE workspace_id = $1 AND status = 'raised'
-              AND expires_at IS NOT NULL AND expires_at <= now()
-            RETURNING id
+            WITH lapsed AS (
+                UPDATE content_suggestions
+                SET status = 'expired', updated_at = now()
+                WHERE workspace_id = $1 AND status = 'raised'
+                  AND expires_at IS NOT NULL AND expires_at <= now()
+                RETURNING id
+            )
+            INSERT INTO suggestion_outcomes (
+                workspace_id, suggestion_id, outcome, decided_by, reason
+            )
+            SELECT $1, lapsed.id, 'expired', 'system', 'the window this beat was for has passed'
+            FROM lapsed
             "#,
         )
         .bind(ws)
-        .fetch_all(&mut *tx)
+        .execute(&mut *tx)
         .await?;
-        for suggestion_id in lapsed {
-            sqlx::query(
-                r#"
-                INSERT INTO suggestion_outcomes (
-                    workspace_id, suggestion_id, outcome, decided_by, reason
-                ) VALUES ($1, $2, 'expired', 'system', 'the window this beat was for has passed')
-                "#,
-            )
-            .bind(ws)
-            .bind(suggestion_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-        let unreported = sqlx::query_scalar::<_, Uuid>(
+        sqlx::query(
             r#"
-            UPDATE content_suggestions
-            SET status = 'expired', updated_at = now()
-            WHERE workspace_id = $1 AND status = 'approved'
-              AND suggested_before IS NOT NULL AND suggested_before < $2
-            RETURNING id
+            WITH unreported AS (
+                UPDATE content_suggestions
+                SET status = 'expired', updated_at = now()
+                WHERE workspace_id = $1 AND status = 'approved'
+                  AND suggested_before IS NOT NULL AND suggested_before < $2
+                RETURNING id
+            )
+            INSERT INTO suggestion_outcomes (
+                workspace_id, suggestion_id, outcome, decided_by, reason
+            )
+            SELECT $1, unreported.id, 'expired', 'system', 'committed, but the beat''s day passed without a report — unmeasured'
+            FROM unreported
             "#,
         )
         .bind(ws)
         .bind(today)
-        .fetch_all(&mut *tx)
+        .execute(&mut *tx)
         .await?;
-        for suggestion_id in unreported {
-            sqlx::query(
-                r#"
-                INSERT INTO suggestion_outcomes (
-                    workspace_id, suggestion_id, outcome, decided_by, reason
-                ) VALUES ($1, $2, 'expired', 'system', 'committed, but the beat''s day passed without a report — unmeasured')
-                "#,
-            )
-            .bind(ws)
-            .bind(suggestion_id)
-            .execute(&mut *tx)
-            .await?;
-        }
 
-        // The open queue is the Pareto cut: it holds at most `limit` live
-        // suggestions, so a pass tops up to the limit rather than appending
-        // it. `open_format_keys` suppresses re-raising; `open_count` (which
-        // counts bespoke keyless rows too) is the headroom.
         let open_rows = sqlx::query_as::<_, OpenSuggestionKeyRow>(
             r#"
             SELECT format_key FROM content_suggestions

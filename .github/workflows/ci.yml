@@ -399,6 +399,7 @@ jobs:
           set -euo pipefail
           python3 scripts/sql-result-types.py
           python3 scripts/test_sql_scalar_types_v1.py
+          python3 scripts/fk-index-ratchet.py
 
 
       - name: Sweep unattached Docker leftovers
