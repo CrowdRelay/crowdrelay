@@ -23,7 +23,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
+pub(crate) async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
@@ -35,7 +35,7 @@ async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     Ok(WorkspaceId::from_uuid(id))
 }
 
-fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
+pub(crate) fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
     AgentOutcomeWorker::new(
         pool.clone(),
         workspace_id,
@@ -46,7 +46,7 @@ fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
     )
 }
 
-fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
+pub(crate) fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
     PostgresAutopilotRepository::new(
         pool.clone(),
         &DatabaseConfig {
@@ -62,7 +62,7 @@ fn repository(pool: &PgPool) -> PostgresAutopilotRepository {
 
 /// The content the drafts carry — a synced post's row, with the media the
 /// approval card shows and the posts attach. The batch keys on this row's id.
-async fn content_source(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid> {
+pub(crate) async fn content_source(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO content_sources (
@@ -89,7 +89,7 @@ async fn content_source(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid
 }
 
 /// A screened-and-admitted community — the bar the ingest gate checks.
-async fn community_target(
+pub(crate) async fn community_target(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     subreddit: &str,
@@ -114,12 +114,34 @@ async fn community_target(
 
 /// A community-engager draft as the agents service emits it: one outcome per
 /// community the post was drafted for, all naming the same source.
-async fn engage_outcome(
+pub(crate) async fn engage_outcome(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     target_id: Uuid,
     source_id: Uuid,
     subreddit: &str,
+) -> Result<Uuid> {
+    engage_outcome_text(
+        pool,
+        workspace_id,
+        target_id,
+        source_id,
+        subreddit,
+        "New video is out",
+        "The band just dropped it — what do you think?",
+    )
+    .await
+}
+
+/// The same draft with the words given — for the language gate.
+pub(crate) async fn engage_outcome_text(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    target_id: Uuid,
+    source_id: Uuid,
+    subreddit: &str,
+    title: &str,
+    body: &str,
 ) -> Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -139,8 +161,8 @@ async fn engage_outcome(
             "platform": "reddit",
             "target_id": target_id.to_string(),
             "subreddit": subreddit,
-            "title": "New video is out",
-            "body": "The band just dropped it — what do you think?",
+            "title": title,
+            "body": body,
             "source_id": source_id.to_string(),
         },
         "rationale": "the community takes band news",
@@ -158,7 +180,7 @@ async fn engage_outcome(
     Ok(id)
 }
 
-async fn action_rows(
+pub(crate) async fn action_rows(
     pool: &PgPool,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<(Uuid, String, Option<String>, Option<time::OffsetDateTime>)>> {

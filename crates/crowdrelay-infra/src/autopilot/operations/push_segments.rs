@@ -320,7 +320,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
     target_path: Option<&str>,
     _event_id: Option<&uuid::Uuid>,
     segment: Option<&str>,
-    _now: OffsetDateTime,
+    now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     let action_uuid = action_id.into_uuid();
     let collapse_key = format!("agent:{action_uuid}");
@@ -401,8 +401,24 @@ pub(in crate::autopilot) async fn execute_signal_push(
         WHERE endpoint.workspace_id = $1
           AND endpoint.active
           AND endpoint.invalidated_at IS NULL
+          -- The gap is enforced where the push is sent, not only where it
+          -- is raised. Relay pacing (`relay_push_verdict`) spaces pushes by
+          -- when they were *raised*; four raised twelve hours apart, held
+          -- for approval and released together, still reached the same two
+          -- phones in one second on 2026-09-26. A fan who got an autopilot
+          -- push inside the gap is skipped for this one.
+          AND NOT EXISTS (
+              SELECT 1 FROM fan_push_deliveries AS recent
+              WHERE recent.workspace_id = endpoint.workspace_id
+                AND recent.fan_id = endpoint.fan_id
+                AND recent.source_kind = 'agent_signal_push'
+                AND recent.source_id <> $2
+                AND recent.created_at > ${now_bind} - make_interval(hours => ${gap_bind})
+          )
         ON CONFLICT (workspace_id, source_kind, source_id, endpoint_id) DO NOTHING
-        "#
+        "#,
+        now_bind = limit_bind + 1,
+        gap_bind = limit_bind + 2,
     );
 
     let mut query = sqlx::query(&sql)
@@ -414,7 +430,10 @@ pub(in crate::autopilot) async fn execute_signal_push(
         .bind(&collapse_key);
 
     query = apply_segment_binds(query, segment_binds);
-    query = query.bind(recipient_bound);
+    query = query.bind(recipient_bound).bind(now).bind(
+        i32::try_from(crowdrelay_domain::content_supply::RELAY_PUSH_MIN_GAP_HOURS)
+            .unwrap_or(i32::MAX),
+    );
 
     let inserted = query.execute(&mut **tx).await.map_err(map_sqlx)?;
 

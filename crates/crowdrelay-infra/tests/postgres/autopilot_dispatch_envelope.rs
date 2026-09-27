@@ -35,13 +35,13 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-struct Fixture {
-    pool: sqlx::PgPool,
-    repository: PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
+pub(crate) struct Fixture {
+    pub(crate) pool: sqlx::PgPool,
+    pub(crate) repository: PostgresAutopilotRepository,
+    pub(crate) workspace_id: WorkspaceId,
 }
 
-async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
+pub(crate) async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
     let (pool, database_url) =
         common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
     let workspace_id = WorkspaceId::new();
@@ -72,7 +72,7 @@ async fn setup() -> Result<Fixture, Box<dyn std::error::Error>> {
 
 /// The bare action insert the worker outcome path performs: a decision row
 /// for lineage, then a queued action with no prediction or evidence.
-async fn seed_outcome_action(
+pub(crate) async fn seed_outcome_action(
     f: &Fixture,
     action_kind: &str,
     payload: Value,

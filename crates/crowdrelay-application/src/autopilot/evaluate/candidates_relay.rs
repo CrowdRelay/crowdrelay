@@ -145,6 +145,14 @@ fn relay_candidates(
         post.body.as_deref().unwrap_or(post.title.as_str()),
         post.url.as_deref(),
     );
+    // A post about "tonight" is not pushed once the night has passed — see
+    // `relative_day_has_passed`. The communities below still get it: their
+    // drafts are rewritten from the caption's facts, not pasted.
+    let stale_push = crowdrelay_domain::relay_freshness::relative_day_has_passed(
+        &format!("{} {}", post.title, post.body.as_deref().unwrap_or_default()),
+        snapshot.occurred_at,
+        now,
+    );
     let mut out = vec![DecisionCandidate {
         context: policy.context,
         subject: ActionSubject::ContentSource(snapshot.source_id),
@@ -181,6 +189,9 @@ fn relay_candidates(
         decision_key: format!("decision:relay:v{}:{source}:signal_push", policy.version),
         action_idempotency_key: format!("action:relay:{source}:signal_push"),
     }];
+    if stale_push {
+        out.clear();
+    }
 
     // Admitted communities: one drafting task per (post × community). The
     // caption used to be pasted verbatim with an English attribution line —

@@ -39,6 +39,11 @@ pub enum OutcomeRejection {
     /// a refused community (off-topic, too small, previously refused) posts
     /// past the screen that rejected it.
     UnvettedCommunity { target_id: Uuid },
+    /// A community draft written in a language other than the community's
+    /// (English when none is recorded). A Polish caption relayed word for
+    /// word into r/melodicdeathmetal was removed by its moderators on
+    /// 2026-09-26, under a batch approval given on an English sample.
+    CommunityLanguageMismatch { expected: String, found: &'static str },
     /// A community post that names no trusted video source — or names one
     /// that does not exist, is inactive, expired, or is not a video. A thread
     /// post exists to share a release video; anything else is a post about
@@ -92,6 +97,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::UnvettedCommunity { target_id } => write!(
                 f,
                 "UNVETTED_COMMUNITY: target_id {target_id} is not an admitted, promoted community target"
+            ),
+            Self::CommunityLanguageMismatch { expected, found } => write!(
+                f,
+                "COMMUNITY_LANGUAGE_MISMATCH: the community reads {expected}, the draft is written in {found}"
             ),
             Self::UnsourcedPost { source_id } => write!(
                 f,

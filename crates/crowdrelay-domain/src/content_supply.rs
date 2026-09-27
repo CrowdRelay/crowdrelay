@@ -536,6 +536,10 @@ pub const RELAY_PUSH_MIN_GAP_HOURS: i64 = 12;
 /// cross-posted to another platform are not pushed a second time.
 pub const RELAY_PUSH_DEDUPE_DAYS: i64 = 7;
 
+/// The shortest title, in letters and digits, that identifies a post on its
+/// own for cross-post dedupe.
+const RELAY_TITLE_MIN_CHARS: usize = 20;
+
 /// A relay push already raised, as the pacing reads it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecentRelayPush {
@@ -573,11 +577,20 @@ pub fn relay_push_verdict(
     now: OffsetDateTime,
 ) -> RelayPushVerdict {
     let words = relay_words(title, body);
+    // The title alone also identifies a cross-post. On 2026-09-26 the band's
+    // Instagram and Facebook copies of one reel carried the same title and
+    // bodies that differed by one thanks line, so the whole-text comparison
+    // read them as two posts and fans got both. A title too short to be
+    // distinctive ("Gramy", "Nowy klip") is not used on its own.
+    let title_words = relay_words(title, "");
+    let distinctive_title = title_words.chars().count() >= RELAY_TITLE_MIN_CHARS;
     let remembered = now - Duration::days(RELAY_PUSH_DEDUPE_DAYS);
     if !words.is_empty()
-        && recent
-            .iter()
-            .any(|push| push.at >= remembered && relay_words(&push.title, &push.body) == words)
+        && recent.iter().any(|push| {
+            push.at >= remembered
+                && (relay_words(&push.title, &push.body) == words
+                    || (distinctive_title && relay_words(&push.title, "") == title_words))
+        })
     {
         return RelayPushVerdict::AlreadyRelayed;
     }
