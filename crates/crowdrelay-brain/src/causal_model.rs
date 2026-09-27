@@ -159,6 +159,15 @@ impl PredictionOutcome {
     }
 }
 
+/// The evidence basis current posteriors are built on.
+///
+/// 1 — fan outcomes are the fans traced to the action (2026-09-27). Rows
+/// that counted the workspace's window are skipped by every per-action
+/// learner, so a checkpoint built before that includes them and must be
+/// rebuilt, not extended. Raise this whenever what an evidence row means
+/// changes under a stored posterior.
+pub const EVIDENCE_BASIS_VERSION: u32 = 1;
+
 /// The default expected fans per dispatch when no data is available.
 /// A prior of 2.0 means the brain expects ~2 new fans per worker dispatch
 /// — optimistic enough to keep dispatching, conservative enough to be
@@ -226,6 +235,13 @@ pub const MIN_BRIDGE_CONFIDENCE: u32 = 10;
 /// outcome model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CausalModel {
+    /// Which evidence basis the posteriors were built from. A checkpoint
+    /// older than [`EVIDENCE_BASIS_VERSION`] was learned from
+    /// workspace-window fan counts and is rebuilt from evidence rather than
+    /// extended — see `OutcomeBasis`. Absent in checkpoints written before
+    /// the field existed, which read as 0.
+    #[serde(default)]
+    pub evidence_basis_version: u32,
     /// The effect size worth acting on, in this tenant's outcome units.
     ///
     /// Held here rather than read from [`MEANINGFUL_EFFECT_THRESHOLD`] so the
@@ -481,6 +497,7 @@ impl CausalModel {
             DEFAULT_EXPECTED_SIGNAL
         };
         Self {
+            evidence_basis_version: EVIDENCE_BASIS_VERSION,
             meaningful_effect_threshold: meaningful_effect,
             expected_signal_per_dispatch: expected_signal,
             fans: HierarchicalNegBinPosterior::new(NegBinPosterior::prior(

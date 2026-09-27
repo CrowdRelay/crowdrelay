@@ -674,10 +674,13 @@ async fn an_unpublished_draft_is_not_measured_as_a_zero() -> Result<(), Box<dyn 
     let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
     let now = OffsetDateTime::now_utc();
 
+    // An outbound-reach kind that is not an attributed fan count: the fan
+    // kinds additionally require a live tracked link (`attributed_fans`), and
+    // this test is about the reach guard alone.
     let claimed = |action_id: Uuid| ClaimedAutopilotMeasurement {
         id: AutopilotMeasurementId::from(Uuid::now_v7()),
         action_id: AutopilotActionId::from(action_id),
-        kind: AutopilotMeasurementKind::AgentRunFanGrowth14d,
+        kind: AutopilotMeasurementKind::AgentRunSignalInstalls7d,
         subject_id: workspace_id.into_uuid(),
         baseline_value: 0.0,
         action_finished_at: now - time::Duration::days(14),

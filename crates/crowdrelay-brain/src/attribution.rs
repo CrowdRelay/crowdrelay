@@ -115,6 +115,11 @@ pub fn attribute_fan_growth(evidence: &[GrowthEvidence]) -> FanGrowthAttribution
     let mut partial_count = 0u32;
 
     for ev in evidence {
+        // A workspace-window row would add the same arrivals once per
+        // overlapping dispatch — see `OutcomeBasis`.
+        if !ev.outcome_basis.teaches_per_action() {
+            continue;
+        }
         // Skip rows without any outcome — they haven't been measured yet.
         let has_outcome = ev.observed_fans.is_some()
             || ev.observed_incremental_fans.is_some()

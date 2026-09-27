@@ -32,6 +32,7 @@
 //! 4. **At learning time**: the brain loads all resolved evidence rows and
 //!    updates its posteriors from them.
 
+pub use crate::outcome_basis::OutcomeBasis;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -445,6 +446,9 @@ pub struct GrowthEvidence {
     /// make a 7d revenue number look new.
     #[serde(default)]
     pub observed_metrics: std::collections::BTreeMap<String, f64>,
+    /// What the fan columns on this row count. See [`OutcomeBasis`].
+    #[serde(default)]
+    pub outcome_basis: OutcomeBasis,
 }
 
 /// Contamination at or above which a randomised assignment is no longer a
@@ -505,6 +509,7 @@ impl Default for GrowthEvidence {
             replayed_14d_at: None,
             replayed_30d_at: None,
             observed_metrics: std::collections::BTreeMap::new(),
+            outcome_basis: OutcomeBasis::default(),
         }
     }
 }
@@ -571,6 +576,7 @@ impl GrowthEvidence {
             replayed_14d_at: None,
             replayed_30d_at: None,
             observed_metrics: std::collections::BTreeMap::new(),
+            outcome_basis: OutcomeBasis::Attributed,
         }
     }
 

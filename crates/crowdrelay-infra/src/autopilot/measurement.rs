@@ -5,8 +5,8 @@ mod readiness;
 
 use super::*;
 use readiness::{
-    dispatch_reached_an_audience, measured_evidence_quality, observable_community,
-    refresh_evidence_readiness, refresh_experiment_readiness,
+    dispatch_reached_an_audience, measured_evidence_quality, refresh_evidence_readiness,
+    refresh_experiment_readiness,
 };
 
 #[async_trait]
@@ -194,35 +194,6 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             if !observed_value.is_finite() {
                 return Err(RepositoryError::Unexpected);
             }
-            // Resolved before the transaction opens, from rows another writer
-            // committed. `Some` here means the observation above came from the
-            // community ledger rather than the workspace fallback, which is
-            // what the evidence quality has to reflect.
-            //
-            // A read failure is answered the same way as "not a community":
-            // the row falls back to the workspace comparison and earns the
-            // weaker evidence quality that goes with it. That is the safe
-            // direction — it under-claims rather than over-claims — and it is
-            // better than failing the whole measurement completion over a
-            // transient read. But it is a downgrade taken on no evidence, so
-            // it is logged rather than swallowed; a run of these is a
-            // measurement window silently recording weaker evidence than it
-            // observed.
-            let community =
-                match observable_community(&self.pool, workspace_id, measurement.action_id).await {
-                    Ok(community) => community,
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            action_id = %measurement.action_id.into_uuid(),
-                            workspace_id = %workspace_id.into_uuid(),
-                            "could not establish whether this measurement's unit is an \
-                             observable community; recording it against the workspace \
-                             fallback, which earns weaker evidence quality"
-                        );
-                        None
-                    }
-                };
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
@@ -245,7 +216,14 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .bind(measurement.id.into_uuid())
             .bind(metric_key)
             .bind(observed_value)
-            .bind(measurement.baseline_value)
+            // The attributed fan kinds are measured against zero; the rate a
+            // measurement scheduled before that change still carries is not
+            // what this outcome was compared with, and must not sit beside it.
+            .bind(if measurement.kind.counts_attributed_fans() {
+                0.0
+            } else {
+                measurement.baseline_value
+            })
             .bind(assessment)
             .bind(effect.delta_basis_points)
             .bind(json!({
@@ -327,10 +305,15 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         -- `refresh_evidence_readiness` once the queue is empty,
                         -- because readiness is a fact about the whole set of
                         -- outcomes and no single measurement can speak for it.
-                        SET observed_new_fans = COALESCE(observed_new_fans, $3)
+                        --
+                        -- The fourteen-day count is definitive and replaces
+                        -- the three-day one. It used to be written only
+                        -- `WHERE observed_new_fans IS NULL`, and the three-day
+                        -- checkpoint always lands first, so this column held
+                        -- three-day counts for every dispatch.
+                        SET observed_new_fans = $3
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND observed_new_fans IS NULL
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
@@ -411,13 +394,9 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 // write it to observed_new_fans (which holds the raw
                 // count only).
                 AutopilotMeasurementKind::IncrementalFanGrowth14d => {
-                    let evidence_quality = measured_evidence_quality(
-                        &mut transaction,
-                        workspace_id,
-                        measurement,
-                        community.as_deref(),
-                    )
-                    .await?;
+                    let evidence_quality =
+                        measured_evidence_quality(&mut transaction, workspace_id, measurement)
+                            .await?;
                     let _ = sqlx::query(
                         r#"
                         UPDATE growth_evidence
@@ -469,37 +448,38 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 }
                 AutopilotMeasurementKind::AgentRunSignalInstalls7d
                 | AutopilotMeasurementKind::SignalInstalls1d => {
+                    // The seven-day count replaces the one-day checkpoint; the
+                    // checkpoint only fills an empty column. Both used to be
+                    // `WHERE observed_signal_installs IS NULL`, so the
+                    // one-day value — which always lands first — stuck.
+                    let definitive =
+                        measurement.kind == AutopilotMeasurementKind::AgentRunSignalInstalls7d;
                     let _ = sqlx::query(
                         r#"
                         UPDATE dispatch_predictions
-                        SET observed_signal_installs = COALESCE(observed_signal_installs, $3)
+                        SET observed_signal_installs = $3
                         WHERE workspace_id = $1
                           AND action_id = $2
-                          AND observed_signal_installs IS NULL
+                          AND ($4 OR observed_signal_installs IS NULL)
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(measurement.action_id.into_uuid())
                     .bind(observed_value)
+                    .bind(definitive)
                     .execute(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
                     // Nothing else. The signal install measurements have no
                     // column on the evidence row and must not close it either
-                    // — Y14 is a week away and Y30 a month past that. The 1d
-                    // checkpoint writes the same column with COALESCE so the
-                    // 7d value replaces it when the longer window closes.
+                    // — Y14 is a week away and Y30 a month past that.
                 }
                 // DurableFanGrowth30d writes the durable fan count to the
                 // growth evidence table's durable_fans_30d column.
                 AutopilotMeasurementKind::DurableFanGrowth30d => {
-                    let evidence_quality = measured_evidence_quality(
-                        &mut transaction,
-                        workspace_id,
-                        measurement,
-                        community.as_deref(),
-                    )
-                    .await?;
+                    let evidence_quality =
+                        measured_evidence_quality(&mut transaction, workspace_id, measurement)
+                            .await?;
                     let _ = sqlx::query(
                         r#"
                         UPDATE growth_evidence

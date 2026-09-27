@@ -65,6 +65,7 @@ pub mod hypothesis;
 pub mod metric_posterior;
 pub mod opportunity;
 pub mod opportunity_graph;
+pub mod outcome_basis;
 pub mod platform_yield;
 pub mod portfolio;
 pub mod reach;
@@ -96,8 +97,8 @@ pub use calibration::{
 };
 pub use causal_model::{
     CausalModel, DEFAULT_EXPECTED_FANS, DEFAULT_EXPECTED_SIGNAL, DispatchContext,
-    DispatchPrediction, MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE, PredictionOutcome,
-    TreatmentAwareStats,
+    DispatchPrediction, EVIDENCE_BASIS_VERSION, MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE,
+    PredictionOutcome, TreatmentAwareStats,
 };
 pub use context_effect::ContextGLM;
 pub use credit_ledger::{
@@ -110,6 +111,7 @@ pub use efe::{
 };
 pub use evidence::{
     CONTAMINATION_CEILING, EvidenceEvent, EvidenceEventType, EvidenceQuality, GrowthEvidence,
+    OutcomeBasis,
 };
 pub use experiment::{
     CausalEstimand, ExecutionStatus, ExperimentAssignment, ExperimentDesign, ExperimentKind,

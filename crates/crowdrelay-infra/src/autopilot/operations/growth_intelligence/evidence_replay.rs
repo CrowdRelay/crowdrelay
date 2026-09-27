@@ -88,7 +88,7 @@ pub(super) fn control_arm_means<'a>(
     let mut sums: std::collections::HashMap<uuid::Uuid, (f64, u32, f64, u32)> =
         std::collections::HashMap::new();
     for ev in evidence {
-        if ev.treatment.is_treatment() {
+        if ev.treatment.is_treatment() || !ev.outcome_basis.teaches_per_action() {
             continue;
         }
         let Some(experiment_uuid) = ev.experiment_uuid else {
@@ -308,6 +308,13 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             }
         }
 
+        // A row whose fan columns count the workspace's window, not this
+        // dispatch, teaches nothing below this line — see `OutcomeBasis`.
+        // Its secondary metrics above were always per-action and have been
+        // folded already.
+        if !ev.outcome_basis.teaches_per_action() {
+            continue;
+        }
         // Update the outcome model (P(Y|action,context)) from the raw
         // observed fan count — NOT the DiD estimate. The outcome model
         // learns the expected raw fan count given an action and context.
@@ -584,6 +591,11 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
     use crowdrelay_brain::GrowthStrategy;
 
     for ev in evidence {
+        // A workspace-window row credits this strategy with whatever the
+        // workspace gained that fortnight — see `OutcomeBasis`.
+        if !ev.outcome_basis.teaches_per_action() {
+            continue;
+        }
         // Use the recorded strategy when available. Legacy evidence rows
         // (before the strategy field was added) fall back to inferring
         // from the template — a heuristic guess that can be wrong when
