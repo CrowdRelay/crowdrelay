@@ -350,7 +350,7 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                 creative_family: ev.creative_family,
                 expected_metrics: Default::default(),
             };
-            let outcome = PredictionOutcome::from_observation(prediction, raw_fans, 0.0);
+            let outcome = PredictionOutcome::fans_only(prediction, raw_fans);
             model.update(&outcome);
             outcome_updates += 1;
         }

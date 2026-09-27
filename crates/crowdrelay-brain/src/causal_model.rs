@@ -139,6 +139,18 @@ pub struct PredictionOutcome {
     pub fan_prediction_error: f64,
     /// The dopamine signal for Signal installs.
     pub signal_prediction_error: f64,
+    /// Whether `observed_signal_installs` was measured at all. The evidence
+    /// replay has no per-dispatch install count — installs are not traced
+    /// to a dispatch — and used to pass `0.0`, so every fan outcome also
+    /// taught "this template produced zero installs" and pulled every
+    /// template's install expectation toward zero. A number nobody measured
+    /// is not zero: `false` leaves the install estimate untouched.
+    #[serde(default = "measured_by_default")]
+    pub signal_measured: bool,
+}
+
+const fn measured_by_default() -> bool {
+    true
 }
 
 impl PredictionOutcome {
@@ -155,6 +167,18 @@ impl PredictionOutcome {
             prediction,
             observed_new_fans,
             observed_signal_installs,
+            signal_measured: true,
+        }
+    }
+
+    /// An outcome whose fan count was measured and whose install count was
+    /// not. See [`Self::signal_measured`].
+    #[must_use]
+    pub fn fans_only(prediction: DispatchPrediction, observed_new_fans: f64) -> Self {
+        Self {
+            signal_measured: false,
+            signal_prediction_error: 0.0,
+            ..Self::from_observation(prediction, observed_new_fans, 0.0)
         }
     }
 }
@@ -166,7 +190,12 @@ impl PredictionOutcome {
 /// learner, so a checkpoint built before that includes them and must be
 /// rebuilt, not extended. Raise this whenever what an evidence row means
 /// changes under a stored posterior.
-pub const EVIDENCE_BASIS_VERSION: u32 = 1;
+///
+/// 2 — the install estimate is no longer fed `0.0` for dispatches whose
+/// installs were never measured (`PredictionOutcome::signal_measured`), so
+/// stored per-template install estimates already dragged toward zero are
+/// rebuilt from evidence.
+pub const EVIDENCE_BASIS_VERSION: u32 = 2;
 
 /// The default expected fans per dispatch when no data is available.
 /// A prior of 2.0 means the brain expects ~2 new fans per worker dispatch
@@ -600,18 +629,20 @@ impl CausalModel {
             base_mean,
             outcome.observed_new_fans,
         );
-        // Update the Signal install EMA.
-        let confidence = self.fans.confidence(template);
-        let lr = 1.0 / (1.0 + (confidence as f64).min(10.0));
-        let signal_current = self
-            .template_expected_signal
-            .get(template)
-            .copied()
-            .unwrap_or(self.expected_signal_per_dispatch);
-        let signal_updated =
-            signal_current + lr * (outcome.observed_signal_installs - signal_current);
-        self.template_expected_signal
-            .insert(template.clone(), signal_updated.max(0.0));
+        // Update the Signal install EMA — only from a measured count.
+        if outcome.signal_measured {
+            let confidence = self.fans.confidence(template);
+            let lr = 1.0 / (1.0 + (confidence as f64).min(10.0));
+            let signal_current = self
+                .template_expected_signal
+                .get(template)
+                .copied()
+                .unwrap_or(self.expected_signal_per_dispatch);
+            let signal_updated =
+                signal_current + lr * (outcome.observed_signal_installs - signal_current);
+            self.template_expected_signal
+                .insert(template.clone(), signal_updated.max(0.0));
+        }
         // Record the prediction-observation pair for calibration. This
         // lets the brain detect and correct systematic prediction bias
         // (e.g. consistently over-predicting fan growth). Routed to the
