@@ -21,14 +21,14 @@ use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseC
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-struct Fixture {
-    pool: sqlx::PgPool,
-    repository: PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    now: OffsetDateTime,
+pub(crate) struct Fixture {
+    pub(crate) pool: sqlx::PgPool,
+    pub(crate) repository: PostgresAutopilotRepository,
+    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) now: OffsetDateTime,
 }
 
-async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
+pub(crate) async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     let (pool, database_url) =
         common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
     let workspace_id = WorkspaceId::new();
@@ -58,7 +58,7 @@ async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
 }
 
 impl Fixture {
-    fn ws(&self) -> Uuid {
+    pub(crate) fn ws(&self) -> Uuid {
         self.workspace_id.into_uuid()
     }
 
@@ -83,7 +83,7 @@ impl Fixture {
 
     /// A contact whose address is under `domain` — the one fact the registry
     /// holds about where a contact is, and what a show's reach is read from.
-    async fn target_at(
+    pub(crate) async fn target_at(
         &self,
         name: &str,
         kind: &str,
@@ -116,7 +116,7 @@ impl Fixture {
         Ok(id)
     }
 
-    async fn release_source(
+    pub(crate) async fn release_source(
         &self,
         title: &str,
         url: &str,
@@ -152,7 +152,7 @@ impl Fixture {
     /// A published show with a city on record — the fact an organiser's
     /// letter cites, and the row the old sender identity mistook for the
     /// act's home.
-    async fn event_in_city(
+    pub(crate) async fn event_in_city(
         &self,
         days_out: i64,
         status: &str,

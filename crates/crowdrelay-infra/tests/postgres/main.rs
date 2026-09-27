@@ -57,6 +57,7 @@ mod autopilot_reply_resolution;
 mod autopilot_show_cost;
 mod autopilot_show_growth_retry;
 mod autopilot_show_ladder;
+mod autopilot_stale_show_letters;
 mod autopilot_standing_approval;
 mod autopilot_target_discovery;
 mod autopilot_team_email;

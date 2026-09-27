@@ -376,3 +376,35 @@ impl PostgresAutopilotRepository {
         .await
     }
 }
+
+/// Whether an outreach action under a show opportunity carries a letter that
+/// was not composed as the show letter. Organisers are asked for a slot and
+/// keep the organiser letter under either key.
+pub(crate) fn stale_show_letter(opportunity_template_key: &str, action_template_key: &str) -> bool {
+    opportunity_template_key.starts_with("event.")
+        && opportunity_template_key != "event.organiser.v1"
+        && action_template_key != opportunity_template_key
+}
+
+#[cfg(test)]
+mod stale_show_letter_tests {
+    use super::stale_show_letter;
+
+    #[test]
+    fn an_album_pitch_under_a_show_opportunity_is_stale() {
+        assert!(stale_show_letter("event.press.v1", "outreach.press.v1"));
+        assert!(stale_show_letter(
+            "event.media_patronage.v1",
+            "outreach.media_patronage.v1"
+        ));
+        assert!(!stale_show_letter("event.press.v1", "event.press.v1"));
+        assert!(!stale_show_letter(
+            "event.organiser.v1",
+            "outreach.organiser.v1"
+        ));
+        assert!(!stale_show_letter(
+            "catalogue.press.v1",
+            "outreach.press.v1"
+        ));
+    }
+}
