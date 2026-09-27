@@ -203,6 +203,13 @@ pub struct PublishContext<'a> {
     ///
     /// Empty means no link may be published at all.
     pub approved_origins: &'a [&'a str],
+    /// Exact links the tenant's own records already publish — today, the
+    /// ticket links on the workspace's published shows. A whole foreign host
+    /// is never approved: a model could put any path on bandsintown.com. An
+    /// exact URL the event row holds is the band's own fact, and holding a
+    /// post that repeats it sent an operator-approved Discord post about the
+    /// Gorzów show to the manual queue on 2026-09-25.
+    pub approved_links: &'a [String],
     /// Content hashes of what this channel published recently. A draft whose
     /// hash is in here is a repeat.
     pub recent_content_hashes: &'a BTreeSet<String>,
@@ -281,19 +288,32 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
         // passes `https://virya.music.evil.example/x` as `virya.music`. The
         // match must be the whole origin followed by `/`, `?` or `#` (or the
         // link is exactly the origin).
-        let approved = context.approved_origins.iter().any(|origin| {
-            let origin = origin.trim_end_matches('/');
-            !origin.is_empty()
-                && link
-                    .strip_prefix(origin)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+        let exact = context.approved_links.iter().any(|approved| {
+            let approved = approved.trim().trim_end_matches('/');
+            !approved.is_empty() && link.trim_end_matches('/') == approved
         });
+        let approved = exact
+            || context.approved_origins.iter().any(|origin| {
+                let origin = origin.trim_end_matches('/');
+                !origin.is_empty()
+                    && link
+                        .strip_prefix(origin)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+            });
         if !approved {
             return PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink);
         }
     }
 
-    if contains_contact_details(trimmed) {
+    // Contact details are read from the words, not from the links the
+    // checks above already approved: a ticket or post URL routinely carries
+    // a nine-digit id (`/t/108530289`), and reading that as a phone number
+    // held every post that linked the show it was about.
+    let mut words = trimmed.to_owned();
+    for link in &links {
+        words = words.replace(link, " ");
+    }
+    if contains_contact_details(&words) {
         return PublishVerdict::HoldForHuman(HoldReason::ContactDetails);
     }
     if length > CAPITALS_RATIO_APPLIES_ABOVE && capital_ratio(trimmed) > MAX_CAPITAL_RATIO {
@@ -471,6 +491,7 @@ mod tests {
         PublishContext {
             channel,
             approved_origins: ORIGINS,
+            approved_links: &[],
             recent_content_hashes: &EMPTY,
             dedupe_text: None,
         }
@@ -498,6 +519,45 @@ mod tests {
             review_outbound_post(&body, &context(PublishChannel::Telegram)),
             PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink),
             "a hallucinated destination must never publish under the tenant's name"
+        );
+    }
+
+    /// The show's own ticket link, exactly as the event row holds it,
+    /// publishes; another path on the same ticketing host does not.
+    #[test]
+    fn an_exact_ticket_link_from_the_event_row_publishes_and_nothing_else_on_its_host() {
+        let tickets =
+            vec!["https://www.bandsintown.com/t/108530289?app_id=x&came_from=267".to_owned()];
+        let with_links = PublishContext {
+            approved_links: &tickets,
+            ..context(PublishChannel::Discord)
+        };
+        let exact = good_post().replace(LINK, &tickets[0]);
+        assert_eq!(
+            review_outbound_post(&exact, &with_links),
+            PublishVerdict::Publish
+        );
+        let other_path = good_post().replace(LINK, "https://www.bandsintown.com/t/999");
+        assert_eq!(
+            review_outbound_post(&other_path, &with_links),
+            PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink)
+        );
+        assert_eq!(
+            review_outbound_post(&exact, &context(PublishChannel::Discord)),
+            PublishVerdict::HoldForHuman(HoldReason::UnapprovedLink),
+            "without the event's link on record the same post is held"
+        );
+    }
+
+    /// A phone number in the words is still held when the post also carries
+    /// an approved link — removing links from the read does not remove the
+    /// read.
+    #[test]
+    fn a_phone_number_beside_an_approved_link_is_still_held() {
+        let body = format!("{} Call us on 600 700 800 for guest list.", good_post());
+        assert_eq!(
+            review_outbound_post(&body, &context(PublishChannel::Telegram)),
+            PublishVerdict::HoldForHuman(HoldReason::ContactDetails)
         );
     }
 
@@ -691,6 +751,7 @@ mod tests {
         let context = PublishContext {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
+            approved_links: &[],
             recent_content_hashes: &recent,
             dedupe_text: None,
         };
@@ -714,6 +775,7 @@ mod tests {
         let context = PublishContext {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
+            approved_links: &[],
             recent_content_hashes: &recent,
             dedupe_text: Some(&draft),
         };
@@ -732,6 +794,7 @@ mod tests {
         let context = PublishContext {
             channel: PublishChannel::Telegram,
             approved_origins: ORIGINS,
+            approved_links: &[],
             recent_content_hashes: &recent,
             dedupe_text: None,
         };
@@ -763,6 +826,7 @@ mod tests {
         let context = PublishContext {
             channel: PublishChannel::Telegram,
             approved_origins: &[],
+            approved_links: &[],
             recent_content_hashes: &BTreeSet::new(),
             dedupe_text: None,
         };

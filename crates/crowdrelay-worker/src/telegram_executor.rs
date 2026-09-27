@@ -524,11 +524,14 @@ impl TelegramExecutorWorker {
         // the worst case of enabling automatic mode is the behaviour that
         // preceded it.
         let recent = self.recent_content_hashes().await?;
+        let ticket_links =
+            crate::publish_links::show_ticket_links(&self.pool, self.workspace_id).await?;
         let verdict = review_outbound_post(
             &body,
             &PublishContext {
                 channel: PublishChannel::Telegram,
                 approved_origins: &[self.public_origin.as_str()],
+                approved_links: &ticket_links,
                 recent_content_hashes: &recent,
                 // The recent hashes cover the stored draft; the reviewed body
                 // carries the appended link, which changes every action.

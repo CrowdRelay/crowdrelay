@@ -1115,6 +1115,7 @@ impl CommunityExecutorWorker {
             &PublishContext {
                 channel: PublishChannel::Community,
                 approved_origins: &approved_origin_refs,
+                approved_links: &[],
                 recent_content_hashes: &recent_hashes,
                 // Stored hashes cover `community_posts.body` — the raw draft
                 // body. The reviewed text adds the title and the smart link
