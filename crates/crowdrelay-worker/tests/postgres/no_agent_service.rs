@@ -121,9 +121,11 @@ async fn run(pool: &sqlx::PgPool) -> Result<()> {
         other => bail!("agent-backed observation should fail named, got {other:?}"),
     }
 
-    // The guard is kind-scoped: a kind that never reads the agent tables
-    // answers through its own path — here a real (if empty) count — not the
-    // service's absence.
+    // The guard is kind-scoped: a fan count reads the agent tables only to
+    // widen its lineage, and without them answers through its own path — not
+    // the service's absence. Since attributed outcomes (2026-09-27) that path
+    // abandons an action with no live tracked post as `no_tracked_link`, which
+    // is only reachable once the lineage query ran without the task table.
     let workspace_backed = ClaimedAutopilotMeasurement {
         kind: AutopilotMeasurementKind::AgentRunFanGrowth3d,
         ..agent_backed
@@ -132,9 +134,9 @@ async fn run(pool: &sqlx::PgPool) -> Result<()> {
         .observe_measurement(workspace_id, &workspace_backed, now)
         .await
     {
-        Ok(observed) => ensure!(
-            observed == 0.0,
-            "an empty workspace counts zero new fans, got {observed}"
+        Err(RepositoryError::ConflictBecause(reason)) => ensure!(
+            reason == AutopilotMeasurementKind::NO_TRACKED_LINK,
+            "a fan count with no tracked post should abandon as no_tracked_link, got {reason}"
         ),
         other => bail!("a fan-count observation needs no agent tables, got {other:?}"),
     }

@@ -179,8 +179,8 @@ async fn enrich_outreach_draft(
     // the ask is serious. Only that kind reads the field; the nearest
     // published show is a fact, and a calendar without one writes no line.
     let next_show = if kind == OutreachTargetKind::Organiser {
-        sqlx::query_as::<_, (OffsetDateTime, Option<String>)>(
-            "SELECT event.starts_at, city.name
+        sqlx::query_as::<_, (OffsetDateTime, String, Option<String>)>(
+            "SELECT event.starts_at, event.timezone, city.name
              FROM events AS event
              LEFT JOIN cities AS city ON city.id = event.city_id
              WHERE event.workspace_id = $1
@@ -193,7 +193,12 @@ async fn enrich_outreach_draft(
         .fetch_optional(&mut **transaction)
         .await
         .map_err(map_sqlx)?
-        .map(|(starts_at, city)| (starts_at.date(), city.unwrap_or_default()))
+        .map(|(starts_at, timezone, city)| {
+            (
+                crate::regional::at_event_timezone(starts_at, &timezone).date(),
+                city.unwrap_or_default(),
+            )
+        })
     } else {
         None
     };
@@ -689,9 +694,9 @@ async fn show_for_opportunity(
     ws: Uuid,
     opportunity_id: Uuid,
 ) -> Result<Option<OpportunityShow>, RepositoryError> {
-    let row = sqlx::query_as::<_, (OffsetDateTime, Option<String>, Option<String>, Option<String>, String)>(
+    let row = sqlx::query_as::<_, (OffsetDateTime, String, Option<String>, Option<String>, Option<String>, String)>(
         r#"
-        SELECT event.starts_at, city.name, event.venue, event.ticket_url,
+        SELECT event.starts_at, event.timezone, city.name, event.venue, event.ticket_url,
                opportunity.template_key
         FROM outreach_opportunities AS opportunity
         JOIN events AS event
@@ -708,8 +713,8 @@ async fn show_for_opportunity(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    Ok(row.map(|(starts_at, city, venue, ticket_url, template_key)| OpportunityShow {
-        starts_at,
+    Ok(row.map(|(starts_at, timezone, city, venue, ticket_url, template_key)| OpportunityShow {
+        starts_at: crate::regional::at_event_timezone(starts_at, &timezone),
         city: city.unwrap_or_default(),
         venue,
         ticket_url,

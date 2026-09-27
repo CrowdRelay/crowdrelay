@@ -170,9 +170,9 @@ async fn invite_reason(
 ) -> Result<Option<InviteReason>, sqlx::Error> {
     // A published show in their city, inside the window where telling somebody
     // early is a courtesy rather than a notification.
-    let upcoming = sqlx::query_as::<_, (String, OffsetDateTime)>(
+    let upcoming = sqlx::query_as::<_, (String, OffsetDateTime, String)>(
         r#"
-        SELECT city.name, event.starts_at
+        SELECT city.name, event.starts_at, event.timezone
         FROM beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id
@@ -191,18 +191,21 @@ async fn invite_reason(
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    if let Some((city, starts_at)) = upcoming {
+    if let Some((city, starts_at, timezone)) = upcoming {
         return Ok(Some(InviteReason::UpcomingShowInTheirCity {
             city,
-            when: crowdrelay_domain::gig_letter::letter_date(starts_at, language),
+            when: crowdrelay_domain::gig_letter::letter_date(
+                crate::regional::at_event_timezone(starts_at, &timezone),
+                language,
+            ),
         }));
     }
 
     // A night this person was part of: any beacon campaign of theirs on a show
     // that happened.
-    let shared = sqlx::query_as::<_, (Option<String>, OffsetDateTime)>(
+    let shared = sqlx::query_as::<_, (Option<String>, OffsetDateTime, String)>(
         r#"
-        SELECT event.venue, event.starts_at
+        SELECT event.venue, event.starts_at, event.timezone
         FROM beacon_campaigns AS campaign
         JOIN events AS event
           ON event.workspace_id = campaign.workspace_id
@@ -219,14 +222,17 @@ async fn invite_reason(
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    if let Some((venue, starts_at)) = shared {
+    if let Some((venue, starts_at, timezone)) = shared {
         let fallback = match language {
             crowdrelay_domain::gig_letter::LetterLanguage::Polish => "tamtym klubie",
             crowdrelay_domain::gig_letter::LetterLanguage::English => "that night",
         };
         return Ok(Some(InviteReason::SharedPastShow {
             venue: venue.unwrap_or_else(|| fallback.to_owned()),
-            when: crowdrelay_domain::gig_letter::letter_date(starts_at, language),
+            when: crowdrelay_domain::gig_letter::letter_date(
+                crate::regional::at_event_timezone(starts_at, &timezone),
+                language,
+            ),
         }));
     }
 

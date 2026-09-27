@@ -889,6 +889,7 @@ struct PlayStepEventRow {
     title: String,
     slug: String,
     starts_at: OffsetDateTime,
+    timezone: String,
     venue: Option<String>,
     ticket_url: Option<String>,
     external_event_url: Option<String>,
@@ -945,7 +946,7 @@ pub(super) async fn execute_play_step(
             let row = sqlx::query_as::<_, PlayStepEventRow>(
                 r#"
                     SELECT step.id AS step_id, event.title, event.slug, event.starts_at,
-                           event.venue, event.ticket_url, event.external_event_url,
+                           event.timezone, event.venue, event.ticket_url, event.external_event_url,
                            event.source_provider, event.city_id
                     FROM play_steps AS step
                     JOIN plays AS play
@@ -1078,9 +1079,11 @@ pub(super) async fn execute_play_step(
         .as_ref()
         .and_then(|fan| fan.2.as_deref())
         .is_none_or(|locale| locale.to_lowercase().starts_with("pl"));
-    let event_date = event_row
-        .as_ref()
-        .map(|event| event.starts_at.date().to_string());
+    let event_date = event_row.as_ref().map(|event| {
+        crate::regional::at_event_timezone(event.starts_at, &event.timezone)
+            .date()
+            .to_string()
+    });
     let event_path = event_row.as_ref().map(|event| {
         if polish {
             format!("/pl/my-signal/?event={}", event.slug)

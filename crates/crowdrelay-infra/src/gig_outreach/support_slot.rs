@@ -83,6 +83,7 @@ struct OpenSlotRow {
     event_id: Uuid,
     venue: String,
     starts_at: OffsetDateTime,
+    timezone: String,
     city_name: String,
     days_until_show: i64,
     open_slots: i16,
@@ -99,6 +100,7 @@ async fn open_slot_for(
         SELECT event.id AS event_id,
                COALESCE(NULLIF(btrim(event.venue), ''), 'the room') AS venue,
                event.starts_at,
+               event.timezone,
                city.name AS city_name,
                FLOOR(EXTRACT(EPOCH FROM (event.starts_at - $3)) / 86400)::bigint
                    AS days_until_show,
@@ -293,16 +295,16 @@ pub async fn approve_support_slot_ask(
     // exist in both. The date is rendered in the letter's language too: "18
     // Oct 2026" inside a Polish sentence is still a foreign word.
     let language = super::letter_language(pool, city_id).await?;
+    let local_start = crate::regional::at_event_timezone(slot.starts_at, &slot.timezone);
     let show_date = match language {
         crowdrelay_domain::gig_letter::LetterLanguage::Polish => {
-            crowdrelay_domain::gig_letter::polish_date(slot.starts_at)
+            crowdrelay_domain::gig_letter::polish_date(local_start)
         }
-        crowdrelay_domain::gig_letter::LetterLanguage::English => slot
-            .starts_at
+        crowdrelay_domain::gig_letter::LetterLanguage::English => local_start
             .format(time::macros::format_description!(
                 "[day] [month repr:short] [year]"
             ))
-            .unwrap_or_else(|_| slot.starts_at.date().to_string()),
+            .unwrap_or_else(|_| local_start.date().to_string()),
     };
     let (opening_line, reasons) = support_slot_ask_letter(
         &headliner,
