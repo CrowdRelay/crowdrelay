@@ -469,6 +469,7 @@ impl CommunityExecutorWorker {
             &PublishContext {
                 channel: PublishChannel::Social,
                 approved_origins: &[],
+                approved_links: &[],
                 recent_content_hashes: &hashes,
                 dedupe_text: None,
             },

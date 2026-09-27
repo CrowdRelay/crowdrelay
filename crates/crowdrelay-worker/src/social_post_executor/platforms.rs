@@ -78,6 +78,7 @@ impl SocialPostExecutorWorker {
             &PublishContext {
                 channel: PublishChannel::Instagram,
                 approved_origins: &[self.public_origin.as_str()],
+                approved_links: &[],
                 recent_content_hashes: &recent,
                 // Stored hashes cover the raw draft text; the reviewed
                 // caption carries the appended tracked link.
@@ -304,6 +305,7 @@ impl SocialPostExecutorWorker {
             &PublishContext {
                 channel: PublishChannel::Social,
                 approved_origins: &[self.public_origin.as_str()],
+                approved_links: &[],
                 recent_content_hashes: &recent,
                 // Stored hashes cover the raw draft text; the reviewed body
                 // carries the appended tracked link.
@@ -487,6 +489,7 @@ impl SocialPostExecutorWorker {
             &PublishContext {
                 channel: PublishChannel::Telegram,
                 approved_origins: &[self.public_origin.as_str()],
+                approved_links: &[],
                 recent_content_hashes: &recent,
                 dedupe_text: action.text.as_deref(),
             },
