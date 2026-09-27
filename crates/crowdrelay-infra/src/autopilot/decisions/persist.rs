@@ -69,7 +69,15 @@ async fn persist_decision_and_action_tx(
                 && !executor_capability_available(transaction, workspace_id, capability)
                     .await? =>
         {
-            tracing::warn!(
+            // Debug, not warn: this is the steady state for a capability no
+            // executor has ever advertised, and it fires every cycle for
+            // every such candidate — 308 of the worker's 388 warnings in
+            // three hours on 2026-09-27, all `beacon.outreach` and
+            // `beacon.discovery`, burying the ones that meant something.
+            // The decision row keeps the finding in its policy snapshot
+            // (`held_by: no_executor:<capability>`); that row, not a log line
+            // repeated every five minutes, is where the gap is read.
+            tracing::debug!(
                 action_kind = candidate.action.action_kind(),
                 capability,
                 decision_key = %candidate.decision_key,
