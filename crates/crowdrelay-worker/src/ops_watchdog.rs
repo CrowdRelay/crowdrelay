@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 23 conditions. The count and this list are
+//! The watchdog monitors 24 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -146,6 +146,16 @@
 //!   the lapsed read calls it `awaiting_sweep`, hidden from the queue on one
 //!   side and uncounted as a loss on the other. Warning, not critical: nothing
 //!   was corrupted, and the fix is the sweep running again, not a person's.
+//! - `growth.drop_surge_stalled` — a fresh video/release source was flagged
+//!   for its drop surge and nothing fan-visible appeared: no succeeded lane
+//!   action, no tracked post, no push delivery carrying the drop's link. The
+//!   surge is the first-hours window where a new video earns most of its
+//!   fans, and the previous shape of the system let a drop look handled —
+//!   artifact requests "succeeded" at a webhook while zero posts existed.
+//!   The condition names the missing stage per lane (awaiting approval,
+//!   executor failed, succeeded without a materialized receipt) so the fix
+//!   is routed, not rediscovered. Warning, not critical: the drop loses its
+//!   launch window, but the source stays eligible for a re-armed surge.
 //!
 //! # Contradictions are the one condition nothing else can find
 //!

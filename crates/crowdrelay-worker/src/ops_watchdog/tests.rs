@@ -1092,5 +1092,32 @@ fn publishing() -> PublishingPosture {
         assert_eq!(raised.details["failed"], 38);
         assert_eq!(raised.details["by_kind_and_error"], "outreach.request: state_changed ×38");
     }
+
+    #[test]
+    fn drop_surge_stalled_is_detected() {
+        // A stalled drop is the failure the surge exists to surface: lanes
+        // were raised and nothing fan-visible appeared. An empty array is
+        // healthy (the query found no stalled drops), `None` is a snapshot
+        // taken before the field was added.
+        let find = |snapshot: &OpsSnapshot| {
+            conditions(snapshot, publishing())
+                .into_iter()
+                .find(|c| c.key == "growth.drop_surge_stalled")
+                .expect("the condition is evaluated")
+        };
+        assert!(!find(&healthy()).active);
+        let mut empty = healthy();
+        empty.stalled_drops = Some(serde_json::json!([]));
+        assert!(!find(&empty).active);
+        let mut snapshot = healthy();
+        snapshot.stalled_drops = Some(serde_json::json!([{
+            "source_id": "01a0e7bb-548c-743c-830f-f29ae81fb192",
+            "source_key": "youtube:iijgBMteL9I",
+            "lanes": [{"lane": "telegram", "status": "awaiting_approval"}],
+        }]));
+        let raised = find(&snapshot);
+        assert!(raised.active);
+        assert_eq!(raised.details["stalled_drops"][0]["lanes"][0]["status"], "awaiting_approval");
+    }
 }
 
