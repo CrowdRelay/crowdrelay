@@ -439,6 +439,29 @@ impl AutopilotMeasurementKind {
         )
     }
 
+    /// Kinds that count the whole workspace over a window instead of what
+    /// the action caused: every active push endpoint created in the day (or
+    /// week) after the action, against the same span before it. #325 made
+    /// the fan kinds attributed; these two still are not, and at this
+    /// tenant's volume the comparison is 3-then-0 noise. On 2026-09-26 three
+    /// `signal_installs_1d` readings of 0 against a baseline of 3 were scored
+    /// `worsened` and demoted `content_supply` to `require_approval` for a
+    /// week. They stay in the ledger as context; they are not evidence
+    /// about an action.
+    pub const WORKSPACE_WINDOW_KINDS: [&'static str; 2] = [
+        Self::SignalInstalls1d.as_str(),
+        Self::AgentRunSignalInstalls7d.as_str(),
+    ];
+
+    /// See [`Self::WORKSPACE_WINDOW_KINDS`].
+    #[must_use]
+    pub const fn is_workspace_window(self) -> bool {
+        matches!(
+            self,
+            Self::SignalInstalls1d | Self::AgentRunSignalInstalls7d
+        )
+    }
+
     /// Whether this kind measures what an outbound post did to an audience.
     ///
     /// A dispatch that produced only a draft has no such outcome. Every
