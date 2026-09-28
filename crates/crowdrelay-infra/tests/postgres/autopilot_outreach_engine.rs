@@ -618,7 +618,7 @@ async fn a_polish_address_gets_a_polish_letter() -> Result<(), Box<dyn std::erro
     assert_eq!(letters.len(), 2, "{letters:?}");
     for (target, body) in &letters {
         if *target == polish.to_string() {
-            assert!(body.starts_with("Dzień dobry,\n"), "{body}");
+            assert!(body.starts_with("Dzień dobry, Polski Zin,\n"), "{body}");
             assert!(body.contains("Pozdrawiamy,"), "{body}");
         } else {
             assert!(body.starts_with("Hi English Zine,"), "{body}");

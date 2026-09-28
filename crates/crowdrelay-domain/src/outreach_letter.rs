@@ -118,6 +118,21 @@ pub fn salutation_name(display_name: &str) -> &str {
         .map_or(name, str::trim)
 }
 
+/// "Dzień dobry, {name}," — the name in the nominative, as the application
+/// letter greets. A bare "Dzień dobry," made every letter of a template
+/// identical, and dispatch refuses a draft that already went out: on
+/// 2026-09-28, 38 of 39 approved show letters were refused. The nominative
+/// is no vocative guess; an empty name keeps the bare greeting.
+#[must_use]
+pub fn greeting_pl(display_name: &str) -> String {
+    let name = salutation_name(display_name);
+    if name.is_empty() {
+        "Dzień dobry,".to_owned()
+    } else {
+        format!("Dzień dobry, {name},")
+    }
+}
+
 /// Subjects stay well under the executor's 220 cap — a subject a mail client
 /// truncates is a subject nobody read.
 pub(crate) const MAX_SUBJECT: usize = 160;
@@ -205,10 +220,7 @@ fn initial_pl(
     url: &str,
 ) -> OutreachLetter {
     let mut lines = vec![
-        // A Polish letter greets without the name: "Dzień dobry, Anna
-        // Laskiewicz" is a form field read aloud, and declining a name into
-        // the vocative without a dictionary is a guess.
-        "Dzień dobry,".to_owned(),
+        greeting_pl(input.target_name),
         String::new(),
         format!(
             "{} i chcielibyśmy zaproponować Wam {title} {}.",
@@ -237,10 +249,7 @@ fn follow_up_pl(
     url: &str,
 ) -> OutreachLetter {
     let mut lines = vec![
-        // A Polish letter greets without the name: "Dzień dobry, Anna
-        // Laskiewicz" is a form field read aloud, and declining a name into
-        // the vocative without a dictionary is a guess.
-        "Dzień dobry,".to_owned(),
+        greeting_pl(input.target_name),
         String::new(),
         format!(
             "Krótko wracamy do poprzedniej wiadomości w sprawie {title}. \
@@ -436,12 +445,11 @@ fn organiser_follow_up_en(
 
 fn organiser_initial_pl(
     input: &OutreachLetterInput<'_>,
-    _target: &str,
+    target: &str,
     act: &str,
 ) -> OutreachLetter {
     let mut lines = vec![
-        // Same vocative rule as the release letter: "Dzień dobry," alone.
-        "Dzień dobry,".to_owned(),
+        greeting_pl(target),
         String::new(),
         format!(
             "{} i chcielibyśmy zapytać o możliwość zagrania u Was.",
@@ -473,11 +481,11 @@ fn organiser_initial_pl(
 
 fn organiser_follow_up_pl(
     input: &OutreachLetterInput<'_>,
-    _target: &str,
+    target: &str,
     act: &str,
 ) -> OutreachLetter {
     let mut lines = vec![
-        "Dzień dobry,".to_owned(),
+        greeting_pl(target),
         String::new(),
         "Krótko wracamy do poprzedniej wiadomości — propozycja zagrania u Was \
          nadal stoi. Jeśli to nie dla Was, krótkie „nie” też bardzo nam pomoże."
@@ -942,7 +950,11 @@ mod tests {
             ..input(&sender, OutreachTargetKind::Press, OutreachPhase::Initial)
         })
         .expect("a complete input composes");
-        assert!(letter.body.starts_with("Dzień dobry,\n"));
+        assert!(
+            letter
+                .body
+                .starts_with("Dzień dobry, Metal Playlists Weekly,\n")
+        );
         assert!(letter.body.contains(
             "Piszemy w imieniu VIRYA (Wrocław) — zespołu grającego modern metal — i chcielibyśmy \
              zaproponować Wam our new single \"Rytuał\" do omówienia lub recenzji."
@@ -1092,7 +1104,11 @@ mod tests {
             )
         })
         .expect("a complete input composes");
-        assert!(letter.body.starts_with("Dzień dobry,\n"));
+        assert!(
+            letter
+                .body
+                .starts_with("Dzień dobry, Metal Playlists Weekly,\n")
+        );
         assert!(letter.body.contains(
             "Piszemy w imieniu VIRYA (Wrocław) — zespołu grającego modern metal — i chcielibyśmy \
              zapytać o możliwość zagrania u Was."
@@ -1155,5 +1171,28 @@ mod tests {
             compose_outreach_letter(&no_pitch),
             Err(OutreachLetterRefusal::NoPitch)
         );
+    }
+
+    /// Each contact's letter is its own (see `greeting_pl`).
+    #[test]
+    fn polish_letters_to_two_contacts_differ() {
+        let sender = sender();
+        let compose = |name: &'static str| {
+            compose_outreach_letter(&OutreachLetterInput {
+                language: LetterLanguage::Polish,
+                target_name: name,
+                ..input(&sender, OutreachTargetKind::Press, OutreachPhase::Initial)
+            })
+            .expect("composes")
+        };
+        let radio = compose("Radio Gorzów — redakcja");
+        let paper = compose("Tarnow.net.pl");
+        assert!(
+            radio.body.starts_with("Dzień dobry, Radio Gorzów,\n"),
+            "{}",
+            radio.body
+        );
+        assert_ne!(radio.body, paper.body);
+        assert_eq!(greeting_pl("  "), "Dzień dobry,");
     }
 }
