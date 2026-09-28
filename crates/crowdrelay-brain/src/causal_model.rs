@@ -147,6 +147,15 @@ pub struct PredictionOutcome {
     /// is not zero: `false` leaves the install estimate untouched.
     #[serde(default = "measured_by_default")]
     pub signal_measured: bool,
+    /// Whether `observed_new_fans` was measured at all — the mirror of
+    /// [`Self::signal_measured`]. Legacy evidence rows can resolve with an
+    /// install count and no fan count; the replay used to pass `0.0` for
+    /// the missing half, so a dispatch nobody measured fans for taught
+    /// "this template produced zero fans" and dragged the fan posterior,
+    /// the context GLM and calibration toward zero together. `false`
+    /// leaves all three untouched — the install EMA still learns.
+    #[serde(default = "measured_by_default")]
+    pub fans_measured: bool,
 }
 
 const fn measured_by_default() -> bool {
@@ -168,6 +177,7 @@ impl PredictionOutcome {
             observed_new_fans,
             observed_signal_installs,
             signal_measured: true,
+            fans_measured: true,
         }
     }
 
@@ -179,6 +189,17 @@ impl PredictionOutcome {
             signal_measured: false,
             signal_prediction_error: 0.0,
             ..Self::from_observation(prediction, observed_new_fans, 0.0)
+        }
+    }
+
+    /// An outcome whose install count was measured and whose fan count was
+    /// not. See [`Self::fans_measured`].
+    #[must_use]
+    pub fn installs_only(prediction: DispatchPrediction, observed_signal_installs: f64) -> Self {
+        Self {
+            fans_measured: false,
+            fan_prediction_error: 0.0,
+            ..Self::from_observation(prediction, 0.0, observed_signal_installs)
         }
     }
 }
@@ -195,7 +216,12 @@ impl PredictionOutcome {
 /// installs were never measured (`PredictionOutcome::signal_measured`), so
 /// stored per-template install estimates already dragged toward zero are
 /// rebuilt from evidence.
-pub const EVIDENCE_BASIS_VERSION: u32 = 2;
+///
+/// 3 — the same treatment for the fan count (`PredictionOutcome::fans_measured`):
+/// evidence rows that resolved with an install count and no fan count were
+/// taught as zero fans, so fan posteriors, context effects and calibration
+/// already dragged toward zero are rebuilt from evidence.
+pub const EVIDENCE_BASIS_VERSION: u32 = 3;
 
 /// The default expected fans per dispatch when no data is available.
 /// A prior of 2.0 means the brain expects ~2 new fans per worker dispatch
@@ -611,24 +637,51 @@ impl CausalModel {
         let template = &outcome.prediction.template_id;
         let subreddit_type = outcome.prediction.context.subreddit_type.as_deref();
         let target_key = outcome.prediction.target_key.as_deref();
-        // Get the base prediction (posterior mean before context adjustment)
-        // so we can learn the context effect from the ratio.
-        let (base_mean, _) = self
-            .fans
-            .predict_for_target(template, subreddit_type, target_key);
-        // Update the hierarchical fan posterior (Gamma-Poisson conjugate).
-        // Fan counts are non-negative integers — convert to u32.
-        let observed_count = outcome.observed_new_fans.round().max(0.0) as u32;
-        self.fans
-            .update_with_target(Some(template), subreddit_type, target_key, observed_count);
-        // Update the learned context effects from the implied multiplier.
-        // base_mean is the raw posterior mean before context adjustment;
-        // the ratio observed/base implies the context multiplier.
-        self.context_effects.update(
-            &outcome.prediction.context,
-            base_mean,
-            outcome.observed_new_fans,
-        );
+        // The fan learners share one gate: a dispatch whose fans were never
+        // measured must not write a zero into the posterior, the context GLM
+        // or calibration — the same rule `signal_measured` already applies
+        // to installs. A measured zero still teaches; `fans_measured` is what
+        // distinguishes it from an unmeasured one.
+        if outcome.fans_measured {
+            // Get the base prediction (posterior mean before context
+            // adjustment) so we can learn the context effect from the ratio.
+            let (base_mean, _) = self
+                .fans
+                .predict_for_target(template, subreddit_type, target_key);
+            // Update the hierarchical fan posterior (Gamma-Poisson conjugate).
+            // Fan counts are non-negative integers — convert to u32.
+            let observed_count = outcome.observed_new_fans.round().max(0.0) as u32;
+            self.fans.update_with_target(
+                Some(template),
+                subreddit_type,
+                target_key,
+                observed_count,
+            );
+            // Update the learned context effects from the implied multiplier.
+            // base_mean is the raw posterior mean before context adjustment;
+            // the ratio observed/base implies the context multiplier.
+            self.context_effects.update(
+                &outcome.prediction.context,
+                base_mean,
+                outcome.observed_new_fans,
+            );
+            // Record the prediction-observation pair for calibration. This
+            // lets the brain detect and correct systematic prediction bias
+            // (e.g. consistently over-predicting fan growth). Routed to the
+            // OutcomeModel regime tracker — the outcome model is the
+            // observational predictor, separate from treatment-effect
+            // calibration.
+            self.calibration.record_by_regime(
+                crate::decision_value::EstimationRegime::OutcomeModel,
+                template,
+                outcome.prediction.expected_new_fans,
+                self.predict_std(template),
+                outcome.observed_new_fans,
+                outcome.prediction.context.subreddit_type.as_deref(),
+                None,
+                "observational",
+            );
+        }
         // Update the Signal install EMA — only from a measured count.
         if outcome.signal_measured {
             let confidence = self.fans.confidence(template);
@@ -643,22 +696,6 @@ impl CausalModel {
             self.template_expected_signal
                 .insert(template.clone(), signal_updated.max(0.0));
         }
-        // Record the prediction-observation pair for calibration. This
-        // lets the brain detect and correct systematic prediction bias
-        // (e.g. consistently over-predicting fan growth). Routed to the
-        // OutcomeModel regime tracker — the outcome model is the
-        // observational predictor, separate from treatment-effect
-        // calibration.
-        self.calibration.record_by_regime(
-            crate::decision_value::EstimationRegime::OutcomeModel,
-            template,
-            outcome.prediction.expected_new_fans,
-            self.predict_std(template),
-            outcome.observed_new_fans,
-            outcome.prediction.context.subreddit_type.as_deref(),
-            None,
-            "observational",
-        );
     }
 
     /// Returns the confidence (measurement count) for a template.
