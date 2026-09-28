@@ -444,14 +444,12 @@ pub(in crate::autopilot) async fn execute_signal_push(
     let estimated_reach = inserted.rows_affected() as i32;
     // Zero endpoints inserted means zero reach — the credit allocator divides
     // fan outcomes by reach, so a fabricated denominator of 1 would invent
-    // credit from nothing. A reach of 0 is the honest report: no audience was
-    // reached, so no outcome can be attributed to this push.
-    let estimated_reach = if estimated_reach > 0 {
-        estimated_reach
-    } else {
-        0
-    };
-    sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', $4, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
+    // credit from nothing. The honest report is no reach event at all: the
+    // column refuses 0 (`estimated_reach >= 1`), and a row that reached
+    // nobody is not a reach. The action still completes — the gap guard, not
+    // a fault, is what reached zero.
+    if estimated_reach > 0 {
+        sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata) VALUES ($1, $2, 'platform_audience', 'signal_fans', 'signal_push', 'signal-inviter', $4, 'sent', jsonb_build_object('title', $3)) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#)
         .bind(workspace_id.into_uuid())
         .bind(action_uuid)
         .bind(title)
@@ -459,6 +457,7 @@ pub(in crate::autopilot) async fn execute_signal_push(
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx)?;
+    }
 
     Ok(())
 }
