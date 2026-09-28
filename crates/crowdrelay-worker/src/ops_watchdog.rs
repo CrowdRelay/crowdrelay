@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 21 conditions. The count and this list are
+//! The watchdog monitors 22 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -76,6 +76,10 @@
 //!   action says the opposite of the action's persisted status. This is what
 //!   `LegalTransition::Conflict` refused to coerce, and until now the
 //!   refusal existed only as a log line. See below.
+//! - `autopilot.authority_guarded` — the autonomy guardrail demoted a policy to
+//!   `require_approval` after two worsened outcomes and the guard has not
+//!   lapsed. The demotion's own event is refused by the n8n router, so this is
+//!   the operator's notice that every action in that context now waits for them.
 //! - `approval.expired_unanswered` — approvals were cancelled because nobody
 //!   answered them inside the 72-hour window. Each is a proposal the brain made,
 //!   ranked and queued, that the system then discarded. It is the one loss that
@@ -515,6 +519,13 @@ struct OpsSnapshot {
     /// in SQL would be a second copy to drift, so the finding names the kind
     /// and lets the operator map it to the executor that went dark.
     unclaimed_action_kinds: Option<String>,
+    /// Policies the autonomy guardrail demoted and that are still inside
+    /// their guard window, as `context until <UTC time>` joined by `, `;
+    /// `None` when none is. The demotion emits
+    /// `crowdrelay.autopilot.authority_demoted`, which the n8n router has no
+    /// handler for and refuses with 422 — two were dead on 2026-09-26 — so
+    /// this is the operator's only notice that the brain now asks first.
+    guarded_policies: Option<String>,
     /// Drafts waiting on a Reddit session (pending or deferred).
     reddit_posting_demand: i64,
     /// Count of credential rows eligible to establish a session — the same
@@ -957,6 +968,14 @@ async fn load_snapshot(
                  OR (a.status='cancelled' AND a.last_error_kind='no_executor'
                      AND a.finished_at > now() - interval '7 days'))
             ) AS unclaimed_action_kinds,
+            (SELECT string_agg(p.context || ' until '
+                               || to_char(p.guarded_until AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI')
+                               || ' UTC', ', ' ORDER BY p.context)
+             FROM autopilot_policies p
+             WHERE p.workspace_id=$1
+               AND p.guardrail_reason IS NOT NULL
+               AND p.guarded_until > now()
+            ) AS guarded_policies,
             -- Filled in by the guarded follow-up below. The real values live
             -- in `agent_service_credentials`, which the agents service owns —
             -- on a CrowdRelay-only deployment the relation does not exist,

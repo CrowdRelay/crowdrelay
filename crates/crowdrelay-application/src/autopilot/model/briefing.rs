@@ -14,6 +14,18 @@ impl AutopilotActionPayload {
     /// and filled by the caller from the action's deadline fields.
     #[must_use]
     pub fn briefing(&self) -> super::control::ActionBriefing {
+        self.briefing_on(&|at: OffsetDateTime| {
+            format!("{} {:02}:{:02} UTC", at.date(), at.hour(), at.minute())
+        })
+    }
+
+    /// [`Self::briefing`] with clock times written by `clock`: this pure crate
+    /// holds no crew zone, so callers that know it pass a formatter on it.
+    #[must_use]
+    pub fn briefing_on(
+        &self,
+        clock: &dyn Fn(OffsetDateTime) -> String,
+    ) -> super::control::ActionBriefing {
         use super::control::{ActionBriefing, BriefingField, BriefingStep};
 
         // A raw UUID in a briefing tells a band member nothing — it is eight
@@ -86,12 +98,7 @@ impl AutopilotActionPayload {
             }
         };
 
-        // The RFC3339 wire form is the worst date a person can be shown.
-        // Values are not localized, so the format is the language-neutral one
-        // everyone already reads: 2026-09-19 06:42 UTC.
-        let friendly_datetime = |at: OffsetDateTime| {
-            format!("{} {:02}:{:02} UTC", at.date(), at.hour(), at.minute())
-        };
+        let friendly_datetime = |at: OffsetDateTime| clock(at);
 
         match self {
             Self::ChangeTicketPrice { ticket_type_id, from_minor, to_minor } => ActionBriefing {
@@ -747,7 +754,8 @@ impl AutopilotActionPayload {
                 ],
                 content: vec![
                     BriefingField { label: "Title".into(), value: title.clone() },
-                    BriefingField { label: "Deadline".into(), value: friendly_datetime(*due_at) },
+                    // A date: the pitch is due N days before release, no hour.
+                    BriefingField { label: "Deadline".into(), value: due_at.date().to_string() },
                 ],
                 deadline_note: String::new(),
             },

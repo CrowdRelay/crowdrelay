@@ -32,6 +32,26 @@ pub fn at_event_timezone(at: time::OffsetDateTime, timezone: &str) -> time::Offs
     }
 }
 
+/// A clock time as a person reads it, on `zone` and naming it:
+/// "2026-09-19 18:00 (Europe/Warsaw)". A zone the bundled database does not
+/// know leaves the time in UTC and says "UTC" — never a guessed zone.
+#[must_use]
+pub fn format_on_clock(at: time::OffsetDateTime, zone: &str) -> String {
+    if is_known_iana_timezone(zone) {
+        let local = at_event_timezone(at, zone);
+        format!(
+            "{} {:02}:{:02} ({})",
+            local.date(),
+            local.hour(),
+            local.minute(),
+            zone.trim()
+        )
+    } else {
+        let utc = at.to_offset(time::UtcOffset::UTC);
+        format!("{} {:02}:{:02} UTC", utc.date(), utc.hour(), utc.minute())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,6 +72,17 @@ mod tests {
     fn a_show_after_midnight_carries_the_local_date() {
         let local = at_event_timezone(datetime!(2026-10-09 23:30 UTC), "Europe/Warsaw");
         assert_eq!(local.date(), time::macros::date!(2026 - 10 - 10));
+    }
+
+    #[test]
+    fn a_clock_time_names_its_zone() {
+        let at = datetime!(2026-09-19 16:00 UTC);
+        assert_eq!(
+            format_on_clock(at, "Europe/Warsaw"),
+            "2026-09-19 18:00 (Europe/Warsaw)"
+        );
+        assert_eq!(format_on_clock(at, "UTC"), "2026-09-19 16:00 UTC");
+        assert_eq!(format_on_clock(at, "Mars/Olympus"), "2026-09-19 16:00 UTC");
     }
 
     #[test]

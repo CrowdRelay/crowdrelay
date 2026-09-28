@@ -180,6 +180,11 @@ pub async fn show_ladder(
         crowdrelay_application::autopilot::BriefingLocale::default(),
         |tag| crowdrelay_application::autopilot::BriefingLocale::from_tag(&tag),
     );
+    // "Reaches fans" is a clock time; it reads on the crew's clock, named.
+    let crew_zone = crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone())
+        .crew_timezone(workspace_id)
+        .await
+        .unwrap_or_else(|_| "UTC".to_owned());
 
     let rungs = rows
         .into_iter()
@@ -189,7 +194,13 @@ pub async fn show_ladder(
                     row.payload.0.clone(),
                 )
                 .ok()
-                .map(|payload| payload.briefing().localized(crew_locale));
+                .map(|payload| {
+                    payload
+                        .briefing_on(&|at| {
+                            crowdrelay_infra::regional::format_on_clock(at, &crew_zone)
+                        })
+                        .localized(crew_locale)
+                });
             ShowLadderRung {
                 action_id: row.action_id,
                 lever: row.lever.unwrap_or_default(),

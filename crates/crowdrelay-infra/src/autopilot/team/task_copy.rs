@@ -119,7 +119,9 @@ fn enriched_task_detail(
     let Ok(payload) = serde_json::from_value::<AutopilotActionPayload>(payload_json.clone()) else {
         return frame.unreadable.to_owned();
     };
-    let mut briefing = payload.briefing().localized(locale);
+    let mut briefing = payload
+        .briefing_on(&|at| crate::regional::format_on_clock(at, crew_zone))
+        .localized(locale);
     briefing.deadline_note =
         format_deadline_note(approval_expires_at, assignment_due_at, locale, crew_zone);
 

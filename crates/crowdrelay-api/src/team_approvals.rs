@@ -53,7 +53,12 @@ pub(crate) async fn public_approval_page(
     if view.status != "awaiting_approval" {
         return page(StatusCode::OK, &decided_panel(&view.status, locale));
     }
-    page(StatusCode::OK, &ask_panel(&claims, &view, locale))
+    let zone =
+        crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(state.database.clone())
+            .crew_timezone(state.ops.workspace_id().into_uuid())
+            .await
+            .unwrap_or_else(|_| "UTC".to_owned());
+    page(StatusCode::OK, &ask_panel(&claims, &view, locale, &zone))
 }
 
 /// `POST /v1/public/approvals/{token}` — `verdict=approve|skip`, decided
@@ -230,12 +235,17 @@ fn ask_panel(
     claims: &team_approval_token::ApprovalTokenClaims,
     view: &crowdrelay_infra::autopilot::ApprovalLinkView,
     locale: crowdrelay_application::autopilot::BriefingLocale,
+    crew_zone: &str,
 ) -> String {
     use crowdrelay_application::autopilot::BriefingLocale;
     let briefing = serde_json::from_value::<
         crowdrelay_application::autopilot::AutopilotActionPayload,
     >(view.payload.clone())
-    .map(|payload| payload.briefing().localized(locale));
+    .map(|payload| {
+        payload
+            .briefing_on(&|at| crowdrelay_infra::regional::format_on_clock(at, crew_zone))
+            .localized(locale)
+    });
     let (kind, title, detail, deadline) = match briefing {
         Ok(briefing) => (
             crowdrelay_infra::autopilot::friendly_action_title(&view.action_kind, locale),
@@ -250,12 +260,23 @@ fn ask_panel(
             String::new(),
         ),
     };
-    let due = claims
-        .expires_at
-        .format(&time::macros::format_description!(
-            "[year]-[month]-[day] [hour]:[minute] UTC"
-        ))
-        .unwrap_or_default();
+    // On the crew's clock, named — "04:42 UTC" for a 06:42 Warsaw deadline
+    // read two hours early. An unknown zone stays UTC and says so.
+    let due_local = crowdrelay_infra::regional::at_event_timezone(claims.expires_at, crew_zone);
+    let zone_label = if crowdrelay_infra::regional::is_known_iana_timezone(crew_zone) {
+        format!("({})", crew_zone.trim())
+    } else {
+        "UTC".to_owned()
+    };
+    let due = format!(
+        "{} {}",
+        due_local
+            .format(&time::macros::format_description!(
+                "[year]-[month]-[day] [hour]:[minute]"
+            ))
+            .unwrap_or_default(),
+        zone_label
+    );
     let (approve_label, skip_label, due_label) = match locale {
         BriefingLocale::Pl => ("Zatwierdź", "Pomiń", "Termin"),
         BriefingLocale::En => ("Approve", "Skip", "Due"),

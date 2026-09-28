@@ -1,0 +1,20 @@
+# Every self-hosted GitHub Actions runner on the production host runs in this
+# slice, below the production containers.
+#
+# Measured 2026-09-27/28 on virya-crowdrelay (2 vCPUs, 12 GB): during a Rust
+# CI build host CPU pressure sat at `some avg60=73-89%`, a single-row
+# `UPDATE worker_leadership` took 1.1-1.5 s and a COMMIT 2 s. The five runner
+# services had no CPU, IO or memory limits.
+#
+# Weights, not quotas: when production is idle CI still gets the whole box;
+# when both want the CPU, production (docker's containers at the default
+# weight 100) gets five times the share. MemoryHigh throttles a build before
+# it can push the production containers into reclaim; it is not a kill.
+[Unit]
+Description=Self-hosted GitHub Actions runners (below production)
+Before=slices.target
+
+[Slice]
+CPUWeight=20
+IOWeight=20
+MemoryHigh=4G

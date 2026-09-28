@@ -72,6 +72,7 @@ fn publishing() -> PublishingPosture {
             awaiting_executor_actions: 0,
             no_executor_cancelled_7d: 0,
             unclaimed_action_kinds: None,
+            guarded_policies: None,
         }
     }
 
@@ -1048,4 +1049,25 @@ fn publishing() -> PublishingPosture {
         );
     }
 
+
+    /// A self-demotion is announced here because the event that reports it
+    /// is refused by its only consumer.
+    #[test]
+    fn a_guarded_policy_raises_a_warning_naming_it() {
+        let quiet = conditions(&healthy(), publishing())
+            .into_iter()
+            .find(|c| c.key == "autopilot.authority_guarded")
+            .expect("the condition is evaluated");
+        assert!(!quiet.active);
+
+        let mut snapshot = healthy();
+        snapshot.guarded_policies = Some("content_supply until 2026-10-03 08:08 UTC".to_owned());
+        let raised = conditions(&snapshot, publishing())
+            .into_iter()
+            .find(|c| c.key == "autopilot.authority_guarded")
+            .expect("the condition is evaluated");
+        assert!(raised.active);
+        assert_eq!(raised.severity, "warning");
+        assert_eq!(raised.details["policies"], "content_supply until 2026-10-03 08:08 UTC");
+    }
 }
