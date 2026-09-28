@@ -234,6 +234,10 @@ pub(super) async fn promote_community_places(
               AND normalize_subreddit(subreddit) <> ''
         DO UPDATE SET
             place_id = COALESCE(agent_outreach_targets.place_id, EXCLUDED.place_id),
+            -- The status follows the verdict (migration 0375): a refused
+            -- community that grew is readmitted here, not left `proposed`.
+            status = community_target_status(
+                agent_outreach_targets.status, EXCLUDED.screening_verdict),
             screening_verdict = EXCLUDED.screening_verdict,
             refusal_reason = EXCLUDED.refusal_reason,
             screened_at = EXCLUDED.screened_at,
