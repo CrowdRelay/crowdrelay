@@ -512,11 +512,16 @@ async fn load_agent_scorecard(
             )::bigint AS unmeasured,
             min(pending.due_at) FILTER (WHERE outcome.action_id IS NULL) AS next_measurement_due_at
         FROM executed_actions AS action
+        -- An action can carry two outcome rows: the execution receipt
+        -- (assessment NULL) and the measurement verdict. The measured row
+        -- must win, and deterministically — an unordered LIMIT 1 could land
+        -- on the receipt and make a measured action vanish from every count.
         LEFT JOIN LATERAL (
             SELECT effect_assessment, action_id
             FROM autopilot_outcomes
             WHERE workspace_id = $1
               AND action_id = action.id
+            ORDER BY (effect_assessment IS NOT NULL) DESC, observed_at DESC, id DESC
             LIMIT 1
         ) AS outcome ON true
         -- An action whose measurement is scheduled but not yet due has not
@@ -608,6 +613,9 @@ async fn load_agent_scorecard(
             FROM autopilot_outcomes
             WHERE workspace_id = $1
               AND action_id = action.id
+            -- Measured verdict beats the bare execution receipt; newest wins
+            -- within each kind.
+            ORDER BY (effect_assessment IS NOT NULL) DESC, observed_at DESC, id DESC
             LIMIT 1
         ) AS outcome ON true
         LEFT JOIN LATERAL (
