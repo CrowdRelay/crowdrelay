@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 22 conditions. The count and this list are
+//! The watchdog monitors 23 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -76,6 +76,9 @@
 //!   action says the opposite of the action's persisted status. This is what
 //!   `LegalTransition::Conflict` refused to coerce, and until now the
 //!   refusal existed only as a log line. See below.
+//! - `execution.approved_actions_failed` — an action a person approved failed
+//!   in the last 24 hours. It is the operator's own work thrown away, and on
+//!   2026-09-28 38 approved letters failed at dispatch with nothing to say so.
 //! - `autopilot.authority_guarded` — the autonomy guardrail demoted a policy to
 //!   `require_approval` after two worsened outcomes and the guard has not
 //!   lapsed. The demotion's own event is refused by the n8n router, so this is
@@ -526,6 +529,13 @@ struct OpsSnapshot {
     /// handler for and refuses with 422 — two were dead on 2026-09-26 — so
     /// this is the operator's only notice that the brain now asks first.
     guarded_policies: Option<String>,
+    /// Actions a person approved that then failed, in the last 24 hours.
+    /// On 2026-09-28 the operator approved 39 letters and 38 failed at
+    /// dispatch within five minutes; no condition watched approved work, so
+    /// nothing said so.
+    approved_failed_24h: i64,
+    /// `action_kind: error_kind ×count` for those failures, joined by `, `.
+    approved_failed_summary: Option<String>,
     /// Drafts waiting on a Reddit session (pending or deferred).
     reddit_posting_demand: i64,
     /// Count of credential rows eligible to establish a session — the same
@@ -976,6 +986,28 @@ async fn load_snapshot(
                AND p.guardrail_reason IS NOT NULL
                AND p.guarded_until > now()
             ) AS guarded_policies,
+            (SELECT count(*) FROM autopilot_actions a
+             WHERE a.workspace_id=$1
+               AND a.status='failed'
+               AND a.approved_at IS NOT NULL
+               -- A person's approval: `policy:bounded_auto` and
+               -- `system:team-router` approve the machine's own work.
+               AND a.approved_by LIKE 'operator%'
+               AND a.finished_at > now() - interval '24 hours'
+            )::bigint AS approved_failed_24h,
+            (SELECT string_agg(failure.kinds || ' ×' || failure.n::text, ', ' ORDER BY failure.n DESC)
+             FROM (
+                 SELECT a.action_kind || ': ' || COALESCE(a.last_error_kind, 'unknown') AS kinds,
+                        count(*) AS n
+                 FROM autopilot_actions a
+                 WHERE a.workspace_id=$1
+                   AND a.status='failed'
+                   AND a.approved_at IS NOT NULL
+                   AND a.approved_by LIKE 'operator%'
+                   AND a.finished_at > now() - interval '24 hours'
+                 GROUP BY 1
+             ) AS failure
+            ) AS approved_failed_summary,
             -- Filled in by the guarded follow-up below. The real values live
             -- in `agent_service_credentials`, which the agents service owns —
             -- on a CrowdRelay-only deployment the relation does not exist,

@@ -508,6 +508,25 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // Work a person signed off that never happened. Warning: nothing
+            // is corrupted, but the operator is the throughput limit and
+            // believes it went out. Bounded at 24 hours so it clears.
+            key: "execution.approved_actions_failed",
+            severity: "warning",
+            summary: "Actions you approved failed instead of going out",
+            active: snapshot.approved_failed_24h > 0,
+            details: json!({
+                "failed": snapshot.approved_failed_24h,
+                "window": "24 hours",
+                "by_kind_and_error": snapshot.approved_failed_summary,
+                "remedy": "read the failed rows (autopilot_actions status='failed', \
+                           approved_at set) and the worker's warning for each \
+                           conflict_reason — a state_changed failure logs the \
+                           sentence that caused it. Fix the cause before \
+                           re-approving; the same draft will fail the same way.",
+            }),
+        },
+        Condition {
             key: "execution.unknown_outcome",
             severity: "warning",
             summary: "Autopilot actions stuck in unknown execution outcome",
