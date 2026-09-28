@@ -354,20 +354,27 @@ impl SocialPostExecutorWorker {
     async fn recover_stale_posting(&self) -> Result<(), SocialPostExecutorError> {
         let ws = self.workspace_id.into_uuid();
 
+        // Post failure, action `unknown`, and assignment `unknown` commit in
+        // one transaction — split commits used to leave posts=failed next to
+        // actions=succeeded with no sweep able to reconcile it.
+        let mut tx = self.pool.begin().await?;
+
         let stale_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
             r#"
             SELECT id, action_id FROM social_posts
             WHERE workspace_id = $1
               AND status = 'posting'
               AND updated_at < now() - make_interval(secs => $2::double precision)
+            FOR UPDATE SKIP LOCKED
             "#,
         )
         .bind(ws)
         .bind(POSTING_STALE_THRESHOLD.as_secs() as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         if stale_rows.is_empty() {
+            tx.commit().await?;
             return Ok(());
         }
 
@@ -385,7 +392,7 @@ impl SocialPostExecutorWorker {
         .bind(format!(
             "{CRASH_POSTING_ERROR_PREFIX} — check platform manually"
         ))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let action_ids: Vec<Uuid> = stale_rows
@@ -406,7 +413,7 @@ impl SocialPostExecutorWorker {
             )
             .bind(&action_ids)
             .bind(ws)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
             sqlx::query(
@@ -421,9 +428,11 @@ impl SocialPostExecutorWorker {
             )
             .bind(ws)
             .bind(&action_ids)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+
+        tx.commit().await?;
 
         tracing::info!(
             recovered = result.rows_affected(),
@@ -745,11 +754,16 @@ impl SocialPostExecutorWorker {
         Ok(count >= MAX_POSTS_PER_24H)
     }
 
+    /// Marks a post failed and tells the parent action and experiment
+    /// assignment, in one transaction — the dispatch marked the action
+    /// `succeeded` before this worker ran, so an unpropagated failure
+    /// leaves the ledger claiming a post that never went live.
     async fn mark_failed(
         &self,
         post_id: Uuid,
         reason: &str,
     ) -> Result<(), SocialPostExecutorError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE social_posts
@@ -762,8 +776,46 @@ impl SocialPostExecutorWorker {
         .bind(self.workspace_id.into_uuid())
         .bind(post_id)
         .bind(reason)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        let action_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT action_id FROM social_posts WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(post_id)
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(action_id) = action_id {
+            sqlx::query(
+                r#"
+                UPDATE autopilot_actions
+                SET status = 'failed',
+                    finished_at = now(),
+                    last_error_kind = 'social_post_failed',
+                    updated_at = now()
+                WHERE id = $1 AND workspace_id = $2 AND status = 'succeeded'
+                "#,
+            )
+            .bind(action_id)
+            .bind(self.workspace_id.into_uuid())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE experiment_assignments
+                SET execution_status = 'failed',
+                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
+                WHERE workspace_id = $1
+                  AND action_id = $2
+                  AND execution_status = 'dispatched'
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(action_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

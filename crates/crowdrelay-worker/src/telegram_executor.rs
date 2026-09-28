@@ -245,20 +245,27 @@ impl TelegramExecutorWorker {
     async fn recover_stale_posting(&self) -> Result<(), TelegramExecutorError> {
         let ws = self.workspace_id.into_uuid();
 
+        // Post failure, action `unknown`, and assignment `unknown` commit in
+        // one transaction — split commits used to leave posts=failed next to
+        // actions=succeeded with no sweep able to reconcile it.
+        let mut tx = self.pool.begin().await?;
+
         let stale_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
             r#"
             SELECT id, action_id FROM telegram_posts
             WHERE workspace_id = $1
               AND status = 'posting'
               AND updated_at < now() - make_interval(secs => $2::double precision)
+            FOR UPDATE SKIP LOCKED
             "#,
         )
         .bind(ws)
         .bind(POSTING_STALE_THRESHOLD.as_secs() as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         if stale_rows.is_empty() {
+            tx.commit().await?;
             return Ok(());
         }
 
@@ -276,7 +283,7 @@ impl TelegramExecutorWorker {
         .bind(format!(
             "{CRASH_POSTING_ERROR_PREFIX} — check Telegram manually"
         ))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let action_ids: Vec<Uuid> = stale_rows
@@ -297,7 +304,7 @@ impl TelegramExecutorWorker {
             )
             .bind(&action_ids)
             .bind(ws)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
             sqlx::query(
@@ -312,9 +319,11 @@ impl TelegramExecutorWorker {
             )
             .bind(ws)
             .bind(&action_ids)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+
+        tx.commit().await?;
 
         tracing::info!(
             recovered = result.rows_affected(),
@@ -443,17 +452,15 @@ impl TelegramExecutorWorker {
         if let Some((ref channel, _)) = posting_target
             && self.channel_on_cooldown(channel).await?
         {
-            tracing::info!(channel = %channel, "channel on 12h cooldown, skipping");
-            self.mark_failed(action.id, "channel on 12h cooldown")
-                .await?;
+            tracing::info!(channel = %channel, "channel on 12h cooldown, deferring");
+            self.mark_rate_limited(action.id).await?;
             return Ok(());
         }
 
         // Anti-spam: check 24h rate limit.
         if self.rate_limit_reached().await? {
-            tracing::info!("24h post limit reached, skipping");
-            self.mark_failed(action.id, "24h post limit reached")
-                .await?;
+            tracing::info!("24h post limit reached, deferring");
+            self.mark_rate_limited(action.id).await?;
             return Ok(());
         }
 
@@ -1003,7 +1010,12 @@ impl TelegramExecutorWorker {
         Ok(bodies.iter().map(|body| content_hash(body)).collect())
     }
 
+    /// Marks a post failed and tells the parent action and experiment
+    /// assignment, in one transaction — the dispatch marked the action
+    /// `succeeded` before this worker ran, so an unpropagated failure
+    /// leaves the ledger claiming a post that never went live.
     async fn mark_failed(&self, post_id: Uuid, reason: &str) -> Result<(), TelegramExecutorError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE telegram_posts
@@ -1011,12 +1023,52 @@ impl TelegramExecutorWorker {
                 error_message = $2,
                 updated_at = now()
             WHERE id = $1
+              AND workspace_id = $3
             "#,
         )
         .bind(post_id)
         .bind(reason)
-        .execute(&self.pool)
+        .bind(self.workspace_id.into_uuid())
+        .execute(&mut *tx)
         .await?;
+        let action_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT action_id FROM telegram_posts WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(post_id)
+        .bind(self.workspace_id.into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(action_id) = action_id {
+            sqlx::query(
+                r#"
+                UPDATE autopilot_actions
+                SET status = 'failed',
+                    finished_at = now(),
+                    last_error_kind = 'telegram_post_failed',
+                    updated_at = now()
+                WHERE id = $1 AND workspace_id = $2 AND status = 'succeeded'
+                "#,
+            )
+            .bind(action_id)
+            .bind(self.workspace_id.into_uuid())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE experiment_assignments
+                SET execution_status = 'failed',
+                    trace_id = COALESCE(trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = $2))
+                WHERE workspace_id = $1
+                  AND action_id = $2
+                  AND execution_status = 'dispatched'
+                "#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(action_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
