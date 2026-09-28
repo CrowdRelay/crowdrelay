@@ -275,6 +275,7 @@ impl CommunityIntelligenceWorker {
 
         let mut success_count = 0u32;
         let mut fail_count = 0u32;
+        let mut streak: Option<(String, u32)> = None;
         // Workspaces whose fan items changed this sweep — trends refresh
         // once per workspace at the end, not once per place.
         let mut touched_workspaces = std::collections::BTreeSet::new();
@@ -319,13 +320,30 @@ impl CommunityIntelligenceWorker {
                     return Ok(());
                 }
                 Err(e) => {
+                    fail_count += 1;
+                    streak = next_streak(streak.take(), upstream_failure_signature(&e));
+                    if success_count == 0
+                        && streak
+                            .as_ref()
+                            .is_some_and(|(_, run)| *run >= SOURCE_FAILURE_STREAK)
+                    {
+                        let reason =
+                            format!("{SOURCE_FAILURE_STREAK} places in a row failed with {e}");
+                        warn!(
+                            adapter = adapter_id,
+                            reason = %reason,
+                            remaining = places.len() - fail_count as usize,
+                            "source unavailable — abandoning this sweep"
+                        );
+                        source_health.record_failure(reason, backoff_max);
+                        return Ok(());
+                    }
                     warn!(
                         adapter = adapter_id,
                         place_id = %place.id,
                         error = %e,
                         "fetch failed"
                     );
-                    fail_count += 1;
                 }
             }
         }
@@ -491,9 +509,79 @@ async fn find_places_for_adapter(
     .await
 }
 
+/// How many places in a row must fail the same upstream way, with none
+/// succeeding, before the sweep reads the failure as the source's.
+///
+/// `SourceUnavailable` covers the statuses an adapter can recognise as
+/// source-level. The agent service's Reddit observe answers 502 for a
+/// browser failure that no subreddit escapes, and the sweep asked all 45
+/// places anyway: 45 identical "fetch failed" warnings per sweep on
+/// 2026-09-28. Three identical upstream failures and nothing working is the
+/// same fact, learned without knowing each adapter's vocabulary.
+const SOURCE_FAILURE_STREAK: u32 = 3;
+
+/// The part of a failure that every place shares when the upstream itself is
+/// down — a server error, a dead transport, a timeout. A 404 or a 429 is
+/// about one place and never starts a streak.
+fn upstream_failure_signature(error: &AdapterError) -> Option<String> {
+    match error {
+        AdapterError::HttpStatus { status, .. } if *status >= 500 => Some(format!("HTTP {status}")),
+        AdapterError::HttpFetch(_) => Some("transport failure".to_owned()),
+        AdapterError::Timeout(_) => Some("timeout".to_owned()),
+        _ => None,
+    }
+}
+
+/// Extends the run of identical upstream failures, or restarts it.
+fn next_streak(streak: Option<(String, u32)>, failure: Option<String>) -> Option<(String, u32)> {
+    match (streak, failure) {
+        (Some((last, run)), Some(now)) if last == now => Some((now, run + 1)),
+        (_, Some(now)) => Some((now, 1)),
+        (_, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_identical_upstream_failures_make_a_source_failure() {
+        let bad_gateway = || AdapterError::HttpStatus {
+            status: 502,
+            url: "http://agent-service:8095/reddit/observe".to_owned(),
+        };
+        let mut streak = None;
+        for _ in 0..SOURCE_FAILURE_STREAK {
+            streak = next_streak(streak, upstream_failure_signature(&bad_gateway()));
+        }
+        assert_eq!(streak, Some(("HTTP 502".to_owned(), SOURCE_FAILURE_STREAK)));
+    }
+
+    #[test]
+    fn a_place_level_failure_breaks_the_streak() {
+        let streak = next_streak(
+            None,
+            upstream_failure_signature(&AdapterError::HttpStatus {
+                status: 502,
+                url: String::new(),
+            }),
+        );
+        let not_found = AdapterError::HttpStatus {
+            status: 404,
+            url: String::new(),
+        };
+        assert_eq!(upstream_failure_signature(&not_found), None);
+        assert_eq!(
+            next_streak(streak, upstream_failure_signature(&not_found)),
+            None
+        );
+        let changed = next_streak(
+            Some(("HTTP 502".to_owned(), 2)),
+            upstream_failure_signature(&AdapterError::Timeout(Duration::from_secs(5))),
+        );
+        assert_eq!(changed, Some(("timeout".to_owned(), 1)));
+    }
 
     #[test]
     fn jitter_stays_inside_the_ten_percent_window() {

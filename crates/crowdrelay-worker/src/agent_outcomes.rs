@@ -1687,11 +1687,11 @@ impl AgentOutcomeWorker {
                 platform = COALESCE(EXCLUDED.platform, agent_outreach_targets.platform),
                 community_url = COALESCE(EXCLUDED.community_url, agent_outreach_targets.community_url),
                 language = COALESCE(EXCLUDED.language, agent_outreach_targets.language),
-                status = CASE
-                    WHEN agent_outreach_targets.status = 'discarded' THEN agent_outreach_targets.status
-                    WHEN EXCLUDED.status = 'promoted' THEN 'promoted'
-                    ELSE agent_outreach_targets.status
-                END,
+                -- Discarded is sticky, admitted promotes, refused demotes
+                -- (migration 0375). Personal contacts carry no verdict and
+                -- keep their status.
+                status = community_target_status(
+                    agent_outreach_targets.status, EXCLUDED.screening_verdict),
                 place_id = COALESCE(EXCLUDED.place_id, agent_outreach_targets.place_id),
                 -- A re-proposal is re-screened against whatever the audience
                 -- graph knows now, which is how a community that was refused

@@ -111,14 +111,23 @@ fn has_polish_digraph(word: &str) -> bool {
 /// around it, so the call is the larger count, and needs at least two.
 #[must_use]
 pub fn detect_draft_language(text: &str) -> DraftLanguage {
-    let lower = text.to_lowercase();
     let mut polish = 0_usize;
     let mut english = 0_usize;
-    for word in lower
+    for original in text
         .split(|c: char| !c.is_alphabetic() && c != '\'')
         .filter(|word| !word.is_empty())
     {
-        if has_polish_letter(word) || has_polish_digraph(word) || POLISH_WORDS.contains(&word) {
+        let word = original.to_lowercase();
+        let word = word.as_str();
+        // A capitalised word is a name or a sentence's first word, and a
+        // name says nothing about the language around it: "Catch us in
+        // Łódź, Wrocław and Gdańsk" is an English tour post with three
+        // Polish letters and a digraph in "Bydgoszcz". Names cast no Polish
+        // vote; English function words count however they are cased.
+        let is_name = original.chars().next().is_some_and(char::is_uppercase);
+        if !is_name
+            && (has_polish_letter(word) || has_polish_digraph(word) || POLISH_WORDS.contains(&word))
+        {
             polish += 1;
         } else if ENGLISH_WORDS.contains(&word) {
             english += 1;
@@ -163,6 +172,19 @@ pub fn community_language_mismatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Polish place names in an English post are names, not Polish.
+    #[test]
+    fn an_english_tour_post_naming_polish_cities_stays_english() {
+        for post in [
+            "Catch us in Łódź, Wrocław and Gdańsk",
+            "Catch us in Bydgoszcz and Rzeszów",
+            "Next stop: Szczecin. See you there!",
+        ] {
+            assert_ne!(detect_draft_language(post), DraftLanguage::Polish, "{post}");
+            assert_eq!(community_language_mismatch(post, None), None, "{post}");
+        }
+    }
 
     /// Slang with no diacritics and one function word, queued for two
     /// English-language communities before the ingest gate existed.
