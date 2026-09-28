@@ -561,7 +561,12 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             if let Some(harm) = harm {
                 merge_harm_keys(&mut *transaction, workspace_id, measurement, harm).await?;
             }
-            if effect.assessment == EffectAssessment::Worsened {
+            // The autonomy guardrail reacts to evidence about actions only:
+            // a workspace-window count is not one, so neither the reading in
+            // hand nor earlier ones of those kinds can demote a policy.
+            if effect.assessment == EffectAssessment::Worsened
+                && !measurement.kind.is_workspace_window()
+            {
                 let demoted_context = sqlx::query_scalar::<_, String>(
                     r#"
                     WITH action_context AS (
@@ -576,7 +581,11 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                         JOIN autopilot_actions action
                           ON action.workspace_id=outcome.workspace_id AND action.id=outcome.action_id
                         JOIN action_context ON action.context=action_context.context
+                        JOIN autopilot_measurements measured
+                          ON measured.workspace_id=outcome.workspace_id
+                         AND measured.id=outcome.measurement_id
                         WHERE outcome.workspace_id=$1 AND outcome.measurement_id IS NOT NULL
+                          AND measured.measurement_kind <> ALL($4::text[])
                         ORDER BY outcome.action_id, outcome.observed_at DESC, outcome.id DESC
                     ), recent AS (
                         SELECT effect_assessment
@@ -604,6 +613,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .bind(workspace_id.into_uuid())
                 .bind(measurement.action_id.into_uuid())
                 .bind(now)
+                .bind(AutopilotMeasurementKind::WORKSPACE_WINDOW_KINDS.to_vec())
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;

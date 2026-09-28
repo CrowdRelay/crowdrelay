@@ -99,25 +99,40 @@ mod tests {
         // 2026-09-19 is a Saturday.
         let due = utc(19, time::Month::September, 4, 42);
         assert_eq!(
-            format_deadline_note(None, Some(due), BriefingLocale::Pl),
+            format_deadline_note(None, Some(due), BriefingLocale::Pl, "UTC"),
             "Termin: sobota, 19 września 2026, 04:42 UTC"
         );
         assert_eq!(
-            format_deadline_note(Some(due), None, BriefingLocale::En),
+            format_deadline_note(Some(due), None, BriefingLocale::En, "UTC"),
+            "Deadline: Saturday, 19 September 2026, 04:42 UTC"
+        );
+        // On the crew's own clock, named: 04:42 UTC is 06:42 in Warsaw.
+        assert_eq!(
+            format_deadline_note(None, Some(due), BriefingLocale::Pl, "Europe/Warsaw"),
+            "Termin: sobota, 19 września 2026, 06:42 (Europe/Warsaw)"
+        );
+        // A deadline an hour before midnight UTC lands on the next day there.
+        let late = utc(19, time::Month::September, 23, 30);
+        assert_eq!(
+            format_deadline_note(None, Some(late), BriefingLocale::En, "Europe/Warsaw"),
+            "Deadline: Sunday, 20 September 2026, 01:30 (Europe/Warsaw)"
+        );
+        assert_eq!(
+            format_deadline_note(None, Some(due), BriefingLocale::En, "Mars/Olympus"),
             "Deadline: Saturday, 19 September 2026, 04:42 UTC"
         );
         // The assignment deadline outranks the approval window, and a missing
         // deadline says so instead of rendering an epoch.
         let later = utc(1, time::Month::October, 12, 0);
         assert!(
-            format_deadline_note(Some(due), Some(later), BriefingLocale::En).contains("October")
+            format_deadline_note(Some(due), Some(later), BriefingLocale::En, "UTC").contains("October")
         );
         assert_eq!(
-            format_deadline_note(None, None, BriefingLocale::Pl),
+            format_deadline_note(None, None, BriefingLocale::Pl, "UTC"),
             "Brak twardego terminu"
         );
         assert_eq!(
-            format_deadline_note(None, None, BriefingLocale::En),
+            format_deadline_note(None, None, BriefingLocale::En, "UTC"),
             "No hard deadline"
         );
     }
@@ -189,8 +204,9 @@ fn policy_summary(row: PolicyRow) -> Result<AutopilotPolicySummary, RepositoryEr
 fn pending_action(
     row: PendingActionRow,
     live_capabilities: &[String],
-    locale: crowdrelay_application::autopilot::BriefingLocale,
+    crew: &CrewClock,
 ) -> Result<PendingAutopilotAction, RepositoryError> {
+    let locale = crew.locale;
     // A payload the worker cannot parse is a live action it will never run.
     // Discarding the serde error made that indistinguishable from a database
     // hiccup, so the shape mismatch stayed invisible while the action failed
@@ -218,8 +234,12 @@ fn pending_action(
     // Same briefing the task email carries, in the same language — the panel
     // and the email are two views of one handoff and must not disagree.
     let mut briefing = payload.briefing().localized(locale);
-    briefing.deadline_note =
-        format_deadline_note(row.approval_expires_at, row.assignment_due_at, locale);
+    briefing.deadline_note = format_deadline_note(
+        row.approval_expires_at,
+        row.assignment_due_at,
+        locale,
+        &crew.zone,
+    );
     Ok(PendingAutopilotAction {
         required_capability: required_capability.map(ToOwned::to_owned),
         executor_ready,
@@ -249,14 +269,49 @@ fn pending_action(
     })
 }
 
+/// The crew's briefing language and clock, read once for a whole queue.
+///
+/// An unreadable setting is the default (English, UTC): a briefing in UTC
+/// beats a cockpit that 500s — the rule both queue readers already followed
+/// for the language alone.
+pub(super) struct CrewClock {
+    pub(super) locale: crowdrelay_application::autopilot::BriefingLocale,
+    pub(super) zone: String,
+}
+
+pub(super) async fn crew_clock(pool: &sqlx::PgPool, workspace_id: Uuid) -> CrewClock {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT key, value FROM tenant_settings \
+         WHERE workspace_id = $1 AND key IN ('crew_locale', 'crew_timezone')",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let setting = |key: &str| rows.iter().find(|(k, _)| k == key).map(|(_, v)| v.trim());
+    CrewClock {
+        locale: setting("crew_locale").map_or(
+            crowdrelay_application::autopilot::BriefingLocale::default(),
+            crowdrelay_application::autopilot::BriefingLocale::from_tag,
+        ),
+        zone: setting("crew_timezone")
+            .filter(|zone| crate::regional::is_known_iana_timezone(zone))
+            .unwrap_or("UTC")
+            .to_owned(),
+    }
+}
+
 /// Formats a deadline note from the action's deadline fields, in the
 /// briefing's locale. Prefers `assignment_due_at` (the team assignment
 /// deadline) over `approval_expires_at` (the autopilot approval window).
 ///
 /// An RFC3339 timestamp is a machine's answer — a crew member reads
 /// "sobota, 19 września 2026, 06:42", not "2026-09-19T04:42:11.379054Z".
-/// The zone suffix stays because the value is UTC and shifting it into a
-/// guessed local zone would lie about the moment.
+/// The time is on the crew's own clock (`crew_timezone`), named, because a
+/// crew reads a clock time as local: "04:42 UTC" for a 06:42 Warsaw deadline
+/// was honest and still read two hours early. The zone is recorded, not
+/// guessed; with none recorded (or an unknown one) the note stays in UTC and
+/// says so.
 const PL_WEEKDAYS: [&str; 7] = [
     "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela",
 ];
@@ -269,12 +324,21 @@ pub(super) fn format_deadline_note(
     approval_expires_at: Option<OffsetDateTime>,
     assignment_due_at: Option<OffsetDateTime>,
     locale: crowdrelay_application::autopilot::BriefingLocale,
+    crew_zone: &str,
 ) -> String {
     use crowdrelay_application::autopilot::BriefingLocale;
-    let deadline = assignment_due_at.or(approval_expires_at);
+    let known = crate::regional::is_known_iana_timezone(crew_zone);
+    let zone = if known {
+        format!("({})", crew_zone.trim())
+    } else {
+        "UTC".to_owned()
+    };
+    let deadline = assignment_due_at
+        .or(approval_expires_at)
+        .map(|at| crate::regional::at_event_timezone(at, if known { crew_zone } else { "UTC" }));
     match (deadline, locale) {
         (Some(dt), BriefingLocale::Pl) => format!(
-            "Termin: {}, {} {} {}, {:02}:{:02} UTC",
+            "Termin: {}, {} {} {}, {:02}:{:02} {zone}",
             PL_WEEKDAYS
                 .get(usize::from(dt.weekday().number_from_monday() - 1))
                 .copied()
@@ -289,7 +353,7 @@ pub(super) fn format_deadline_note(
             dt.minute()
         ),
         (Some(dt), BriefingLocale::En) => format!(
-            "Deadline: {}, {} {} {}, {:02}:{:02} UTC",
+            "Deadline: {}, {} {} {}, {:02}:{:02} {zone}",
             dt.weekday(),
             dt.day(),
             dt.month(),

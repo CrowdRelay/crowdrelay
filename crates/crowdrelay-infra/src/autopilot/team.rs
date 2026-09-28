@@ -65,6 +65,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
             let crew_locale = crew_locale_in_tx(&mut tx, workspace_id).await;
+            let crew_zone = crew_timezone_in_tx(&mut tx, workspace_id).await?;
 
             // Production-day housekeeping runs even where the roster is
             // empty: shows still project into production days and open
@@ -281,6 +282,7 @@ impl PostgresAutopilotRepository {
                         action.approval_expires_at,
                         None,
                         crew_locale,
+                        &crew_zone,
                     ),
                     due_at: action.approval_expires_at,
                     source_action_id: Some(action.id),
