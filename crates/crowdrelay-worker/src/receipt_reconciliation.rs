@@ -614,34 +614,64 @@ impl ReceiptReconciliationWorker {
         Ok(resolved)
     }
 
-    /// Sweep 2e: resolve `unknown` actions from their outbox delivery
-    /// status. This is the authoritative reconciliation for actions that
-    /// entered `unknown` because of ambiguous transport failures (timeout
-    /// after max attempts — the request may or may not have reached the
-    /// provider).
+    /// Sweep 2e: resolve `unknown` actions from the actual per-endpoint
+    /// delivery rows. This is the authoritative reconciliation for actions
+    /// that entered `unknown` because of ambiguous transport failures
+    /// (timeout after max attempts — the request may or may not have
+    /// reached the provider).
     ///
-    /// The outbox delivery status is the external truth: if the webhook
-    /// was eventually delivered (by a retry from a different worker, or a
-    /// late lease recovery), the action succeeded. If the outbox event is
-    /// dead with a permanent rejection, the action failed. If it's dead
-    /// with an ambiguous error, the action stays `unknown` — only a
-    /// provider-specific reconciliation or manual check can resolve it.
+    /// `webhook_deliveries` is the external truth: `outbox_events.status`
+    /// flips to `delivered` when delivery rows are *materialized* — before
+    /// any HTTP attempt — so the event row can never prove a send
+    /// happened. Only a `delivered` delivery proves it; a dead delivery
+    /// with a permanent rejection fails the action; ambiguous dead or
+    /// absent deliveries keep it `unknown` — only a provider-specific
+    /// reconciliation or manual check can resolve those.
     async fn resolve_from_outbox(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
     ) -> Result<usize, ReceiptReconciliationError> {
         // Find unknown actions that have a linked outbox event, and check
-        // the outbox event's delivery status. Skip community.engage
-        // actions (handled by sweep 2b), agent.content actions (sweep 2c),
-        // and actions that already have executor receipts (sweep 2a).
-        let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime)> = sqlx::query_as(
+        // the aggregate state of that event's deliveries. Skip
+        // community.engage actions (handled by sweep 2b), agent.content
+        // actions (sweep 2c), and actions that already have executor
+        // receipts (sweep 2a).
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            Uuid,
+            String,
+            Option<String>,
+            OffsetDateTime,
+            i64,
+            i64,
+            Vec<Option<String>>,
+            i64,
+        )> = sqlx::query_as(
             r#"
-            SELECT a.id, e.status, e.last_error_kind,
-                   COALESCE(e.delivered_at, e.updated_at)
+            SELECT a.id,
+                   e.status AS event_status,
+                   e.last_error_kind AS event_error_kind,
+                   COALESCE(e.delivered_at, e.updated_at) AS evidence_at,
+                   COALESCE(d.delivered, 0) AS delivered_count,
+                   COALESCE(d.in_flight, 0) AS in_flight_count,
+                   COALESCE(d.dead_kinds, '{}'::text[]) AS dead_kinds,
+                   COALESCE(d.cancelled, 0) AS cancelled_count
             FROM autopilot_actions a
             JOIN outbox_events e
                 ON e.workspace_id = a.workspace_id
                 AND e.action_id = a.id
+            LEFT JOIN LATERAL (
+                SELECT
+                    count(*) FILTER (WHERE d.status = 'delivered') AS delivered,
+                    count(*) FILTER (WHERE d.status IN ('pending', 'processing'))
+                        AS in_flight,
+                    array_agg(d.last_error_kind)
+                        FILTER (WHERE d.status = 'dead') AS dead_kinds,
+                    count(*) FILTER (WHERE d.status = 'cancelled') AS cancelled
+                FROM webhook_deliveries d
+                WHERE d.workspace_id = e.workspace_id
+                  AND d.outbox_event_id = e.id
+            ) d ON true
             WHERE a.workspace_id = $1
               AND a.status = 'unknown'
               AND a.action_kind NOT IN ('community.engage.request', 'agent.content.request')
@@ -659,15 +689,16 @@ impl ReceiptReconciliationWorker {
                     AND r.status IN ('succeeded', 'failed')
               )
             -- One action can hold several events (keyed emissions send more
-            -- than once). A delivered event is the only positive proof a send
-            -- happened, so it resolves before a dead sibling; the newest row
-            -- wins inside a status because it is the latest attempt. The
-            -- resolve is idempotent per action, so this order decides the
-            -- verdict rather than query-plan luck.
-            ORDER BY CASE e.status
-                         WHEN 'delivered' THEN 0
-                         WHEN 'dead' THEN 1
-                         ELSE 2
+            -- than once). A delivered delivery is the only positive proof a
+            -- send happened, so it resolves before terminal siblings;
+            -- in-flight rows resolve last so an already-evaluable event
+            -- decides the verdict first. The resolve is idempotent per
+            -- action, so this order decides the verdict rather than
+            -- query-plan luck.
+            ORDER BY CASE
+                         WHEN COALESCE(d.delivered, 0) > 0 THEN 0
+                         WHEN COALESCE(d.in_flight, 0) > 0 THEN 2
+                         ELSE 1
                      END,
                      e.created_at DESC
             LIMIT $2
@@ -679,9 +710,26 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, outbox_status, last_error_kind, evidence_at) in rows {
-            // Route through the canonical resolver via the outbox adapter.
-            let evidence = outbox_event_to_evidence(&outbox_status, last_error_kind.as_deref());
+        for (
+            action_id,
+            event_status,
+            event_error_kind,
+            evidence_at,
+            delivered_count,
+            in_flight_count,
+            dead_kinds,
+            cancelled_count,
+        ) in rows
+        {
+            // Route through the canonical resolver via the delivery adapter.
+            let evidence = deliveries_to_evidence(
+                &event_status,
+                event_error_kind.as_deref(),
+                delivered_count,
+                in_flight_count,
+                &dead_kinds,
+                cancelled_count,
+            );
             match legal_transition(
                 ActionState::Unknown,
                 resolve_observation(evidence),
@@ -1007,11 +1055,24 @@ fn content_post_to_evidence(post_status: &str, error_message: Option<&str>) -> R
 /// canonical [`ResolutionEvidence`] facts for the
 /// [`resolve_observation`] + [`legal_transition`] resolver.
 ///
-/// This is the ONLY place that knows about `outbox_events.status` values
-/// and which error kinds are permanent vs ambiguous. The canonical
-/// resolver (`resolve_observation` + `legal_transition`) makes the
-/// semantic decision; this adapter just converts provider state into
-/// domain facts.
+/// These are the ONLY places that know about `outbox_events.status` /
+/// `webhook_deliveries.status` values and which error kinds are permanent
+/// vs ambiguous. The canonical resolver (`resolve_observation` +
+/// `legal_transition`) makes the semantic decision; the adapters just
+/// convert provider state into domain facts.
+fn is_permanent_error_kind(kind: &str) -> bool {
+    kind.starts_with("http_permanent")
+        || kind == "recipient_ineligible"
+        || kind.starts_with("secret_")
+        || kind.starts_with("endpoint_")
+        || kind == "invalid_signing_secret"
+        || kind == "event_serialization"
+        || kind == "invalid_endpoint_url"
+        || kind == "invalid_event_timestamp"
+        || kind == "materialization_timeout"
+        || kind == "materialization_database"
+}
+
 fn outbox_event_to_evidence(
     outbox_status: &str,
     last_error_kind: Option<&str>,
@@ -1021,21 +1082,7 @@ fn outbox_event_to_evidence(
         "delivered" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed),
         // Outbox event is dead → check the error kind.
         "dead" => {
-            let permanent = matches!(
-                last_error_kind,
-                Some(kind)
-                    if kind.starts_with("http_permanent")
-                        || kind == "recipient_ineligible"
-                        || kind.starts_with("secret_")
-                        || kind.starts_with("endpoint_")
-                        || kind == "invalid_signing_secret"
-                        || kind == "event_serialization"
-                        || kind == "invalid_endpoint_url"
-                        || kind == "invalid_event_timestamp"
-                        || kind == "materialization_timeout"
-                        || kind == "materialization_database"
-            );
-            if permanent {
+            if last_error_kind.is_some_and(is_permanent_error_kind) {
                 // Permanent rejection (provider saw it and rejected)
                 // → definitively failed.
                 ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)
@@ -1051,11 +1098,64 @@ fn outbox_event_to_evidence(
     }
 }
 
+/// Aggregated [`webhook_deliveries`] state for one outbox event → evidence.
+///
+/// `outbox_events.status = 'delivered'` means delivery rows were
+/// materialized, not that a provider confirmed anything — so this adapter
+/// reads the deliveries themselves. Any delivered delivery is positive
+/// proof; an event-level `dead` is the event's own terminal failure;
+/// in-flight deliveries mean the outcome is still undecided; a dead
+/// delivery resolves by error kind; a cancelled delivery (endpoint
+/// deactivated, never sent) is definitive non-delivery; and no delivery
+/// rows at all proves nothing — retention may have pruned them, so the
+/// action stays `unknown` rather than taking a false verdict.
+fn deliveries_to_evidence(
+    event_status: &str,
+    event_error_kind: Option<&str>,
+    delivered_count: i64,
+    in_flight_count: i64,
+    dead_kinds: &[Option<String>],
+    cancelled_count: i64,
+) -> ResolutionEvidence {
+    if delivered_count > 0 {
+        return ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed);
+    }
+    if event_status == "dead" {
+        // The event itself failed terminally (serialization,
+        // materialization, lease loss) — its own error kind decides.
+        return outbox_event_to_evidence("dead", event_error_kind);
+    }
+    if in_flight_count > 0 {
+        return ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::InFlight);
+    }
+    if !dead_kinds.is_empty() {
+        let all_permanent = dead_kinds
+            .iter()
+            .all(|kind| kind.as_deref().is_some_and(is_permanent_error_kind));
+        return if all_permanent {
+            // Every endpoint rejected it permanently → definitively failed.
+            ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)
+        } else {
+            // At least one ambiguous failure → the send may have landed.
+            ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost)
+        };
+    }
+    if cancelled_count > 0 {
+        // All deliveries were cancelled (endpoints deactivated) — the send
+        // provably never left the building.
+        return ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure);
+    }
+    // No delivery rows: either zero active endpoints existed at
+    // materialization or retention pruned them. Neither proves success or
+    // failure — stay unknown.
+    ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        community_post_to_evidence, content_post_to_evidence, outbox_event_to_evidence,
-        requires_terminal_receipt,
+        community_post_to_evidence, content_post_to_evidence, deliveries_to_evidence,
+        outbox_event_to_evidence, requires_terminal_receipt,
     };
     use crowdrelay_application::autopilot::AutopilotActionPayload;
     use crowdrelay_domain::FanId;
@@ -1413,5 +1513,118 @@ mod tests {
                 "in-flight status {status} should stay unknown (NoChange from Unknown)"
             );
         }
+    }
+
+    #[test]
+    fn a_materialized_event_is_not_delivery_proof() {
+        // The regression this sweep's rewrite fixes: outbox_events.status
+        // flips to 'delivered' when delivery *rows* are inserted, before any
+        // HTTP attempt. An ambiguous-dead delivery under a 'delivered' event
+        // must keep the action unknown — not resolve it succeeded.
+        let evidence = deliveries_to_evidence(
+            "delivered",
+            None,
+            0,
+            0,
+            &[Some("transport_timeout".to_owned())],
+            0,
+        );
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::NoChange,
+            "a delivery that died ambiguously is not proof the send happened"
+        );
+    }
+
+    #[test]
+    fn a_delivered_delivery_resolves_the_action() {
+        let evidence = deliveries_to_evidence("delivered", None, 1, 0, &[], 0);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::Apply(ActionState::Succeeded),
+            "a provider-confirmed delivery is the positive proof"
+        );
+    }
+
+    #[test]
+    fn all_permanent_dead_deliveries_fail_the_action() {
+        let kinds = [
+            Some("http_permanent_status".to_owned()),
+            Some("recipient_ineligible".to_owned()),
+        ];
+        let evidence = deliveries_to_evidence("delivered", None, 0, 0, &kinds, 0);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::Apply(ActionState::Failed),
+            "every endpoint rejected it — definitive failure"
+        );
+    }
+
+    #[test]
+    fn one_ambiguous_dead_delivery_holds_the_verdict() {
+        let kinds = [
+            Some("http_permanent_status".to_owned()),
+            Some("transport_timeout".to_owned()),
+        ];
+        let evidence = deliveries_to_evidence("delivered", None, 0, 0, &kinds, 0);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::NoChange,
+            "one endpoint may have received it — stay unknown"
+        );
+    }
+
+    #[test]
+    fn no_deliveries_stays_unknown() {
+        // Zero delivery rows proves nothing: either no endpoint existed at
+        // materialization or retention pruned terminal rows. Both keep the
+        // action unknown rather than inventing a verdict.
+        for (status, kind) in [
+            ("delivered", None),
+            ("pending", None),
+            ("delivered", Some("materialization_timeout")),
+        ] {
+            let evidence = deliveries_to_evidence(status, kind, 0, 0, &[], 0);
+            assert_eq!(
+                legal_transition(
+                    ActionState::Unknown,
+                    resolve_observation(evidence),
+                    SuccessEvidence::Premature,
+                ),
+                LegalTransition::NoChange,
+                "status {status} with no deliveries must not resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn an_event_level_dead_still_reads_its_own_error_kind() {
+        // Event-level terminal failure (serialization, materialization) is
+        // independent of per-delivery state.
+        let evidence = deliveries_to_evidence("dead", Some("event_serialization"), 0, 1, &[], 0);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::Apply(ActionState::Failed),
+        );
     }
 }

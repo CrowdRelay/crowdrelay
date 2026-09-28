@@ -375,6 +375,108 @@ impl AutopilotWorker {
         }
     }
 
+    /// Play outcomes settle last, and settle even when the plays context is
+    /// switched off. Measuring what already happened is not acting on it,
+    /// and a campaign that ran before the operator paused the agent still
+    /// deserves an honest answer about what it did.
+    ///
+    /// A policy that cannot be read skips the phase rather than scoring
+    /// under the default: the operator's thresholds are what the verdicts
+    /// mean, and a fabricated reading resolves an outcome a retry resolves
+    /// honestly. Nothing is claimed on a failed load, so nothing is burned.
+    async fn settle_play_outcomes(&self, degraded: &mut DegradedPhases, now: OffsetDateTime) {
+        let measurement_policy = match self.play_measurement_policy().await {
+            Ok(policy) => policy,
+            Err(error) => {
+                degraded.failed(phase::PLAY_OUTCOME_CLAIM, repository_error_kind(error));
+                tracing::warn!(
+                    error = %error,
+                    "CrowdRelay play outcome phase skipped: measurement policy did not load"
+                );
+                return;
+            }
+        };
+        match self
+            .repository
+            .claim_due_play_outcomes(self.workspace_id, PLAY_OUTCOME_BATCH_SIZE, now)
+            .await
+        {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    let settled_at = OffsetDateTime::now_utc();
+                    let result = async {
+                        let observation = self
+                            .repository
+                            .observe_play_outcome(self.workspace_id, &outcome, settled_at)
+                            .await?;
+                        let verdict = assess_play_claim(&outcome, &observation, measurement_policy);
+                        self.repository
+                            .complete_play_outcome(
+                                self.workspace_id,
+                                &outcome,
+                                &observation,
+                                verdict,
+                                settled_at,
+                            )
+                            .await
+                    }
+                    .await;
+
+                    if let Err(error) = result {
+                        let error_kind = repository_error_kind(error);
+                        degraded.failed(phase::PLAY_OUTCOME_RESOLUTION, error_kind);
+                        let retryable = repository_error_retryable(error);
+                        tracing::warn!(
+                            play_id = %outcome.play_id,
+                            claim = outcome.claim.as_str(),
+                            error_kind,
+                            "CrowdRelay play outcome measurement failed"
+                        );
+                        let _ = self
+                            .repository
+                            .fail_play_outcome(
+                                self.workspace_id,
+                                outcome.id,
+                                error_kind,
+                                retryable,
+                                OffsetDateTime::now_utc(),
+                            )
+                            .await
+                            .inspect_err(|e| {
+                                tracing::error!(
+                                    play_id = %outcome.play_id,
+                                    error = %e,
+                                    "failed to mark CrowdRelay play outcome as failed — outcome may remain in-flight"
+                                );
+                            })
+                            .ok();
+                    }
+                }
+            }
+            Err(error) => {
+                degraded.failed(phase::PLAY_OUTCOME_CLAIM, repository_error_kind(error));
+                tracing::warn!(error = %error, "CrowdRelay play outcome claim failed");
+            }
+        }
+    }
+
+    /// The operator's reading policy, or the default when no Plays policy is
+    /// configured. A failed load propagates: `Err` is "cannot say what the
+    /// thresholds are", not "there are none" — the caller skips the phase so
+    /// the outcomes are retried under the real policy next cycle.
+    async fn play_measurement_policy(&self) -> Result<PlayMeasurementPolicy, RepositoryError> {
+        let policies = self.repository.load_policies(self.workspace_id).await?;
+        Ok(policies
+            .into_iter()
+            .find_map(|policy| match (policy.context, policy.config) {
+                (AutopilotContext::Plays, AutopilotPolicyConfig::Plays(plays)) => {
+                    Some(plays.measurement)
+                }
+                _ => None,
+            })
+            .unwrap_or_default())
+    }
+
     /// Runs one cycle and reports what the record of it should say.
     ///
     /// Not a `Result`: a failed phase does not fail the cycle. The phases are
@@ -719,15 +821,20 @@ impl AutopilotWorker {
                             );
                         })
                         .ok();
-                    let assess_harm = harm.unwrap_or_default();
                     let result = async {
+                        // A failed harm observation is not a clean zero.
+                        // Classifying under the default would let a send
+                        // that produced real harm read Neutral because the
+                        // `Worsened` override never saw it — so the attempt
+                        // fails retryable instead of completing on a number
+                        // nobody measured.
+                        let assess_harm = harm.as_ref().ok_or(RepositoryError::Unexpected)?;
                         let observed = self
                             .repository
                             .observe_measurement(self.workspace_id, &measurement, observed_at)
                             .await?;
-                        let effect =
-                            assess_measurement_effect(&measurement, observed, &assess_harm)
-                                .ok_or(RepositoryError::Unexpected)?;
+                        let effect = assess_measurement_effect(&measurement, observed, assess_harm)
+                            .ok_or(RepositoryError::Unexpected)?;
                         self.repository
                             .complete_measurement(
                                 self.workspace_id,
@@ -807,73 +914,7 @@ impl AutopilotWorker {
             }
         }
 
-        // Play outcomes settle last, and settle even when the plays context is
-        // switched off. Measuring what already happened is not acting on it,
-        // and a campaign that ran before the operator paused the agent still
-        // deserves an honest answer about what it did.
-        let measurement_policy = self.play_measurement_policy().await;
-        match self
-            .repository
-            .claim_due_play_outcomes(self.workspace_id, PLAY_OUTCOME_BATCH_SIZE, now)
-            .await
-        {
-            Ok(outcomes) => {
-                for outcome in outcomes {
-                    let settled_at = OffsetDateTime::now_utc();
-                    let result = async {
-                        let observation = self
-                            .repository
-                            .observe_play_outcome(self.workspace_id, &outcome, settled_at)
-                            .await?;
-                        let verdict = assess_play_claim(&outcome, &observation, measurement_policy);
-                        self.repository
-                            .complete_play_outcome(
-                                self.workspace_id,
-                                &outcome,
-                                &observation,
-                                verdict,
-                                settled_at,
-                            )
-                            .await
-                    }
-                    .await;
-
-                    if let Err(error) = result {
-                        let error_kind = repository_error_kind(error);
-                        degraded.failed(phase::PLAY_OUTCOME_RESOLUTION, error_kind);
-                        let retryable = repository_error_retryable(error);
-                        tracing::warn!(
-                            play_id = %outcome.play_id,
-                            claim = outcome.claim.as_str(),
-                            error_kind,
-                            "CrowdRelay play outcome measurement failed"
-                        );
-                        let _ = self
-                            .repository
-                            .fail_play_outcome(
-                                self.workspace_id,
-                                outcome.id,
-                                error_kind,
-                                retryable,
-                                OffsetDateTime::now_utc(),
-                            )
-                            .await
-                            .inspect_err(|e| {
-                                tracing::error!(
-                                    play_id = %outcome.play_id,
-                                    error = %e,
-                                    "failed to mark CrowdRelay play outcome as failed — outcome may remain in-flight"
-                                );
-                            })
-                            .ok();
-                    }
-                }
-            }
-            Err(error) => {
-                degraded.failed(phase::PLAY_OUTCOME_CLAIM, repository_error_kind(error));
-                tracing::warn!(error = %error, "CrowdRelay play outcome claim failed");
-            }
-        }
+        self.settle_play_outcomes(&mut degraded, now).await;
 
         // Wave outcomes settle last, and settle even when the outreach context
         // is switched off — for the same reason play outcomes do: measuring
@@ -1040,29 +1081,6 @@ impl AutopilotWorker {
             north_star_metric,
             wait_reason,
         }
-    }
-
-    /// The operator's reading policy, or the default when the context has none.
-    ///
-    /// A policy that cannot be read must not stop a measurement: the outcome
-    /// would be silently deferred for ever, and an unmeasured play is exactly
-    /// what this phase exists to prevent.
-    async fn play_measurement_policy(&self) -> PlayMeasurementPolicy {
-        self.repository
-            .load_policies(self.workspace_id)
-            .await
-            .ok()
-            .and_then(|policies| {
-                policies
-                    .into_iter()
-                    .find_map(|policy| match (policy.context, policy.config) {
-                        (AutopilotContext::Plays, AutopilotPolicyConfig::Plays(plays)) => {
-                            Some(plays.measurement)
-                        }
-                        _ => None,
-                    })
-            })
-            .unwrap_or_default()
     }
 }
 

@@ -1162,3 +1162,47 @@ fn an_unmeasured_install_count_does_not_teach_zero() {
         "a measured zero still teaches"
     );
 }
+
+/// A dispatch whose installs were measured but whose fans were not leaves
+/// the fan posterior, the context GLM and calibration untouched — while the
+/// install estimate still learns. The replay used to feed `0.0` for the
+/// unmeasured half and drag every template's fan expectation toward zero.
+#[test]
+fn an_unmeasured_fan_count_does_not_teach_zero() {
+    let prediction = || DispatchPrediction {
+        template_id: "press-pitch".to_owned(),
+        expected_new_fans: 2.0,
+        expected_signal_installs: 0.2,
+        ..DispatchPrediction::default()
+    };
+    let mut model = CausalModel::new();
+    let confidence_before = model.confidence("press-pitch");
+    let expected_before = model.expected_fans("press-pitch");
+    for _ in 0..5 {
+        model.update(&PredictionOutcome::installs_only(prediction(), 3.0));
+    }
+    assert_eq!(
+        model.confidence("press-pitch"),
+        confidence_before,
+        "an unmeasured fan count counted as an observation"
+    );
+    assert_eq!(
+        model.expected_fans("press-pitch"),
+        expected_before,
+        "an unmeasured fan count moved the posterior"
+    );
+    // The measured half still teaches: five measured installs moved the
+    // template's install estimate off the default.
+    assert!(
+        model.template_expected_signal.contains_key("press-pitch"),
+        "the measured install half was lost with the fan half"
+    );
+
+    // A real measured zero is not skipped — it teaches what it says.
+    model.update(&PredictionOutcome::fans_only(prediction(), 0.0));
+    assert_eq!(
+        model.confidence("press-pitch"),
+        confidence_before + 1,
+        "a measured zero is a real observation"
+    );
+}

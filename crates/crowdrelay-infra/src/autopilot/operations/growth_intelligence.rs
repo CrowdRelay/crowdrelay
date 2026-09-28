@@ -984,8 +984,11 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         workspace_id,
         super::super::NORTH_STAR_WINDOW_DAYS,
     )
-    .await
-    .unwrap_or_default();
+    // Propagated like every sibling read above: a failed query must not
+    // read as an empty series — `assess` on no days returns `Initializing`,
+    // whose sizing multiplier cuts the workspace's whole dispatch budget
+    // for the cycle on what was only a transient read failure.
+    .await?;
     // CUSUM change-point detection over the same series, for sudden regime
     // shifts: viral moments, algorithm changes, audience fatigue. The detector
     // is stateless across cycles, so this is a batch detection over the whole
@@ -1451,8 +1454,22 @@ async fn full_replay(
         context_json,
     ) in rows
     {
-        let context: crowdrelay_brain::DispatchContext =
-            serde_json::from_value(context_json).unwrap_or_default();
+        let context: crowdrelay_brain::DispatchContext = match serde_json::from_value(context_json)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                // A context that cannot be decoded is not the default
+                // context — teaching the outcome under the zeroed features
+                // writes it into a bucket it never belonged to.
+                tracing::warn!(
+                    workspace_id = %workspace_id.into_uuid(),
+                    template_id = %template_id,
+                    %error,
+                    "legacy evidence row skipped: context does not decode"
+                );
+                continue;
+            }
+        };
         let prediction = DispatchPrediction {
             template_id: template_id.clone(),
             expected_new_fans: expected_fans,
@@ -1468,13 +1485,19 @@ async fn full_replay(
         // The outcome model learns P(Y|action,context) from raw observed
         // fan counts, not from DiD estimates. Prefer observed_fans (raw)
         // and fall back to observed_incremental_fans only for legacy rows
-        // that don't have the raw count populated.
-        let outcome_fans = observed_fans.or(observed_incremental_fans).unwrap_or(0.0);
-        let outcome = match observed_signal {
-            Some(installs) => {
-                PredictionOutcome::from_observation(prediction, outcome_fans, installs)
+        // that don't have the raw count populated. A row with no fan
+        // observation at all is not a zero — `installs_only` keeps the
+        // measured half and leaves the fan learners untouched.
+        let outcome = match (observed_fans.or(observed_incremental_fans), observed_signal) {
+            (Some(fans), Some(installs)) => {
+                PredictionOutcome::from_observation(prediction, fans, installs)
             }
-            None => PredictionOutcome::fans_only(prediction, outcome_fans),
+            (Some(fans), None) => PredictionOutcome::fans_only(prediction, fans),
+            (None, Some(installs)) => PredictionOutcome::installs_only(prediction, installs),
+            // The WHERE clause requires one of the three observed columns,
+            // so this arm is unreachable — but skipping beats teaching a
+            // fabricated zero if that ever stops being true.
+            (None, None) => continue,
         };
         model.update(&outcome);
     }
@@ -1536,7 +1559,18 @@ pub(in crate::autopilot) async fn load_exploration_memory(
         if decayed_weight < 0.01 {
             continue;
         }
-        let ctx: DispatchContext = serde_json::from_value(context_json).unwrap_or_default();
+        let Ok(ctx) = serde_json::from_value::<DispatchContext>(context_json) else {
+            // An undecodable context hashed under the default features
+            // records a visit the (template, default-context) pair never
+            // received — the novelty estimate then underprices a real
+            // visit there and overprices the actual one.
+            tracing::warn!(
+                workspace_id = %workspace_id.into_uuid(),
+                template_id = %template_id,
+                "exploration memory skipped a row: context does not decode"
+            );
+            continue;
+        };
         let hash = context_hash(&ctx);
         mem.record_decayed_visit(&template_id, &hash, decayed_weight);
     }

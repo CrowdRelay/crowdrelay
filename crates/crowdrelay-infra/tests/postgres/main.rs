@@ -48,6 +48,7 @@ mod autopilot_placements;
 mod autopilot_play_outcomes;
 mod autopilot_plays;
 mod autopilot_post_show_report;
+mod autopilot_press_pitch_governor;
 mod autopilot_push_gap;
 mod autopilot_quota_per_class;
 mod autopilot_relay_ladder;

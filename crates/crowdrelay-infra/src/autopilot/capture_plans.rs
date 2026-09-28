@@ -410,18 +410,19 @@ struct ShotCandidateRow {
 pub(in crate::autopilot) async fn issue_capture_plans(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
-    now: OffsetDateTime,
+    // `today` arrives as the caller's crew-local date: `scheduled_for`
+    // is a venue-local DATE, so the day window must compare dates on
+    // the same clock the crew lives on, not UTC. Binding it as a DATE
+    // also keeps the connection's timezone from picking the day.
+    // `other` days never produce a shot list, so they are filtered here
+    // rather than burning a slot every sweep; a settled-but-not-
+    // abandoned plan also blocks re-issue — a `done` plan already
+    // harvested its day and a second list would only nag.
+    today: time::Date,
     mutable_team: &mut [TeamRoutingRow],
     crew_locale: crowdrelay_application::autopilot::BriefingLocale,
     pending_notices: &mut Vec<PendingInitialNotice>,
 ) -> Result<u32, RepositoryError> {
-    // `today` is bound as a DATE so the window compares dates to dates —
-    // casting the instant session-side would let the connection's
-    // timezone pick the day. `other` days never produce a shot list, so
-    // they are filtered here rather than burning a slot every sweep; a
-    // settled-but-not-abandoned plan also blocks re-issue — a `done`
-    // plan already harvested its day and a second list would only nag.
-    let today = now.date();
     let days = sqlx::query_as::<_, UnplannedProductionDayRow>(
         r#"
         SELECT event.id, event.kind, event.title, event.scheduled_for, event.event_id

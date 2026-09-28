@@ -185,15 +185,21 @@ async fn process_one(
         Some(r) => r,
         None => return Ok(()), // No resolved evidence yet — nothing to attribute.
     };
+    // Decode errors propagate — a column that no longer reads as its type
+    // is contract drift worth surfacing, not a NULL. A decode failure used
+    // to be flattened to `None`/`now()`, so a resolved-but-undecodable row
+    // attributed nothing and, with `resolved_at` already set, never came
+    // back for another attempt.
     let observed_incremental: Option<f64> = outcome_row
         .try_get("observed_incremental_fans")
-        .ok()
-        .flatten();
-    let durable_fans_30d: Option<f64> = outcome_row.try_get("durable_fans_30d").ok().flatten();
-    let timestamp: OffsetDateTime = outcome_row
-        .try_get("timestamp")
-        .unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let resolved_at: Option<OffsetDateTime> = outcome_row.try_get("resolved_at").ok().flatten();
+        .map_err(super::map_sqlx)?;
+    let durable_fans_30d: Option<f64> = outcome_row
+        .try_get("durable_fans_30d")
+        .map_err(super::map_sqlx)?;
+    let timestamp: OffsetDateTime = outcome_row.try_get("timestamp").map_err(super::map_sqlx)?;
+    let resolved_at: Option<OffsetDateTime> = outcome_row
+        .try_get("resolved_at")
+        .map_err(super::map_sqlx)?;
     let observed = observed_incremental.unwrap_or(0.0);
     if observed.abs() < 0.001 {
         return Ok(()); // No incremental fans — nothing to attribute.

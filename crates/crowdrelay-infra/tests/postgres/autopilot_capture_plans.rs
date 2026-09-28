@@ -1135,3 +1135,103 @@ async fn a_keyless_action_on_a_source_does_not_break_the_supply_read()
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_issue_window_runs_on_the_crews_clock_not_utcs()
+-> Result<(), Box<dyn std::error::Error>> {
+    use time::macros::datetime;
+
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "crew-a", &["video"]).await?;
+    // The crew lives on Warsaw time.
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_timezone', 'Europe/Warsaw')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // 2026-10-09 22:30 UTC is already 2026-10-10 00:30 in Warsaw (CEST).
+    // The crew's issue window covers its today and tomorrow — the 10th and
+    // 11th — while the UTC window still covers the 9th and 10th. A day on
+    // the 11th is the discriminant: issued under the crew clock, invisible
+    // under UTC.
+    let day_id = seed_production_event(
+        &pool,
+        workspace_id,
+        "show",
+        time::macros::date!(2026 - 10 - 11),
+        "scheduled",
+        None,
+    )
+    .await?;
+
+    repo.reconcile_team_handoffs(workspace_id, datetime!(2026-10-09 22:30 UTC))
+        .await?;
+
+    let plan_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM capture_plans
+         WHERE workspace_id=$1 AND production_event_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(day_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        plan_count, 1,
+        "a day that is tomorrow on the crew's clock is inside the issue window"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_draft_past_its_crew_local_day_is_abandoned_not_kept()
+-> Result<(), Box<dyn std::error::Error>> {
+    use time::macros::datetime;
+
+    let (repo, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    seed_workspace(&pool, workspace_id).await?;
+    seed_team_email_executor(&pool, workspace_id).await?;
+    seed_member(&pool, workspace_id, "crew-a", &["video"]).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_timezone', 'Europe/Warsaw')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // 2026-10-10 23:30 UTC is 2026-10-11 01:30 in Warsaw: a draft whose day
+    // was the 10th has already outlived it on the crew's clock, while UTC
+    // still calls the day current.
+    let day_id = seed_production_event(
+        &pool,
+        workspace_id,
+        "rehearsal",
+        time::macros::date!(2026 - 10 - 10),
+        "scheduled",
+        None,
+    )
+    .await?;
+    let plan_id = seed_plan(&pool, workspace_id, day_id, "draft", None).await?;
+
+    repo.reconcile_team_handoffs(workspace_id, datetime!(2026-10-10 23:30 UTC))
+        .await?;
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM capture_plans WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id.into_uuid())
+            .bind(plan_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        status, "abandoned",
+        "a draft that outlived its crew-local day settles instead of staying open"
+    );
+    Ok(())
+}

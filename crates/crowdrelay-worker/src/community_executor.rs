@@ -53,7 +53,7 @@ use crowdrelay_domain::standing_approval::{
 use crowdrelay_infra::reddit_proxy::read_reddit_proxy_from_db;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 use tokio::{
     sync::watch,
@@ -525,21 +525,31 @@ impl CommunityExecutorWorker {
     pub async fn recover_stale_posting(&self) -> Result<(), CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
 
+        // The post failure, the action's transition to `unknown`, and the
+        // assignment update commit in one transaction — a crash between the
+        // statements used to leave posts=failed next to actions=succeeded
+        // with no sweep able to reconcile the contradiction.
+        let mut tx = self.pool.begin().await?;
+
         // Step 1: Find stale posting rows and collect their action_ids.
+        // FOR UPDATE SKIP LOCKED keeps a second worker from racing the same
+        // recovery window.
         let stale_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
             r#"
             SELECT id, action_id FROM community_posts
             WHERE workspace_id = $1
               AND status = 'posting'
               AND updated_at < now() - make_interval(secs => $2::double precision)
+            FOR UPDATE SKIP LOCKED
             "#,
         )
         .bind(ws)
         .bind(POSTING_STALE_THRESHOLD.as_secs() as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         if stale_rows.is_empty() {
+            tx.commit().await?;
             return Ok(());
         }
 
@@ -560,7 +570,7 @@ impl CommunityExecutorWorker {
             "{CRASH_POSTING_ERROR_PREFIX} — check Reddit manually"
         ))
         .bind(ws)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         // Step 3: Transition autopilot actions to 'unknown' (not 'failed').
@@ -585,7 +595,7 @@ impl CommunityExecutorWorker {
             )
             .bind(&action_ids)
             .bind(ws)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
             // Step 4: Transition experiment assignments to 'unknown'.
@@ -604,9 +614,11 @@ impl CommunityExecutorWorker {
             )
             .bind(ws)
             .bind(&action_ids)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+
+        tx.commit().await?;
 
         tracing::info!(
             recovered = result.rows_affected(),
@@ -737,7 +749,10 @@ impl CommunityExecutorWorker {
         // seed and claim — a demoted or re-screened target must not receive
         // the post it was queued for. Without this the row would sit in
         // `pending` forever: the seed-time EXISTS gate does not revisit it.
-        sqlx::query(
+        // The parent actions are told in the same transaction — an
+        // unreported veto leaves the ledger claiming a send that was
+        // refused here.
+        let vetoed_actions: Vec<Option<Uuid>> = sqlx::query_scalar(
             r#"
             UPDATE community_posts cp
             SET status = 'failed',
@@ -753,11 +768,43 @@ impl CommunityExecutorWorker {
                     AND t.screening_verdict = 'admitted'
                     AND t.status = 'promoted'
               )
+            RETURNING cp.action_id
             "#,
         )
         .bind(ws)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
+        let vetoed_actions: Vec<Uuid> = vetoed_actions.into_iter().flatten().collect();
+        if !vetoed_actions.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE autopilot_actions
+                SET status = 'failed',
+                    finished_at = now(),
+                    last_error_kind = 'community_target_not_admitted',
+                    updated_at = now()
+                WHERE id = ANY($1) AND workspace_id = $2 AND status = 'succeeded'
+                "#,
+            )
+            .bind(&vetoed_actions)
+            .bind(ws)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE experiment_assignments AS ea
+                SET execution_status = 'failed',
+                    trace_id = COALESCE(ea.trace_id, (SELECT trace_id FROM autopilot_actions WHERE id = ea.action_id))
+                WHERE ea.workspace_id = $1
+                  AND ea.action_id = ANY($2)
+                  AND ea.execution_status = 'dispatched'
+                "#,
+            )
+            .bind(ws)
+            .bind(&vetoed_actions)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         // Step 3: Claim pending and rate_limited (past backoff) rows.
         // Transition them to `posting` atomically.

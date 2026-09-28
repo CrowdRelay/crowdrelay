@@ -79,7 +79,12 @@ impl PostgresAutopilotRepository {
             // mints its campaign here so the scan leg exists even when nobody
             // remembered to create one (the 2026-09-11 finding).
             super::capture_plans::mint_door_campaigns(&mut tx, workspace_id, now).await?;
-            super::capture_plans::settle_capture_plans(&mut tx, workspace_id, now.date()).await?;
+            // `scheduled_for` is a venue-local DATE, so "today" for plan
+            // issue/settle has to be read on the crew's clock — a UTC date
+            // settles and issues plans a day early or late for a crew
+            // whose evening crosses the UTC midnight.
+            let crew_today = crate::regional::at_event_timezone(now, &crew_zone).date();
+            super::capture_plans::settle_capture_plans(&mut tx, workspace_id, crew_today).await?;
             close_resolved_assignments(&mut tx, workspace_id, now).await?;
             // Checked without erroring, because an operator who has gated
             // team.email off has not broken anything. Erroring here also rolled
@@ -375,7 +380,7 @@ impl PostgresAutopilotRepository {
                 super::capture_plans::issue_capture_plans(
                     &mut tx,
                     workspace_id,
-                    now,
+                    crew_today,
                     &mut mutable_team,
                     crew_locale,
                     &mut pending_notices,

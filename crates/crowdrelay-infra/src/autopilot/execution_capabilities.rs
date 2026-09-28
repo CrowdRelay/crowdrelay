@@ -158,6 +158,7 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestBookingAgentReply { .. }
                 | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
+                | AutopilotActionPayload::RequestBookingTargetDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
                 | AutopilotActionPayload::RequestBeaconOutreach { .. }
                 | AutopilotActionPayload::RequestContentArtifact { .. }
@@ -174,7 +175,11 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
                 | AutopilotActionPayload::RunPlayStep { .. }
                 | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-                | AutopilotActionPayload::RequestOutreachTarget { .. }
+                // `RequestOutreachTarget` is deliberately absent: it executes
+                // as an in-process UPDATE on `agent_outreach_targets` — no
+                // event is emitted and no executor ever files a receipt for
+                // it, so the flag only deferred its outcome write to a report
+                // that cannot arrive.
         ),
     }
 }

@@ -10,11 +10,16 @@ impl CommunityExecutorWorker {
     /// Marks a community post as failed with an error message and
     /// propagates the failure back to the parent autopilot action so the
     /// ledger does not report success for a post that never went live.
+    ///
+    /// The post write and the propagation commit together: a mid-flight
+    /// error between them used to leave `community_posts=failed` beside
+    /// `autopilot_actions=succeeded` with no sweep that could reconcile it.
     pub(super) async fn mark_failed(
         &self,
         post_id: Uuid,
         error: &str,
     ) -> Result<(), CommunityExecutorError> {
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             r#"
             UPDATE community_posts
@@ -28,9 +33,12 @@ impl CommunityExecutorWorker {
         .bind(post_id)
         .bind(error)
         .bind(self.workspace_id.into_uuid())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        self.propagate_failure(post_id, error).await
+        self.propagate_failure(&mut transaction, post_id, error)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Tells the parent autopilot action, and the experiment assignment, that
@@ -39,9 +47,11 @@ impl CommunityExecutorWorker {
     /// Split out of `mark_failed` because a transient failure defers the draft
     /// without saying anything to the ledger — the action is terminal once told,
     /// so propagating on the first network error made one outage look like a
-    /// batch of failed posts to the brain.
+    /// batch of failed posts to the brain. Runs inside the caller's
+    /// transaction so the verdict and its propagation commit together.
     async fn propagate_failure(
         &self,
+        transaction: &mut Transaction<'_, Postgres>,
         post_id: Uuid,
         error: &str,
     ) -> Result<(), CommunityExecutorError> {
@@ -50,7 +60,7 @@ impl CommunityExecutorWorker {
         )
         .bind(post_id)
         .bind(self.workspace_id.into_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **transaction)
         .await?;
 
         // The action was marked 'succeeded' by actions_execution.rs before this
@@ -75,7 +85,7 @@ impl CommunityExecutorWorker {
             .bind(action_id)
             .bind(self.workspace_id.into_uuid())
             .bind(error_kind)
-            .execute(&self.pool)
+            .execute(&mut **transaction)
             .await?;
             // Transition the experiment assignment execution_status from
             // dispatched → failed. The external intervention was attempted
@@ -94,7 +104,7 @@ impl CommunityExecutorWorker {
             )
             .bind(self.workspace_id.into_uuid())
             .bind(action_id)
-            .execute(&self.pool)
+            .execute(&mut **transaction)
             .await?;
             tracing::warn!(
                 post_id = %post_id,
@@ -159,8 +169,12 @@ impl CommunityExecutorWorker {
         if exhausted {
             // Only now is the parent action told. Propagating on the first
             // transient failure is what made one outage look like a batch of
-            // failed posts to the brain.
-            self.propagate_failure(post_id, error).await?;
+            // failed posts to the brain. Action + assignment updates commit
+            // together — the post row is already terminal above.
+            let mut transaction = self.pool.begin().await?;
+            self.propagate_failure(&mut transaction, post_id, error)
+                .await?;
+            transaction.commit().await?;
         }
         Ok(())
     }

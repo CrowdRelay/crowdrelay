@@ -865,6 +865,12 @@ impl PostgresEventRepository {
             ) AS acts ON true
             WHERE event_interests.workspace_id = $1
                 AND event_interests.fan_id = $2
+                -- A fan can only register interest in a published show, but
+                -- the show's status is not frozen at registration: cancelled
+                -- must not resurface here — its slug 404s and its ticket_url
+                -- points at a dead show. 'completed' stays: the shows a fan
+                -- attended are part of their list.
+                AND events.status IN ('published', 'completed')
             ORDER BY events.starts_at, events.id
             LIMIT $3
             "#,

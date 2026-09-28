@@ -101,6 +101,39 @@ async fn emitted_action_without_receipt(pool: &PgPool, workspace_id: WorkspaceId
     .execute(pool)
     .await
     .context("insert delivered outbox event")?;
+    // A 'delivered' event row only proves deliveries were materialized —
+    // the resolver reads `webhook_deliveries`, so the fixture needs the
+    // provider-confirmed delivery that backs the event.
+    let endpoint_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_endpoints
+            (id, workspace_id, name, url, signing_secret_ref)
+        VALUES ($1,$2,'test-endpoint','https://bridge.example.test/hook','test-secret')
+        ON CONFLICT (workspace_id, name) DO NOTHING
+        "#,
+    )
+    .bind(endpoint_id)
+    .bind(workspace_id.into_uuid())
+    .execute(pool)
+    .await
+    .context("insert webhook endpoint")?;
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_deliveries
+            (id, workspace_id, outbox_event_id, endpoint_id, status,
+             max_attempts, delivered_at)
+        SELECT $1, $2, $3, id, 'delivered', 12, now() - interval '2 days'
+        FROM webhook_endpoints
+        WHERE workspace_id = $2 AND name = 'test-endpoint'
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(outbox_id)
+    .execute(pool)
+    .await
+    .context("insert delivered webhook delivery")?;
     sqlx::query(
         r#"
         INSERT INTO autopilot_action_emissions
