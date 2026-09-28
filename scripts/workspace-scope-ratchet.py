@@ -63,17 +63,28 @@ CRATES = ROOT / "crates"
 
 
 def scoped_tables() -> set[str]:
-    """Tables whose CREATE TABLE declares a workspace_id column."""
-    sql = "".join(
-        path.read_text(encoding="utf-8", errors="replace")
-        for path in sorted(MIGRATIONS.glob("*.sql"))
-    )
+    """Tables whose CREATE TABLE declares a workspace_id column.
+
+    `ALTER TABLE x RENAME TO y` renames carry the column — and the scope
+    obligation — to the new name. Migration 0346 renamed all 133 `viryaos_*`
+    tables; without following the rename the set kept dead names and every
+    statement against the renamed tables was invisible to this ratchet.
+    """
     tables = set()
-    for match in re.finditer(
-        r"CREATE TABLE (?:IF NOT EXISTS )?([a-z0-9_]+)\s*\((.*?)\n\);", sql, re.S
-    ):
-        if re.search(r"\bworkspace_id\b", match.group(2)):
-            tables.add(match.group(1))
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        sql = path.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(
+            r"CREATE TABLE (?:IF NOT EXISTS )?([a-z0-9_]+)\s*\((.*?)\n\);", sql, re.S
+        ):
+            if re.search(r"\bworkspace_id\b", match.group(2)):
+                tables.add(match.group(1))
+        for match in re.finditer(
+            r"ALTER TABLE (?:IF EXISTS )?([a-z0-9_]+)\s+RENAME TO\s+([a-z0-9_]+)", sql
+        ):
+            old, new = match.groups()
+            if old in tables:
+                tables.discard(old)
+                tables.add(new)
     return tables
 
 
@@ -108,7 +119,9 @@ def is_test_source(relative: str) -> bool:
     for `/tests/` alone misses them. A fixture reading across workspaces is doing
     its job in both.
     """
-    return "/tests/" in relative or relative.endswith("/tests.rs")
+    return "/tests/" in relative or relative.endswith("/tests.rs") or relative.endswith(
+        "_tests.rs"
+    )
 
 
 def unscoped_statements(tables: set[str]) -> dict[str, int]:
