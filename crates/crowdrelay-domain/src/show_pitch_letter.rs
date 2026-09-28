@@ -26,8 +26,8 @@ use time::Date;
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::outreach::{OutreachPhase, OutreachTargetKind};
 use crate::outreach_letter::{
-    MAX_SUBJECT, OutreachLetter, format_show_date_en, format_show_date_pl, introduction,
-    introduction_pl, salutation_name, sign_off, sign_off_pl, truncate,
+    MAX_SUBJECT, OutreachLetter, format_show_date_en, format_show_date_pl, greeting_pl,
+    introduction, introduction_pl, salutation_name, sign_off, sign_off_pl, truncate,
 };
 
 /// Everything a show letter is composed from. Every field is a fact the
@@ -201,7 +201,8 @@ pub fn compose_show_pitch_letter(
                 || (format!(": {city}"), format!(" ({city})")),
                 |venue| (format!(": {city}, {venue}"), format!(" ({city}, {venue})")),
             );
-            let mut lines = vec!["Dzień dobry,".to_owned(), String::new()];
+            // Named, so each contact's letter is its own: see `greeting_pl`.
+            let mut lines = vec![greeting_pl(input.target_name), String::new()];
             match input.phase {
                 OutreachPhase::Initial => {
                     lines.push(format!(
@@ -341,7 +342,11 @@ mod tests {
             letter.subject,
             "Virya — koncert 17 października 2026, Gorzów Wielkopolski"
         );
-        assert!(letter.body.starts_with("Dzień dobry,\n"), "{}", letter.body);
+        assert!(
+            letter.body.starts_with("Dzień dobry, Radio Gorzów,\n"),
+            "{}",
+            letter.body
+        );
         assert!(
             letter.body.contains(
                 "i 17 października 2026 gramy koncert: Gorzów Wielkopolski, MagnetOffOn."
