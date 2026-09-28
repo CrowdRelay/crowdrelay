@@ -39,12 +39,15 @@ ROOT = Path(__file__).resolve().parents[1]
 CRATES = ROOT / "crates"
 
 TABLE = "audience_segments"
-# Three statements across two files: `execution.rs` carries two of them.
-FORCING_STATEMENT_COUNT = 3
+# Four statements across four files: `execution.rs` carries the event leg and
+# `source_campaign.rs` the drop-surge sibling — same managed-segment revive on
+# conflict, so deactivation anywhere still self-heals within one cycle.
+FORCING_STATEMENT_COUNT = 4
 FORCING_FILES = (
     "crates/crowdrelay-infra/src/autopilot/operations/execution.rs",
     "crates/crowdrelay-infra/src/autopilot/operations/release_waves.rs",
     "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs",
+    "crates/crowdrelay-infra/src/autopilot/operations/source_campaign.rs",
 )
 
 

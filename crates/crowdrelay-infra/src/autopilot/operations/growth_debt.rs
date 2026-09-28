@@ -853,6 +853,14 @@ mod tests {
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
             social_post: None,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
         }
     }
 

@@ -804,6 +804,8 @@ pub async fn list_content_sources(
     }
 }
 
+include!("outreach_release/promote.rs");
+
 /// One plan as the timeline page opens it (§4i-1): the stored facts plus
 /// where the ladder actually got to, computed from the same policy and the
 /// same milestone marks the evaluator decides from.

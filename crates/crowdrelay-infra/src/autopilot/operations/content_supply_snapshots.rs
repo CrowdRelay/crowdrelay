@@ -2,7 +2,7 @@
 //! has in flight, and has failed to get.
 
 use super::*;
-use crowdrelay_domain::content_supply::{FailedArtifact, PostResonance};
+use crowdrelay_domain::content_supply::{DropSurgeLaneFailure, FailedArtifact, PostResonance};
 
 #[derive(Debug, FromRow)]
 struct ContentRow {
@@ -12,6 +12,11 @@ struct ContentRow {
     occurred_at: OffsetDateTime,
     expires_at: OffsetDateTime,
     title: String,
+    source_key: String,
+    source_url: Option<String>,
+    source_body: Option<String>,
+    source_thumbnail_url: Option<String>,
+    member_site_base_url: Option<String>,
     post_url: Option<String>,
     post_platform: Option<String>,
     post_body: Option<String>,
@@ -35,6 +40,10 @@ struct ContentRow {
     failed_artifact_kinds: Vec<String>,
     failed_artifact_counts: Vec<i64>,
     failed_artifact_last: Vec<OffsetDateTime>,
+    surge_lane_names: Vec<String>,
+    surge_lane_counts: Vec<i64>,
+    surge_lane_last: Vec<OffsetDateTime>,
+    surge_requested_at: Option<OffsetDateTime>,
 }
 
 pub(in crate::autopilot) async fn load_content_supply_snapshots(
@@ -51,6 +60,35 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             source.occurred_at,
             source.expires_at,
             source.title,
+            source.source_key,
+            -- The drop surge reads the source's own destination and words:
+            -- a video's YouTube URL and description. Only meaningful on
+            -- `video`/`release` sources — a synced post's URL is its relay
+            -- permalink, read through `post_url` instead.
+            CASE WHEN source.source_kind IN ('video', 'release')
+                 THEN source.metadata->>'url' END AS source_url,
+            CASE WHEN source.source_kind IN ('video', 'release')
+                 THEN source.metadata->>'body' END AS source_body,
+            -- The video's thumbnail for post drafts: stored when the sync
+            -- wrote one, else derived from the YouTube video id the feed
+            -- always carries. Other origins leave it NULL — a draft posts
+            -- without art rather than with a guess.
+            CASE WHEN source.source_kind = 'video'
+                 THEN COALESCE(
+                     source.metadata->>'thumbnail_url',
+                     CASE WHEN source.metadata->>'video_id' ~ '^[A-Za-z0-9_-]{6,}$'
+                          THEN 'https://i.ytimg.com/vi/'
+                               || (source.metadata->>'video_id')
+                               || '/hqdefault.jpg' END
+                 ) END AS source_thumbnail_url,
+            -- The tenant's public site origin, needed to compose the
+            -- absolute tracked URL the email lane's copy carries. One row
+            -- serves every source; the scalar subquery is cheaper than a
+            -- second round-trip.
+            (SELECT setting.value
+             FROM tenant_settings AS setting
+             WHERE setting.workspace_id = source.workspace_id
+               AND setting.key = 'member_site_base_url') AS member_site_base_url,
             -- The synced post's own fields — only meaningful on a
             -- `social_post` source, where the relay reads them verbatim.
             -- On every other kind they ride along unused.
@@ -121,12 +159,25 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                   -- decode and takes the whole snapshot load with it.
                   AND action.payload ? 'artifact'
                   AND action.status = 'succeeded'
+                  -- "Completed" means the artifact landed somewhere, not
+                  -- that a notification webhook accepted the request. The
+                  -- executor's terminal report must carry
+                  -- `metadata.artifact_delivery` with a non-blank
+                  -- url/surface/reference — the 2026-09-28 drop measured
+                  -- what counting a Discord-notify 200 as delivery costs:
+                  -- fifty-nine requests "completed" and zero artifacts
+                  -- ever reached a fan-facing surface.
                   AND EXISTS (
                       SELECT 1
                       FROM autopilot_execution_reports AS report
                       WHERE report.workspace_id = action.workspace_id
                         AND report.action_id = action.id
                         AND report.status = 'succeeded'
+                        AND COALESCE(
+                            NULLIF(btrim(report.metadata->'artifact_delivery'->>'url'), ''),
+                            NULLIF(btrim(report.metadata->'artifact_delivery'->>'surface'), ''),
+                            NULLIF(btrim(report.metadata->'artifact_delivery'->>'reference'), '')
+                        ) IS NOT NULL
                   )
             ), ARRAY[]::text[]) AS completed_artifacts,
             COALESCE(ARRAY(
@@ -158,7 +209,17 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             ), ARRAY[]::text[]) AS inflight_artifacts,
             COALESCE(failed.kinds, ARRAY[]::text[]) AS failed_artifact_kinds,
             COALESCE(failed.counts, ARRAY[]::bigint[]) AS failed_artifact_counts,
-            COALESCE(failed.last_failed, ARRAY[]::timestamptz[]) AS failed_artifact_last
+            COALESCE(failed.last_failed, ARRAY[]::timestamptz[]) AS failed_artifact_last,
+            COALESCE(surge_failed.lanes, ARRAY[]::text[]) AS surge_lane_names,
+            COALESCE(surge_failed.counts, ARRAY[]::bigint[]) AS surge_lane_counts,
+            COALESCE(surge_failed.last_failed, ARRAY[]::timestamptz[]) AS surge_lane_last,
+            -- The operator's explicit promote stamp (`…/promote` writes it).
+            -- A non-timestamp value read back as NULL rather than failing
+            -- the whole supply load.
+            CASE WHEN source.metadata->>'surge_requested_at'
+                      ~ '^\d{4}-\d{2}-\d{2}T'
+                 THEN (source.metadata->>'surge_requested_at')::timestamptz
+            END AS surge_requested_at
         FROM content_sources AS source
         -- The account's own normal: earlier posts on the same platform in the
         -- last 90 days that the sync has read engagement for. Earlier only —
@@ -209,10 +270,69 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                   AND action.subject_id = source.id
                   AND action.payload ? 'artifact'
                   AND action.payload->>'source_version' = source.version::text
-                  AND action.status = 'failed'
+                  AND (
+                      action.status = 'failed'
+                      -- A "succeeded" request whose executor reports ended
+                      -- without artifact evidence did not deliver the
+                      -- artifact: the request notified, the artifact never
+                      -- landed. Counting it as failed is the honest state,
+                      -- and it rides the same bounded retry a transport
+                      -- failure does rather than silently closing the
+                      -- artifact's file.
+                      OR (
+                          action.status = 'succeeded'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM autopilot_execution_reports AS report
+                              WHERE report.workspace_id = action.workspace_id
+                                AND report.action_id = action.id
+                                AND report.status IN ('succeeded','failed')
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM autopilot_execution_reports AS evidence
+                              WHERE evidence.workspace_id = action.workspace_id
+                                AND evidence.action_id = action.id
+                                AND evidence.status = 'succeeded'
+                                AND COALESCE(
+                                    NULLIF(btrim(evidence.metadata->'artifact_delivery'->>'url'), ''),
+                                    NULLIF(btrim(evidence.metadata->'artifact_delivery'->>'surface'), ''),
+                                    NULLIF(btrim(evidence.metadata->'artifact_delivery'->>'reference'), '')
+                                ) IS NOT NULL
+                          )
+                      )
+                  )
                 GROUP BY action.payload->>'artifact'
             ) AS per_artifact
         ) AS failed ON true
+        -- Surge lanes that already failed for this source. The lane name
+        -- lives in the idempotency key (`action:drop_surge:{source}:{lane}`
+        -- with an `:attempt{n}` suffix on retries), so the failure read keys
+        -- on the key's prefix and suffix rather than a payload column —
+        -- the same place the dedupe actually happens.
+        LEFT JOIN LATERAL (
+            SELECT
+                array_agg(per_lane.lane ORDER BY per_lane.lane) AS lanes,
+                array_agg(per_lane.failures ORDER BY per_lane.lane) AS counts,
+                array_agg(per_lane.last_failed_at ORDER BY per_lane.lane) AS last_failed
+            FROM (
+                SELECT
+                    -- Element 4 of 'action:drop_surge:{uuid}:{lane}…' — the
+                    -- uuid is element 3, the lane is always the fourth
+                    -- colon-separated segment because the retry suffix
+                    -- comes after it.
+                    split_part(action.idempotency_key, ':', 4) AS lane,
+                    count(*)::bigint AS failures,
+                    max(COALESCE(action.finished_at, action.updated_at)) AS last_failed_at
+                FROM autopilot_actions AS action
+                WHERE action.workspace_id = source.workspace_id
+                  AND action.context = 'content_supply'
+                  AND action.idempotency_key
+                      LIKE 'action:drop_surge:' || source.id::text || ':%'
+                  AND action.status = 'failed'
+                GROUP BY split_part(action.idempotency_key, ':', 4)
+            ) AS per_lane
+        ) AS surge_failed ON true
         WHERE source.workspace_id = $1
           AND source.active
           -- Every artifact an `event` source owes is pre-show promotion: a
@@ -252,6 +372,16 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 source_id: ContentSourceId::from_uuid(row.source_id),
                 source_kind,
                 source_version: row.source_version,
+                source_key: row.source_key.clone(),
+                title: row.title.clone(),
+                source_url: row.source_url.clone(),
+                source_body: row.source_body.clone(),
+                source_thumbnail_url: row.source_thumbnail_url.clone(),
+                site_origin: row
+                    .member_site_base_url
+                    .as_deref()
+                    .map(|origin| origin.trim().trim_end_matches('/').to_owned())
+                    .filter(|origin| !origin.is_empty()),
                 occurred_at: row.occurred_at,
                 expires_at: row.expires_at,
                 communication_enabled: row.communication_enabled,
@@ -280,6 +410,18 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                         })
                     })
                     .collect::<Result<_, RepositoryError>>()?,
+                drop_surge_failures: row
+                    .surge_lane_names
+                    .iter()
+                    .zip(&row.surge_lane_counts)
+                    .zip(&row.surge_lane_last)
+                    .map(|((lane, failures), last_failed_at)| DropSurgeLaneFailure {
+                        lane: lane.clone(),
+                        failures: u32::try_from(*failures).unwrap_or(u32::MAX),
+                        last_failed_at: *last_failed_at,
+                    })
+                    .collect(),
+                surge_requested_at: row.surge_requested_at,
                 social_post: if source_kind == ContentSourceKind::SocialPost {
                     Some(SocialPostFact {
                         title: row.title.clone(),

@@ -692,6 +692,10 @@ fn outreach_candidate(
 /// missing, and — for a synced band post — the relays that carry it. The
 /// artifact request is unchanged; the relay is the addition (2.11), and it is
 /// a *carry*, not a draft: title, caption and link arrive verbatim.
+///
+/// A fresh video or release owes a third kind: the drop surge fans out to
+/// every owned lane in the same cycle, because the first day is where a new
+/// video earns its fans and the artifact chain cannot wait for it.
 fn content_candidates(
     snapshot: &ContentSupplySnapshot,
     policy: &AutopilotPolicy,
@@ -703,6 +707,18 @@ fn content_candidates(
     let AutopilotPolicyConfig::ContentSupply(domain_policy) = &policy.config else {
         return Ok(Vec::new());
     };
+    // The surge is additive: the artifact chain still owes its renders, the
+    // surge owes the drop its fan-out. The two never share a subject or a
+    // key, so neither can starve the other.
+    let mut out = drop_surge_candidates(
+        snapshot,
+        policy,
+        domain_policy,
+        communities,
+        push_audience,
+        evidence,
+        now,
+    )?;
     match evaluate_content_supply(snapshot, *domain_policy, now) {
         ContentSupplyDecision::Request {
             artifact,
@@ -727,7 +743,7 @@ fn content_candidates(
             let disposition = crowdrelay_domain::autonomy::internal_work_disposition(
                 disposition(policy.autonomy_level, confidence, policy.minimum_confidence),
             );
-            Ok(vec![DecisionCandidate {
+            out.push(DecisionCandidate {
                 context: policy.context,
                 subject: ActionSubject::ContentSource(snapshot.source_id),
                 decision_kind: "request_content_artifact",
@@ -750,19 +766,23 @@ fn content_candidates(
                     "action:content:{}:sv{}:{:?}{retry}",
                     snapshot.source_id, snapshot.source_version, artifact
                 ),
-            }])
+            });
+            Ok(out)
         }
-        ContentSupplyDecision::Relay { confidence } => Ok(relay_candidates(
-            snapshot,
-            policy,
-            domain_policy,
-            communities,
-            push_audience,
-            confidence,
-            evidence,
-            now,
-        )?),
-        ContentSupplyDecision::Hold(_) => Ok(Vec::new()),
+        ContentSupplyDecision::Relay { confidence } => {
+            out.extend(relay_candidates(
+                snapshot,
+                policy,
+                domain_policy,
+                communities,
+                push_audience,
+                confidence,
+                evidence,
+                now,
+            )?);
+            Ok(out)
+        }
+        ContentSupplyDecision::Hold(_) => Ok(out),
     }
 }
 

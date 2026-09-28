@@ -178,6 +178,37 @@ impl PostgresAutopilotRepository {
                     )
                     .await?;
                 }
+                AutopilotActionPayload::RequestSourceCampaign {
+                    source_id,
+                    template_key,
+                    audience_size: _,
+                    audience_basis: _,
+                    draft,
+                } => {
+                    // The drop surge's email leg — same campaign machinery as
+                    // the event-bound sibling, anchored on the content source
+                    // instead of a show. The tracked link is minted first so
+                    // the copy's URL resolves the moment the mailer sends.
+                    operations::drop_surge::ensure_drop_surge_link(
+                        &mut transaction,
+                        workspace_id,
+                        *source_id,
+                        "email",
+                    )
+                    .await?;
+                    operations::execute_source_campaign(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        operations::SourceCampaignOrder {
+                            source_id: *source_id,
+                            template_key,
+                            draft,
+                        },
+                        now,
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RequestMerchBundle {
                     product_a,
                     product_b,
@@ -1200,6 +1231,23 @@ impl PostgresAutopilotRepository {
                     // window is reserved in the same transaction, so the
                     // pitch spends against the same cooldown and org budget
                     // every other outbound send answers to.
+                    // A drop-surge draft is composed by the brain, not a
+                    // model — `draft.drop_surge` marks it, and execution
+                    // owes it two things the model path gets for free: the
+                    // completed task row the channel executors join on
+                    // (`task_id` is derived per lane, not the id of a task
+                    // that ran), and the tracked `/l/` link its `cta_url`
+                    // names, minted before the action can succeed so the
+                    // executor never materializes a post bound to nothing.
+                    operations::drop_surge::materialize_surge_draft(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        *task_id,
+                        template_id.as_deref(),
+                        draft,
+                    )
+                    .await?;
                     let (send_email, send_name) = if let Some(target_id) = recipient_target_id
                     {
                         let pinned = sqlx::query_as::<_, (String, String)>(
@@ -1395,7 +1443,7 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::RequestSignalPush {
-                    task_id: _,
+                    task_id,
                     title,
                     body,
                     target_path,
@@ -1403,7 +1451,21 @@ impl PostgresAutopilotRepository {
                     segment,
                     audience_size: _,
                     audience_basis: _,
+                    drop_surge_lane,
                 } => {
+                    // A surge push's `task_id` is the source it promotes and
+                    // its `target_path` names a `/l/` slug — the link row
+                    // must exist before the push lands or the tap resolves
+                    // to nowhere.
+                    if let Some(lane) = drop_surge_lane {
+                        operations::drop_surge::ensure_drop_surge_link(
+                            &mut transaction,
+                            workspace_id,
+                            ContentSourceId::from_uuid(*task_id),
+                            lane,
+                        )
+                        .await?;
+                    }
                     operations::execute_signal_push(
                         &mut transaction,
                         workspace_id,

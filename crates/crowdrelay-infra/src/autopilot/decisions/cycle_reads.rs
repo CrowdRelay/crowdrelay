@@ -92,17 +92,32 @@ macro_rules! decision_cycle_reads {
 
             // Cancelled actions are excluded: an approval that was refused is
             // not a touch anybody received. Everything else counts, including
-            // failures, because a send that errored may still have gone out.
+            // failures, because a send that errored may still have gone out —
+            // with one provable exception: a failure with no emission row was
+            // refused before dispatch ever ran (a dispatch-time veto, a gate
+            // refusal), so it demonstrably reached nobody and must not spend
+            // the envelope a real send would. On 2026-09-28 a 38-action
+            // `state_changed` veto batch burned the workspace's weekly
+            // third-party budget for sends that never existed.
             let spend = sqlx::query_as::<_, (String, i64, i64)>(
                 r#"
                 SELECT action_class, count(*)::bigint,
                        count(*) FILTER (WHERE created_at >= $2 - INTERVAL '24 hours')::bigint
-                FROM autopilot_actions
-                WHERE workspace_id = $1
-                  AND action_class IN ('owned_audience', 'third_party')
-                  AND status <> 'cancelled'
-                  AND created_at >= $2 - INTERVAL '7 days'
-                GROUP BY action_class
+                FROM autopilot_actions AS action
+                WHERE action.workspace_id = $1
+                  AND action.action_class IN ('owned_audience', 'third_party')
+                  AND action.status <> 'cancelled'
+                  AND NOT (
+                      action.status = 'failed'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM autopilot_action_emissions AS emission
+                          WHERE emission.workspace_id = action.workspace_id
+                            AND emission.action_id = action.id
+                      )
+                  )
+                  AND action.created_at >= $2 - INTERVAL '7 days'
+                GROUP BY action.action_class
                 "#,
             )
             .bind(workspace_id.into_uuid())

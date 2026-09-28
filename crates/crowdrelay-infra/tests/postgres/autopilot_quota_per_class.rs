@@ -113,6 +113,7 @@ fn relay_push() -> DecisionCandidate {
             segment: None,
             audience_size: None,
             audience_basis: String::new(),
+            drop_surge_lane: None,
         },
         decision_key: format!("decision:test-quota:{nonce}"),
         action_idempotency_key: format!("action:test-quota:{nonce}"),

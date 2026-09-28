@@ -408,6 +408,7 @@ async fn an_action_with_no_target_has_nothing_to_remember() -> Result<()> {
         segment: None,
         audience_size: None,
         audience_basis: String::new(),
+        drop_surge_lane: None,
     };
     ensure!(
         push.standing_approval_target().is_none(),

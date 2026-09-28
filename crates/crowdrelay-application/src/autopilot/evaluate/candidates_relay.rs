@@ -185,6 +185,7 @@ fn relay_candidates(
                     "fans with notifications on who consented to marketing".to_owned()
                 }
             }),
+            drop_surge_lane: None,
         },
         decision_key: format!("decision:relay:v{}:{source}:signal_push", policy.version),
         action_idempotency_key: format!("action:relay:{source}:signal_push"),

@@ -181,6 +181,14 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("event:{event_id}")),
             DispatchContext::default(),
         ),
+        // The drop surge's email leg groups by its source: two videos
+        // dropping in one day are two campaigns, each measuring its own.
+        AutopilotActionPayload::RequestSourceCampaign { source_id, .. } => (
+            "source-campaign".to_owned(),
+            format!("source:{source_id}"),
+            Some(format!("source:{source_id}")),
+            DispatchContext::default(),
+        ),
         AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => (
             format!("show-growth:{}", lever.as_str()),
             format!("event:{event_id}"),

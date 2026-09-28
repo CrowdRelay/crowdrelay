@@ -49,6 +49,7 @@ mod content_artifact_execution;
 mod content_suggestion_execution;
 mod content_supply_snapshots;
 mod discovery;
+pub(in crate::autopilot) mod drop_surge;
 pub(in crate::autopilot) mod evidence;
 mod execution;
 pub(in crate::autopilot) mod experiment_assignments;
@@ -73,6 +74,7 @@ mod reply_triage;
 mod show_growth;
 mod show_growth_execution;
 mod snapshots;
+mod source_campaign;
 
 pub(super) use acquisition_channels::*;
 pub(super) use booking_agent_reply_execution::*;
@@ -99,6 +101,7 @@ pub(super) use reply_snapshots::*;
 pub(super) use show_growth::*;
 pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;
+pub(super) use source_campaign::*;
 
 /// The gate every smart-link destination must pass before it is inserted:
 /// `smart_links.destination_url` is CHECKed `~* '^https?://'` — a looser gate

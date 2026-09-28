@@ -493,11 +493,21 @@ where
                     }
                     // Admitted communities — and the push audience the
                     // approval will quote — are loaded once, and only when a
-                    // fresh synced post could be relayed — a cycle with no
-                    // relay material owes either read nothing.
-                    let has_relay_material = snapshots
-                        .iter()
-                        .any(|snapshot| snapshot.source_kind == ContentSourceKind::SocialPost);
+                    // fresh synced post could be relayed or a fresh drop
+                    // could surge — a cycle with neither owes either read
+                    // nothing.
+                    let domain_policy = match &policy.config {
+                        AutopilotPolicyConfig::ContentSupply(config) => Some(*config),
+                        _ => None,
+                    };
+                    let has_relay_material = snapshots.iter().any(|snapshot| {
+                        snapshot.source_kind == ContentSourceKind::SocialPost
+                            || domain_policy.is_some_and(|config| {
+                                crowdrelay_domain::content_supply::drop_surge_eligible(
+                                    snapshot, &config, now,
+                                )
+                            })
+                    });
                     let communities = if has_relay_material {
                         self.repository
                             .load_relay_community_targets(self.workspace_id)
@@ -963,6 +973,7 @@ include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
 include!("evaluate/candidates_terms.rs");
 include!("evaluate/candidates_relay.rs");
+include!("evaluate/candidates_drop_surge.rs");
 include!("evaluate/candidates_reply_rescue.rs");
 include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");

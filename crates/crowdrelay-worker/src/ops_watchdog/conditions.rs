@@ -603,5 +603,34 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                 "fans_awaiting_geocoding": snapshot.fans_awaiting_geocoding,
             }),
         },
+        Condition {
+            // A fresh drop's fan-out produced nothing a fan can see. The
+            // drop window is where a new video earns its reach — a stalled
+            // surge is the difference between a premiere and a non-event,
+            // and on 2026-09-28 one burned its whole first day silent while
+            // the artifact lane reported success. Warning rather than
+            // critical: nothing is corrupted and the window has not fully
+            // closed — but it is closing, which is why the alarm exists at
+            // all. `approval.expired_unanswered` covers the opposite failure
+            // (asks nobody answered); this one covers asks that were never
+            // even made visible.
+            key: "growth.drop_surge_stalled",
+            severity: "warning",
+            summary: "A fresh drop's fan-out stalled — surge lanes raised but nothing reached fans",
+            active: snapshot
+                .stalled_drops
+                .as_ref()
+                .is_some_and(|drops| drops.as_array().is_some_and(|a| !a.is_empty())),
+            details: json!({
+                "stalled_drops": snapshot.stalled_drops,
+                "remedy": "each stalled drop lists its lanes with their \
+                           action status. awaiting_approval means the fix is \
+                           an approval click in /ops/attention; failed means \
+                           the executor's error needs reading; succeeded \
+                           with no receipt means the post materializer never \
+                           claimed it — check executor heartbeats and the \
+                           template join.",
+            }),
+        },
     ]
 }

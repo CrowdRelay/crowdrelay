@@ -806,6 +806,11 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     max_recipients_per_step = $7,
                     weekly_approval_requests = $11,
                     weekly_bootstrap_actions = $10,
+                    -- Was missing while the audit details carried it: the API
+                    -- accepted the daily cap and the UPDATE silently dropped
+                    -- it, leaving the column stuck at its old value no matter
+                    -- what an operator set.
+                    daily_third_party_touches = $12,
                     parked = $9,
                     version = version + 1,
                     updated_at = now()
@@ -823,6 +828,7 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
             .bind(command.parked)
             .bind(bounded_i32(command.weekly_bootstrap_actions)?)
             .bind(bounded_i32(command.weekly_approval_requests)?)
+            .bind(bounded_i32(command.daily_third_party_touches)?)
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;

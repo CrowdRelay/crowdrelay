@@ -17,6 +17,7 @@ impl AutopilotActionPayload {
             Self::RequestGigOutreach { .. } => "gig.outreach.request",
             Self::RequestLatarnikInvite { .. } => "latarnik.invite.request",
             Self::RequestAudienceCampaign { .. } => "audience.campaign.request",
+            Self::RequestSourceCampaign { .. } => "audience.source_campaign.request",
             Self::RequestMerchBundle { .. } => "merch.bundle.request",
             Self::RequestOutreach { .. } => "outreach.request",
             Self::RequestOutreachReply { .. } => "outreach.reply.request",
