@@ -130,22 +130,28 @@ pub async fn confirm_release_delivery(
         tracing::warn!(%error, beacon_id=%principal.beacon_id, campaign_id=%campaign_id, "Latarnik delivery confirmation failed");
         return BeaconSignalError::Unavailable.response(request_id_value);
     }
-    if let Err(error) = sqlx::query(
-        r#"
-        INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id,max_attempts)
-        VALUES ($1,'crowdrelay.beacon.release_delivery_confirmed',1,$2,$3,12)
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(json!({
-        "campaign_id": campaign_id,
-        "release_title": row.1,
-        "beacon_id": principal.beacon_id,
-        "display_name": principal.display_name,
-    }))
-    .bind(format!("beacon-release-confirmed:{campaign_id}:{}", principal.beacon_id))
-    .execute(&mut *tx)
-    .await
+    // A member re-submitting (a Paczkomat detail edit, a retried POST)
+    // lands here on an already-'confirmed' row — the update above is
+    // deliberately idempotent, and the emission must be too: a second
+    // `release_delivery_confirmed` event defeats consumer-side dedupe,
+    // which keys on event id.
+    if row.0 != "confirmed"
+        && let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO outbox_events (workspace_id,event_type,event_version,payload,request_id,max_attempts)
+            VALUES ($1,'crowdrelay.beacon.release_delivery_confirmed',1,$2,$3,12)
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(json!({
+            "campaign_id": campaign_id,
+            "release_title": row.1,
+            "beacon_id": principal.beacon_id,
+            "display_name": principal.display_name,
+        }))
+        .bind(format!("beacon-release-confirmed:{campaign_id}:{}", principal.beacon_id))
+        .execute(&mut *tx)
+        .await
     {
         tracing::warn!(%error, "Latarnik delivery confirmation event failed");
         return BeaconSignalError::Unavailable.response(request_id_value);
