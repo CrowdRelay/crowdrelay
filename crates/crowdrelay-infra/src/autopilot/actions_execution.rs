@@ -1188,26 +1188,79 @@ impl PostgresAutopilotRepository {
                     // is the only thing the mailer sees. Emitting a pitch
                     // without an address published a draft to nobody, which is
                     // how every press pitch in production ended.
+                    //
+                    // The address the payload froze at approval time is not
+                    // trusted on its own: when the pitch names a registry
+                    // target, that row is re-pinned here — the producer's own
+                    // guards run again under the lock, because a contact can
+                    // be marked do-not-contact, deactivated, or re-addressed
+                    // between the click and the claim. The approved email is
+                    // the pin — a row carrying a different one is a different
+                    // recipient than the operator approved. The contact
+                    // window is reserved in the same transaction, so the
+                    // pitch spends against the same cooldown and org budget
+                    // every other outbound send answers to.
+                    let (send_email, send_name) = if let Some(target_id) = recipient_target_id
+                    {
+                        let pinned = sqlx::query_as::<_, (String, String)>(
+                            r#"
+                            SELECT target.display_name, target.contact_email
+                            FROM outreach_targets AS target
+                            WHERE target.workspace_id = $1
+                              AND target.id = $2
+                              AND target.active
+                              AND target.accepts_outreach
+                              AND NOT target.do_not_contact
+                              AND target.contact_email IS NOT NULL
+                              AND btrim(target.contact_email) <> ''
+                            FOR SHARE OF target
+                            "#,
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(*target_id)
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?
+                        .ok_or(RepositoryError::Conflict)?;
+                        if recipient_email.as_deref().map(|mail| mail.trim().to_lowercase())
+                            != Some(pinned.1.trim().to_lowercase())
+                        {
+                            return Err(RepositoryError::Conflict);
+                        }
+                        reserve_contact_window(
+                            &mut transaction,
+                            workspace_id,
+                            action.id,
+                            "press_pitch",
+                            &pinned.1,
+                            now,
+                            false,
+                        )
+                        .await?;
+                        (Some(pinned.1), Some(pinned.0))
+                    } else {
+                        (recipient_email.clone(), recipient_name.clone())
+                    };
                     let event = json!({
                         "action_id": action.id,
                         "template_id": template_id,
                         "task_id": task_id,
                         "draft": draft,
-                        "recipient_email": recipient_email,
-                        "recipient_name": recipient_name,
+                        "recipient_email": send_email,
+                        "recipient_name": send_name,
                         "recipient_target_id": recipient_target_id,
                     });
                     // A draft with an address is an outward send — the payload
                     // classes itself third-party for exactly this shape, so the
                     // gate will demand the evidence a channel draft can omit.
-                    if recipient_email.is_some() || recipient_target_id.is_some() {
+                    if send_email.is_some() || recipient_target_id.is_some() {
                         emit_outward_action(
                             &mut transaction,
                             workspace_id,
                             action.id,
                             "crowdrelay.agent.content_requested",
                             format!("agent-task:{task_id}"),
-                            "agent-drafted pitch to a recipient the operator approved",
+                            "agent-drafted pitch to a recipient the operator approved — re-pinned and contact window reserved at dispatch",
                             event,
                         )
                         .await?;
