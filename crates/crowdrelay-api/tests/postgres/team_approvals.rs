@@ -164,9 +164,22 @@ async fn a_mailed_link_renders_then_decides_the_ask() -> Result<(), Box<dyn std:
     .await?;
     let token = link_for(approve_id, now + time::Duration::days(2));
 
+    // The crew's clock is recorded, so the deadline reads on it, named.
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'crew_timezone', 'Europe/Warsaw')
+         ON CONFLICT (workspace_id, key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(workspace_uuid)
+    .execute(&pool)
+    .await?;
+
     // GET renders the ask — and decides nothing.
     let (status, body) = get_text(&app, &format!("/v1/public/approvals/{token}")).await?;
     assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("(Europe/Warsaw)") && !body.contains(" UTC</p>"),
+        "the deadline is not on the crew's clock: {body}"
+    );
     assert!(
         body.contains("Post to r/test"),
         "the ask never rendered: {body}"

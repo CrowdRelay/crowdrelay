@@ -117,18 +117,8 @@ pub(in crate::autopilot) async fn load_next_best_actions(
     // The chief-of-staff queue shows the same briefings as the panel and the
     // task emails, so it resolves the same language. Unreadable means the
     // source language, never a failed load.
-    let crew_locale = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_locale'",
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_optional(&repo.pool)
-    .await
-    .ok()
-    .flatten()
-    .map_or(
-        crowdrelay_application::autopilot::BriefingLocale::default(),
-        |tag| crowdrelay_application::autopilot::BriefingLocale::from_tag(&tag),
-    );
+    let crew = crate::autopilot::crew_clock(&repo.pool, workspace_id.into_uuid()).await;
+    let crew_locale = crew.locale;
 
     let rows = sqlx::query_as::<_, QueueRow>(
         r#"
@@ -319,7 +309,11 @@ pub(in crate::autopilot) async fn load_next_best_actions(
         {
             outreach_targets.push(*target_id);
         }
-        let briefing = parsed_payload.map(|parsed| parsed.briefing().localized(crew_locale));
+        let briefing = parsed_payload.map(|parsed| {
+            parsed
+                .briefing_on(&|at| crate::regional::format_on_clock(at, &crew.zone))
+                .localized(crew_locale)
+        });
         candidates.push((
             row.due_at,
             briefing,

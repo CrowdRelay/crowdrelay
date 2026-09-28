@@ -409,6 +409,27 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // The brain demoted itself: two consecutive `worsened` outcomes
+            // in a context drop its policy to `require_approval` for a week.
+            // Right when it happens the operator must hear it — every action
+            // in that context now waits for them — and the event that says so
+            // is refused by the n8n router. Warning: nothing is broken, the
+            // throughput limit just moved onto a person.
+            key: "autopilot.authority_guarded",
+            severity: "warning",
+            summary: "The autopilot demoted itself to ask-first after worsened outcomes",
+            active: snapshot.guarded_policies.is_some(),
+            details: json!({
+                "policies": snapshot.guarded_policies,
+                "remedy": "every action in the named contexts now waits for approval \
+                           until the guard lapses. Read the two latest outcomes \
+                           in the context (autopilot_outcomes joined to \
+                           autopilot_actions) — if they are noise rather than harm, \
+                           restore the policy's autonomy_level yourself; if they \
+                           are real, leave the guard and review what shipped.",
+            }),
+        },
+        Condition {
             // The deadline is a contract, and this is the contract being
             // broken. An ask past `approval_expires_at` must have already
             // died — the claim sweep runs it every cycle and the retention

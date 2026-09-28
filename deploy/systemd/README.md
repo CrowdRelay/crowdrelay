@@ -1,6 +1,6 @@
 # Server timers
 
-Three independent units live here. All name `/opt/crowdrelay`, which is where
+Three independent timers live here, plus the CI runner slice. All name `/opt/crowdrelay`, which is where
 production is installed; check `WorkingDirectory`/`ExecStart` against the real
 install before enabling one anywhere else.
 
@@ -44,3 +44,22 @@ restore steps, and the WAL-archiving upgrade path live in
 ## Optional alerts
 
 Set `ALERT_WEBHOOK_URL` in `/etc/virya/production-smoke.env` to preserve failure notifications after moving the 15-minute schedule out of GitHub Actions. Repeated failures are rate-limited to one alert per hour by default (`ALERT_COOLDOWN_SECONDS`), and the probe sends one recovery message when service returns. The timer keeps its state in `/var/lib/crowdrelay-production-smoke`.
+
+## CI runner slice
+
+The self-hosted GitHub Actions runners (five `actions.runner.*.service` units)
+run on the production host. During a Rust CI build host CPU pressure reached
+`some avg60=89%` on 2 vCPUs and single-row database updates took 1-1.5 s
+(2026-09-27/28). `ci-runners.slice` puts every runner below production: CPU and
+IO weight 20 against docker's default 100, `MemoryHigh=4G`, `Nice=10`. Weights,
+not quotas, so CI still gets the whole box when production is idle.
+
+Install on the host between CI jobs (a changed runner restarts, interrupting a
+job in flight):
+
+    bash scripts/apply-ci-runner-limits.sh --dry-run
+    bash scripts/apply-ci-runner-limits.sh
+
+It is idempotent and prints each runner's slice afterwards. Moving the runners
+off the production host is still the better fix; this is the cheap one.
+

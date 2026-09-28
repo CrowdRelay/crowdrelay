@@ -385,6 +385,22 @@ impl TenantSettingsRepository {
             .unwrap_or_else(|| DEFAULT_CREW_LOCALE.to_owned()))
     }
 
+    /// The crew's clock: `crew_timezone` when it names a known IANA zone,
+    /// otherwise `"UTC"`. Text a crew member reads converts to it and names
+    /// it; with none recorded the text stays UTC and says so.
+    pub async fn crew_timezone(&self, workspace_id: Uuid) -> Result<String, sqlx::Error> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_timezone'",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stored
+            .map(|zone| zone.trim().to_owned())
+            .filter(|zone| crate::regional::is_known_iana_timezone(zone))
+            .unwrap_or_else(|| "UTC".to_owned()))
+    }
+
     /// The crew's language tag only when the tenant actually set one —
     /// `None` stays `None` here. `crew_locale` substitutes the default for
     /// readers that must produce text; a payload that records which locale

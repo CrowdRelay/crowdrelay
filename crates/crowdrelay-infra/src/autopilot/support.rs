@@ -233,7 +233,9 @@ fn pending_action(
     });
     // Same briefing the task email carries, in the same language — the panel
     // and the email are two views of one handoff and must not disagree.
-    let mut briefing = payload.briefing().localized(locale);
+    let mut briefing = payload
+        .briefing_on(&|at| crate::regional::format_on_clock(at, &crew.zone))
+        .localized(locale);
     briefing.deadline_note = format_deadline_note(
         row.approval_expires_at,
         row.assignment_due_at,
