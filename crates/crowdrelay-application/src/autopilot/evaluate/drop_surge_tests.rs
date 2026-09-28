@@ -112,6 +112,35 @@
             .map(|candidate| candidate.action_idempotency_key.as_str())
             .collect();
         assert_eq!(keys.len(), DROP_SURGE_LANES.len());
+        // Bounded-auto must mean it: outward lanes auto-execute even against
+        // unproven evidence, the same gate the sibling artifact lane answers.
+        // The first version of this test exercised
+        // `disposition_with_evidence`, and a production drop under a
+        // full-send posture still parked every lane awaiting approval —
+        // the evidence floor is for measured decisions, not first-party
+        // posting lanes with a closing window.
+        let dispositions: Vec<PolicyDisposition> = candidates
+            .iter()
+            .filter(|candidate| candidate.decision_kind == "drop_surge_fanout")
+            .map(|candidate| candidate.disposition)
+            .collect();
+        let outward = dispositions
+            .iter()
+            .zip(
+                candidates
+                    .iter()
+                    .filter(|c| c.decision_kind == "drop_surge_fanout")
+                    .map(|c| c.action_idempotency_key.rsplit(':').next().unwrap_or("")),
+            )
+            .filter(|(_, lane)| *lane != "community")
+            .map(|(disposition, _)| *disposition)
+            .collect::<Vec<_>>();
+        assert!(
+            outward
+                .iter()
+                .all(|disposition| *disposition == PolicyDisposition::AutoExecute),
+            "outward lanes auto-execute at bounded-auto: {dispositions:?}"
+        );
         Ok(())
     }
 

@@ -82,7 +82,6 @@ fn drop_surge_candidates(
     domain_policy: &crowdrelay_domain::content_supply::ContentSupplyPolicy,
     communities: &[CommunityRelayTarget],
     push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
-    evidence: ContextEvidence,
     now: OffsetDateTime,
 ) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
     if !crowdrelay_domain::content_supply::drop_surge_eligible(snapshot, domain_policy, now) {
@@ -91,21 +90,20 @@ fn drop_surge_candidates(
     let input_snapshot = serde_json::to_value(snapshot)?;
     let policy_snapshot = policy_evidence(policy, domain_policy)?;
     let source = snapshot.source_id.into_uuid();
-    // Outward lanes answer the normal gate — posture, confidence floor,
-    // evidence — unupgraded. At bounded-auto they execute on their own;
-    // under require_approval they park with the copy in front of the
-    // operator, which is exactly what that posture asks for.
-    let outward = disposition_with_evidence(
-        policy.autonomy_level,
-        crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(
-            DROP_SURGE_CONFIDENCE,
-        ),
-        policy.minimum_confidence,
-        evidence,
-        RATE_FLOOR,
-    );
+    // Outward lanes answer the normal gate — posture and confidence floor,
+    // the same `disposition` every other content-supply candidate takes.
+    // At bounded-auto they execute on their own; under require_approval
+    // they park with the copy in front of the operator, which is exactly
+    // what that posture asks for. An extra evidence floor is *not* applied
+    // here: the sibling artifact lane does not carry one either, and a
+    // drop that waits on observed history has already lost its window.
     let confidence = crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(
         DROP_SURGE_CONFIDENCE,
+    );
+    let outward = disposition(
+        policy.autonomy_level,
+        confidence,
+        policy.minimum_confidence,
     );
 
     let mut out = Vec::new();

@@ -716,7 +716,6 @@ fn content_candidates(
         domain_policy,
         communities,
         push_audience,
-        evidence,
         now,
     )?;
     match evaluate_content_supply(snapshot, *domain_policy, now) {
