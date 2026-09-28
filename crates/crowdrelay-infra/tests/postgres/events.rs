@@ -1190,3 +1190,98 @@ fn test_sensitive_response_codec() -> SensitiveResponseCodec {
         b"events-integration-response-secret",
     ))
 }
+
+/// A fan's "my events" list is a live read: a show cancelled after they
+/// registered interest must drop out of it — its slug 404s and its ticket
+/// link is dead — while a completed one stays, because the show they went
+/// to is part of their history. Interest rows are never deleted, so the
+/// filter is what keeps the two apart.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_EVENT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_cancelled_show_leaves_the_fans_interest_list() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_EVENT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!(
+        "event-cancel-{}",
+        workspace_id.into_uuid().simple()
+    ))?;
+    let starts_at = OffsetDateTime::now_utc() + time::Duration::days(2);
+    let event_id = seed_fixture(&pool, workspace_id, &workspace_slug, starts_at).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let acquisition = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        CountryCode::parse("PL")?,
+        &database,
+        false,
+        test_sensitive_response_codec(),
+    );
+    let events =
+        PostgresEventRepository::new(pool.clone(), workspace_slug, &database, vec![1_440, 120]);
+
+    let fan = acquisition
+        .persist_fan_signup(&signup_command(workspace_id)?)
+        .await?;
+    let command = RegisterEventInterestCommand::new(
+        crowdrelay_application::RegisterEventInterestCommandArgs {
+            workspace_id,
+            event_slug: EventSlug::parse("wroclaw-live-2026")?,
+            fan_session: fan.fan_session_token.clone().ok_or("active fan session")?,
+            idempotency_key: IdempotencyKey::parse("event-interest-cancel-0001")?,
+            request_id: RequestId::parse("event-interest-cancel-request-0001")?,
+            campaign_id: None,
+            visitor_id: Some(VisitorId::new()),
+            source: "integration_test".to_owned(),
+        },
+    )?;
+    assert!(events.register_interest(&command).await?.created);
+
+    let listed = events
+        .list_fan_interests(
+            workspace_id,
+            fan.fan_session_token.as_ref().ok_or("active fan session")?,
+            10,
+        )
+        .await?;
+    assert_eq!(listed.len(), 1, "the published show is listed");
+
+    sqlx::query("UPDATE events SET status = 'cancelled' WHERE id = $1")
+        .bind(event_id)
+        .execute(&pool)
+        .await?;
+    let listed = events
+        .list_fan_interests(
+            workspace_id,
+            fan.fan_session_token.as_ref().ok_or("active fan session")?,
+            10,
+        )
+        .await?;
+    assert!(
+        listed.is_empty(),
+        "a cancelled show must not surface to the fan — its links are dead"
+    );
+
+    sqlx::query("UPDATE events SET status = 'completed' WHERE id = $1")
+        .bind(event_id)
+        .execute(&pool)
+        .await?;
+    let listed = events
+        .list_fan_interests(
+            workspace_id,
+            fan.fan_session_token.as_ref().ok_or("active fan session")?,
+            10,
+        )
+        .await?;
+    assert_eq!(listed.len(), 1, "a completed show stays in the list");
+    Ok(())
+}
