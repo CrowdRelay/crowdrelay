@@ -153,6 +153,52 @@ mod tests {
         }
     }
 
+    /// A booking-discovery request is executor work end to end: parked when
+    /// no `booking.discovery` capability is advertised, deferred to a receipt
+    /// when it is. The mapping arm existed while `payload_requires_executor`
+    /// omitted the variant — every reachability test read the arm and the
+    /// action still ran ungated, burned its attempts on
+    /// `repository_unavailable`, and never parked. The pair must move
+    /// together, so this asserts both sides of it.
+    #[test]
+    fn booking_discovery_is_gated_and_mapped() {
+        let payload = AutopilotActionPayload::RequestBookingTargetDiscovery {
+            requested_count: 8,
+        };
+        assert!(
+            payload_requires_executor(&payload),
+            "a discovery ask no executor serves must park, not burn attempts"
+        );
+        assert_eq!(
+            executor_capability_for_payload(&payload),
+            Some("booking.discovery"),
+            "the predicate and the capability map are one contract — \
+             an executor-required payload with no mapping is a dead arm"
+        );
+    }
+
+    /// `RequestOutreachTarget` executes as an in-process UPDATE — nothing is
+    /// emitted and no receipt ever arrives, so marking it executor-required
+    /// only deferred its outcome write to a report that cannot exist.
+    #[test]
+    fn outreach_target_promotion_is_internal() {
+        let payload = AutopilotActionPayload::RequestOutreachTarget {
+            task_id: Uuid::now_v7(),
+            target_kind: "press".to_owned(),
+            display_name: "Fanzine".to_owned(),
+            contact_email: None,
+            contact_domain: None,
+            why_fit: String::new(),
+            evidence_urls: json!([]),
+            subreddit: None,
+        };
+        assert!(
+            !payload_requires_executor(&payload),
+            "a pure DB write has no executor to wait on"
+        );
+        assert_eq!(executor_capability_for_payload(&payload), None);
+    }
+
     /// The emission gate reads the template, not just the event type.
     #[test]
     fn emission_capability_splits_press_pitch_from_channel_content() {
