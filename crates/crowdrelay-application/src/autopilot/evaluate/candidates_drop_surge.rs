@@ -1,0 +1,278 @@
+// Drop-surge fan-out for fresh videos and releases, split out of
+// `candidates.rs`: the moment a new video lands in the supply, every owned
+// lane gets its own idempotent action instead of waiting on the generic
+// posting cadence — the failure this lane closes was measured on
+// 2026-09-28, when a premiere got fifty-nine artifact requests and zero
+// fan-facing posts in its first day.
+//
+// The copy is composed here, in deterministic Rust, from the source's own
+// title and description — no model call, no fabricated facts, and the
+// model-text approval gate does not apply because no model wrote a word.
+// Outward lanes still answer the workspace's posture, confidence floor and
+// per-class hold like every other action.
+
+/// Confidence a surge candidate reports. The eligibility check is boolean —
+/// the source either just dropped or it did not — so the number states
+/// "deterministic rule, not an estimator's guess" rather than pretending a
+/// measurement exists.
+const DROP_SURGE_CONFIDENCE: u16 = 9_500;
+
+/// A channel draft's caption budget, in characters. The executor appends
+/// the tracked link itself; the text leaves room for it.
+const SURGE_CAPTION_MAX: usize = 800;
+/// X's 280-character body has to hold caption and link together.
+const SURGE_CAPTION_X_MAX: usize = 230;
+
+/// The `agent_service_tasks.template_id` each channel lane's synthetic task
+/// row carries — the value the channel executors join on to claim work.
+fn surge_template_id(lane: &str) -> Option<&'static str> {
+    match lane {
+        "telegram" => Some("telegram-poster"),
+        "discord" => Some("discord-poster"),
+        "instagram" | "facebook" | "x" => Some("social-post"),
+        _ => None,
+    }
+}
+
+/// The caption a channel draft carries: the band's own title and
+/// description with feed markup stripped, bounded for the platform. The
+/// tracked `/l/` link is deliberately not in the text — the executors mint
+/// and append it, which is what makes the click countable.
+fn surge_caption(snapshot: &ContentSupplySnapshot, max: usize) -> String {
+    let title = snapshot.title.trim();
+    let body = snapshot
+        .source_body
+        .as_deref()
+        .map(strip_feed_markup)
+        .unwrap_or_default();
+    let text = if body.is_empty() {
+        title.to_owned()
+    } else if title.is_empty() {
+        body
+    } else {
+        format!("{title}\n\n{body}")
+    };
+    lock_screen_line(&text, max)
+}
+
+/// How many times this lane already failed for the source — the retry
+/// counter the idempotency key carries so a re-raised lane lands as a new
+/// action instead of deduping onto the dead one.
+fn surge_attempt(snapshot: &ContentSupplySnapshot, lane: &str) -> u32 {
+    snapshot
+        .drop_surge_failures
+        .iter()
+        .find(|failure| failure.lane == lane)
+        .map_or(0, |failure| failure.failures)
+}
+
+/// The drop fan-out for one fresh video or release: one candidate per lane,
+/// each keyed `action:drop_surge:{source}:{lane}` so a provider outage in
+/// Telegram retries Telegram alone and the channels that already posted are
+/// never touched twice.
+///
+/// Lanes that exhaust [`DROP_SURGE_MAX_ATTEMPTS`] stop — a channel that
+/// keeps failing gets its silence rather than a spam loop. The community
+/// lane is a `community-engager` dispatch, not a post: its drafts come back
+/// as their own approval-gated actions, in each community's language.
+#[allow(clippy::too_many_arguments)]
+fn drop_surge_candidates(
+    snapshot: &ContentSupplySnapshot,
+    policy: &AutopilotPolicy,
+    domain_policy: &crowdrelay_domain::content_supply::ContentSupplyPolicy,
+    communities: &[CommunityRelayTarget],
+    push_audience: Option<crowdrelay_domain::content_supply::SignalPushAudience>,
+    evidence: ContextEvidence,
+    now: OffsetDateTime,
+) -> Result<Vec<DecisionCandidate>, serde_json::Error> {
+    if !crowdrelay_domain::content_supply::drop_surge_eligible(snapshot, domain_policy, now) {
+        return Ok(Vec::new());
+    }
+    let input_snapshot = serde_json::to_value(snapshot)?;
+    let policy_snapshot = policy_evidence(policy, domain_policy)?;
+    let source = snapshot.source_id.into_uuid();
+    // Outward lanes answer the normal gate — posture, confidence floor,
+    // evidence — unupgraded. At bounded-auto they execute on their own;
+    // under require_approval they park with the copy in front of the
+    // operator, which is exactly what that posture asks for.
+    let outward = disposition_with_evidence(
+        policy.autonomy_level,
+        crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(
+            DROP_SURGE_CONFIDENCE,
+        ),
+        policy.minimum_confidence,
+        evidence,
+        RATE_FLOOR,
+    );
+    let confidence = crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(
+        DROP_SURGE_CONFIDENCE,
+    );
+
+    let mut out = Vec::new();
+    for &lane in crowdrelay_domain::content_supply::DROP_SURGE_LANES {
+        let failures = surge_attempt(snapshot, lane);
+        if failures >= crowdrelay_domain::content_supply::DROP_SURGE_MAX_ATTEMPTS {
+            continue;
+        }
+        // A retried lane needs a key the dead action does not already own —
+        // same repair the artifact chain got for `FailedArtifact`.
+        let retry = if failures == 0 {
+            String::new()
+        } else {
+            format!(":attempt{failures}")
+        };
+        // A community lane with nobody admitted to hear it is a task run for
+        // nothing — the engager would wake, find zero targets and report
+        // silence. Skipping is honest: the lane retries once a community is
+        // actually admitted.
+        if lane == "community" && communities.is_empty() {
+            continue;
+        }
+        // The email lane needs an absolute link — `cta_url` is relative.
+        // Without the tenant's site origin there is nothing a reader can
+        // click, so the lane waits for the setting rather than sending a
+        // body with a hole where the link goes.
+        if lane == "email" && snapshot.site_origin.is_none() {
+            continue;
+        }
+        let Some(link_slug) =
+            crowdrelay_domain::content_supply::drop_surge_link_slug(&snapshot.source_key, lane)
+        else {
+            continue;
+        };
+        let subject = crate::autopilot::drop_surge_subject(snapshot.source_id, lane);
+        let decision_key =
+            format!("decision:drop_surge:v{}:{source}:{lane}{retry}", policy.version);
+        let action_idempotency_key = format!("action:drop_surge:{source}:{lane}{retry}");
+        let reason = "fresh drop — the first hours are where a new video earns its fans";
+        let action = match lane {
+            "signal_push" => AutopilotActionPayload::RequestSignalPush {
+                task_id: source,
+                title: lock_screen_line(snapshot.title.trim(), RELAY_PUSH_TITLE_MAX),
+                body: surge_caption(snapshot, RELAY_PUSH_BODY_MAX),
+                // `/l/{slug}` resolves on the member site straight into the
+                // video — the tap is the click, so the tracked route counts.
+                target_path: Some(format!("/l/{link_slug}")),
+                event_id: None,
+                segment: None,
+                audience_size: push_audience.map(|audience| audience.reached),
+                audience_basis: push_audience.map_or_else(String::new, |audience| {
+                    if audience.reached < audience.eligible {
+                        format!(
+                            "fans with notifications on who consented to marketing — the workspace's per-step send envelope caps this push at {}",
+                            audience.reached
+                        )
+                    } else {
+                        "fans with notifications on who consented to marketing".to_owned()
+                    }
+                }),
+                drop_surge_lane: Some(lane.to_owned()),
+            },
+            "email" => AutopilotActionPayload::RequestSourceCampaign {
+                source_id: snapshot.source_id,
+                template_key: "content.drop_surge.v1".to_owned(),
+                draft: crowdrelay_domain::campaign_lifecycle::EventCampaignCopy {
+                    subject: snapshot.title.trim().to_owned(),
+                    body: format!(
+                        "{}\n\nWatch: {}/l/{link_slug}",
+                        surge_caption(snapshot, 1200),
+                        snapshot.site_origin.as_deref().unwrap_or_default()
+                    ),
+                },
+                audience_size: None,
+                audience_basis: "fans who consented to marketing email".to_owned(),
+            },
+            "community" => {
+                // The engager writes each community's post in its own
+                // language — this dispatch is internal drafting work whose
+                // outputs park as approval-gated posts downstream, so it
+                // takes the internal-work upgrade like the relay's do.
+                let targets = communities
+                    .iter()
+                    .map(|target| format!("r/{}", target.subreddit))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                AutopilotActionPayload::RequestAgentRun {
+                    template_id: "community-engager".to_owned(),
+                    prompt: format!(
+                        "A new video just dropped. Draft one post per admitted community carrying it.\n\n\
+                        The ONLY facts you may use — the source's own words, no invented details:\n\
+                        - title: {}\n\
+                        - description: {}\n\
+                        - source_id: {source}\n\
+                        - tracked link for every post: /l/{link_slug} (never a raw YouTube or foreign URL)\n\n\
+                        Admitted communities: {targets}\n\n\
+                        Write each post in that community's own language and norms.",
+                        snapshot.title.trim(),
+                        surge_caption(snapshot, 400),
+                    ),
+                    priority: 1,
+                    tier: crowdrelay_brain::AgentTier::Basic,
+                }
+            }
+            _ => {
+                // Channel lanes: telegram, discord, instagram, facebook, x —
+                // one `agent.content.request` action each, exactly the shape
+                // a model draft would land as. `task_id` is deterministic
+                // (source + lane) and execution materializes the synthetic
+                // completed task row the channel executors join on.
+                let Some(template_id) = surge_template_id(lane) else {
+                    continue;
+                };
+                let max = if lane == "x" {
+                    SURGE_CAPTION_X_MAX
+                } else {
+                    SURGE_CAPTION_MAX
+                };
+                AutopilotActionPayload::RequestAgentContent {
+                    template_id: Some(template_id.to_owned()),
+                    task_id: crate::autopilot::drop_surge_task_uuid(snapshot.source_id, lane),
+                    draft: serde_json::json!({
+                        "platform": lane,
+                        "text": surge_caption(snapshot, max),
+                        "cta_url": format!("/l/{link_slug}"),
+                        // `artifact_outcome` and friends join a post back to
+                        // its source by exactly this field — carry it flat,
+                        // not nested, so the measurements already written
+                        // count these posts without a new join.
+                        "source_id": source,
+                        "drop_surge": {
+                            "source_id": source,
+                            "lane": lane,
+                            "origin": "deterministic",
+                        },
+                    }),
+                    recipient_email: None,
+                    recipient_name: None,
+                    recipient_target_id: None,
+                }
+            }
+        };
+        let disposition = match lane {
+            // Only the engager dispatch is internal work — the drafted posts
+            // it produces come back as their own gated actions.
+            "community" => {
+                crowdrelay_domain::autonomy::internal_work_disposition(disposition(
+                    policy.autonomy_level,
+                    confidence,
+                    policy.minimum_confidence,
+                ))
+            }
+            _ => outward,
+        };
+        out.push(DecisionCandidate {
+            context: policy.context,
+            subject,
+            decision_kind: "drop_surge_fanout",
+            confidence,
+            disposition,
+            reason,
+            input_snapshot: input_snapshot.clone(),
+            policy_snapshot: policy_snapshot.clone(),
+            action,
+            decision_key,
+            action_idempotency_key,
+        });
+    }
+    Ok(out)
+}

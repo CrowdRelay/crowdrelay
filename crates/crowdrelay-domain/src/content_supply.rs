@@ -11,6 +11,18 @@ use crate::{
     ContentSourceId, OutreachTargetId, autonomy::Confidence, release_autopilot::ReleaseTier,
 };
 
+// Split submodules — the retry vocabulary and the drop surge each carry
+// enough commentary to stand alone, and the ratchet caps this file at 1200.
+// Everything is re-exported, so paths stay `content_supply::…`.
+mod drop_surge;
+mod retry;
+
+pub use drop_surge::{
+    DROP_SURGE_LANES, DROP_SURGE_MAX_ATTEMPTS, DropSurgeLaneFailure, drop_surge_eligible,
+    drop_surge_link_slug,
+};
+pub use retry::{FailedArtifact, MAX_ARTIFACT_ATTEMPTS, artifact_retry_due};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentSourceKind {
@@ -229,41 +241,38 @@ pub struct SignalPushAudience {
     pub reached: u32,
 }
 
-/// An artifact whose earlier requests failed, for one source version.
-///
-/// A failed request is neither done nor in flight, so the evaluator asks for
-/// the same artifact again next cycle — under the same idempotency key, which
-/// dedupes onto the failed action and writes nothing. Before this existed one
-/// failure froze the source's whole chain for good: on 2026-09-25 two
-/// `live_listing` requests hit Discord's rate limit (HTTP 429, five requests
-/// in one second to one webhook), and neither source got another artifact.
-/// A retry carries its attempt number in its key, waits out a growing delay,
-/// and stops after [`MAX_ARTIFACT_ATTEMPTS`]; the chain skips an artifact in
-/// either state rather than waiting on it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub struct FailedArtifact {
-    pub artifact: ContentArtifactKind,
-    pub failures: u32,
-    #[serde(with = "time::serde::rfc3339")]
-    pub last_failed_at: OffsetDateTime,
-}
-
-/// Requests per artifact and source version, the first included.
-pub const MAX_ARTIFACT_ATTEMPTS: u32 = 3;
-
-/// How long after its latest failure an artifact may be asked for again: 30
-/// minutes after the first failure, an hour after the second.
-#[must_use]
-pub fn artifact_retry_due(failed: &FailedArtifact) -> OffsetDateTime {
-    let doublings = failed.failures.saturating_sub(1).min(4);
-    failed.last_failed_at + Duration::minutes(30 * (1_i64 << doublings))
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ContentSupplySnapshot {
     pub source_id: ContentSourceId,
     pub source_kind: ContentSourceKind,
     pub source_version: i64,
+    /// The source's own key — `youtube:{video_id}`, `release:{plan}` — the
+    /// stable name a drop surge's tracked links are minted from.
+    #[serde(default)]
+    pub source_key: String,
+    /// The source's own title — the band's words, so the surge copy can be
+    /// composed without a model call.
+    #[serde(default)]
+    pub title: String,
+    /// Where the source lives publicly — the video's YouTube URL, the
+    /// release's listen link. `None` means there is nothing to point fans
+    /// at, and a surge that cannot be clicked is not a surge.
+    #[serde(default)]
+    pub source_url: Option<String>,
+    /// The source's own description/body — the band's voice, reusable
+    /// verbatim in surge copy rather than model-paraphrased.
+    #[serde(default)]
+    pub source_body: Option<String>,
+    /// The video's thumbnail, when the source carries or derives one — the
+    /// picture a channel post attaches. `None` posts without art.
+    #[serde(default)]
+    pub source_thumbnail_url: Option<String>,
+    /// The tenant's public site origin (`tenant_settings.member_site_base_url`,
+    /// trimmed). The email lane's copy needs the absolute tracked URL;
+    /// `None` means the surge skips email rather than printing a link that
+    /// cannot resolve.
+    #[serde(default)]
+    pub site_origin: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub occurred_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -289,6 +298,18 @@ pub struct ContentSupplySnapshot {
     /// `SocialPost`. The relay needs them to carry the post; every other
     /// kind leaves it `None`.
     pub social_post: Option<SocialPostFact>,
+    /// Surge lanes that already failed for this source, newest failure kept.
+    /// The count is what a retry's key carries so it lands as a new action
+    /// instead of deduping onto the dead one.
+    #[serde(default)]
+    pub drop_surge_failures: Vec<DropSurgeLaneFailure>,
+    /// When an operator last asked for this source's surge explicitly
+    /// (`POST …/promote`). A promote re-arms the fan-out for a source whose
+    /// own `occurred_at` has aged out of the drop window — the lanes that
+    /// already delivered still dedupe, so the ask retries only what never
+    /// landed.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub surge_requested_at: Option<OffsetDateTime>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -304,6 +325,12 @@ pub struct ContentSupplyPolicy {
     /// collection window, so `show_completed` sources stay pending until
     /// `occurred_at + post_show_harvest_hours`. Zero means no delay.
     pub post_show_harvest_hours: u32,
+    /// How long a fresh video or release counts as a drop — the window where
+    /// the surge fans it out to every owned channel at once instead of
+    /// waiting on the generic posting cadence. The first day is where a new
+    /// video earns its reach; a drop older than this keeps getting ordinary
+    /// artifacts but the surge has already had its say.
+    pub drop_surge_hours: u32,
 }
 
 impl Default for ContentSupplyPolicy {
@@ -312,6 +339,7 @@ impl Default for ContentSupplyPolicy {
             maximum_source_age_days: 45,
             post_show_harvest_hours: 72,
             social_post_relay_hours: 72,
+            drop_surge_hours: 72,
         }
     }
 }
@@ -602,562 +630,7 @@ pub fn relay_push_verdict(
 }
 
 #[cfg(test)]
-mod relay_pacing_tests {
-    use super::*;
-
-    fn at(hours_ago: i64) -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp(1_790_000_000).expect("valid")
-            - Duration::hours(hours_ago)
-    }
-
-    fn push(hours_ago: i64, title: &str, body: &str) -> RecentRelayPush {
-        RecentRelayPush {
-            at: at(hours_ago),
-            title: title.to_owned(),
-            body: body.to_owned(),
-        }
-    }
-
-    #[test]
-    fn the_same_words_cross_posted_are_not_pushed_twice() {
-        let title = "Terapia grupowa, spowiedź szaleńca, mental metal.";
-        let recent = [push(
-            30,
-            title,
-            "Terapia grupowa. Łapcie mordeczki\n\nhttps://www.facebook.com/1069/posts/1",
-        )];
-        assert_eq!(
-            relay_push_verdict(
-                title,
-                "Terapia grupowa. Łapcie mordeczki\n\nhttps://www.instagram.com/p/Dd1/",
-                &recent,
-                at(0)
-            ),
-            RelayPushVerdict::AlreadyRelayed
-        );
-    }
-
-    #[test]
-    fn a_second_post_waits_out_the_gap() {
-        let recent = [push(2, "Gramy w Gorzowie", "17.10")];
-        assert_eq!(
-            relay_push_verdict("Nowy klip", "Już jest", &recent, at(0)),
-            RelayPushVerdict::TooSoon
-        );
-        let older = [push(RELAY_PUSH_MIN_GAP_HOURS, "Gramy w Gorzowie", "17.10")];
-        assert_eq!(
-            relay_push_verdict("Nowy klip", "Już jest", &older, at(0)),
-            RelayPushVerdict::Send
-        );
-    }
-
-    #[test]
-    fn words_older_than_the_memory_may_be_relayed_again() {
-        let recent = [push(RELAY_PUSH_DEDUPE_DAYS * 24 + 1, "Gramy", "17.10")];
-        assert_eq!(
-            relay_push_verdict("Gramy", "17.10", &recent, at(0)),
-            RelayPushVerdict::Send
-        );
-    }
-}
+mod relay_pacing_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn now() -> OffsetDateTime {
-        OffsetDateTime::UNIX_EPOCH + Duration::days(20_000)
-    }
-
-    #[test]
-    fn event_requests_live_listing_before_channel_specific_artifacts() {
-        let snapshot = ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::Event,
-            source_version: 1,
-            occurred_at: now() - Duration::days(1),
-            expires_at: now() + Duration::days(10),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-            social_post: None,
-        };
-
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request {
-                artifact: ContentArtifactKind::LiveListing,
-                attempt: 0,
-                confidence: Confidence::saturating_from_basis_points(9_500),
-            }
-        );
-    }
-
-    #[test]
-    fn event_builds_press_hook_after_canonical_listing() {
-        let snapshot = ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::Event,
-            source_version: 1,
-            occurred_at: now() - Duration::days(1),
-            expires_at: now() + Duration::days(10),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            social_post: None,
-            completed_artifacts: vec![ContentArtifactKind::LiveListing],
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-        };
-
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request {
-                artifact: ContentArtifactKind::PressHook,
-                attempt: 0,
-                confidence: Confidence::saturating_from_basis_points(9_500),
-            }
-        );
-    }
-
-    fn event_with_failed_listing(failures: u32, minutes_ago: i64) -> ContentSupplySnapshot {
-        ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::Event,
-            source_version: 1,
-            occurred_at: now() - Duration::days(1),
-            expires_at: now() + Duration::days(10),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            social_post: None,
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: vec![FailedArtifact {
-                artifact: ContentArtifactKind::LiveListing,
-                failures,
-                last_failed_at: now() - Duration::minutes(minutes_ago),
-            }],
-        }
-    }
-
-    fn requested(snapshot: &ContentSupplySnapshot) -> Option<(ContentArtifactKind, u32)> {
-        match evaluate_content_supply(snapshot, ContentSupplyPolicy::default(), now()) {
-            ContentSupplyDecision::Request {
-                artifact, attempt, ..
-            } => Some((artifact, attempt)),
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn a_failed_artifact_is_retried_once_due_under_a_new_attempt() {
-        // Production, 2026-09-25: a live listing refused with HTTP 429 was
-        // asked for again under its old key every cycle, deduped onto the
-        // failed action, and the source never got another artifact.
-        assert_eq!(
-            requested(&event_with_failed_listing(1, 31)),
-            Some((ContentArtifactKind::LiveListing, 1))
-        );
-        assert_eq!(
-            requested(&event_with_failed_listing(2, 61)),
-            Some((ContentArtifactKind::LiveListing, 2))
-        );
-    }
-
-    #[test]
-    fn a_retry_not_yet_due_does_not_hold_the_chain() {
-        assert_eq!(
-            requested(&event_with_failed_listing(1, 10)),
-            Some((ContentArtifactKind::PressHook, 0))
-        );
-        // The second retry waits an hour, not thirty minutes.
-        assert_eq!(
-            requested(&event_with_failed_listing(2, 45)),
-            Some((ContentArtifactKind::PressHook, 0))
-        );
-    }
-
-    #[test]
-    fn an_artifact_that_failed_every_attempt_is_skipped() {
-        assert_eq!(
-            requested(&event_with_failed_listing(MAX_ARTIFACT_ATTEMPTS, 10_000)),
-            Some((ContentArtifactKind::PressHook, 0))
-        );
-    }
-
-    #[test]
-    fn release_requests_artifacts_one_at_a_time_and_respects_inflight() {
-        let snapshot = ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::Release,
-            source_version: 1,
-            occurred_at: now() - Duration::days(1),
-            expires_at: now() + Duration::days(10),
-            communication_enabled: Some(true),
-            press_enabled: Some(true),
-            release_tier: Some(ReleaseTier::Single),
-            social_post: None,
-            completed_artifacts: vec![ContentArtifactKind::SignalPush],
-            in_flight_artifacts: vec![ContentArtifactKind::SocialFeed],
-            failed_artifacts: Vec::new(),
-        };
-
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request {
-                artifact: ContentArtifactKind::SocialStory,
-                attempt: 0,
-                confidence: Confidence::saturating_from_basis_points(9_500),
-            }
-        );
-    }
-
-    #[test]
-    fn a_year_old_event_is_stale_but_a_year_old_video_is_share_material() {
-        let old_event = ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::Event,
-            source_version: 1,
-            occurred_at: now() - Duration::days(365),
-            expires_at: now() + Duration::days(10),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-            social_post: None,
-        };
-        let old_video = ContentSupplySnapshot {
-            source_kind: ContentSourceKind::Video,
-            ..old_event.clone()
-        };
-        let old_story = ContentSupplySnapshot {
-            source_kind: ContentSourceKind::Story,
-            ..old_event.clone()
-        };
-
-        assert_eq!(
-            evaluate_content_supply(&old_event, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::StaleSource),
-        );
-        // Video and story are evergreen: only expires_at bounds them.
-        assert!(matches!(
-            evaluate_content_supply(&old_video, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request { .. }
-        ));
-        assert!(matches!(
-            evaluate_content_supply(&old_story, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request { .. }
-        ));
-    }
-
-    #[test]
-    fn a_finished_show_waits_out_its_material_window_before_harvesting() {
-        let show = ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::ShowCompleted,
-            source_version: 1,
-            occurred_at: now() - Duration::hours(20),
-            expires_at: now() + Duration::days(30),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-            social_post: None,
-        };
-
-        // Twenty hours in, the night is over but the capture plan's material
-        // is still being collected: nothing drafts from it yet.
-        assert_eq!(
-            evaluate_content_supply(&show, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::HarvestPending),
-        );
-
-        // Once the window closes the recap artifact is demanded first — the
-        // night's own record before the social reuse of it.
-        let mut collected = show.clone();
-        collected.occurred_at = now() - Duration::hours(80);
-        assert!(matches!(
-            evaluate_content_supply(&collected, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request {
-                artifact: ContentArtifactKind::PostShowRecap,
-                ..
-            }
-        ));
-
-        // The gate is kind-scoped: events and releases still draft the moment
-        // they land, with no collection window to wait out.
-        let mut event = show;
-        event.source_kind = ContentSourceKind::Event;
-        assert!(matches!(
-            evaluate_content_supply(&event, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request { .. }
-        ));
-    }
-
-    fn release_snapshot() -> ContentSupplySnapshot {
-        ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::Release,
-            source_version: 1,
-            occurred_at: now() - Duration::days(1),
-            expires_at: now() + Duration::days(10),
-            communication_enabled: Some(true),
-            press_enabled: Some(true),
-            release_tier: Some(ReleaseTier::Single),
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-            social_post: None,
-        }
-    }
-
-    #[test]
-    fn a_release_with_communication_off_owes_no_fan_facing_artifact() {
-        let mut snapshot = release_snapshot();
-        snapshot.communication_enabled = Some(false);
-
-        // The operator's own switch holds the whole fan-facing chain; the
-        // press hook still stands because press is a different switch and it
-        // reaches journalists, not fans.
-        assert!(matches!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request {
-                artifact: ContentArtifactKind::PressHook,
-                ..
-            }
-        ));
-
-        snapshot.completed_artifacts = vec![ContentArtifactKind::PressHook];
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
-        );
-    }
-
-    #[test]
-    fn a_release_with_press_off_never_owes_a_press_hook() {
-        let mut snapshot = release_snapshot();
-        snapshot.press_enabled = Some(false);
-
-        // Signal still comes first — the switch only mutes the press side.
-        assert!(matches!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Request {
-                artifact: ContentArtifactKind::SignalPush,
-                ..
-            }
-        ));
-
-        snapshot.completed_artifacts = vec![
-            ContentArtifactKind::SignalPush,
-            ContentArtifactKind::SocialFeed,
-            ContentArtifactKind::SocialStory,
-            ContentArtifactKind::NewsletterBlock,
-        ];
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
-            "press off means the chain completes without the hook"
-        );
-    }
-
-    #[test]
-    fn a_filler_release_is_posted_but_never_pitched() {
-        let mut snapshot = release_snapshot();
-        snapshot.release_tier = Some(ReleaseTier::Filler);
-
-        // The owned-channel chain still runs — posting the demo is the point
-        // of the tier — but a demo owes no press hook.
-        snapshot.completed_artifacts = vec![
-            ContentArtifactKind::SignalPush,
-            ContentArtifactKind::SocialFeed,
-            ContentArtifactKind::SocialStory,
-            ContentArtifactKind::NewsletterBlock,
-        ];
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
-        );
-    }
-
-    #[test]
-    fn a_synced_social_post_without_facts_cannot_relay() {
-        // A source row with no social_post facts has nothing to carry — the
-        // relay cannot invent a title or link, so it holds rather than send
-        // an empty share.
-        let snapshot = ContentSupplySnapshot {
-            source_id: ContentSourceId::new(),
-            source_kind: ContentSourceKind::SocialPost,
-            source_version: 1,
-            occurred_at: now() - Duration::hours(6),
-            expires_at: now() + Duration::days(44),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-            social_post: None,
-        };
-
-        assert_eq!(
-            evaluate_content_supply(&snapshot, ContentSupplyPolicy::default(), now()),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete),
-        );
-    }
-
-    fn fact(resonance: Option<PostResonance>) -> SocialPostFact {
-        SocialPostFact {
-            title: "Gramy 17.10 w Gorzowie.".to_owned(),
-            url: None,
-            platform: "instagram".to_owned(),
-            body: None,
-            media_url: None,
-            media_id: None,
-            media_type: None,
-            thumbnail_url: None,
-            resonance,
-        }
-    }
-
-    #[test]
-    fn only_posts_that_landed_at_home_go_to_communities() {
-        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
-        let settled = posted + Duration::hours(40);
-        let above = PostResonance {
-            engagement: 80,
-            peer_median: Some(50),
-            peers: 10,
-            ..Default::default()
-        };
-        let below = PostResonance {
-            engagement: 30,
-            peer_median: Some(50),
-            peers: 10,
-            ..Default::default()
-        };
-        assert!(resonates_for_communities(
-            &fact(Some(above)),
-            posted,
-            settled
-        ));
-        assert!(!resonates_for_communities(
-            &fact(Some(below)),
-            posted,
-            settled
-        ));
-        // Too early to tell, however well it is doing.
-        assert!(!resonates_for_communities(
-            &fact(Some(above)),
-            posted,
-            posted + Duration::hours(6)
-        ));
-        // Never read: fail closed.
-        assert!(!resonates_for_communities(&fact(None), posted, settled));
-        // A new account with no history: any real engagement is enough, none is not.
-        let first = PostResonance {
-            engagement: 4,
-            peer_median: None,
-            peers: 0,
-            ..Default::default()
-        };
-        assert!(resonates_for_communities(
-            &fact(Some(first)),
-            posted,
-            settled
-        ));
-        let silent = PostResonance {
-            engagement: 0,
-            peer_median: None,
-            peers: 0,
-            ..Default::default()
-        };
-        assert!(!resonates_for_communities(
-            &fact(Some(silent)),
-            posted,
-            settled
-        ));
-    }
-
-    #[test]
-    fn reach_and_watch_time_decide_when_the_platform_reports_them() {
-        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
-        let settled = posted + Duration::hours(40);
-        let with = |rate: i64, watch: Option<i64>| PostResonance {
-            engagement: 10,
-            peer_median: Some(500), // raw engagement alone would refuse it
-            peers: 10,
-            rate_per_mille: Some(rate),
-            peer_rate_median: Some(40),
-            rate_peers: 8,
-            watch_ms: watch,
-            peer_watch_median: Some(4_000),
-        };
-        // Shown to few people, but those people engaged at a high rate.
-        assert!(resonates_for_communities(
-            &fact(Some(with(55, None))),
-            posted,
-            settled
-        ));
-        // Low rate, and watched no longer than usual: not spread.
-        assert!(!resonates_for_communities(
-            &fact(Some(with(20, Some(4_100)))),
-            posted,
-            settled
-        ));
-        // Low rate, but held attention 25%+ longer than usual: the hook worked.
-        assert!(resonates_for_communities(
-            &fact(Some(with(20, Some(5_000)))),
-            posted,
-            settled
-        ));
-    }
-
-    #[test]
-    fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
-        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
-        let snapshot = |resonance: PostResonance| ContentSupplySnapshot {
-            source_id: crate::ContentSourceId::new(),
-            source_kind: ContentSourceKind::SocialPost,
-            source_version: 1,
-            occurred_at: now - Duration::days(5),
-            expires_at: now + Duration::days(30),
-            communication_enabled: None,
-            press_enabled: None,
-            release_tier: None,
-            completed_artifacts: Vec::new(),
-            in_flight_artifacts: Vec::new(),
-            failed_artifacts: Vec::new(),
-            social_post: Some(fact(Some(resonance))),
-        };
-        let outlier = PostResonance {
-            engagement: 120,
-            peer_median: Some(50),
-            peers: 10,
-            ..Default::default()
-        };
-        let ordinary = PostResonance {
-            engagement: 60,
-            ..outlier
-        };
-        assert!(is_outlier(&outlier));
-        assert!(!is_outlier(&ordinary));
-        let policy = ContentSupplyPolicy::default();
-        assert!(matches!(
-            evaluate_content_supply(&snapshot(outlier), policy, now),
-            ContentSupplyDecision::Relay { .. }
-        ));
-        assert_eq!(
-            evaluate_content_supply(&snapshot(ordinary), policy, now),
-            ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
-        );
-    }
-}
+mod tests;

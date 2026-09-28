@@ -68,6 +68,7 @@ fn publishing() -> PublishingPosture {
             hours_to_next_approval_expiry: None,
             approvals_outstanding: 0,
             unswept_lapsed_approvals: 0,
+            stalled_drops: None,
             // No work parked or cancelled on a missing executor.
             awaiting_executor_actions: 0,
             no_executor_cancelled_7d: 0,

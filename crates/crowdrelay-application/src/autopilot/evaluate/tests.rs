@@ -452,6 +452,14 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::Event,
             source_version: 2,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
             occurred_at: now - time::Duration::days(1),
             expires_at: now + time::Duration::days(10),
             communication_enabled: None,
@@ -514,6 +522,14 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 3,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
             // Settled (past the 36h resonance window) and above the account's
             // own median — the post communities should get.
             occurred_at: now - time::Duration::hours(40),
@@ -681,6 +697,14 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 1,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
             occurred_at: now - time::Duration::hours(1),
             expires_at: now + time::Duration::days(44),
             communication_enabled: None,
@@ -739,6 +763,14 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 1,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
             occurred_at: now - time::Duration::hours(hours_old),
             expires_at: now + time::Duration::days(40),
             communication_enabled: None,
@@ -825,6 +857,14 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 3,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
             // Settled (past the 36h resonance window) and above the account's
             // own median — the post communities should get.
             occurred_at: now - time::Duration::hours(40),
@@ -893,4 +933,6 @@ mod tests {
         assert_eq!(candidates.len(), 2, "the two community drafts remain");
         Ok(())
     }
+
+    include!("drop_surge_tests.rs");
 }

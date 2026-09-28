@@ -1239,6 +1239,7 @@ mod tests {
             segment: None,
             audience_size: None,
             audience_basis: String::new(),
+            drop_surge_lane: None,
         };
         assert!(!requires_terminal_receipt(&payload));
     }

@@ -821,6 +821,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::autopilot::list_content_sources)
                 .post(crate::autopilot::upsert_content_source),
         )
+        // The operator's "push this drop now": stamps the source's surge
+        // request and wakes the worker — the next cycle fans out every lane
+        // that has not already delivered. Re-promoting is idempotent: lanes
+        // that already sent keep their dedupe keys and are not re-sent.
+        .route(
+            "/v1/control-plane/autopilot/content-sources/{source_id}/promote",
+            post(crate::autopilot::promote_content_source),
+        )
         // The content page's pipeline read: pending drafts, live material
         // count, and the titles those drafts cite — one narrow read model
         // instead of the cockpit-wide overview fan-out.

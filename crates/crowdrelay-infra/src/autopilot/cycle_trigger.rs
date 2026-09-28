@@ -103,6 +103,63 @@ pub async fn request_autopilot_cycle(
     Ok(())
 }
 
+/// What the promote button learned about the source it was pointed at —
+/// returned so the response can say what it armed, not just that it rang.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropSurgeRequest {
+    pub source_id: uuid::Uuid,
+    pub source_kind: String,
+    pub title: String,
+    /// The lanes the next cycle will try to raise. A lane the ledger already
+    /// delivered keeps its dedupe key and is not re-sent, so "armed" means
+    /// "evaluated for", not "sent again".
+    pub lanes: Vec<String>,
+}
+
+/// The operator's "promote this drop now": stamps `surge_requested_at` on
+/// the source so the drop window re-opens for it, then wakes the worker
+/// through the same NOTIFY the cycle button uses — one execution path, so
+/// the quota transaction that guards a scheduled cycle guards this too.
+///
+/// Only `video` and `release` sources can be promoted — they are the kinds
+/// the surge evaluates; the check happens in the UPDATE's WHERE so a wrong
+/// kind returns `Conflict` rather than stamping a fact nothing reads.
+pub async fn request_drop_surge(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    source_id: uuid::Uuid,
+) -> Result<DropSurgeRequest, RepositoryError> {
+    let source = sqlx::query_as::<_, (String, String)>(
+        r#"
+        UPDATE content_sources
+        SET metadata = jsonb_set(metadata, '{surge_requested_at}', to_jsonb(now())),
+            updated_at = now()
+        WHERE workspace_id = $1
+          AND id = $2
+          AND active
+          AND source_kind IN ('video', 'release')
+        RETURNING source_kind, title
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(RepositoryError::Conflict)?;
+    request_autopilot_cycle(pool, workspace_id).await?;
+    Ok(DropSurgeRequest {
+        source_id,
+        source_kind: source.0,
+        title: source.1,
+        lanes: crowdrelay_domain::content_supply::DROP_SURGE_LANES
+            .iter()
+            .map(|lane| (*lane).to_owned())
+            .collect(),
+    })
+}
+
 /// How a cycle was started. A brain that only ever runs when asked is a
 /// different problem from one that runs on schedule and decides nothing.
 #[derive(Clone, Copy, Debug)]

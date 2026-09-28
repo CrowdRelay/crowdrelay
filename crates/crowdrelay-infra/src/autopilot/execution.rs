@@ -180,6 +180,53 @@ pub(super) async fn schedule_effect_measurement(
                 }
             }
         }
+        AutopilotActionPayload::RequestSourceCampaign { .. } => {
+            // The drop email's two honest questions: did this drop's fan-out
+            // grow fans, and did the email cost subscribers? Growth is keyed
+            // to the action — the attributed-fans read follows the action's
+            // trace lineage, so the sibling lanes' tracked posts count for
+            // it the same way they count for a channel draft (the known
+            // cross-template double count that comment in
+            // `attributed_fans.rs` already owns). The unsubscribe measure
+            // binds to the campaign row itself, resolved through the
+            // dispatch event execution just wrote.
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth14d,
+                action_id.into_uuid(),
+                0.0,
+                now + time::Duration::days(14),
+            ));
+            plans.push((
+                AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                action_id.into_uuid(),
+                0.0,
+                now + time::Duration::days(3),
+            ));
+            let campaign_id = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT campaign.id
+                FROM communication_campaigns AS campaign
+                JOIN outbox_events AS dispatch
+                  ON dispatch.workspace_id = campaign.workspace_id
+                 AND dispatch.id = campaign.dispatch_event_id
+                WHERE campaign.workspace_id = $1
+                  AND dispatch.action_id = $2
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if let Some(campaign_id) = campaign_id {
+                plans.push((
+                    AutopilotMeasurementKind::CampaignUnsubscribe7d,
+                    campaign_id,
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
+        }
         AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
             // No measurement is scheduled yet. Measuring a raised finding means
             // comparing the series' own later velocity against the baseline it

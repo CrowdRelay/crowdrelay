@@ -8,9 +8,9 @@ mod cycle_trigger;
 mod daily_briefing;
 mod decline_advisories;
 pub use cycle_trigger::{
-    AUTOPILOT_CYCLE_CHANNEL, CycleClose, CyclePreview, CycleTrigger, NORTH_STAR_WINDOW_DAYS,
-    close_cycle_run, daily_north_star, open_cycle_run, preview_autopilot_cycle,
-    request_autopilot_cycle,
+    AUTOPILOT_CYCLE_CHANNEL, CycleClose, CyclePreview, CycleTrigger, DropSurgeRequest,
+    NORTH_STAR_WINDOW_DAYS, close_cycle_run, daily_north_star, open_cycle_run,
+    preview_autopilot_cycle, request_autopilot_cycle, request_drop_surge,
 };
 // The signal-inviter's outcome mapper lives in the worker crate but needs the
 // same audience count the approval screen shows — one count, one definition.
@@ -107,8 +107,9 @@ use crowdrelay_brain::GrowthIntelligenceSnapshot;
 use crowdrelay_domain::pricing::TicketYieldPolicy;
 use crowdrelay_domain::{
     AutopilotActionId, AutopilotDecisionId, AutopilotMeasurementId, BookingTargetId, CityId,
-    EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId, MerchVariantId, PlayId,
-    PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId, TraceContext, WorkspaceId,
+    ContentSourceId, EventId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchProductId,
+    MerchVariantId, PlayId, PromotionCampaignId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
+    TraceContext, WorkspaceId,
     action_class::ActionClass,
     action_ledger::{
         ActionState, LegalTransition, ResolutionEvidence, SuccessEvidence, legal_transition,

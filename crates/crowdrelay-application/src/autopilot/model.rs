@@ -216,6 +216,13 @@ pub enum ActionSubject {
     /// workspace-wide inflight-subject index. The UUID is derived, not a
     /// table row: see `social_channel_subject`.
     SocialChannel(uuid::Uuid),
+    /// One lane of one source's drop surge — push, email, a channel post,
+    /// the community dispatch. The lanes fan out at once for a fresh video,
+    /// so each needs its own subject: under the inflight-subject index,
+    /// eight actions naming the same source as subject would serialize to
+    /// one lane per evaluation cycle. The UUID is derived from
+    /// (source id, lane) — see `drop_surge_subject`.
+    DropSurgeLane(uuid::Uuid),
 }
 
 impl From<GrowthDebtSubject> for ActionSubject {
@@ -257,6 +264,7 @@ impl ActionSubject {
             Self::ContentSuggestion(_) => "content_suggestion",
             Self::ContentArc(_) => "content_arc",
             Self::SocialChannel(_) => "social_channel",
+            Self::DropSurgeLane(_) => "drop_surge_lane",
         }
     }
 
@@ -309,8 +317,47 @@ impl ActionSubject {
             Self::ContentSuggestion(id) => id.into_uuid(),
             Self::ContentArc(id) => id.into_uuid(),
             Self::SocialChannel(id) => id,
+            Self::DropSurgeLane(id) => id,
         }
     }
+}
+
+/// FNV-1a over `key` hashed into `seed`'s low bits — written out so the
+/// derived id is stable across toolchain releases: a persisted dedupe key
+/// cannot ride `DefaultHasher`, whose output std does not freeze.
+fn fnv1a_derived_uuid(seed: uuid::Uuid, key: &[u8]) -> uuid::Uuid {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in seed.as_bytes().iter().chain(key) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    uuid::Uuid::from_u128((seed.as_u128() & !u128::from(u64::MAX)) | u128::from(hash))
+}
+
+/// The surge lane's derived subject: `fnv1a(source_id, lane)` keeping the
+/// source's own high bits so the ledger still reads the lane as belonging
+/// to its drop. Same derivation shape as [`social_channel_subject`] —
+/// deterministic per workspace because the source id already is, so a
+/// duplicate surge candidate for the same lane dedupes onto the live
+/// action instead of piling up retries the index would otherwise
+/// serialize.
+#[must_use]
+pub fn drop_surge_subject(source_id: ContentSourceId, lane: &str) -> ActionSubject {
+    ActionSubject::DropSurgeLane(fnv1a_derived_uuid(source_id.into_uuid(), lane.as_bytes()))
+}
+
+/// The synthetic task id a surge lane's channel draft carries. The channel
+/// executors find work by joining the action's `task_id` to an
+/// `agent_service_tasks` row — a deterministic draft has no model task, so
+/// execution materializes a completed row under exactly this id. Deriving
+/// it from (source, lane) keeps a retried lane on the same row instead of
+/// minting a duplicate.
+#[must_use]
+pub fn drop_surge_task_uuid(source_id: ContentSourceId, lane: &str) -> uuid::Uuid {
+    fnv1a_derived_uuid(
+        source_id.into_uuid(),
+        format!("surge-task:{lane}").as_bytes(),
+    )
 }
 
 /// The derived subject id for one (workspace, platform) channel. A weekly
@@ -321,23 +368,10 @@ impl ActionSubject {
 /// in the ledger, and mixes in the platform's hash for the low bits.
 #[must_use]
 pub fn social_channel_subject(workspace_id: WorkspaceId, platform: &str) -> ActionSubject {
-    // FNV-1a, written out so the derived id is stable across toolchain
-    // releases — a persisted dedupe key cannot ride `DefaultHasher`, whose
-    // output std does not freeze.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in workspace_id
-        .into_uuid()
-        .as_bytes()
-        .iter()
-        .chain(platform.as_bytes())
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    let id = uuid::Uuid::from_u128(
-        (workspace_id.into_uuid().as_u128() & !u128::from(u64::MAX)) | u128::from(hash),
-    );
-    ActionSubject::SocialChannel(id)
+    ActionSubject::SocialChannel(fnv1a_derived_uuid(
+        workspace_id.into_uuid(),
+        platform.as_bytes(),
+    ))
 }
 
 /// Typed executable intents. Infrastructure serializes these only at the
@@ -526,6 +560,28 @@ pub enum AutopilotActionPayload {
         /// missing words.
         #[serde(default)]
         draft: crowdrelay_domain::campaign_lifecycle::EventCampaignCopy,
+    },
+    /// A fan-email campaign anchored on a content source — the drop surge's
+    /// email leg for a video or release that just landed. Sibling of
+    /// `RequestAudienceCampaign`, which is event-bound: a video has no event,
+    /// no city, and no lifecycle phase, so it gets the same machinery with a
+    /// source anchor instead.
+    RequestSourceCampaign {
+        source_id: ContentSourceId,
+        template_key: String,
+        /// The words the campaign sends, composed in-repo at raise time —
+        /// the source's own title and description in the tenant's voice,
+        /// with the tracked link. The mailer sends this verbatim; the
+        /// approval shows exactly what a fan reads.
+        draft: crowdrelay_domain::campaign_lifecycle::EventCampaignCopy,
+        /// How many consented fans this reaches, when the decision snapshot
+        /// knew — `None` is honest rather than printing a zero.
+        #[serde(default)]
+        audience_size: Option<u32>,
+        /// Who those people are, in a sentence — "fans who consented to
+        /// marketing email".
+        #[serde(default)]
+        audience_basis: String,
     },
     RequestMerchBundle {
         product_a: MerchProductId,
@@ -1227,6 +1283,12 @@ pub enum AutopilotActionPayload {
         /// learn who is in it.
         #[serde(default)]
         audience_basis: String,
+        /// The drop-surge lane that raised this push, when one did —
+        /// `"signal_push"`. Execution mints the lane's tracked link on that
+        /// signal, and the ledger reads plainly that this push is part of a
+        /// drop fan-out rather than a relay carry.
+        #[serde(default)]
+        drop_surge_lane: Option<String>,
     },
     /// This week's join-ask, posted to the band's own page in the band's
     /// own words (§5). The text is one of the operator's variants verbatim —
@@ -1325,6 +1387,10 @@ impl AutopilotActionPayload {
             // same weekly envelope as a push.
             Self::RequestFanLifecycleMessage { .. }
             | Self::RequestAudienceCampaign { .. }
+            // A source-anchored fan email spends the same envelope and hits
+            // the same opted-in audience as an event campaign — the anchor
+            // differs, the reach does not.
+            | Self::RequestSourceCampaign { .. }
             | Self::RequestSignalPush { .. }
             | Self::PublishJoinAsk { .. } => ActionClass::OwnedAudience,
 
