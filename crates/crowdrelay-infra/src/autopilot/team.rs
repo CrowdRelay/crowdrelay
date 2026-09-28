@@ -25,6 +25,7 @@ struct UnassignedShowTaskRow {
     event_title: String,
     task_key: String,
     starts_at: OffsetDateTime,
+    timezone: String,
     due_at: OffsetDateTime,
 }
 
@@ -170,7 +171,7 @@ impl PostgresAutopilotRepository {
                     ('qr_from_stage'),('post_show_reconciliation')
                 )
                 SELECT event.id event_id, event.title event_title, task.item_key task_key,
-                       event.starts_at,
+                       event.starts_at, event.timezone,
                        CASE WHEN task.item_key = 'post_show_reconciliation'
                             THEN event.starts_at + INTERVAL '36 hours'
                             ELSE event.starts_at - INTERVAL '2 hours' END due_at
@@ -938,12 +939,22 @@ pub fn friendly_action_title(action_kind: &str, locale: BriefingLocale) -> Strin
     title.to_owned()
 }
 
+/// The showtime on the room's own clock, named. It used to print UTC —
+/// "2026-10-17 17:30 UTC" for a 19:30 Warsaw show — to crew who read a clock
+/// time as local. The event's zone is recorded, so this is a conversion, not
+/// a guess; an unknown zone falls back to UTC and says so.
 fn show_task_detail(task: &UnassignedShowTaskRow, locale: BriefingLocale) -> String {
+    let local = crate::regional::at_event_timezone(task.starts_at, &task.timezone);
+    let zone = if crate::regional::is_known_iana_timezone(&task.timezone) {
+        task.timezone.trim()
+    } else {
+        "UTC"
+    };
     let starts_at = format!(
-        "{} {:02}:{:02} UTC",
-        task.starts_at.date(),
-        task.starts_at.hour(),
-        task.starts_at.minute()
+        "{} {:02}:{:02} ({zone})",
+        local.date(),
+        local.hour(),
+        local.minute()
     );
     match locale {
         BriefingLocale::Pl => format!(
@@ -1059,3 +1070,36 @@ include!("team/task_copy.rs");
 include!("team/reminder_copy.rs");
 
 include!("team/tests.rs");
+
+#[cfg(test)]
+mod show_task_detail_tests {
+    use super::*;
+    use time::macros::datetime;
+
+    fn task(timezone: &str) -> UnassignedShowTaskRow {
+        UnassignedShowTaskRow {
+            event_id: Uuid::nil(),
+            event_title: "Sanity Check Tour".to_owned(),
+            task_key: "staff_assigned".to_owned(),
+            starts_at: datetime!(2026-10-17 17:30 UTC),
+            timezone: timezone.to_owned(),
+            due_at: datetime!(2026-10-17 15:30 UTC),
+        }
+    }
+
+    #[test]
+    fn the_showtime_reads_on_the_room_s_clock() {
+        assert_eq!(
+            show_task_detail(&task("Europe/Warsaw"), BriefingLocale::Pl),
+            "Koncert: Sanity Check Tour. Termin koncertu: 2026-10-17 19:30 (Europe/Warsaw)."
+        );
+    }
+
+    #[test]
+    fn an_unknown_zone_stays_utc_and_says_so() {
+        assert_eq!(
+            show_task_detail(&task("Mars/Olympus"), BriefingLocale::En),
+            "Show: Sanity Check Tour. Showtime: 2026-10-17 17:30 (UTC)."
+        );
+    }
+}
