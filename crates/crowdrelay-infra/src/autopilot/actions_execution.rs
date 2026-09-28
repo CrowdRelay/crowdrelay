@@ -1309,6 +1309,15 @@ impl PostgresAutopilotRepository {
                     source_id,
                     creative_family: _,
                 } => {
+                    // The language gate once more before the post leaves:
+                    // see `refuse_draft_in_wrong_language`.
+                    super::lapsed_sweep::refuse_draft_in_wrong_language(
+                        &mut transaction,
+                        workspace_id,
+                        &target_id.to_string(),
+                        &format!("{title}\n{body}"),
+                    )
+                    .await?;
                     emit_outward_action(
                         &mut transaction,
                         workspace_id,

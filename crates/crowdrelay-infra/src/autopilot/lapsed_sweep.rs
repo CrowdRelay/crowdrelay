@@ -24,6 +24,9 @@ pub struct LapsedSweepStats {
     /// retired — the contact stopped being one this subject is news to, the
     /// show moved or was cancelled, or its pitch window closed.
     pub opportunities_retired: u64,
+    /// Community drafts withdrawn because they are not written in their
+    /// community's language.
+    pub community_language_mismatches: u64,
     /// Content suggestions flipped to `expired` because their ask died.
     pub suggestions_expired: u64,
     /// Proposed arcs retired for the same reason.
@@ -200,6 +203,77 @@ pub async fn sweep_lapsed_approval_asks(
     .await?
     .rows_affected();
 
+    // A community draft in the wrong language cannot be approved into a post.
+    //
+    // The ingest gate (`community_language_mismatch` in agent_outcomes.rs)
+    // reads every new draft since #323, but it runs when an outcome arrives,
+    // and drafts queued before it were never read. On 2026-09-27 two were
+    // still waiting: "Wariacie wpadasz na gigusa?" for r/deathmetal and
+    // r/metalcore, both English-language, the day after a moderator removed
+    // the band's Polish caption from r/melodicdeathmetal. The same rule,
+    // applied to the asks already in the queue — language detection is Rust,
+    // so candidates are read, judged here and withdrawn by id.
+    let community_candidates =
+        sqlx::query_as::<_, (Uuid, Uuid, Option<String>, Option<String>, Option<String>)>(
+            r#"
+        SELECT action.workspace_id, action.id,
+               action.payload->>'title', action.payload->>'body', target.language
+        FROM autopilot_actions AS action
+        LEFT JOIN agent_outreach_targets AS target
+          ON target.workspace_id = action.workspace_id
+         AND target.id::text = action.payload->>'target_id'
+        WHERE action.status = 'awaiting_approval'
+          AND action.action_kind = 'community.engage.request'
+          AND ($1::uuid IS NULL OR action.workspace_id = $1)
+        ORDER BY action.created_at, action.id
+        FOR UPDATE OF action SKIP LOCKED
+        LIMIT $2
+        "#,
+        )
+        .bind(workspace_uuid)
+        .bind(limit)
+        .fetch_all(&mut **transaction)
+        .await?;
+    let mismatched: Vec<Uuid> = community_candidates
+        .into_iter()
+        .filter(|(_, _, title, body, language)| {
+            let text = [title.as_deref(), body.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
+            crowdrelay_domain::community_language::community_language_mismatch(
+                &text,
+                language.as_deref(),
+            )
+            .is_some()
+        })
+        .map(|(_, id, _, _, _)| id)
+        .collect();
+    let community_language_mismatches = if mismatched.is_empty() {
+        0
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE autopilot_actions
+            SET status = 'cancelled',
+                finished_at = $2,
+                last_error_kind = $3,
+                idempotency_key = idempotency_key || ':language:' || id::text
+            WHERE id = ANY($1::uuid[])
+              AND status = 'awaiting_approval'
+              AND ($4::uuid IS NULL OR workspace_id = $4)
+            "#,
+        )
+        .bind(&mismatched)
+        .bind(now)
+        .bind(crowdrelay_domain::community_language::COMMUNITY_LANGUAGE_MISMATCH)
+        .bind(workspace_uuid)
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected()
+    };
+
     // A suggestion whose ask died in the queue — window lapsed or evidence
     // too thin to ask — is itself dead. Without this pair it stays `raised`
     // forever: invisible to the evaluator (which skips lapsed rows),
@@ -274,7 +348,41 @@ pub async fn sweep_lapsed_approval_asks(
         approvals_expired,
         insufficient_evidence,
         opportunities_retired,
+        community_language_mismatches,
         suggestions_expired,
         arcs_retired,
     })
+}
+
+/// Refuses a community draft that is not in its community's language, at the
+/// last point before it is emitted. An approval given before the ingest gate
+/// existed — or a batch approval given on one sample — must not publish a
+/// draft in the wrong language; [`sweep_lapsed_approval_asks`] withdraws such
+/// drafts from the queue, and this is the guard for one already approved.
+pub(in crate::autopilot) async fn refuse_draft_in_wrong_language(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    target_id: &str,
+    draft: &str,
+) -> Result<(), RepositoryError> {
+    let community_language = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT language FROM agent_outreach_targets WHERE workspace_id = $1 AND id::text = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(target_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .flatten();
+    if crowdrelay_domain::community_language::community_language_mismatch(
+        draft,
+        community_language.as_deref(),
+    )
+    .is_some()
+    {
+        return Err(RepositoryError::ConflictBecause(
+            crowdrelay_domain::community_language::COMMUNITY_LANGUAGE_MISMATCH,
+        ));
+    }
+    Ok(())
 }
