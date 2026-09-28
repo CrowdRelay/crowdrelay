@@ -1422,8 +1422,8 @@ impl AgentOutcomeWorker {
     /// makes re-runs idempotent (ON CONFLICT DO UPDATE) and keeps agent-
     /// created links identifiable in the admin smart-links list.
     ///
-    /// Returns the public redirect path (`/l/{slug}`) or `None` if the item
-    /// has no usable destination URL.
+    /// Returns the public redirect path (`/l/{slug}`) or `None` if neither
+    /// the item nor its registered source supplies a usable destination.
     async fn ensure_agent_smart_link(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -1469,15 +1469,28 @@ impl AgentOutcomeWorker {
         // chars) keeps the slug well under the 128-char CHECK constraint.
         let slug = format!("agent-{}", outcome.id.simple());
 
-        sqlx::query(
+        // A failed INSERT poisons the caller's transaction — Postgres
+        // aborts it (25P02) and every later statement in `map_outcome`
+        // fails with an opaque "current transaction is aborted". Rolling
+        // back to the savepoint keeps the tx alive so the caller's
+        // "post goes out untracked" fallback is actually reachable.
+        sqlx::query("SAVEPOINT agent_smart_link")
+            .execute(&mut **tx)
+            .await
+            .map_err(AgentOutcomeError::from)?;
+
+        let inserted = sqlx::query(
             r#"
             INSERT INTO smart_links
                 (workspace_id, slug, destination_url, active,
-                 channel_source, channel_community)
-            VALUES ($1, $2, $3, true, $4, $5)
+                 channel_source, channel_community, channel_creative)
+            VALUES ($1, $2, $3, true, $4, $5, $6)
             ON CONFLICT (workspace_id, slug) DO UPDATE SET
                 destination_url = EXCLUDED.destination_url,
-                active = true
+                active = true,
+                channel_source = EXCLUDED.channel_source,
+                channel_community = EXCLUDED.channel_community,
+                channel_creative = EXCLUDED.channel_creative
             "#,
         )
         .bind(workspace_id)
@@ -1485,11 +1498,20 @@ impl AgentOutcomeWorker {
         .bind(destination)
         .bind(request.channel_source)
         .bind(request.channel_community)
+        .bind(request.channel_creative)
         .execute(&mut **tx)
-        .await
-        .map_err(AgentOutcomeError::from)?;
+        .await;
 
-        Ok(Some(format!("/l/{slug}")))
+        match inserted {
+            Ok(_) => Ok(Some(format!("/l/{slug}"))),
+            Err(error) => {
+                sqlx::query("ROLLBACK TO SAVEPOINT agent_smart_link")
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(AgentOutcomeError::from)?;
+                Err(AgentOutcomeError::from(error))
+            }
+        }
     }
 
     /// Inserts an `agent_fan_segments` row from an audience_segments item.
@@ -1841,6 +1863,7 @@ struct AgentSmartLinkRequest<'a> {
     destination: &'a str,
     channel_source: &'a str,
     channel_community: Option<&'a str>,
+    channel_creative: Option<&'a str>,
     source_canonical_url: Option<&'a str>,
 }
 

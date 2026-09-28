@@ -1141,12 +1141,18 @@ impl CommunityExecutorWorker {
         // still gets the repost as a link rather than a failure.
         let image_url = self.resolve_image_url(action).await;
 
+        // On the link rung the body is not rendered — the submitted URL is
+        // the post's only clickable. When the draft carries a tracked link,
+        // submit that instead of the bare permalink: it resolves to the same
+        // destination through `/l/`, so the audience ends up in the same
+        // place and the click is counted.
+        let tracked_link_url = self.tracked_link_url(action.smart_link.as_deref());
         let reddit_result = self
             .submit_via_agent_browser(
                 action,
                 &post_body,
                 image_url.as_deref(),
-                action.source_url.as_deref(),
+                tracked_link_url.as_deref().or(action.source_url.as_deref()),
             )
             .await?;
 
@@ -1225,7 +1231,8 @@ impl CommunityExecutorWorker {
     /// Submits through the agents service (POST /reddit/post). The agents
     /// side owns the format ladder: `image_url` asks for a native image post
     /// (it downloads the bytes and runs Reddit's media-lease upload);
-    /// `link_url` is the source permalink a link post falls back to; with
+    /// `link_url` is what a link post points at — the draft's tracked
+    /// `/l/` link when it has one, the source permalink otherwise; with
     /// neither working a plain self post goes out. The response's `kind`
     /// records which rung actually posted. A 429 maps to the executor's
     /// rate-limit backoff; every other failure is surfaced to the caller.
@@ -1345,40 +1352,53 @@ impl CommunityExecutorWorker {
     /// carrying that risk is the only one this channel has.
     ///
     /// A link that fails the check is dropped rather than corrected: the post
-    /// still reads, and a guessed destination is not better than none.
+    /// still reads, and a guessed destination is not better than none. The
+    /// resolution itself lives in `tracked_link_url`, which the link-post
+    /// rung also uses for `link_url`.
     fn build_post_body<'a>(&'a self, body: &'a str, smart_link: Option<&str>) -> Cow<'a, str> {
-        match smart_link {
-            Some(link) if !link.trim().is_empty() => {
-                let link = link.trim();
-                let full_url = if link
-                    .get(..4)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("http"))
-                {
-                    if self.is_own_origin(link) {
-                        link.to_owned()
-                    } else {
-                        tracing::warn!(
-                            link,
-                            origin = %self.public_origin,
-                            "dropping a smart link that points outside this workspace's origin"
-                        );
-                        return Cow::Borrowed(body);
-                    }
-                } else if let Some(path) = link.strip_prefix('/') {
-                    // A path is the shape this field is supposed to carry, and
-                    // it can only ever resolve to our own origin.
-                    format!("{}/{path}", self.public_origin.trim_end_matches('/'))
-                } else {
-                    tracing::warn!(
-                        link,
-                        "dropping a smart link that is neither an absolute URL nor a rooted path"
-                    );
-                    return Cow::Borrowed(body);
-                };
-                Cow::Owned(format!("{body}\n\n{full_url}"))
-            }
-            _ => Cow::Borrowed(body),
+        match self.tracked_link_url(smart_link) {
+            Some(full_url) => Cow::Owned(format!("{body}\n\n{full_url}")),
+            None => Cow::Borrowed(body),
         }
+    }
+
+    /// Resolves a stored `smart_link` to the absolute URL a platform needs —
+    /// a `/l/...` path joins the workspace's public origin; an absolute URL
+    /// only passes when it already points at that origin. Anything else is
+    /// dropped rather than corrected: the post still reads, and a guessed
+    /// destination is not better than none.
+    fn tracked_link_url(&self, smart_link: Option<&str>) -> Option<String> {
+        let link = smart_link?.trim();
+        if link.is_empty() {
+            return None;
+        }
+        if link
+            .get(..4)
+            .is_some_and(|p| p.eq_ignore_ascii_case("http"))
+        {
+            if self.is_own_origin(link) {
+                return Some(link.to_owned());
+            }
+            tracing::warn!(
+                link,
+                origin = %self.public_origin,
+                "dropping a smart link that points outside this workspace's origin"
+            );
+            return None;
+        }
+        if let Some(path) = link.strip_prefix('/') {
+            // A path is the shape this field is supposed to carry, and
+            // it can only ever resolve to our own origin.
+            return Some(format!(
+                "{}/{path}",
+                self.public_origin.trim_end_matches('/')
+            ));
+        }
+        tracing::warn!(
+            link,
+            "dropping a smart link that is neither an absolute URL nor a rooted path"
+        );
+        None
     }
 
     /// Whether an absolute URL belongs to this workspace's public origin.

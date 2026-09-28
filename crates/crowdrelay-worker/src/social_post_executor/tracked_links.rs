@@ -66,10 +66,11 @@ impl SocialPostExecutorWorker {
             }
             return Ok(());
         }
-        // The destination came out of a language model — the same refusal
-        // the community path applies: only a tenant-owned origin may be
-        // wrapped, or the post would redirect the band's domain to wherever
-        // the model said. Both of ours count: the site origin the `/l/`
+        // The destination came out of a language model — the community
+        // path applies the same refusal plus a registered-source carve-out
+        // this path deliberately lacks (`None` below): only a tenant-owned
+        // origin may be wrapped, or the post would redirect the band's
+        // domain to wherever the model said. Both of ours count: the site origin the `/l/`
         // redirect lives under, and the member-site origin the join-ask
         // evaluator mints its CTA on — the two are the same URL today but
         // are configured separately and can diverge.

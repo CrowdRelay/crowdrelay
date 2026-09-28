@@ -25,8 +25,12 @@ impl AgentOutcomeWorker {
         let raw_link = item
             .and_then(|i| i.get("smart_link"))
             .and_then(Value::as_str)
+            .map(str::trim)
             .unwrap_or("");
-        let source_canonical_url = community_source.and_then(|s| s.source_url.as_deref());
+        let source_canonical_url = community_source
+            .and_then(|s| s.source_url.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         // The model leaves `smart_link` empty on most drafts — it has no
         // reason to know the field exists. The source's own URL is the
         // destination the post promotes anyway, so a blank proposal falls
@@ -39,6 +43,22 @@ impl AgentOutcomeWorker {
         } else {
             raw_link
         };
+        // The creative family the engager chose lives on the producing
+        // run's evidence row, keyed through the task that dispatched it.
+        // Carrying it onto the engage action lets the published post's own
+        // measurement teach the family posterior — the run-level row only
+        // saw a workspace-wide number, published or not. It also stamps the
+        // smart link's `channel_creative`, so clicks split by angle. The
+        // lookup runs on the pool, outside this transaction:
+        // `agent_service_tasks` is the agents service's schema and may not
+        // exist here.
+        let creative_family = creative_family_for_task(
+            &self.pool,
+            outcome.id,
+            outcome.workspace_id,
+            outcome.task_id,
+        )
+        .await;
         // Create a tracked smart link for attribution so we can measure
         // which Reddit posts drive ticket sales / signups. Log errors
         // instead of silently swallowing them — a post without attribution
@@ -53,7 +73,14 @@ impl AgentOutcomeWorker {
                     AgentSmartLinkRequest {
                         destination,
                         channel_source: "reddit",
-                        channel_community: Some(subreddit),
+                        // `channel_community` carries a CHECK (non-blank,
+                        // <=120 chars); a payload string that violates it
+                        // aborts the whole outcome transaction, not just the
+                        // link — normalize it here rather than relying on
+                        // the savepoint in `ensure_agent_smart_link`.
+                        channel_community: Some(subreddit.trim())
+                            .filter(|s| !s.is_empty() && s.chars().count() <= 120),
+                        channel_creative: creative_family.as_deref(),
                         source_canonical_url,
                     },
                 )
@@ -87,20 +114,6 @@ impl AgentOutcomeWorker {
                 (still, s.media_id.clone(), s.source_url.clone())
             })
             .unwrap_or_default();
-        // The creative family the engager chose lives on the producing
-        // run's evidence row, keyed through the task that dispatched it.
-        // Carrying it onto the engage action lets the published post's own
-        // measurement teach the family posterior — the run-level row only
-        // saw a workspace-wide number, published or not. The lookup runs on
-        // the pool, outside this transaction: `agent_service_tasks` is the
-        // agents service's schema and may not exist here.
-        let creative_family = creative_family_for_task(
-            &self.pool,
-            outcome.id,
-            outcome.workspace_id,
-            outcome.task_id,
-        )
-        .await;
         Ok((
             json!({
                 "kind": "request_community_engagement",
