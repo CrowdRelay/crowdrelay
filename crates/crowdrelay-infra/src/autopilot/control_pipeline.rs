@@ -158,18 +158,7 @@ pub(super) async fn load_content_pipeline(
 
     // Same briefing language the overview resolves — one setting for
     // the whole queue rather than a read per row.
-    let crew_locale = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'crew_locale'",
-    )
-    .bind(workspace_uuid)
-    .fetch_optional(&repo.pool)
-    .await
-    .ok()
-    .flatten()
-    .map_or(
-        crowdrelay_application::autopilot::BriefingLocale::default(),
-        |tag| crowdrelay_application::autopilot::BriefingLocale::from_tag(&tag),
-    );
+    let crew = super::crew_clock(&repo.pool, workspace_uuid).await;
 
     let mut pending = Vec::with_capacity(pending_rows.len());
     let mut source_ids = std::collections::BTreeSet::new();
@@ -179,7 +168,7 @@ pub(super) async fn load_content_pipeline(
         {
             source_ids.insert(source_id);
         }
-        pending.push(pending_action(row, &live_capabilities, crew_locale)?);
+        pending.push(pending_action(row, &live_capabilities, &crew)?);
     }
 
     let source_titles = if source_ids.is_empty() {

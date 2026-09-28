@@ -111,6 +111,7 @@ fn enriched_task_detail(
     approval_expires_at: Option<OffsetDateTime>,
     assignment_due_at: Option<OffsetDateTime>,
     locale: BriefingLocale,
+    crew_zone: &str,
 ) -> String {
     use crowdrelay_application::autopilot::AutopilotActionPayload;
 
@@ -119,7 +120,8 @@ fn enriched_task_detail(
         return frame.unreadable.to_owned();
     };
     let mut briefing = payload.briefing().localized(locale);
-    briefing.deadline_note = format_deadline_note(approval_expires_at, assignment_due_at, locale);
+    briefing.deadline_note =
+        format_deadline_note(approval_expires_at, assignment_due_at, locale, crew_zone);
 
     let mut text = format!(
         "{}\n\n{}: {}\n\n{}:",
