@@ -73,6 +73,8 @@ fn publishing() -> PublishingPosture {
             no_executor_cancelled_7d: 0,
             unclaimed_action_kinds: None,
             guarded_policies: None,
+            approved_failed_24h: 0,
+            approved_failed_summary: None,
         }
     }
 
@@ -1070,4 +1072,24 @@ fn publishing() -> PublishingPosture {
         assert_eq!(raised.severity, "warning");
         assert_eq!(raised.details["policies"], "content_supply until 2026-10-03 08:08 UTC");
     }
+
+    /// Approved work that failed is announced, with what failed and why.
+    #[test]
+    fn approved_actions_that_failed_raise_a_warning() {
+        let find = |snapshot: &OpsSnapshot| {
+            conditions(snapshot, publishing())
+                .into_iter()
+                .find(|c| c.key == "execution.approved_actions_failed")
+                .expect("the condition is evaluated")
+        };
+        assert!(!find(&healthy()).active);
+        let mut snapshot = healthy();
+        snapshot.approved_failed_24h = 38;
+        snapshot.approved_failed_summary = Some("outreach.request: state_changed ×38".to_owned());
+        let raised = find(&snapshot);
+        assert!(raised.active);
+        assert_eq!(raised.details["failed"], 38);
+        assert_eq!(raised.details["by_kind_and_error"], "outreach.request: state_changed ×38");
+    }
 }
+
