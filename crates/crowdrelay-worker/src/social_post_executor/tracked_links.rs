@@ -78,18 +78,19 @@ impl SocialPostExecutorWorker {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        let destination =
-            match crowdrelay_domain::acquisition::agent_smart_link_destination(cta_url, &allowed) {
-                Ok(destination) => destination,
-                Err(refusal) => {
-                    tracing::warn!(
-                        action_id = %row.action_id,
-                        refusal = %refusal,
-                        "refused a social-post link destination; the post goes out untracked"
-                    );
-                    return Ok(());
-                }
-            };
+        let destination = match crowdrelay_domain::acquisition::agent_smart_link_destination(
+            cta_url, &allowed, None,
+        ) {
+            Ok(destination) => destination,
+            Err(refusal) => {
+                tracing::warn!(
+                    action_id = %row.action_id,
+                    refusal = %refusal,
+                    "refused a social-post link destination; the post goes out untracked"
+                );
+                return Ok(());
+            }
+        };
         let slug = format!("social-{}", row.action_id.simple());
         sqlx::query(
             r#"

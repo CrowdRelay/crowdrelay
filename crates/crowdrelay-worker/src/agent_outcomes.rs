@@ -1429,9 +1429,7 @@ impl AgentOutcomeWorker {
         tx: &mut Transaction<'_, Postgres>,
         workspace_id: Uuid,
         outcome: &ValidatedOutcome,
-        destination: &str,
-        channel_source: &str,
-        channel_community: Option<&str>,
+        request: AgentSmartLinkRequest<'_>,
     ) -> Result<Option<String>, AgentOutcomeError> {
         // The destination came out of a language model. `starts_with("http")`
         // was the whole of the check, so the tenant's own domain answered a
@@ -1449,8 +1447,9 @@ impl AgentOutcomeWorker {
         // worth less than a post with one; a post that redirects the audience
         // somewhere nobody approved is worth less than either.
         let destination = match crowdrelay_domain::acquisition::agent_smart_link_destination(
-            destination,
+            request.destination,
             &[self.public_origin.as_str()],
+            request.source_canonical_url,
         ) {
             Ok(destination) => destination,
             Err(refusal) => {
@@ -1484,8 +1483,8 @@ impl AgentOutcomeWorker {
         .bind(workspace_id)
         .bind(&slug)
         .bind(destination)
-        .bind(channel_source)
-        .bind(channel_community)
+        .bind(request.channel_source)
+        .bind(request.channel_community)
         .execute(&mut **tx)
         .await
         .map_err(AgentOutcomeError::from)?;
@@ -1832,6 +1831,17 @@ struct CommunityPostSourceRow {
     media_type: Option<String>,
     thumbnail_url: Option<String>,
     source_url: Option<String>,
+}
+
+/// What one draft asked for when its link gets minted: the proposed
+/// destination, the channel labels the `smart_links` row records, and the
+/// registered source's own URL — the one foreign destination the domain may
+/// accept, because it was written by the watcher, not the model.
+struct AgentSmartLinkRequest<'a> {
+    destination: &'a str,
+    channel_source: &'a str,
+    channel_community: Option<&'a str>,
+    source_canonical_url: Option<&'a str>,
 }
 
 #[cfg(test)]

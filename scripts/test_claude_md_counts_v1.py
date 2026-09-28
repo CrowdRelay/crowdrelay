@@ -38,7 +38,7 @@ API = ROOT / "crates/crowdrelay-api/src"
 
 ROUTE_PATH = re.compile(r'\.route\(\s*"([^"]+)"')
 
-# The eleven files CLAUDE.md says hold every route.
+# The fourteen files CLAUDE.md says hold every route.
 ROUTE_FILES = [
     "routing.rs",
     "control_plane.rs",
@@ -53,6 +53,7 @@ ROUTE_FILES = [
     "media.rs",
     "team_approvals.rs",
     "control_plane_operator.rs",
+    "connections_youtube.rs",
 ]
 
 AUTHORITY_PREFIXES = [
@@ -110,7 +111,7 @@ class ClaudeMdCounts(unittest.TestCase):
             f"CLAUDE.md says {match.group(1)} routes; the listed files register "
             f"{total}",
         )
-        words = {10: "TEN", 11: "ELEVEN", 12: "TWELVE", 13: "THIRTEEN"}
+        words = {10: "TEN", 11: "ELEVEN", 12: "TWELVE", 13: "THIRTEEN", 14: "FOURTEEN"}
         self.assertEqual(
             match.group(2),
             words.get(len(ROUTE_FILES), str(len(ROUTE_FILES))),

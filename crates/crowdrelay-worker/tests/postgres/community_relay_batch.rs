@@ -1390,3 +1390,40 @@ async fn a_seeded_post_row_takes_the_edit_but_a_post_out_the_door_refuses() -> R
     );
     Ok(())
 }
+
+// ── Tracked-link coverage: a draft with no smart_link mints one to the source ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_draft_without_a_smart_link_still_posts_tracked() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&pool).await?;
+    let source_id = content_source(&pool, ws).await?;
+    let target_a = community_target(&pool, ws, "metalpolska").await?;
+    engage_outcome(&pool, ws, target_a, source_id, "metalpolska").await?;
+    worker(&pool, ws).run_once().await?;
+
+    let action_id = action_rows(&pool, ws).await?[0].0;
+    let payload = action_payload(&pool, action_id).await?;
+    let smart_link = payload["smart_link"].as_str().unwrap_or_default();
+    ensure!(
+        smart_link.starts_with("/l/agent-"),
+        "the draft with no proposal still carries a tracked link, got {smart_link:?}"
+    );
+    // And it wraps the registered source's own URL — never a model guess.
+    let destination = sqlx::query_scalar::<_, String>(
+        "SELECT destination_url FROM smart_links \
+         WHERE workspace_id = $1 AND slug = $2",
+    )
+    .bind(ws.into_uuid())
+    .bind(smart_link.trim_start_matches("/l/"))
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        destination == "https://reddit.com/r/band/comments/abc",
+        "the tracked link answers the canonical source, got {destination}"
+    );
+    Ok(())
+}

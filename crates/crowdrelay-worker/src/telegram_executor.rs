@@ -695,6 +695,7 @@ impl TelegramExecutorWorker {
                 match crowdrelay_domain::acquisition::agent_smart_link_destination(
                     cta,
                     &[self.public_origin.as_str()],
+                    None,
                 ) {
                     Ok(destination) => destination.as_str().to_owned(),
                     Err(refusal) => {

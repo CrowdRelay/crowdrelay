@@ -26,20 +26,36 @@ impl AgentOutcomeWorker {
             .and_then(|i| i.get("smart_link"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        let source_canonical_url = community_source.and_then(|s| s.source_url.as_deref());
+        // The model leaves `smart_link` empty on most drafts — it has no
+        // reason to know the field exists. The source's own URL is the
+        // destination the post promotes anyway, so a blank proposal falls
+        // back to it: the same words go out, but through a counted `/l/`
+        // redirect instead of an untracked bare link. A model proposal that
+        // IS the canonical URL passes the domain check for the same reason;
+        // one that points elsewhere is still refused.
+        let destination = if raw_link.is_empty() {
+            source_canonical_url.unwrap_or("")
+        } else {
+            raw_link
+        };
         // Create a tracked smart link for attribution so we can measure
         // which Reddit posts drive ticket sales / signups. Log errors
         // instead of silently swallowing them — a post without attribution
         // is still deliverable, but the operator should know the smart link
         // failed.
-        let tracked_link = if !raw_link.is_empty() {
+        let tracked_link = if !destination.is_empty() {
             match self
                 .ensure_agent_smart_link(
                     tx,
                     outcome.workspace_id,
                     outcome,
-                    raw_link,
-                    "reddit",
-                    Some(subreddit),
+                    AgentSmartLinkRequest {
+                        destination,
+                        channel_source: "reddit",
+                        channel_community: Some(subreddit),
+                        source_canonical_url,
+                    },
                 )
                 .await
             {

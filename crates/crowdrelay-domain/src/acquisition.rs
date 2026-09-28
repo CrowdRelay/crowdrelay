@@ -627,7 +627,16 @@ pub enum AgentDestinationRefusal {
 /// breaks conversion as well: the click is counted, the fan is never created,
 /// and the post is measured as reach that converted nobody.
 ///
-/// The rule is that an agent may only point at origins the tenant owns.
+/// The rule is that an agent may only point at origins the tenant owns —
+/// with one carve-out. `source_canonical_url` is the registered content
+/// source's own URL (the YouTube video, the reel, the listing), written by
+/// the watcher or operator onto the source row — never by the model. A
+/// destination that *is* that URL reproduces no model choice: the post was
+/// always going to link the thing it promotes, so wrapping it in `/l/`
+/// turns an untracked mention into a counted click. The equality test is
+/// the whole guard — a foreign destination that merely resembles the
+/// source still fails.
+///
 /// `DestinationUrl::parse` already rejects non-HTTP schemes, embedded
 /// credentials and control characters; what it cannot know is which hosts are
 /// the tenant's. That is the caller's to supply and this function's to
@@ -640,6 +649,7 @@ pub enum AgentDestinationRefusal {
 pub fn agent_smart_link_destination(
     destination: &str,
     allowed_origins: &[&str],
+    source_canonical_url: Option<&str>,
 ) -> Result<DestinationUrl, AgentDestinationRefusal> {
     let parsed =
         DestinationUrl::parse(destination).map_err(|_| AgentDestinationRefusal::NotAUrl)?;
@@ -652,10 +662,14 @@ pub fn agent_smart_link_destination(
         .iter()
         .any(|allowed| !allowed.is_empty() && origin == *allowed)
     {
-        Ok(parsed)
-    } else {
-        Err(AgentDestinationRefusal::ForeignOrigin)
+        return Ok(parsed);
     }
+    if let Some(canonical) = source_canonical_url
+        && Url::parse(canonical.trim()).is_ok_and(|source| source == url)
+    {
+        return Ok(parsed);
+    }
+    Err(AgentDestinationRefusal::ForeignOrigin)
 }
 
 #[cfg(test)]
@@ -824,7 +838,7 @@ mod agent_destination_tests {
 
     #[test]
     fn the_tenants_own_origin_is_allowed() {
-        let destination = agent_smart_link_destination("https://virya.music/join", OWN)
+        let destination = agent_smart_link_destination("https://virya.music/join", OWN, None)
             .expect("the tenant's own page is where an agent link should point");
         assert_eq!(destination.as_str(), "https://virya.music/join");
     }
@@ -833,7 +847,7 @@ mod agent_destination_tests {
     #[test]
     fn a_host_that_merely_starts_with_the_tenants_is_refused() {
         assert_eq!(
-            agent_smart_link_destination("https://virya.music.evil.example/join", OWN),
+            agent_smart_link_destination("https://virya.music.evil.example/join", OWN, None),
             Err(AgentDestinationRefusal::ForeignOrigin),
             "a prefix match would accept this, and it is a different host"
         );
@@ -842,7 +856,7 @@ mod agent_destination_tests {
     #[test]
     fn a_foreign_destination_is_refused() {
         assert_eq!(
-            agent_smart_link_destination("https://elsewhere.example/track", OWN),
+            agent_smart_link_destination("https://elsewhere.example/track", OWN, None),
             Err(AgentDestinationRefusal::ForeignOrigin)
         );
     }
@@ -851,7 +865,7 @@ mod agent_destination_tests {
     #[test]
     fn the_same_host_on_another_scheme_is_refused() {
         assert_eq!(
-            agent_smart_link_destination("http://virya.music/join", OWN),
+            agent_smart_link_destination("http://virya.music/join", OWN, None),
             Err(AgentDestinationRefusal::ForeignOrigin)
         );
     }
@@ -865,7 +879,7 @@ mod agent_destination_tests {
             "ftp://virya.music/x",
         ] {
             assert!(
-                agent_smart_link_destination(destination, OWN).is_err(),
+                agent_smart_link_destination(destination, OWN, None).is_err(),
                 "accepted {destination:?}"
             );
         }
@@ -876,7 +890,32 @@ mod agent_destination_tests {
     #[test]
     fn no_allowed_origin_allows_nothing() {
         assert_eq!(
-            agent_smart_link_destination("https://virya.music/join", &[]),
+            agent_smart_link_destination("https://virya.music/join", &[], None),
+            Err(AgentDestinationRefusal::ForeignOrigin)
+        );
+    }
+
+    /// A destination equal to the registered source's own URL is accepted —
+    /// the source row was written by the watcher, not the model, so the
+    /// post linking the thing it promotes earns a tracked link.
+    #[test]
+    fn the_registered_source_url_is_allowed() {
+        let source = "https://www.youtube.com/watch?v=iijgBMteL9I";
+        let destination =
+            agent_smart_link_destination(source, OWN, Some(source)).expect("the canonical source");
+        assert_eq!(destination.as_str(), source);
+    }
+
+    /// Resembling the source is not being the source — a model cannot widen
+    /// the carve-out to a neighbouring URL on the same host.
+    #[test]
+    fn a_different_url_on_the_sources_host_is_refused() {
+        assert_eq!(
+            agent_smart_link_destination(
+                "https://www.youtube.com/watch?v=other",
+                OWN,
+                Some("https://www.youtube.com/watch?v=iijgBMteL9I"),
+            ),
             Err(AgentDestinationRefusal::ForeignOrigin)
         );
     }
