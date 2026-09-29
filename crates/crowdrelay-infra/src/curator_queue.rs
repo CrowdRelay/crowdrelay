@@ -255,21 +255,21 @@ pub async fn mark_curator_dm_sent(
         return Err(RepositoryError::Conflict);
     }
 
-    let sent_at = OffsetDateTime::now_utc();
-    sqlx::query(
+    let sent_at: OffsetDateTime = sqlx::query_scalar(
         r#"
         INSERT INTO outreach_interactions (
             workspace_id, target_id, candidate_id, direction, phase,
             source_key, occurred_at, metadata
         ) VALUES ($1, NULL, $2, 'outbound', 'initial', $3, $4, $5)
+        RETURNING occurred_at
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(candidate_id)
     .bind(curator_source_key(source_id))
-    .bind(sent_at)
+    .bind(OffsetDateTime::now_utc())
     .bind(serde_json::json!({ "note": note }))
-    .execute(&mut *transaction)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(map_sqlx)?;
 
