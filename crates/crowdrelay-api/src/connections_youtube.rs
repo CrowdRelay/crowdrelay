@@ -2,10 +2,12 @@
 //!
 //! The Gmail flow's generic grant (`connections_gmail::GoogleGrant`) with a
 //! grant of its own: `youtube.force-ssl` is the scope Google requires to post
-//! a comment reply, and connecting Gmail or Drive must never grant it. Tokens
-//! live on platform `youtube_account`, apart from the `youtube` rows the
-//! video sync keys by channel id. Reading comments needs no grant — the
-//! worker reads them with the API key the video sync already holds.
+//! a comment reply, and `yt-analytics.readonly` lets the worker read the
+//! traffic-source split that separates CrowdRelay-driven views from ads —
+//! and connecting Gmail or Drive must never grant either. Tokens live on
+//! platform `youtube_account`, apart from the `youtube` rows the video sync
+//! keys by channel id. Reading comments needs no grant — the worker reads
+//! them with the API key the video sync already holds.
 
 use axum::{
     Router,
@@ -21,7 +23,7 @@ use crate::connections_gmail::{
 
 const YOUTUBE: GoogleGrant = GoogleGrant {
     platform: "youtube_account",
-    scopes: "openid email https://www.googleapis.com/auth/youtube.force-ssl",
+    scopes: "openid email https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/yt-analytics.readonly",
     state_cookie: "youtube_oauth_state",
     label: "YouTube (replies)",
 };

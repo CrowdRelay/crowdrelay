@@ -204,7 +204,8 @@ impl GrowthMetricSyncWorker {
 /// The eleven-character id a `youtube:` source key carries. Video ids come
 /// from the channel feed, so this is a belt over the suspenders: anything
 /// malformed answers false rather than reaching the request URL.
-fn is_video_id(id: &str) -> bool {
+/// `pub(super)` for the traffic sweep, which validates the same key shape.
+pub(super) fn is_video_id(id: &str) -> bool {
     id.len() == 11
         && id
             .chars()

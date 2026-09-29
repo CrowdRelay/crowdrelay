@@ -33,6 +33,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, encrypt_value};
 
 mod connection_health;
+mod owned_video_traffic;
 mod owned_videos;
 mod release_videos;
 mod simple_platforms;
@@ -376,6 +377,12 @@ impl GrowthMetricSyncWorker {
             // staleness, so the sweep runs even when no connection is due.
             if let Err(error) = self.sync_owned_video_stats().await {
                 tracing::warn!(error = %error, "owned video stats sweep failed");
+            }
+            // Traffic sources split the same uploads' views into what
+            // CrowdRelay touched and what ads or YouTube organic delivered.
+            // Grant-gated: no youtube_account consent, nothing to read.
+            if let Err(error) = self.sync_owned_video_traffic().await {
+                tracing::warn!(error = %error, "owned video traffic sweep failed");
             }
             Ok::<_, GrowthMetricSyncError>(())
         })
