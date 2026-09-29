@@ -11204,6 +11204,71 @@ paths:
         '200': { description: Capability lanes in severity order — missing, blocked, live. }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/autopilot/outreach/import-proposals:
+    get:
+      operationId: listOutreachImportProposals
+      summary: List screened CRM import proposals with their verdicts
+      description: >-
+        The registry sweep proposes contacts in bulk; this list shows each
+        proposed row with the verdict the deterministic screen assigns —
+        `admit`, or `refuse:` plus `invalid_email`, `already_target`,
+        `do_not_contact`, `role_address` or `duplicate_in_batch` — together
+        with a per-verdict count over the whole matching set, not only the
+        returned page. Reading changes nothing: the same screen re-runs
+        inside the approval transaction.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - name: target_kind
+        in: query
+        required: false
+        schema: { type: string, enum: [press, radio, creator, endorsement, media_patronage, playlist, organiser] }
+      - name: limit
+        in: query
+        required: false
+        schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        '200':
+          description: Screened proposals, oldest first, plus verdict counts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutreachImportProposalPage' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/autopilot/outreach/import-proposals/approve:
+    post:
+      operationId: approveOutreachImportProposals
+      summary: Bulk-approve admitted CRM proposals into outreach targets
+      description: >-
+        The consent point for the registry import. Either a named id list or
+        every admitted row of one target kind, at most two hundred per call.
+        The screen re-runs inside the transaction, so a row that stopped
+        being admissible between the list and the click is refused, not
+        promoted. Each admitted row inserts an outreach target with
+        `accepts_outreach_basis = 'operator registry import'`; an address
+        that already exists is never touched. One `operator_actions` audit
+        row records the batch, and a replayed Idempotency-Key answers
+        `replayed: true` without inserting twice.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApproveImportProposalsRequest' }
+      responses:
+        '200':
+          description: Admitted count, refusals by reason, created target ids.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutreachImportApproval' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /control-plane/gig-plan/approve:
     post:
       operationId: approveGigProposal
@@ -13706,6 +13771,61 @@ components:
         operation_id: { type: string, format: uuid }
         candidate_id: { type: string, format: uuid }
         target_id: { type: [string, 'null'], format: uuid }
+        replayed: { type: boolean }
+    OutreachImportProposal:
+      type: object
+      additionalProperties: false
+      required: [id, target_kind, display_name, contact_email, contact_domain, why_fit, verdict]
+      properties:
+        id: { type: string, format: uuid }
+        target_kind: { type: string, maxLength: 40 }
+        display_name: { type: string, maxLength: 200 }
+        contact_email: { type: [string, 'null'], maxLength: 320 }
+        contact_domain: { type: [string, 'null'], maxLength: 200 }
+        why_fit: { type: string }
+        verdict:
+          type: string
+          enum: [admit, 'refuse:invalid_email', 'refuse:already_target', 'refuse:do_not_contact', 'refuse:role_address', 'refuse:duplicate_in_batch']
+    OutreachImportProposalPage:
+      type: object
+      additionalProperties: false
+      required: [proposals, verdict_counts]
+      properties:
+        proposals:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/OutreachImportProposal' }
+        verdict_counts:
+          type: object
+          additionalProperties: { type: integer, minimum: 0 }
+    ApproveImportProposalsRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Exactly one selection shape: `ids` (one to two hundred), or
+        `target_kind` with `all_admitted: true`.
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { type: string, format: uuid }
+        target_kind: { type: string, enum: [press, radio, creator, endorsement, media_patronage, playlist, organiser] }
+        all_admitted: { type: boolean }
+    OutreachImportApproval:
+      type: object
+      additionalProperties: false
+      required: [operation_id, admitted, refused_by_reason, created_target_ids, replayed]
+      properties:
+        operation_id: { type: string, format: uuid }
+        admitted: { type: integer, minimum: 0 }
+        refused_by_reason:
+          type: object
+          additionalProperties: { type: integer, minimum: 0 }
+        created_target_ids:
+          type: array
+          maxItems: 200
+          items: { type: string, format: uuid }
         replayed: { type: boolean }
     SubmissionChannelRequest:
       type: object

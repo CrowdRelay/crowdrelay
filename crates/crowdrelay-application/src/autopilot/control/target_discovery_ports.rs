@@ -115,6 +115,77 @@ pub struct SubmissionChannelMutation {
     pub replayed: bool,
 }
 
+/// A proposed CRM contact as the import screen sees it: the agent's row plus
+/// the verdict the deterministic screen assigns to it.
+#[derive(Clone, Debug, Serialize)]
+pub struct OutreachImportProposal {
+    pub id: uuid::Uuid,
+    pub target_kind: String,
+    pub display_name: String,
+    pub contact_email: Option<String>,
+    pub contact_domain: Option<String>,
+    pub why_fit: String,
+    /// `admit`, or `refuse:` plus one of `invalid_email`, `already_target`,
+    /// `do_not_contact`, `role_address`, `duplicate_in_batch`.
+    pub verdict: String,
+}
+
+/// The screened page plus a count per verdict over every matching row, so
+/// the operator sees the whole batch's shape and not only the page's.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct OutreachImportProposalPage {
+    pub proposals: Vec<OutreachImportProposal>,
+    pub verdict_counts: std::collections::BTreeMap<String, u32>,
+}
+
+/// What an approval covers: named rows, or every admitted row of one kind.
+#[derive(Clone, Debug)]
+pub enum OutreachImportSelection {
+    Ids(Vec<uuid::Uuid>),
+    AllAdmitted { target_kind: String },
+}
+
+/// What one approval call did.
+#[derive(Clone, Debug, Serialize)]
+pub struct OutreachImportApproval {
+    pub operation_id: uuid::Uuid,
+    /// Rows the screen admitted and this call promoted.
+    pub admitted: u32,
+    /// Rows it refused, counted under the verdict that refused them.
+    pub refused_by_reason: std::collections::BTreeMap<String, u32>,
+    /// Targets actually inserted — an address that already existed is not in
+    /// here, because the conflict rule never touches an existing
+    /// relationship.
+    pub created_target_ids: Vec<uuid::Uuid>,
+    pub replayed: bool,
+}
+
+/// The CRM-contact import gate: screen first, then bulk approve.
+///
+/// The agent's registry sweep proposes contacts faster than an operator can
+/// confirm them one at a time, so this port answers two operator questions —
+/// "what would happen to these" (list) and "promote the ones that pass"
+/// (approve) — with the same deterministic screen behind both. Approval is
+/// the consent point: nothing is contacted until a row is promoted, and the
+/// bounded outreach lane still applies its own caps afterwards.
+#[async_trait]
+pub trait AutopilotOutreachImportRepository: Send + Sync {
+    async fn list_outreach_import_proposals(
+        &self,
+        workspace_id: WorkspaceId,
+        target_kind: Option<String>,
+        limit: u32,
+    ) -> Result<OutreachImportProposalPage, RepositoryError>;
+
+    async fn approve_outreach_import_proposals(
+        &self,
+        workspace_id: WorkspaceId,
+        selection: OutreachImportSelection,
+        idempotency_key: &IdempotencyKey,
+        request_id: Option<&RequestId>,
+    ) -> Result<OutreachImportApproval, RepositoryError>;
+}
+
 #[async_trait]
 pub trait AutopilotTargetDiscoveryRepository: Send + Sync {
     /// Screens and stores a bounded batch. Idempotent on the operation and

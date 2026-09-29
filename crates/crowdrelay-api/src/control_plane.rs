@@ -857,6 +857,17 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/outreach/candidates/{candidate_id}/confirm",
             post(crate::autopilot::confirm_outreach_candidate),
         )
+        // The CRM registry import: the screen's verdicts on every proposed
+        // contact, and the bulk approval that turns the admitted ones into
+        // outreach targets. Approval is the consent point.
+        .route(
+            "/v1/control-plane/autopilot/outreach/import-proposals",
+            get(crate::autopilot::list_outreach_import_proposals),
+        )
+        .route(
+            "/v1/control-plane/autopilot/outreach/import-proposals/approve",
+            post(crate::autopilot::approve_outreach_import_proposals),
+        )
         .route(
             "/v1/control-plane/autopilot/booking-discovery/candidates",
             get(crate::autopilot::list_booking_candidates),

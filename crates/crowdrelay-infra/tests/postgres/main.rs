@@ -35,6 +35,7 @@ mod autopilot_experiment_integrity;
 mod autopilot_fan_source_snapshots;
 mod autopilot_gated_claim;
 mod autopilot_harm;
+mod autopilot_import_proposals;
 mod autopilot_insight_routing;
 mod autopilot_learning_proof;
 mod autopilot_measurement_spine;

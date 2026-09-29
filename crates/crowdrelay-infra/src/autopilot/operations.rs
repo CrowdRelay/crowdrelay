@@ -49,6 +49,7 @@ mod content_artifact_execution;
 mod content_suggestion_execution;
 mod content_supply_snapshots;
 mod discovery;
+mod discovery_import;
 pub(in crate::autopilot) mod drop_surge;
 pub(in crate::autopilot) mod evidence;
 mod execution;

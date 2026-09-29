@@ -29,6 +29,8 @@
         /v1/control-plane/autopilot/content-suggestions/* \
         /v1/control-plane/autopilot/outreach/candidates \
         /v1/control-plane/autopilot/outreach/candidates/* \
+        /v1/control-plane/autopilot/outreach/import-proposals \
+        /v1/control-plane/autopilot/outreach/import-proposals/approve \
         /v1/control-plane/autopilot/booking-discovery/candidates \
         /v1/control-plane/autopilot/booking-discovery/candidates/* \
         /v1/control-plane/autopilot/beacon-signal \
