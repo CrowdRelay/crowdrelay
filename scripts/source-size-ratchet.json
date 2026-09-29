@@ -34,9 +34,9 @@
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
     "crates/crowdrelay-worker/src/agent_outcomes.rs": 1793,
     "crates/crowdrelay-worker/src/autopilot.rs": 1337,
-    "crates/crowdrelay-worker/src/community_executor.rs": 1911,
+    "crates/crowdrelay-worker/src/community_executor.rs": 2238,
     "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2251,
-    "crates/crowdrelay-worker/src/main.rs": 1423,
+    "crates/crowdrelay-worker/src/main.rs": 1515,
     "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1630,
     "crates/crowdrelay-worker/tests/postgres/community_relay_batch.rs": 1370
   }
