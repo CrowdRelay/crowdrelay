@@ -886,8 +886,9 @@ fn extract_tag(block: &str, tag: &str) -> Option<String> {
 }
 
 /// Remove markup tags from an HTML fragment — Bandcamp's about blocks carry
-/// `<br>` and `<a>` that mean nothing to a voice sample.
-fn strip_tags(html: &str) -> String {
+/// `<br>` and `<a>` that mean nothing to a voice sample. The Gmail reply
+/// reader reuses it for bodies that arrived html-only.
+pub(crate) fn strip_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
     for ch in html.chars() {

@@ -6,11 +6,15 @@
 //!
 //! Privacy boundary: `format=full` under a `fields` whitelist that names
 //! headers and attachment *part metadata* only — `body.data` is never on
-//! the wire, never read, never stored. Headers arrive whole (Gmail has
-//! no narrower grant once parts are requested), and the scan reads only
-//! the address fields plus `Reply-To` from them. Tabular attachments
-//! (.xlsx/.csv/.tsv) are the one payload the connector opens — an
-//! emailed contact list runs the same shared intake a Drive file does.
+//! the wire for the scan, never read, never stored. Headers arrive whole
+//! (Gmail has no narrower grant once parts are requested), and the scan
+//! reads only the address fields plus `Reply-To` from them. Tabular
+//! attachments (.xlsx/.csv/.tsv) are the one payload the connector opens —
+//! an emailed contact list runs the same shared intake a Drive file does.
+//! The single exception lives in `gmail_outreach_ledger`: an inbound reply
+//! from a contact pitched in the last 60 days gets its body fetched under
+//! its own whitelist, because what a pitched curator answered is the
+//! substance reply triage needs.
 //!
 //! Incremental: the connection's `sync_cursor` holds Gmail's historyId.
 //! First run is a bounded full sweep (newest messages first); later cycles
@@ -912,6 +916,7 @@ impl GmailContactsSyncWorker {
         // from this mailbox, or an answer it received.
         let recipients: Vec<String> = values_of("To").into_iter().chain(values_of("Cc")).collect();
         self.record_scanned_touch(
+            connection_id,
             message_id,
             &from,
             &recipients,

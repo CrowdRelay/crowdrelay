@@ -202,6 +202,196 @@ pub async fn outreach_addresses(
     .await
 }
 
+/// An outreach contact whose reply is worth reading: the sender is a target
+/// the workspace mailed within the last `days` days. Carries the disposition
+/// the ledger holds for the target at read time — the "previous" a later
+/// reply classification records.
+#[derive(Debug)]
+pub struct PitchedReplyTarget {
+    pub target_id: Uuid,
+    pub target_kind: String,
+    pub disposition: Option<String>,
+}
+
+/// Which of `counterparts` (lowercase-normalised addresses) are outreach
+/// targets this workspace actually pitched within `days` days. An inbound
+/// message from anyone else is mail, not a reply — the caller must not fetch
+/// its body.
+///
+/// # Errors
+///
+/// Any database error.
+pub async fn pitched_reply_targets(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    counterparts: &[String],
+    days: i32,
+) -> Result<Vec<PitchedReplyTarget>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        r#"
+        SELECT target.id, target.target_kind,
+               target.last_reply_disposition::text
+        FROM outreach_targets AS target
+        WHERE target.workspace_id = $1
+          AND lower(btrim(target.contact_email)) = ANY($2::text[])
+          AND EXISTS (
+              SELECT 1 FROM outreach_interactions AS earlier
+              WHERE earlier.workspace_id = $1
+                AND earlier.target_id = target.id
+                AND earlier.direction = 'outbound'
+                AND earlier.occurred_at > now() - make_interval(days => $3::int)
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(counterparts)
+    .bind(days)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(target_id, target_kind, disposition)| PitchedReplyTarget {
+                target_id,
+                target_kind,
+                disposition,
+            })
+            .collect()
+    })
+}
+
+/// Records what a replied contact actually said: the inbound interaction's
+/// `metadata` gains `reply_text`, and a `reply_classifications` row with
+/// `classification_result = 'auto'` queues it for the first-party
+/// classifier — the same shape `record_reply` writes for a reply the
+/// operator files by hand. Both writes are one transaction, and the
+/// `metadata ? 'reply_text'` guard is the per-message idempotency: a second
+/// pass over the same message updates nothing and inserts nothing, so the
+/// caller reports `false` instead of double-counting.
+///
+/// # Errors
+///
+/// Any database error.
+pub async fn record_reply_text(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    message_id: &str,
+    target: &PitchedReplyTarget,
+    reply_text: &str,
+    occurred_at: OffsetDateTime,
+) -> Result<bool, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let marked = sqlx::query_scalar::<_, i64>(
+        r#"
+        UPDATE outreach_interactions
+        SET metadata = metadata || jsonb_build_object('reply_text', $4::text)
+        WHERE workspace_id = $1
+          AND target_id = $2
+          AND source_key = $3
+          AND direction = 'inbound'
+          AND NOT (metadata ? 'reply_text')
+        RETURNING id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target.target_id)
+    .bind(format!("gmail:{message_id}"))
+    .bind(reply_text)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if marked.is_none() {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO reply_classifications (
+            workspace_id, target_id, target_kind,
+            reply_text, previous_disposition,
+            classification_result, classified_disposition,
+            confidence_basis_points, matched_rules, classified_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'auto', NULL, 0, '[]'::jsonb, $6)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target.target_id)
+    .bind(&target.target_kind)
+    .bind(reply_text)
+    .bind(&target.disposition)
+    .bind(occurred_at)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+/// Inbound ledger rows that predate reply-body capture: `(message_id,
+/// target, occurred_at)` for every recorded reply still missing
+/// `reply_text`, oldest first. The backfill drains them a few per cycle.
+/// The same pitched window the live path applies gates it — measured back
+/// from the reply's own `occurred_at`, so an old pitch followed by a fresh
+/// answer still qualifies.
+///
+/// # Errors
+///
+/// Any database error.
+pub async fn unbodied_replies(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    since: OffsetDateTime,
+    pitched_days: i32,
+    limit: i64,
+) -> Result<Vec<(String, PitchedReplyTarget, OffsetDateTime)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, Uuid, String, Option<String>, OffsetDateTime)>(
+        r#"
+        SELECT replace(oi.source_key, 'gmail:', '') AS message_id,
+               oi.target_id, target.target_kind,
+               target.last_reply_disposition::text, oi.occurred_at
+        FROM outreach_interactions oi
+        JOIN outreach_targets target
+          ON target.workspace_id = oi.workspace_id
+         AND target.id = oi.target_id
+        WHERE oi.workspace_id = $1
+          AND oi.direction = 'inbound'
+          AND oi.source_key LIKE 'gmail:%'
+          AND oi.occurred_at > $2
+          AND NOT (oi.metadata ? 'reply_text')
+          AND EXISTS (
+              SELECT 1 FROM outreach_interactions AS earlier
+              WHERE earlier.workspace_id = oi.workspace_id
+                AND earlier.target_id = oi.target_id
+                AND earlier.direction = 'outbound'
+                AND earlier.occurred_at > oi.occurred_at - make_interval(days => $4::int)
+          )
+        ORDER BY oi.occurred_at
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(since)
+    .bind(pitched_days)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(message_id, target_id, target_kind, disposition, occurred_at)| {
+                    (
+                        message_id,
+                        PitchedReplyTarget {
+                            target_id,
+                            target_kind,
+                            disposition,
+                        },
+                        occurred_at,
+                    )
+                },
+            )
+            .collect()
+    })
+}
+
 /// Whether the ledger already holds this message for any contact — the
 /// reconciler skips fetching a message it has recorded.
 ///
