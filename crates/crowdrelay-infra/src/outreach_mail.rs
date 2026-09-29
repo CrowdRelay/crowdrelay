@@ -369,8 +369,8 @@ pub async fn unbodied_replies(
     )
     .bind(workspace_id)
     .bind(since)
-    .bind(pitched_days)
     .bind(limit)
+    .bind(pitched_days)
     .fetch_all(pool)
     .await
     .map(|rows| {

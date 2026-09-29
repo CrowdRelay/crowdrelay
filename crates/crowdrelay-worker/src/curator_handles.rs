@@ -120,6 +120,10 @@ impl CuratorHandleWorker {
             WHERE workspace_id = $1
               AND place_kind = 'telegram'
               AND status = 'active'
+              -- A place already marked as a broadcast channel is filed:
+              -- its handles are candidates and re-reading the page each
+              -- day only crowds unread places out of the LIMIT window.
+              AND membership_state <> 'not_a_fit'
             ORDER BY member_count DESC NULLS LAST, id
             LIMIT $2
             "#,
@@ -133,12 +137,15 @@ impl CuratorHandleWorker {
         let mut report = SweepReport::default();
         let mut candidates = Vec::new();
         for (place_id, name, url) in places {
-            report.places_read += 1;
             let Some(page) = self.fetch_page(&url).await else {
+                // A failed fetch is not a read — the sweep report must not
+                // record sources_read for pages nobody got.
                 continue;
             };
-            if page.subscribers.is_some() {
-                self.mark_broadcast(place_id, &name, &page).await?;
+            report.places_read += 1;
+            if page.subscribers.is_some()
+                && self.mark_broadcast(place_id, &name, &url, &page).await?
+            {
                 report.channels_marked += 1;
             }
             let own = telegram_handle(&url);
@@ -215,18 +222,23 @@ impl CuratorHandleWorker {
 
     /// A channel cannot be posted to, so the community lanes must stop
     /// drafting for it; the admin handle it publishes is the way in instead.
+    /// Returns whether the mark was written — the note names the channel's
+    /// own handle only when the page's own link is not the contact.
     async fn mark_broadcast(
         &self,
         place_id: uuid::Uuid,
         name: &str,
+        url: &str,
         page: &TelegramPageInfo,
-    ) -> Result<(), CuratorHandleError> {
+    ) -> Result<bool, CuratorHandleError> {
+        let own = telegram_handle(url);
         let admin = page
             .handles
-            .first()
+            .iter()
+            .find(|handle| own.as_deref() != Some(handle.as_str()))
             .map(|handle| format!("; admin @{handle}"))
             .unwrap_or_default();
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
             UPDATE discovery_places
             SET membership_state = 'not_a_fit',
@@ -244,7 +256,7 @@ impl CuratorHandleWorker {
         .execute(&self.pool)
         .await
         .map_err(CuratorHandleError::Database)?;
-        Ok(())
+        Ok(updated.rows_affected() > 0)
     }
 }
 

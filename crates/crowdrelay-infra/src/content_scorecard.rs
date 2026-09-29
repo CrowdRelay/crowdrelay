@@ -856,7 +856,7 @@ async fn curator_queue(pool: &PgPool, ws: Uuid) -> Result<VideoCuratorLedger, Re
         LEFT JOIN outreach_interactions sent
           ON sent.workspace_id = c.workspace_id
          AND sent.direction = 'outbound'
-         AND sent.metadata ->> 'candidate_id' = c.id::text
+         AND sent.candidate_id = c.id
         WHERE c.workspace_id = $1
           AND c.route_kind = 'handle'
           AND c.status = 'admitted'
