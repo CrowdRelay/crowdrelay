@@ -611,6 +611,37 @@ mod tests {
         );
     }
 
+    /// A platform with a real sender is a send lane, not a manual wait: a
+    /// Lemmy delivery seeds `pending`, the claim takes it, and the address
+    /// the sender posts to is the place's URL — never the display name.
+    #[tokio::test]
+    #[ignore = "requires CROWDRELAY_COMMUNITY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+    async fn a_sendable_platform_delivery_enters_the_claim_lane() {
+        let Some((worker, workspace_id)) = live_worker(false).await else {
+            return;
+        };
+        let (_action_id, _target_id) =
+            seed_nonreddit_action(&worker, workspace_id, "lemmy", "metalfed").await;
+        let claimed = worker.claim_pending_actions().await.expect("claim");
+        let post: Option<(String, String)> = sqlx::query_as(
+            "SELECT platform, status FROM community_posts WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&worker.pool)
+        .await
+        .expect("post row");
+        let (platform, status) = post.expect("the action must materialize a ledger row");
+        assert_eq!(platform, "lemmy");
+        assert_eq!(status, "posting");
+        assert_eq!(claimed.len(), 1, "the claim lane must take a Lemmy delivery");
+        let claimed = &claimed[0];
+        assert_eq!(
+            claimed.place_url.as_deref(),
+            Some("https://example.test/metalfed"),
+            "the sender addresses the place URL, not the community name"
+        );
+    }
+
     /// A community whose own rules require a post flair is the same kind of
     /// wait: the draft materializes for a person, and publishing stays out
     /// of it even when manual mode is off — an adopted post without the

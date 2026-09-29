@@ -8,7 +8,10 @@
 //! transitions the membership state.
 //!
 //! ## Eligibility
-//! - `place_kind = 'subreddit'` (only Reddit is supported for auto-join)
+//! - `place_kind` has an automatic join lane: `subreddit` (Reddit API via the
+//!   logged-in browser), `lemmy` (sanctioned `community/follow`), `telegram`
+//!   (MTProto user join). Discord self-join is a ToS violation and forum
+//!   joining is registration+CAPTCHA — both stay manual and are never claimed.
 //! - `membership_state = 'not_joined'`
 //! - `status = 'active'`
 //! - `member_count >= 100` (skip tiny/dead communities)
@@ -66,6 +69,12 @@ const JOIN_API_TIMEOUT: Duration = Duration::from_secs(300);
 const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Maximum places to claim in a single cycle.
 const CLAIM_BATCH: i64 = 3;
+
+/// The place kinds an executor can join without a human. `discord` is
+/// deliberately absent — joining a server as a user is a selfbot, which
+/// Discord's ToS bans the whole account for — and `forum` joins are
+/// registrations a person completes once per forum.
+const AUTO_JOINABLE_KINDS: &[&str] = &["subreddit", "lemmy", "telegram"];
 
 /// The watchdog has to outlast the batch it is watching.
 ///
@@ -137,11 +146,15 @@ impl CommunityJoinError {
             | Self::RateLimited
             | Self::NotASubreddit(_) => false,
             // The agent service answered. Only a 4xx that is not our own
-            // validation error means Reddit itself turned us down; a 5xx is
-            // the service failing, and a 400 is the service rejecting our
-            // request before sending it.
+            // validation error means the platform itself turned us down; a
+            // 5xx is the service failing, and a 400 is the service rejecting
+            // our request before sending it. One exception: a catalog or
+            // directory URL in a Telegram place can never resolve to a chat —
+            // that 400 is a property of the place, so it rejects like a 404.
             Self::AgentsService(message) => {
-                !message.contains("HTTP 5") && !message.contains("HTTP 400")
+                !message.contains("HTTP 5")
+                    && (!message.contains("HTTP 400")
+                        || message.contains("not a joinable telegram reference"))
             }
         }
     }
@@ -269,8 +282,8 @@ impl CommunityJoinExecutorWorker {
                 Err(CommunityJoinError::RateLimited) => {
                     tracing::warn!(
                         place_id = %place.place_id,
-                        subreddit = %place.name,
-                        "reddit rate limited the join, will retry next cycle"
+                        community = %place.name,
+                        "the platform rate limited the join, will retry next cycle"
                     );
                     // Revert to not_joined so it can be retried.
                     self.set_membership(place.place_id, "not_joined", Some("rate limited"))
@@ -409,12 +422,12 @@ impl CommunityJoinExecutorWorker {
                           AND t.place_id = place.id
                           AND t.status = 'promoted'
                           AND t.target_kind = 'community'
-                          AND t.subreddit IS NOT NULL
+                          AND (t.subreddit IS NOT NULL OR t.community_url IS NOT NULL)
                           AND t.screening_verdict IS DISTINCT FROM 'refused'
                         LIMIT 1
                     ) AS demand ON true
                     WHERE place.workspace_id = $1
-                      AND place.place_kind = 'subreddit'
+                      AND place.place_kind = ANY($4)
                       AND place.membership_state = 'not_joined'
                       AND place.status = 'active'
                       AND (place.member_count IS NULL OR place.member_count >= $2)
@@ -437,23 +450,23 @@ impl CommunityJoinExecutorWorker {
                     LIMIT $3
                     FOR UPDATE OF place SKIP LOCKED
                 )
-                RETURNING id, name, url
+                RETURNING id, name, url, place_kind
             )
-            SELECT c.id AS place_id, c.name, c.url
+            SELECT c.id AS place_id, c.name, c.url, c.place_kind
             FROM claimed c
             "#,
         )
         .bind(ws)
         .bind(MIN_MEMBER_COUNT)
         .bind(CLAIM_BATCH)
+        .bind(AUTO_JOINABLE_KINDS)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows)
     }
 
-    /// Joins a single community by calling the agents service's
-    /// `/reddit/join` endpoint.
+    /// Joins a single community through its platform's lane.
     async fn join_community(&self, place: &ClaimedPlace) -> Result<(), CommunityJoinError> {
         let auth_key = self
             .agent_service_auth_key
@@ -465,24 +478,41 @@ impl CommunityJoinExecutorWorker {
             ws,
             crate::discovery::AgentCapability::SocialPublish,
         );
-        let url = format!("{}/reddit/join", self.agent_service_url);
 
-        // `discovery_places.name` is the subreddit's *title*, not its slug —
-        // "Death Metal: death metal bands, death metal music, and death metal
-        // culture", "/r/Metalcore - news, reviews, videos &amp; discussion".
-        // Sending that as a subreddit produced
-        //   HTTP 400 {"error":"subreddit must be 2-21 chars of A-Za-z0-9_"}
-        // thirty times, from our own validator, before the request ever
-        // reached Reddit. The slug was in `url` the whole time, which this
-        // struct already selected and marked `#[allow(dead_code)]`.
-        let Some(subreddit) = subreddit_slug(&place.url, &place.name) else {
-            return Err(CommunityJoinError::NotASubreddit(place.url.clone()));
+        let (url, payload, log_name) = match place.place_kind.as_str() {
+            // Lemmy resolves `!name@instance` or the canonical /c/ URL
+            // through the home instance — the place URL is the identifier.
+            "lemmy" => (
+                format!("{}/lemmy/join", self.agent_service_url),
+                serde_json::json!({ "community": place.url }),
+                place.url.clone(),
+            ),
+            // Telegram joins a t.me username or invite link — the MTProto
+            // user session does the join a bot cannot.
+            "telegram" => (
+                format!("{}/telegram-user/join", self.agent_service_url),
+                serde_json::json!({ "chat": place.url }),
+                place.url.clone(),
+            ),
+            _ => {
+                // `discovery_places.name` is the subreddit's *title*, not its
+                // slug — "Death Metal: death metal bands, death metal music,
+                // and death metal culture", "/r/Metalcore - news, reviews,
+                // videos &amp; discussion". Sending that as a subreddit
+                // produced
+                //   HTTP 400 {"error":"subreddit must be 2-21 chars of A-Za-z0-9_"}
+                // thirty times, from our own validator, before the request
+                // ever reached Reddit. The slug was in `url` the whole time.
+                let Some(subreddit) = subreddit_slug(&place.url, &place.name) else {
+                    return Err(CommunityJoinError::NotASubreddit(place.url.clone()));
+                };
+                (
+                    format!("{}/reddit/join", self.agent_service_url),
+                    serde_json::json!({ "subreddit": subreddit }),
+                    subreddit,
+                )
+            }
         };
-        let subreddit = subreddit.as_str();
-
-        let payload = serde_json::json!({
-            "subreddit": subreddit,
-        });
 
         let response = self
             .http_client
@@ -501,7 +531,8 @@ impl CommunityJoinExecutorWorker {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(CommunityJoinError::AgentsService(format!(
-                "agents /reddit/join HTTP {status}: {body}"
+                "agents join HTTP {status} for {}: {body}",
+                place.place_kind
             )));
         }
 
@@ -510,7 +541,8 @@ impl CommunityJoinExecutorWorker {
 
         tracing::info!(
             place_id = %place.place_id,
-            subreddit = %place.name,
+            kind = %place.place_kind,
+            community = %log_name,
             "successfully joined community"
         );
         Ok(())
@@ -547,6 +579,7 @@ struct ClaimedPlace {
     place_id: Uuid,
     name: String,
     url: String,
+    place_kind: String,
 }
 
 #[cfg(test)]
@@ -639,6 +672,28 @@ mod tests {
                 .to_owned(),
         );
         assert!(theirs.is_refusal());
+    }
+
+    #[test]
+    fn an_unrouteable_telegram_reference_rejects_the_place() {
+        // A catalog/directory URL can never resolve to a Telegram chat —
+        // the agents service says so with a 400, and that is a property of
+        // the place, not of our request, so it is terminal like a 404.
+        let catalog = CommunityJoinError::AgentsService(
+            "agents join HTTP 400 for telegram: not a joinable telegram reference: \
+             https://telegram-channel.net/x"
+                .to_owned(),
+        );
+        assert!(catalog.is_refusal());
+
+        // But a 400 that is about our own missing setup stays retryable —
+        // the place joins the moment a person completes the login.
+        let no_session = CommunityJoinError::AgentsService(
+            "agents join HTTP 400 for telegram: no telegram-user session stored — run \
+             the interactive /telegram-user/login first"
+                .to_owned(),
+        );
+        assert!(!no_session.is_refusal());
     }
 
     #[test]

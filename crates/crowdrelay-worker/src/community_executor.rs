@@ -131,6 +131,13 @@ fn build_http_client(
 /// Cooldown: no more than one post per subreddit per 7 days.
 const SUBREDDIT_COOLDOWN_DAYS: i32 = 7;
 
+/// The community platforms this executor has a sender for. A delivery for
+/// any other platform seeds `awaiting_manual_post` and stays there — a
+/// Discord draft belongs to a person, not an endpoint (selfbot automation
+/// is a ToS violation), and `other` has no shape to submit to. Ordering is
+/// load-bearing nowhere; membership is.
+const SENDABLE_PLATFORMS: &[&str] = &["reddit", "lemmy", "telegram", "forum"];
+
 /// A `posting` row older than this is considered a crashed attempt.
 const POSTING_STALE_THRESHOLD: Duration = Duration::from_secs(300);
 
@@ -735,14 +742,16 @@ impl CommunityExecutorWorker {
                      -- A delivery the send lane cannot make waits for a
                      -- person from the start instead of passing through
                      -- `posting` on its way there. Two cases: a platform
-                     -- this executor does not send to at all, and a Reddit
-                     -- community whose own rules gate the post on something
-                     -- automation cannot satisfy — a required flair, a mod
-                     -- check-in. The person publishes by hand and registers
-                     -- the URL; adopting either into the send lane would
-                     -- ship a post the community's stated rules reject.
-                     WHEN COALESCE(NULLIF(t.platform, ''), 'reddit') <> 'reddit'
-                          OR COALESCE(rules.requires_approval, false)
+                     -- this executor has no sender for (Discord is manual
+                     -- by ToS), and a community whose own rules gate the
+                     -- post on something automation cannot satisfy — a
+                     -- required flair, a mod check-in. The person publishes
+                     -- by hand and registers the URL; adopting either into a
+                     -- send lane would ship a post the community's stated
+                     -- rules reject.
+                     WHEN NOT (
+                          COALESCE(NULLIF(t.platform, ''), 'reddit') = ANY($2)
+                          AND NOT COALESCE(rules.requires_approval, false))
                      THEN 'awaiting_manual_post'
                      ELSE 'pending' END
             FROM autopilot_actions a
@@ -777,6 +786,7 @@ impl CommunityExecutorWorker {
             "#,
         )
         .bind(ws)
+        .bind(SENDABLE_PLATFORMS)
         .execute(&mut *tx)
         .await?;
 
@@ -869,12 +879,12 @@ impl CommunityExecutorWorker {
                             ON batch.workspace_id = c2.workspace_id
                            AND batch.source_id = c2.relay_source_id
                         WHERE c2.workspace_id = $1
-                          -- This executor is the Reddit lane. Deliveries for
-                          -- other platforms seed as `awaiting_manual_post`
-                          -- and wait for a person or their own executor —
-                          -- claiming them here would ship a Discord draft to
-                          -- Reddit's submit endpoint under a subreddit name.
-                          AND c2.platform = 'reddit'
+                          -- Only platforms this executor actually sends to.
+                          -- Everything else seeds `awaiting_manual_post` and
+                          -- waits for a person — claiming a Discord draft
+                          -- here would ship it to the wrong endpoint under a
+                          -- subreddit name.
+                          AND c2.platform = ANY($5)
                           AND (
                               c2.status = 'pending'
                               OR (c2.status = 'rate_limited'
@@ -1022,14 +1032,16 @@ impl CommunityExecutorWorker {
                 FROM target
                 WHERE cp.id = target.id
                 RETURNING cp.id, cp.action_id, cp.target_id, cp.platform, cp.subreddit,
-                          cp.title, cp.body, cp.smart_link, cp.image_url, cp.media_id,
-                          cp.source_url, cp.relay_source_id, target.claimed_from
+                          cp.place_id, cp.title, cp.body, cp.smart_link, cp.image_url,
+                          cp.media_id, cp.source_url, cp.relay_source_id,
+                          target.claimed_from
             )
-            SELECT c.id, c.action_id, c.target_id, c.platform, c.subreddit, c.title,
-                   c.body, c.smart_link, c.image_url, c.media_id, c.source_url,
-                   c.relay_source_id, c.claimed_from,
+            SELECT c.id, c.action_id, c.target_id, c.platform, c.subreddit,
+                   pl.url AS place_url, c.title, c.body, c.smart_link, c.image_url,
+                   c.media_id, c.source_url, c.relay_source_id, c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
+            LEFT JOIN discovery_places pl ON pl.id = c.place_id
             LEFT JOIN autopilot_actions a ON a.id = c.action_id
             "#,
         )
@@ -1037,6 +1049,7 @@ impl CommunityExecutorWorker {
         .bind(SUBREDDIT_COOLDOWN_DAYS)
         .bind(!self.manual_mode)
         .bind(cap_reached)
+        .bind(SENDABLE_PLATFORMS)
         .fetch_all(&mut *tx)
         .await?;
 
@@ -1052,7 +1065,7 @@ impl CommunityExecutorWorker {
         // be submitted to Reddit under a community name that is not a
         // subreddit. Park it for a person instead of failing it: the draft
         // itself is fine, the lane is wrong.
-        if action.platform != "reddit" {
+        if !SENDABLE_PLATFORMS.contains(&action.platform.as_str()) {
             sqlx::query(
                 "UPDATE community_posts \
                  SET status = 'awaiting_manual_post', \
@@ -1068,7 +1081,7 @@ impl CommunityExecutorWorker {
                 post_id = %action.id,
                 platform = %action.platform,
                 subreddit = %action.subreddit,
-                "non-Reddit community delivery reached the Reddit lane — parked for manual publication"
+                "community delivery for a platform with no sender reached the send lane — parked for manual publication"
             );
             return Ok(());
         }
@@ -1277,14 +1290,53 @@ impl CommunityExecutorWorker {
         // destination through `/l/`, so the audience ends up in the same
         // place and the click is counted.
         let tracked_link_url = self.tracked_link_url(action.smart_link.as_deref());
-        let reddit_result = self
-            .submit_via_agent_browser(
-                action,
-                &post_body,
-                image_url.as_deref(),
-                tracked_link_url.as_deref().or(action.source_url.as_deref()),
-            )
-            .await?;
+
+        // The send. Reddit has its own format ladder (image → link → self);
+        // the other lanes take a straight title/body submission. A platform's
+        // credential missing — no Lemmy account stored, no Telegram session,
+        // no forum profile — parks the draft for a person instead of burning
+        // it, same class as a publish-guard hold.
+        let outcome = match action.platform.as_str() {
+            "reddit" => {
+                let result = self
+                    .submit_via_agent_browser(
+                        action,
+                        &post_body,
+                        image_url.as_deref(),
+                        tracked_link_url.as_deref().or(action.source_url.as_deref()),
+                    )
+                    .await?;
+                PostedOutcome {
+                    post_id: Some(result.post_id),
+                    post_url: Some(result.post_url),
+                    kind: result.kind,
+                }
+            }
+            platform => {
+                let Some(place_url) = action.place_url.as_deref() else {
+                    self.hold_for_human(
+                        action.id,
+                        "community has no place URL for its sender to address",
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                match self
+                    .submit_platform_post(action, platform, place_url, &post_body)
+                    .await?
+                {
+                    PlatformSend::Posted { post_url } => PostedOutcome {
+                        post_id: None,
+                        post_url,
+                        kind: None,
+                    },
+                    PlatformSend::NeedsHuman(reason) => {
+                        self.hold_for_human(action.id, &reason).await?;
+                        return Ok(());
+                    }
+                }
+            }
+        };
 
         // Record success, and re-anchor the action's pending measurements to
         // `posted_at` in the same transaction: the exposure window starts
@@ -1309,9 +1361,9 @@ impl CommunityExecutorWorker {
             "#,
         )
         .bind(action.id)
-        .bind(&reddit_result.post_id)
-        .bind(&reddit_result.post_url)
-        .bind(&reddit_result.kind)
+        .bind(&outcome.post_id)
+        .bind(&outcome.post_url)
+        .bind(&outcome.kind)
         .bind(self.workspace_id.into_uuid())
         .execute(&mut *posted_tx)
         .await?;
@@ -1328,7 +1380,16 @@ impl CommunityExecutorWorker {
         // it. Both writes are idempotent (`ON CONFLICT DO NOTHING`, a
         // monotonic from-guard), so rolling them into `posted_tx` only
         // shrinks the window where the record can lie.
-        sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id, causation_id) VALUES ($1, $2, 'subreddit_audience', $3, 'reddit_post', 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'post_url', $4), $6, $2) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&reddit_result.post_url).bind(100_i32).bind(action.trace_id).execute(&mut *posted_tx).await?; // reach ledger — estimated_reach=100 as a conservative default for subreddit broadcasts (actual subscriber count not available at this layer). causation_id = action_id (the action caused the reach event).
+        // Reach is attributed to the platform the post actually went out on
+        // — a Telegram channel named like a subreddit must not credit the
+        // subreddit. `community`/`community_post` match what register-manual
+        // writes, so automated and hand publication land in one lane.
+        let (recipient_kind, channel) = if action.platform == "reddit" {
+            ("subreddit_audience", "reddit_post")
+        } else {
+            ("community", "community_post")
+        };
+        sqlx::query(r#"INSERT INTO reach_events (workspace_id, action_id, recipient_kind, recipient_id, channel, template_id, estimated_reach, status, metadata, trace_id, causation_id) VALUES ($1, $2, $7::text, $3, $8::text, 'community-engager', $5, 'delivered', jsonb_build_object('subreddit', $3, 'platform', $9, 'post_url', $4), $6, $2) ON CONFLICT (action_id, recipient_id, channel) WHERE action_id IS NOT NULL DO NOTHING"#).bind(self.workspace_id.into_uuid()).bind(action.action_id).bind(&action.subreddit).bind(&outcome.post_url).bind(100_i32).bind(action.trace_id).bind(recipient_kind).bind(channel).bind(&action.platform).execute(&mut *posted_tx).await?; // reach ledger — estimated_reach=100 as a conservative default for community broadcasts (actual member count not available at this layer). causation_id = action_id (the action caused the reach event).
         // Transition the experiment assignment execution_status from
         // dispatched → executed. This is the actual execution boundary:
         // the external intervention (Reddit post) has been confirmed.
@@ -1351,9 +1412,10 @@ impl CommunityExecutorWorker {
         .await?;
         posted_tx.commit().await?;
         tracing::info!(
-            subreddit = %action.subreddit,
-            post_url = %reddit_result.post_url,
-            "successfully posted to Reddit"
+            platform = %action.platform,
+            community = %action.subreddit,
+            post_url = ?outcome.post_url,
+            "successfully posted community delivery"
         );
         Ok(())
     }
@@ -1457,6 +1519,130 @@ impl CommunityExecutorWorker {
         }
         check_response_size(&response)?;
         response.json().await.map_err(CommunityExecutorError::Http)
+    }
+
+    /// Sends through one of the non-Reddit platform lanes on the agents
+    /// service: `/lemmy/post`, `/telegram-user/post`, `/forum/post`. The
+    /// place URL is the community address on every one — `!name@instance`,
+    /// a `t.me` handle or invite, a forum base — so the payload differs only
+    /// in field names. Statuses map to the same classes the Reddit lane
+    /// uses: 429 defers, 5xx defers through `SessionUnavailable`, a 400
+    /// naming a missing credential or session means the lane needs a person
+    /// to do the one-time setup (park the draft, lose nothing), and any
+    /// other refusal is about the content and fails the draft.
+    async fn submit_platform_post(
+        &self,
+        action: &ClaimedAction,
+        platform: &str,
+        place_url: &str,
+        post_body: &str,
+    ) -> Result<PlatformSend, CommunityExecutorError> {
+        let auth_key = self.agent_service_auth_key.as_deref().ok_or_else(|| {
+            CommunityExecutorError::RedditApi("agent service auth key not configured".to_owned())
+        })?;
+        let ws = self.workspace_id.into_uuid();
+        let token = crate::discovery::derive_agent_token_with_capability(
+            auth_key,
+            ws,
+            crate::discovery::AgentCapability::SocialPublish,
+        );
+
+        let (url, payload) = match platform {
+            // Lemmy: a link post points at the tracked link; the body still
+            // carries the same text so readers see the sentence, not just a
+            // bare URL. `url` is `.optional()` on the agents side — an
+            // explicit null fails validation, so the key goes on the wire
+            // only when it carries a link.
+            "lemmy" => {
+                let mut payload = serde_json::json!({
+                    "community": place_url,
+                    "title": action.title,
+                    "body": post_body,
+                });
+                let link = self
+                    .tracked_link_url(action.smart_link.as_deref())
+                    .or_else(|| action.source_url.clone());
+                if let Some(link) = link
+                    && let Some(object) = payload.as_object_mut()
+                {
+                    object.insert("url".to_owned(), link.into());
+                }
+                (format!("{}/lemmy/post", self.agent_service_url), payload)
+            }
+            // Telegram has no title/body split — one message, title first,
+            // and 4096 chars is the platform's cap the route enforces.
+            "telegram" => {
+                let message = format!("{}\n\n{}", action.title, post_body);
+                let message: String = message.chars().take(4096).collect();
+                (
+                    format!("{}/telegram-user/post", self.agent_service_url),
+                    serde_json::json!({
+                        "chat": place_url,
+                        "message": message,
+                    }),
+                )
+            }
+            // Forums take the thread shape a human writes: title + body.
+            _ => (
+                format!("{}/forum/post", self.agent_service_url),
+                serde_json::json!({
+                    "forum_url": place_url,
+                    "title": action.title,
+                    "body": post_body,
+                }),
+            ),
+        };
+
+        let client = self
+            .http_client
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Workspace-Id", ws.to_string())
+            .json(&payload)
+            .timeout(AGENTS_SUBMIT_TIMEOUT)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status.as_u16() == 429 {
+            return Err(CommunityExecutorError::RateLimited);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if status.is_server_error() {
+                return Err(CommunityExecutorError::SessionUnavailable(format!(
+                    "agents {platform} post HTTP {status}: {body}"
+                )));
+            }
+            // 400s naming a credential or session are setup gaps, not
+            // content refusals — a person completes the login/store step
+            // and the same draft publishes.
+            let lower = body.to_ascii_lowercase();
+            if status.as_u16() == 400
+                && (lower.contains("credential")
+                    || lower.contains("session")
+                    || lower.contains("not logged in"))
+            {
+                return Ok(PlatformSend::NeedsHuman(format!(
+                    "{platform} lane needs an operator: {body}"
+                )));
+            }
+            return Err(CommunityExecutorError::RedditApi(format!(
+                "agents {platform} post HTTP {status}: {body}"
+            )));
+        }
+
+        let value: serde_json::Value = response.json().await.unwrap_or_default();
+        let post_url = value
+            .get("postUrl")
+            .or_else(|| value.get("post_url"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        Ok(PlatformSend::Posted { post_url })
     }
 
     /// Checks if this subreddit has been posted to within the cooldown window.
@@ -1937,11 +2123,16 @@ pub struct ClaimedAction {
     /// The community this delivery targets — the outreach target id a
     /// standing grant keys on. `None` means no grant can cover the row.
     target_id: Option<Uuid>,
-    /// The community surface this delivery is for. The claim lane only takes
-    /// `reddit`; the field rides along so a row that reached `process_action`
-    /// on another platform is recognised and parked, not submitted.
+    /// The community surface this delivery is for. The claim lane takes the
+    /// sendable set; a row that reached `process_action` on another platform
+    /// is recognised and parked, not submitted.
     platform: String,
     subreddit: String,
+    /// The discovery place's canonical URL — how a Lemmy `!name@instance`, a
+    /// `t.me` handle, or a forum base address reaches its sender. `None` for
+    /// a Reddit row (its subreddit column already carries the address) or a
+    /// target that was never tied to a place.
+    place_url: Option<String>,
     title: String,
     body: String,
     smart_link: Option<String>,
@@ -1965,6 +2156,24 @@ pub struct ClaimedAction {
 }
 
 #[derive(Debug, Deserialize)]
+/// What a send produced, normalised across platforms so the posted-record
+/// write is one block. `post_id` stays `None` off Reddit — the metrics lane
+/// claims on `reddit_post_id IS NOT NULL`, so a Lemmy or forum post must not
+/// smuggle an id in there and get polled through Reddit's metrics endpoint.
+struct PostedOutcome {
+    post_id: Option<String>,
+    post_url: Option<String>,
+    kind: Option<String>,
+}
+
+/// A non-Reddit send either landed or discovered the lane cannot send until
+/// a person does the one-time setup (login, credential, forum session).
+enum PlatformSend {
+    Posted { post_url: Option<String> },
+    NeedsHuman(String),
+}
+
+#[derive(serde::Deserialize)]
 struct RedditSubmitResult {
     post_id: String,
     post_url: String,
