@@ -32,7 +32,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WATCHDOG = ROOT / "crates/crowdrelay-worker/src/ops_watchdog.rs"
 CONDITIONS = ROOT / "crates/crowdrelay-worker/src/ops_watchdog/conditions.rs"
-TESTS = ROOT / "crates/crowdrelay-worker/src/ops_watchdog/tests.rs"
+# tests.rs plus the `tests_*.rs` siblings it shares the module with — the
+# watchdog's suite is split across include! files under the size ratchet.
+TESTS_DIR = ROOT / "crates/crowdrelay-worker/src/ops_watchdog"
 
 # `key: "growth.feed_failing",` in the conditions list.
 KEY = re.compile(r'key:\s*"([a-z_]+\.[a-z_]+)"')
@@ -114,7 +116,9 @@ class WatchdogConditionsDocumented(unittest.TestCase):
 
     def test_every_condition_has_a_test(self):
         """An alarm with no test is one nobody has seen fire."""
-        tests = TESTS.read_text()
+        tests = "".join(
+            path.read_text() for path in TESTS_DIR.glob("tests*.rs")
+        )
         untested = sorted(key for key in set(self.keys) if key not in tests)
         self.assertEqual(
             untested,
