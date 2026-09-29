@@ -11,25 +11,27 @@
 
 #[cfg(test)]
 mod tests {
-    use super::{OpsSnapshot, conditions};
-use crate::auto_post_platforms::{PublishingPosture, RedditPosture};
+    use super::{MissingReason, OpsSnapshot, Pace, VideoScorecardView, conditions};
+    use crate::auto_post_platforms::{PublishingPosture, RedditPosture};
+    use sqlx::types::Json;
+    use time::OffsetDateTime;
 
-/// The posture of a workspace whose channels are all switched on.
-///
-/// Every test that is not about publishing uses this, so a condition about
-/// unpublished drafts does not fire in the middle of an unrelated assertion.
-fn publishing() -> PublishingPosture {
-    PublishingPosture {
-        platforms: crate::auto_post_platforms::AutoPostPlatforms {
-            telegram: true,
-            discord: true,
-            social: true,
-        },
-        reddit: RedditPosture::Publishes,
+    /// The posture of a workspace whose channels are all switched on.
+    ///
+    /// Every test that is not about publishing uses this, so a condition about
+    /// unpublished drafts does not fire in the middle of an unrelated assertion.
+    pub(super) fn publishing() -> PublishingPosture {
+        PublishingPosture {
+            platforms: crate::auto_post_platforms::AutoPostPlatforms {
+                telegram: true,
+                discord: true,
+                social: true,
+            },
+            reddit: RedditPosture::Publishes,
+        }
     }
-}
 
-    fn healthy() -> OpsSnapshot {
+    pub(super) fn healthy() -> OpsSnapshot {
         OpsSnapshot {
             executor_registered: 1,
             executor_active: 1,
@@ -79,6 +81,8 @@ fn publishing() -> PublishingPosture {
             // No campaign delivery has been claimed and abandoned.
             deliveries_stuck_claimed: 0,
             abandoned_claims_24h: 0,
+            // No videos to score: both video conditions stay quiet.
+            video_cards: Json(Vec::new()),
         }
     }
 
@@ -112,9 +116,11 @@ fn publishing() -> PublishingPosture {
         let mut snapshot = healthy();
         snapshot.no_executor_cancelled_7d = 1;
         let fired = conditions(&snapshot, publishing());
-        assert!(fired
-            .iter()
-            .any(|c| c.key == "executor.capability_unadvertised" && c.active));
+        assert!(
+            fired
+                .iter()
+                .any(|c| c.key == "executor.capability_unadvertised" && c.active)
+        );
     }
 
     /// A dead registry is `executor.offline`'s territory — parked work there
@@ -125,21 +131,27 @@ fn publishing() -> PublishingPosture {
         snapshot.executor_active = 0;
         snapshot.awaiting_executor_actions = 2;
         let fired = conditions(&snapshot, publishing());
-        assert!(fired
-            .iter()
-            .any(|c| c.key == "executor.offline" && c.active));
-        assert!(!fired
-            .iter()
-            .any(|c| c.key == "executor.capability_unadvertised" && c.active));
+        assert!(
+            fired
+                .iter()
+                .any(|c| c.key == "executor.offline" && c.active)
+        );
+        assert!(
+            !fired
+                .iter()
+                .any(|c| c.key == "executor.capability_unadvertised" && c.active)
+        );
     }
 
     /// The healthy state carries neither parked work nor cancellations.
     #[test]
     fn advertised_capabilities_report_nothing() {
         let fired = conditions(&healthy(), publishing());
-        assert!(!fired
-            .iter()
-            .any(|c| c.key == "executor.capability_unadvertised" && c.active));
+        assert!(
+            !fired
+                .iter()
+                .any(|c| c.key == "executor.capability_unadvertised" && c.active)
+        );
     }
 
     /// History alone must not hold the alarm open.
@@ -312,7 +324,10 @@ fn publishing() -> PublishingPosture {
             .filter(|c| c.active)
             .map(|c| c.key)
             .collect::<Vec<_>>();
-        assert!(raised.is_empty(), "a system that has not run yet is not a fault");
+        assert!(
+            raised.is_empty(),
+            "a system that has not run yet is not a fault"
+        );
     }
 
     /// And it must be critical.
@@ -791,9 +806,14 @@ fn publishing() -> PublishingPosture {
         let mut snapshot = healthy();
         snapshot.unknown_actions = 3;
         snapshot.contradicted_actions = 0;
-        assert!(conditions(&snapshot, publishing()).iter().all(|condition| condition.key
-            != "execution.contradicted_outcome"
-            || !condition.active));
+        assert!(
+            conditions(&snapshot, publishing())
+                .iter()
+                .all(
+                    |condition| condition.key != "execution.contradicted_outcome"
+                        || !condition.active
+                )
+        );
     }
 
     /// The keys `conditions` reports as active for a snapshot.
@@ -1055,7 +1075,6 @@ fn publishing() -> PublishingPosture {
         );
     }
 
-
     /// A self-demotion is announced here because the event that reports it
     /// is refused by its only consumer.
     #[test]
@@ -1074,7 +1093,10 @@ fn publishing() -> PublishingPosture {
             .expect("the condition is evaluated");
         assert!(raised.active);
         assert_eq!(raised.severity, "warning");
-        assert_eq!(raised.details["policies"], "content_supply until 2026-10-03 08:08 UTC");
+        assert_eq!(
+            raised.details["policies"],
+            "content_supply until 2026-10-03 08:08 UTC"
+        );
     }
 
     /// Approved work that failed is announced, with what failed and why.
@@ -1093,7 +1115,10 @@ fn publishing() -> PublishingPosture {
         let raised = find(&snapshot);
         assert!(raised.active);
         assert_eq!(raised.details["failed"], 38);
-        assert_eq!(raised.details["by_kind_and_error"], "outreach.request: state_changed ×38");
+        assert_eq!(
+            raised.details["by_kind_and_error"],
+            "outreach.request: state_changed ×38"
+        );
     }
 
     #[test]
@@ -1120,7 +1145,10 @@ fn publishing() -> PublishingPosture {
         }]));
         let raised = find(&snapshot);
         assert!(raised.active);
-        assert_eq!(raised.details["stalled_drops"][0]["lanes"][0]["status"], "awaiting_approval");
+        assert_eq!(
+            raised.details["stalled_drops"][0]["lanes"][0]["status"],
+            "awaiting_approval"
+        );
     }
 
     /// An executor that claims a campaign delivery and never reports a
@@ -1148,5 +1176,5 @@ fn publishing() -> PublishingPosture {
         assert_eq!(raised.severity, "warning");
         assert_eq!(raised.details["abandoned_claims_24h"], 116);
     }
-}
 
+}

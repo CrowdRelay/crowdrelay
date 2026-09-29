@@ -535,7 +535,10 @@ async fn load_snapshot(
              WHERE d.workspace_id=$1 AND d.status='failed'
                AND d.error_code='claim_expired_unknown'
                AND d.completed_at > now() - interval '1 day'
-            )::bigint AS abandoned_claims_24h
+            )::bigint AS abandoned_claims_24h,
+            -- The video scorecards are read outside this transaction; the
+            -- column exists only so the row type can carry them.
+            '[]'::jsonb AS video_cards
         FROM executor_instances WHERE workspace_id=$1
         "#,
     )

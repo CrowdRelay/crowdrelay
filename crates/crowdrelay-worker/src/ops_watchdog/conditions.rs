@@ -677,5 +677,74 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            every recipient resolves.",
             }),
         },
+        Condition {
+            // A video inside its window that is under half of the views its
+            // age expects is the "+1000 in 14 days" plan visibly failing.
+            // Warning, not critical: the window has not closed, and the
+            // card already knows what is missing — the details hand the
+            // operator the video and its top blockers rather than a bare
+            // number to investigate.
+            key: "video.behind_pace",
+            severity: "warning",
+            summary: "A video in its 14-day window is behind its CrowdRelay-driven view pace",
+            active: snapshot
+                .video_cards
+                .iter()
+                .any(|card| card.pace == Pace::Behind),
+            details: json!({
+                "behind": snapshot
+                    .video_cards
+                    .iter()
+                    .filter(|card| card.pace == Pace::Behind)
+                    .map(|card| json!({
+                        "title": card.title,
+                        "source_id": card.source_id,
+                        "age_days": card.age_days,
+                        "attributed_views": card.attributed_views,
+                        "expected_by_now": card.expected_by_now,
+                        "missing": card
+                            .missing
+                            .iter()
+                            .take(3)
+                            .map(|reason| serde_json::to_value(reason)
+                                .unwrap_or_default()
+                                .get("reason")
+                                .cloned()
+                                .unwrap_or_default())
+                            .collect::<Vec<Value>>(),
+                    }))
+                    .collect::<Vec<Value>>(),
+                "remedy": "open the video's scorecard — /v1/control-plane/\
+                           content/videos/{source_id}/scorecard — and clear \
+                           the top missing reason: halted Reddit standing, \
+                           an unseeded press wave, or undelivered fan mail.",
+            }),
+        },
+        Condition {
+            // Info, not warning: nothing is broken in what ran — the grant
+            // simply does not exist, so no `traffic:*` series can ever land
+            // and every card reads unmeasured. A reconnect fixes it; the
+            // finding exists so "we cannot tell" is never mistaken for
+            // "nobody came".
+            key: "video.unmeasured",
+            severity: "info",
+            summary: "YouTube Analytics is not connected — CrowdRelay-driven views cannot be told from organic ones",
+            active: snapshot.video_cards.iter().any(|card| {
+                card.missing
+                    .iter()
+                    .any(|reason| matches!(reason, MissingReason::NoAnalyticsGrant))
+            }),
+            details: json!({
+                "videos_unmeasured": snapshot
+                    .video_cards
+                    .iter()
+                    .filter(|card| card.pace == Pace::Unmeasured)
+                    .map(|card| card.title.clone())
+                    .collect::<Vec<String>>(),
+                "remedy": "reconnect the YouTube account with the \
+                           yt-analytics.readonly scope — connections → \
+                           YouTube → reauthorize.",
+            }),
+        },
     ]
 }

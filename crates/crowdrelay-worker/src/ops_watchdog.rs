@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 25 conditions. The count and this list are
+//! The watchdog monitors 27 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -164,6 +164,15 @@
 //!   expiry only ran when the executor called back, which a dead executor
 //!   never does; this cycle now runs the sweep itself, and the alarm
 //!   counts the abandoned sends it has to rescue.
+//! - `video.behind_pace` — a video inside its 14-day window is under half
+//!   of the attributed views its age expects on the "+1000 CrowdRelay-driven
+//!   views" plan. Warning: the window is closing, not closed, and the
+//!   details name the top missing supply so the fix is routed — a halted
+//!   Reddit standing, an unseeded press wave, undelivered fan mail.
+//! - `video.unmeasured` — videos exist to score but no `youtube_account`
+//!   grant carries the Analytics scope, so CrowdRelay-driven views can never
+//!   be told from organic ones. Info: the cure is a reconnect, not a fix to
+//!   anything that ran.
 //!
 //! # Contradictions are the one condition nothing else can find
 //!
@@ -197,11 +206,13 @@
 
 use std::{collections::HashMap, time::Duration};
 
+use crowdrelay_application::autopilot::VideoScorecardView;
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::video_scorecard::{MissingReason, Pace};
 
 use crate::auto_post_platforms::PublishingPosture;
 use serde_json::{Value, json};
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Transaction, types::Json};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::{
@@ -218,6 +229,9 @@ const ALERT_REPEAT_AFTER: time::Duration = time::Duration::hours(6);
 /// an unknown that persists longer indicates the operator needs to check
 /// the provider manually.
 const UNKNOWN_ALERT_AGE_THRESHOLD: Duration = Duration::from_secs(60 * 60);
+
+/// The scorecard feed's page size — the same cap the list route serves.
+const VIDEO_SCORECARD_LIMIT: i64 = 30;
 
 #[derive(Debug, Error)]
 pub enum OpsWatchdogError {
@@ -287,6 +301,24 @@ impl OpsWatchdogWorker {
     /// break that only a live database can see.
     pub async fn run_once(&self) -> Result<usize, OpsWatchdogError> {
         let now = OffsetDateTime::now_utc();
+        // The per-video scorecards read on the pool, ahead of the
+        // transaction: the dozen set-queries it fans out have no business
+        // holding the advisory lock, and a card-read failure must warn and
+        // degrade the video conditions rather than blind every other alarm
+        // in the cycle.
+        let video_cards = match crowdrelay_infra::content_scorecard::list_video_scorecards(
+            &self.pool,
+            self.workspace_id,
+            VIDEO_SCORECARD_LIMIT,
+        )
+        .await
+        {
+            Ok(cards) => cards,
+            Err(error) => {
+                tracing::warn!(%error, "video scorecard read failed; video alarms skipped this cycle");
+                Vec::new()
+            }
+        };
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{}:crowdrelay-ops-watchdog", self.workspace_id))
@@ -317,7 +349,8 @@ impl OpsWatchdogWorker {
         .bind(crowdrelay_domain::campaign_lifecycle::DELIVERY_CLAIM_TTL_MINUTES as i32)
         .execute(&mut *transaction)
         .await?;
-        let snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
+        let mut snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
+        snapshot.video_cards = Json(video_cards);
         let conditions = conditions(&snapshot, self.posture);
         let states = load_states(&mut transaction, self.workspace_id).await?;
         let repeat_before = now
@@ -619,6 +652,11 @@ struct OpsSnapshot {
     /// Claims the lease sweep failed closed in the last day — each one a
     /// send the executor claimed and never reported an outcome for.
     abandoned_claims_24h: i64,
+    /// The recent-video scorecards, read on the pool ahead of the snapshot
+    /// transaction — a dozen set-queries do not belong inside the advisory
+    /// lock. The SELECT hands back an empty jsonb array and the real cards
+    /// replace it before the conditions run.
+    video_cards: Json<Vec<VideoScorecardView>>,
 }
 
 #[derive(Clone, Debug)]
@@ -741,3 +779,5 @@ async fn mark_recovered(
 }
 
 include!("ops_watchdog/tests.rs");
+
+include!("ops_watchdog/tests_video.rs");
