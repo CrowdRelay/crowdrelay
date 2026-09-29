@@ -131,20 +131,15 @@ pub async fn delivery_plan(
     } else {
         None
     };
-    let delivery = match delivery_progress(
-        &state,
-        workspace_id,
-        campaign_id,
-        campaign.channel.as_str(),
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, %campaign_id, "could not read campaign delivery progress");
-            return unavailable(&headers);
-        }
-    };
+    let delivery =
+        match delivery_progress(&state, workspace_id, campaign_id, campaign.channel.as_str()).await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, %campaign_id, "could not read campaign delivery progress");
+                return unavailable(&headers);
+            }
+        };
     (
         StatusCode::OK,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -371,16 +366,12 @@ pub async fn report_campaign_delivery(
     .fetch_optional(&state.database)
     .await;
     match existing {
-        Ok(Some(delivery))
-            if delivery.attempt_key == attempt_key && delivery.status == status =>
-        {
-            (
-                StatusCode::OK,
-                [(CACHE_CONTROL, PRIVATE_NO_STORE)],
-                Json(delivery),
-            )
-                .into_response()
-        }
+        Ok(Some(delivery)) if delivery.attempt_key == attempt_key && delivery.status == status => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(delivery),
+        )
+            .into_response(),
         Ok(Some(_)) | Ok(None) => Problem::conflict(request_id(&headers))
             .private()
             .into_response(),
@@ -702,7 +693,11 @@ pub async fn enqueue_push_campaign(
                 .private()
                 .into_response();
         }
-        Ok(None) => return Problem::not_found(request_id(&headers)).private().into_response(),
+        Ok(None) => {
+            return Problem::not_found(request_id(&headers))
+                .private()
+                .into_response();
+        }
         Err(error) => {
             tracing::warn!(%error, %campaign_id, "could not load push campaign");
             return unavailable(&headers);
@@ -718,7 +713,11 @@ pub async fn enqueue_push_campaign(
     }
     let segment = match load_segment(&state, workspace_id, &campaign.segment_slug).await {
         Ok(Some(value)) if value.active => value,
-        Ok(_) => return Problem::conflict(request_id(&headers)).private().into_response(),
+        Ok(_) => {
+            return Problem::conflict(request_id(&headers))
+                .private()
+                .into_response();
+        }
         Err(error) => {
             tracing::warn!(%error, %campaign_id, "could not load push campaign segment");
             return unavailable(&headers);
@@ -730,7 +729,11 @@ pub async fn enqueue_push_campaign(
     };
     match ensure_recipient_snapshot(&state, workspace_id, campaign_id, &filter, "push").await {
         Ok(true) => {}
-        Ok(false) => return Problem::conflict(request_id(&headers)).private().into_response(),
+        Ok(false) => {
+            return Problem::conflict(request_id(&headers))
+                .private()
+                .into_response();
+        }
         Err(error) => {
             tracing::warn!(%error, %campaign_id, "could not snapshot push campaign recipients");
             return unavailable(&headers);
