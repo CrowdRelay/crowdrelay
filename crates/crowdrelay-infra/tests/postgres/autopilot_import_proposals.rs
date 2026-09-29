@@ -136,6 +136,19 @@ async fn approve_promotes_admitted_rows_once() {
     assert_eq!(target_rows, 1);
     assert!(preexisting_verified);
 
+    // Operator approval is the attestation, so the created targets arrive
+    // verified — the flag every pitch lane filters on.
+    let verified_new: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM outreach_targets
+         WHERE workspace_id = $1 AND id = ANY($2) AND verified",
+    )
+    .bind(workspace)
+    .bind(&approval.created_target_ids)
+    .fetch_one(&f.pool)
+    .await
+    .expect("verified new targets");
+    assert_eq!(verified_new, 2);
+
     // Admitted rows promoted with the screen's verdict recorded.
     let promoted: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM agent_outreach_targets

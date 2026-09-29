@@ -301,7 +301,10 @@ impl AutopilotOutreachImportRepository for PostgresAutopilotRepository {
 
             // An address the band already holds stays the row it already is:
             // the conflict rule never resets an existing relationship, the
-            // same rule the candidate-promotion path keeps.
+            // same rule the candidate-promotion path keeps. Operator approval
+            // is the attestation — the same verified=true the other operator
+            // imports and candidate promotion carry — because every pitch
+            // lane filters on verified.
             let mut created_target_ids = Vec::with_capacity(admitted.len());
             for row in &admitted {
                 let email = row
@@ -316,7 +319,7 @@ impl AutopilotOutreachImportRepository for PostgresAutopilotRepository {
                         workspace_id, target_kind, display_name, contact_email,
                         active, verified, accepts_outreach, accepts_outreach_basis,
                         priority
-                    ) VALUES ($1,$2,$3,$4,true,false,true,
+                    ) VALUES ($1,$2,$3,$4,true,true,true,
                               'operator registry import',50)
                     ON CONFLICT (workspace_id, contact_email) DO NOTHING
                     RETURNING id
