@@ -41,7 +41,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 21] = [
+pub const EDITABLE_KEYS: [&str; 22] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_LIVE_PAGE_PATH,
@@ -63,6 +63,7 @@ pub const EDITABLE_KEYS: [&str; 21] = [
     KEY_JOIN_ASK_PLATFORMS,
     KEY_JOIN_ASK_IMAGE_URL,
     KEY_BRAND_WORDMARK,
+    KEY_SOCIAL_AUTOPOST_PLATFORMS,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -73,6 +74,11 @@ const KEY_SIGNAL_ENABLED: &str = "signal_enabled";
 const KEY_SYNESTHESIA_ENABLED: &str = "synesthesia_enabled";
 const KEY_NORTH_STAR_METRIC: &str = "north_star_metric";
 pub const KEY_SOCIAL_AUTO_POST: &str = "social_auto_post";
+/// Per-platform autopost lanes, comma-separated. Checked only while
+/// `social_auto_post` is on: a platform in the list publishes itself,
+/// a platform outside is held for a person. Absent means every platform
+/// the executor can post — see `domain::social_autopost`.
+pub const KEY_SOCIAL_AUTOPOST_PLATFORMS: &str = "social_autopost_platforms";
 pub const KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH: &str = "growth_cadence_moments_per_month";
 pub const KEY_GROWTH_CADENCE_FILLERS_ENABLED: &str = "growth_cadence_fillers_enabled";
 /// The language the crew reads task briefings in.
@@ -167,6 +173,11 @@ pub struct TenantBrandSettings {
     /// platforms that have credentials (Facebook Pages, Instagram) instead of
     /// drafting for manual review. Default false — the operator turns it on.
     pub social_auto_post: bool,
+    /// The platforms `social_auto_post` is allowed to post — the automatic
+    /// lane. Any drafted platform outside this list waits for a person
+    /// instead, so removing a platform moves it to the human queue without
+    /// touching the master switch. Default: everything the executor can post.
+    pub social_autopost_platforms: Vec<String>,
     /// First-party ticket checkout opt-in. Default false: a tenant that never
     /// asked for ticket sales gets a refusal at the reserve, not a silent
     /// order row. Migration 0343 seeded the tenants who were already selling.
@@ -181,6 +192,11 @@ impl Default for TenantBrandSettings {
             live_page_path: DEFAULT_LIVE_PAGE_PATH.to_owned(),
             synesthesia_campaign_slug: DEFAULT_SYNESTHESIA_CAMPAIGN_SLUG.to_owned(),
             signal_enabled: true,
+            social_autopost_platforms:
+                crowdrelay_domain::social_autopost::DEFAULT_AUTOPOST_PLATFORMS
+                    .iter()
+                    .map(|platform| (*platform).to_owned())
+                    .collect(),
             synesthesia_enabled: false,
             north_star_metric: DEFAULT_NORTH_STAR_METRIC.to_owned(),
             social_auto_post: false,
@@ -310,7 +326,7 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9, $10)
+              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(workspace_id)
@@ -323,6 +339,7 @@ impl TenantSettingsRepository {
         .bind(KEY_SOCIAL_AUTO_POST)
         .bind(KEY_TICKETING_ENABLED)
         .bind(KEY_LIVE_PAGE_PATH)
+        .bind(KEY_SOCIAL_AUTOPOST_PLATFORMS)
         .fetch_all(&self.pool)
         .await?;
         let mut settings = TenantBrandSettings::default();
@@ -336,6 +353,13 @@ impl TenantSettingsRepository {
                 KEY_SYNESTHESIA_ENABLED => settings.synesthesia_enabled = value == "true",
                 KEY_NORTH_STAR_METRIC => settings.north_star_metric = value,
                 KEY_SOCIAL_AUTO_POST => settings.social_auto_post = value == "true",
+                KEY_SOCIAL_AUTOPOST_PLATFORMS => {
+                    if let Some(platforms) =
+                        crowdrelay_domain::social_autopost::parse_autopost_platforms(&value)
+                    {
+                        settings.social_autopost_platforms = platforms;
+                    }
+                }
                 KEY_TICKETING_ENABLED => settings.ticketing_enabled = value == "true",
                 _ => {}
             }

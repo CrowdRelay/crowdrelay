@@ -34,23 +34,6 @@ struct PendingActionSummary {
     total_count: i64,
 }
 
-/// One channel's backlog of drafted-but-unpublished posts.
-///
-/// Reported per channel because the answer differs by channel: Reddit needs a
-/// human by policy, while Telegram and Discord are one environment variable
-/// away from publishing themselves.
-#[derive(Debug, Serialize, sqlx::FromRow)]
-struct UnpublishedDraftChannel {
-    /// `reddit`, `telegram`, `discord` or `social`.
-    channel: String,
-    drafts: i64,
-    /// When the oldest draft on this channel was created. The age is the
-    /// point: one draft from this morning is a queue, twelve from last month
-    /// is a channel nobody is running.
-    #[serde(with = "time::serde::rfc3339::option")]
-    oldest_drafted_at: Option<OffsetDateTime>,
-}
-
 /// One community the brain wants to post to and cannot, because nobody has
 /// joined it.
 ///
@@ -143,7 +126,7 @@ struct OperatorAttentionSnapshot {
     /// action state, not from rendered UI items.
     awaiting_approval: i64,
     /// Dispatches the brain produced that are still waiting for a person to
-    /// publish them.
+    /// publish them — the human half of the post queue.
     ///
     /// This belongs in an exception-first view because it is the one queue
     /// where the system is blocked on the operator rather than the other way
@@ -152,6 +135,11 @@ struct OperatorAttentionSnapshot {
     /// publishes reaches nobody, so the work the brain did is spent and the
     /// fan it would have brought does not arrive.
     unpublished_drafts: Vec<UnpublishedDraftChannel>,
+    /// The automatic half of the post queue — rows the machine is still
+    /// working on or resolved itself. Listed separately from
+    /// `unpublished_drafts` so "the system is posting" never reads as
+    /// "waiting on you" or vice versa.
+    automatic_queue: Vec<AutomaticQueueChannel>,
     /// Communities the brain has decided it wants to post to and cannot,
     /// because nobody has joined them.
     ///
@@ -317,6 +305,8 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let brain = run_limited(budget, timeout_duration, load_brain_assessment(&state.ops));
     let unpublished_drafts =
         run_limited(budget, timeout_duration, load_unpublished_drafts(&state));
+    let automatic_queue =
+        run_limited(budget, timeout_duration, load_automatic_queue(&state));
     let blocked_communities =
         run_limited(budget, timeout_duration, load_blocked_communities(&state.ops));
     let lapsed = run_limited(budget, timeout_duration, load_lapsed_approvals(&state.ops));
@@ -334,11 +324,13 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
+        automatic_queue,
         blocked_communities, lapsed, failed, notices, rejected,
         join_ask, unanswered,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
+        automatic_queue,
         blocked_communities, lapsed, failed, notices, rejected,
         join_ask, unanswered,
     );
@@ -381,6 +373,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Err(error) => return error.into_response(request_id(&headers)),
     };
     let unpublished_drafts = match unpublished_drafts {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let automatic_queue = match automatic_queue {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
@@ -428,6 +424,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             needs_you,
             awaiting_approval,
             unpublished_drafts,
+            automatic_queue,
             blocked_communities,
             join_ask_readiness,
             brain,
@@ -554,41 +551,6 @@ async fn load_unanswered_replies(
     )
     .bind(state.workspace_id.into_uuid())
     .fetch_all(&state.pool)
-    .await
-    .map_err(OpsError::sqlx)
-}
-
-/// The drafted posts waiting on a person, per channel.
-///
-/// Counts the draft states rather than excluding the published one, so a
-/// status added later is not silently reported as a backlog. `rate_limited`
-/// and `failed` are deliberately absent: those are the system's problem and
-/// already surface as alerts, while `awaiting_manual_post` is the operator's.
-async fn load_unpublished_drafts(
-    state: &crate::AppState,
-) -> Result<Vec<UnpublishedDraftChannel>, OpsError> {
-    sqlx::query_as::<_, UnpublishedDraftChannel>(
-        r#"
-        SELECT channel, count(*)::bigint AS drafts, min(created_at) AS oldest_drafted_at
-        FROM (
-            SELECT 'reddit' AS channel, created_at FROM community_posts
-            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
-            UNION ALL
-            SELECT 'telegram', created_at FROM telegram_posts
-            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
-            UNION ALL
-            SELECT 'discord', created_at FROM discord_posts
-            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
-            UNION ALL
-            SELECT 'social', created_at FROM social_posts
-            WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
-        ) AS drafts
-        GROUP BY channel
-        ORDER BY min(created_at)
-        "#,
-    )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .fetch_all(state.ticketing.pool())
     .await
     .map_err(OpsError::sqlx)
 }

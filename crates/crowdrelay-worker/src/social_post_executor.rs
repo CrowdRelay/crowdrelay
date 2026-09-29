@@ -258,29 +258,41 @@ impl SocialPostExecutorWorker {
         }
     }
 
-    /// Returns true when the executor should draft (manual mode) rather than
-    /// publish automatically. Two switches gate publishing: the deployment
-    /// kill switch (`CROWDRELAY_SOCIAL_AUTO_POST`, off forces manual no matter
-    /// what the tenant setting says) and the tenant's own `social_auto_post`,
-    /// read live from the database (60s TTL cache) so the control plane toggle
-    /// takes effect without a restart. A settings read failure also holds —
-    /// a database blip must never silently enable publishing.
-    async fn is_manual_mode(&self) -> bool {
-        if self.env_manual_mode {
-            return true;
-        }
+    /// The tenant's brand settings, or `None` when they cannot be read.
+    /// The read goes through a 60s cache, so the per-action call in
+    /// `process_action` costs nothing and a control-plane toggle lands
+    /// without a restart.
+    async fn brand_settings(
+        &self,
+    ) -> Option<std::sync::Arc<crowdrelay_infra::tenant_settings::TenantBrandSettings>> {
         use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
         let repo = TenantSettingsRepository::new(self.pool.clone());
         match repo.brand_settings(self.workspace_id.into_uuid()).await {
-            Ok(settings) => !settings.social_auto_post,
+            Ok(settings) => Some(settings),
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "failed to read social_auto_post from tenant settings; holding posts for a human"
+                    "failed to read tenant settings; holding posts for a human"
                 );
-                true
+                None
             }
         }
+    }
+
+    /// `Some(settings)` when automatic posting is live for this tenant —
+    /// both the deployment kill switch (`CROWDRELAY_SOCIAL_AUTO_POST`) and
+    /// the tenant's own `social_auto_post` are off-gates. `None` means the
+    /// action belongs in the human queue: a settings read failure holds for
+    /// a person too, because a database blip must never silently enable
+    /// publishing.
+    async fn automatic_mode_settings(
+        &self,
+    ) -> Option<std::sync::Arc<crowdrelay_infra::tenant_settings::TenantBrandSettings>> {
+        if self.env_manual_mode {
+            return None;
+        }
+        let settings = self.brand_settings().await?;
+        settings.social_auto_post.then_some(settings)
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -611,13 +623,13 @@ impl SocialPostExecutorWorker {
             return Ok(());
         }
 
-        // Manual mode (default): mark as awaiting manual post.
-        // The operator posts manually to the platform and registers the
-        // post URL via the API.
+        // Manual mode (the default, or a read failure): mark as awaiting
+        // manual post. The operator posts manually to the platform and
+        // registers the post URL via the API.
         //
         // The live value is read from tenant_settings on each cycle so an
         // operator can flip it from the control plane without a restart.
-        if self.is_manual_mode().await {
+        let Some(settings) = self.automatic_mode_settings().await else {
             sqlx::query(
                 r#"
                 UPDATE social_posts
@@ -636,24 +648,31 @@ impl SocialPostExecutorWorker {
                 "social post marked as awaiting manual post"
             );
             return Ok(());
-        }
+        };
 
-        // Automatic mode. Facebook Pages and Instagram publish through the
-        // Graph API; Telegram through the Bot API when its own kill switch
-        // is on; X still drafts, because its write API is behind a paid tier
-        // this tenant does not hold. Held with the reason so the queue says
-        // why rather than looking like a stuck job.
-        if action.platform == "facebook" {
-            return self.publish_to_facebook_page(action).await;
-        }
-        if action.platform == "instagram" {
-            return self.publish_to_instagram(action).await;
-        }
-        if action.platform == "telegram" {
-            return self.publish_to_telegram(action).await;
-        }
-
-        let reason = "x publishing needs a paid API tier";
+        // Automatic mode, per platform. A platform in the tenant's autopost
+        // list publishes itself; one outside it waits for a person — the
+        // draft moves to the human queue, it does not block and it is not a
+        // fault. X always waits: its write API is behind a paid tier this
+        // stack does not hold, so it can never enter the autopost list.
+        // Held with the reason so the queue says why rather than looking
+        // like a stuck job.
+        let reason = if action.platform == "x" {
+            "x publishing needs a paid API tier"
+        } else if !settings
+            .social_autopost_platforms
+            .iter()
+            .any(|platform| platform == &action.platform)
+        {
+            "autoposting is off for this platform"
+        } else {
+            match action.platform.as_str() {
+                "facebook" => return self.publish_to_facebook_page(action).await,
+                "instagram" => return self.publish_to_instagram(action).await,
+                "telegram" => return self.publish_to_telegram(action).await,
+                _ => "this platform has no automatic publish path",
+            }
+        };
         self.hold_for_human(action.id, reason).await?;
         tracing::info!(
             action_id = %action.action_id,

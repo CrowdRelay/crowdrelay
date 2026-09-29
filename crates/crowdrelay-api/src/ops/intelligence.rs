@@ -33,8 +33,12 @@ pub(crate) struct IntelligenceBrief {
     awaiting_approval: i64,
     /// Communities the brain wants to reach but cannot — nobody joined them.
     blocked_communities: Vec<BlockedCommunity>,
-    /// Finished work nobody published.
+    /// Finished work nobody published — the human half of the post queue.
     unpublished_drafts: Vec<UnpublishedDraftChannel>,
+    /// Work the machine is still carrying — the automatic half of the post
+    /// queue. Listed beside `unpublished_drafts` so "the system is posting"
+    /// never reads as "waiting on you" or the reverse.
+    automatic_queue: Vec<AutomaticQueueChannel>,
     /// What the weekly join-ask needs from a person before it can run at all.
     ///
     /// The cold-start half of this brief. The three fields above describe a
@@ -89,6 +93,11 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
         timeout_duration,
         load_unpublished_drafts(&state),
     );
+    let automatic_queue = run_limited(
+        budget,
+        timeout_duration,
+        load_automatic_queue(&state),
+    );
     let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
 
     let posture = budgeted(
@@ -116,8 +125,8 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
             .load_chief_of_staff(workspace_id, now),
     );
 
-    let (worker, brain, needs_you, blocked, drafts, join_ask, posture, cycle, chief) = tokio::join!(
-        worker, brain, needs_you, blocked, drafts, join_ask, posture, cycle, chief,
+    let (worker, brain, needs_you, blocked, drafts, automatic_queue, join_ask, posture, cycle, chief) = tokio::join!(
+        worker, brain, needs_you, blocked, drafts, automatic_queue, join_ask, posture, cycle, chief,
     );
 
     let worker = match worker {
@@ -141,6 +150,10 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
         Err(error) => return error.into_response(request_id(&headers)),
     };
     let join_ask_readiness = match join_ask {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let automatic_queue = match automatic_queue {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
@@ -179,6 +192,7 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
             awaiting_approval,
             blocked_communities: blocked,
             unpublished_drafts: drafts,
+            automatic_queue,
             join_ask_readiness,
         },
     )
