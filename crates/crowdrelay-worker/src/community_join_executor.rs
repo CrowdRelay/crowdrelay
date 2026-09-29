@@ -152,7 +152,13 @@ impl CommunityJoinError {
             // directory URL in a Telegram place can never resolve to a chat —
             // that 400 is a property of the place, so it rejects like a 404.
             Self::AgentsService(message) => {
+                // A 404 from the agent's own router — Fastify answers
+                // "Route POST:/lemmy/join not found" when the deployed agent
+                // image predates the lane. That is version skew on our side,
+                // not the platform refusing the join, so it stays retryable.
+                let route_missing = message.contains("Route ") && message.contains("not found");
                 !message.contains("HTTP 5")
+                    && !route_missing
                     && (!message.contains("HTTP 400")
                         || message.contains("not a joinable telegram reference"))
             }
@@ -694,6 +700,20 @@ mod tests {
                 .to_owned(),
         );
         assert!(!no_session.is_refusal());
+    }
+
+    #[test]
+    fn a_missing_agent_route_is_not_a_refusal() {
+        // The worker shipped before the agent image did once: Fastify's 404
+        // "Route POST:/lemmy/join not found" hit `is_refusal` and burned all
+        // sixteen Lemmy/Telegram places to `rejected` in one sweep. Version
+        // skew is our side failing — it must stay retryable.
+        let route_missing = CommunityJoinError::AgentsService(
+            "agents join HTTP 404 Not Found for lemmy: {\"message\":\"Route POST:/lemmy/join \
+             not found\",\"error\":\"Not Found\",\"statusCode\":404}"
+                .to_owned(),
+        );
+        assert!(!route_missing.is_refusal());
     }
 
     #[test]
