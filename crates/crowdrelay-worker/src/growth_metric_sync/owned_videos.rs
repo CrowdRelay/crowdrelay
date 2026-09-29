@@ -141,13 +141,6 @@ impl GrowthMetricSyncWorker {
         let observed_at = OffsetDateTime::now_utc();
         for item in &body.items {
             for (workspace_id, source_id, title, _) in jobs.iter().filter(|job| job.3 == item.id) {
-                // The display name is also the series' human label — key and
-                // title, capped at 120 characters without splitting a
-                // multi-byte one.
-                let display_name: String = format!("YouTube {} — {title}", item.id)
-                    .chars()
-                    .take(120)
-                    .collect();
                 for (metric_key, value) in [
                     ("views", item.statistics.view_count.as_ref()),
                     ("likes", item.statistics.like_count.as_ref()),
@@ -156,6 +149,14 @@ impl GrowthMetricSyncWorker {
                     let Some(value) = value.and_then(normalize_count) else {
                         continue;
                     };
+                    // The display name is also the series' human label — one
+                    // per counter, so views, likes and comments stay
+                    // distinguishable, capped at 120 characters without
+                    // splitting a multi-byte one.
+                    let display_name: String = format!("YouTube {metric_key} — {title}")
+                        .chars()
+                        .take(120)
+                        .collect();
                     record_subject_metric_point(
                         &self.pool,
                         *workspace_id,
