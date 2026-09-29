@@ -57,6 +57,7 @@ impl AutopilotActionPayload {
             Self::RaiseContentSuggestion { .. } => "content.suggestion.raise",
             Self::RaiseContentArc { .. } => "content.arc.raise",
             Self::RunPlayStep { .. } => "play.step.run",
+            Self::RunArchivePromoteWave { .. } => "archive.promotion.run",
             Self::SendTeamAssignmentEmail { .. } => "team.assignment.email",
             Self::RequestAgentContent { .. } => "agent.content.request",
             Self::RequestOutreachTarget { .. } => "outreach.target.request",

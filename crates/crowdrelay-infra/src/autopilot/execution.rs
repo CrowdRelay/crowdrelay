@@ -536,7 +536,13 @@ pub(super) async fn schedule_effect_measurement(
         // level with the sweep that found the gap, not as a send to anybody.
         | AutopilotActionPayload::SetEventTicketUrl { .. }
         | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-        | AutopilotActionPayload::RequestOutreachTarget { .. } => {}
+        | AutopilotActionPayload::RequestOutreachTarget { .. }
+        // The wave's effect is confirmations landing as `fan.confirmed`
+        // events — the staged → pending → confirmed → engaged ladder is the
+        // readout. Scheduling a metric against the approval would attribute
+        // fan joins to a click, which is the inflation the measurement
+        // layer exists to refuse.
+        | AutopilotActionPayload::RunArchivePromoteWave { .. } => {}
         // A fan lifecycle message (welcome, re-engagement, referral invite)
         // is externally dispatched and requires a terminal executor receipt.
         // Its measurement is scheduled when that receipt arrives, via

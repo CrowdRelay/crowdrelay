@@ -3,7 +3,7 @@
 //! a durable, idempotent Autopilot action under the usual authority gate.
 
 use crowdrelay_domain::growth_debt::{
-    GrowthDebtDecision, GrowthDebtObservation, evaluate_growth_debt,
+    GrowthDebtDecision, GrowthDebtKind, GrowthDebtObservation, evaluate_growth_debt,
 };
 use time::OffsetDateTime;
 
@@ -31,13 +31,13 @@ pub(super) fn growth_debt_candidate(
     evidence: ContextEvidence,
     now: OffsetDateTime,
 ) -> Result<Option<DecisionCandidate>, serde_json::Error> {
-    let AutopilotPolicyConfig::GrowthDebt(domain_policy) = policy.config else {
+    let AutopilotPolicyConfig::GrowthDebt(domain_policy) = &policy.config else {
         return Ok(None);
     };
     let GrowthDebtDecision::Raise(item) = evaluate_growth_debt(observation, domain_policy) else {
         return Ok(None);
     };
-    let disposition = disposition_with_evidence(
+    let mut disposition = disposition_with_evidence(
         policy.autonomy_level,
         item.confidence,
         policy.minimum_confidence,
@@ -45,16 +45,31 @@ pub(super) fn growth_debt_candidate(
         RATE_FLOOR,
     );
     let subject = ActionSubject::from(observation.subject);
-    let action = AutopilotActionPayload::RaiseGrowthDebt {
-        subject_kind: subject.kind().to_owned(),
-        subject_id: subject.uuid(),
-        debt_kind: item.kind,
-        recommended_action: item.kind.recommended_action().to_owned(),
-        overdue_basis_points: item.overdue_basis_points,
-        outstanding_items: item.outstanding_items,
-        tracked_items: observation.tracked_items,
-        priority: item.priority,
-        template_key: item.kind.template_key().to_owned(),
+    // The archive backlog is the one debt kind whose remediation is also
+    // the payload: approving the card fires a bounded double opt-in wave.
+    // It mails people who never wrote first, so autonomy never self-sends
+    // it — the approval queue is the wave's only launch path.
+    let action = if item.kind == GrowthDebtKind::ArchiveBacklogUnpromoted {
+        if matches!(disposition, PolicyDisposition::AutoExecute) {
+            disposition = PolicyDisposition::RequireApproval;
+        }
+        AutopilotActionPayload::RunArchivePromoteWave {
+            limit: i64::from(item.outstanding_items).min(domain_policy.archive_wave_cap),
+            reason: domain_policy.archive_invite_reason.clone(),
+            staged_count: i64::from(observation.tracked_items),
+        }
+    } else {
+        AutopilotActionPayload::RaiseGrowthDebt {
+            subject_kind: subject.kind().to_owned(),
+            subject_id: subject.uuid(),
+            debt_kind: item.kind,
+            recommended_action: item.kind.recommended_action().to_owned(),
+            overdue_basis_points: item.overdue_basis_points,
+            outstanding_items: item.outstanding_items,
+            tracked_items: observation.tracked_items,
+            priority: item.priority,
+            template_key: item.kind.template_key().to_owned(),
+        }
     };
     Ok(Some(DecisionCandidate {
         context: policy.context,

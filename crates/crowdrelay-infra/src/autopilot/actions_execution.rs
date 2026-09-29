@@ -891,6 +891,20 @@ impl PostgresAutopilotRepository {
                     // auto-sending an outreach message here would move paid,
                     // outward-facing work behind an observation quota.
                 }
+                AutopilotActionPayload::RunArchivePromoteWave {
+                    limit, reason, ..
+                } => {
+                    // The same mechanism the operator endpoint calls — the
+                    // safeguards cannot drift apart between launch paths.
+                    operations::run_archive_promote_wave(
+                        &mut transaction,
+                        &self.pool,
+                        workspace_id,
+                        *limit,
+                        reason.clone(),
+                    )
+                    .await?;
+                }
                 AutopilotActionPayload::RaiseContentSuggestion { suggestion_id, .. } => {
                     operations::approve_content_suggestion(&mut transaction, workspace_id, *suggestion_id)
                         .await?;
