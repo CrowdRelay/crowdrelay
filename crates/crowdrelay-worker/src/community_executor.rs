@@ -1619,14 +1619,15 @@ impl CommunityExecutorWorker {
                     "agents {platform} post HTTP {status}: {body}"
                 )));
             }
-            // 400s naming a credential or session are setup gaps, not
-            // content refusals — a person completes the login/store step
-            // and the same draft publishes.
+            // 400s naming a credential, a session, or a missing board are
+            // setup gaps, not content refusals — a person completes the
+            // login/store/board step and the same draft publishes.
             let lower = body.to_ascii_lowercase();
             if status.as_u16() == 400
                 && (lower.contains("credential")
                     || lower.contains("session")
-                    || lower.contains("not logged in"))
+                    || lower.contains("not logged in")
+                    || lower.contains("no postable board"))
             {
                 return Ok(PlatformSend::NeedsHuman(format!(
                     "{platform} lane needs an operator: {body}"
