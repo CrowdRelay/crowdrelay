@@ -66,6 +66,7 @@ mod owned_replies;
 mod relay;
 mod replies;
 mod standing;
+mod title;
 use time::OffsetDateTime;
 
 use relay::RelayBatchGate;
@@ -1452,7 +1453,7 @@ impl CommunityExecutorWorker {
         // even looked at — the keys only go on the wire when they carry a URL.
         let mut payload = serde_json::json!({
             "subreddit": action.subreddit,
-            "title": action.title,
+            "title": title::reddit_title(&action.title),
             "body": post_body,
         });
         if let Some(object) = payload.as_object_mut() {
