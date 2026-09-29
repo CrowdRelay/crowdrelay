@@ -279,20 +279,25 @@ impl SocialPostExecutorWorker {
         }
     }
 
-    /// `Some(settings)` when automatic posting is live for this tenant —
-    /// both the deployment kill switch (`CROWDRELAY_SOCIAL_AUTO_POST`) and
-    /// the tenant's own `social_auto_post` are off-gates. `None` means the
-    /// action belongs in the human queue: a settings read failure holds for
-    /// a person too, because a database blip must never silently enable
-    /// publishing.
-    async fn automatic_mode_settings(
-        &self,
-    ) -> Option<std::sync::Arc<crowdrelay_infra::tenant_settings::TenantBrandSettings>> {
+    /// The lane a drafted platform takes this cycle, resolved live from
+    /// tenant_settings so a control-plane toggle lands without a restart.
+    ///
+    /// The human lane is the fail-closed answer: the deployment kill switch
+    /// (`CROWDRELAY_SOCIAL_AUTO_POST`) off, the tenant's `social_auto_post`
+    /// off, a settings read failure, or a platform outside
+    /// `social_autopost_platforms` all hold the draft for a person — a
+    /// database blip must never silently enable publishing.
+    async fn lane_for(&self, platform: &str) -> SocialLane {
         if self.env_manual_mode {
-            return None;
+            return SocialLane::Hold("automatic posting is switched off");
         }
-        let settings = self.brand_settings().await?;
-        settings.social_auto_post.then_some(settings)
+        match self.brand_settings().await {
+            Some(settings) if settings.social_auto_post => {
+                social_lane(platform, &settings.social_autopost_platforms)
+            }
+            Some(_) => SocialLane::Hold("automatic posting is switched off"),
+            None => SocialLane::Hold("tenant settings could not be read"),
+        }
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -606,61 +611,35 @@ impl SocialPostExecutorWorker {
             ));
         }
 
-        // Anti-spam: check platform cooldown.
-        if self.platform_on_cooldown(&action.platform).await? {
-            tracing::info!(
-                platform = %action.platform,
-                "platform on 12h cooldown, skipping"
-            );
-            self.mark_rate_limited(action.id).await?;
-            return Ok(());
-        }
+        // The lane decision runs before the anti-spam guardrails: cooldown
+        // and the 24h cap protect a platform from rapid publishes, and a
+        // draft heading for the human queue never reaches the platform.
+        // Holding it behind a rate_limited cycle would park it in the
+        // machine lane for hours for a throttle that cannot apply.
+        match self.lane_for(&action.platform).await {
+            SocialLane::Publish(path) => {
+                // Anti-spam: check platform cooldown.
+                if self.platform_on_cooldown(&action.platform).await? {
+                    tracing::info!(
+                        platform = %action.platform,
+                        "platform on 12h cooldown, skipping"
+                    );
+                    self.mark_rate_limited(action.id).await?;
+                    return Ok(());
+                }
 
-        // Anti-spam: check 24h rate limit.
-        if self.rate_limit_reached().await? {
-            tracing::info!("24h post limit reached, skipping");
-            self.mark_rate_limited(action.id).await?;
-            return Ok(());
-        }
+                // Anti-spam: check 24h rate limit.
+                if self.rate_limit_reached().await? {
+                    tracing::info!("24h post limit reached, skipping");
+                    self.mark_rate_limited(action.id).await?;
+                    return Ok(());
+                }
 
-        // Manual mode (the default, or a read failure): mark as awaiting
-        // manual post. The operator posts manually to the platform and
-        // registers the post URL via the API.
-        //
-        // The live value is read from tenant_settings on each cycle so an
-        // operator can flip it from the control plane without a restart.
-        let Some(settings) = self.automatic_mode_settings().await else {
-            sqlx::query(
-                r#"
-                UPDATE social_posts
-                SET status = 'awaiting_manual_post',
-                    updated_at = now()
-                WHERE workspace_id = $1 AND id = $2
-                "#,
-            )
-            .bind(self.workspace_id.into_uuid())
-            .bind(action.id)
-            .execute(&self.pool)
-            .await?;
-            tracing::info!(
-                action_id = %action.action_id,
-                platform = %action.platform,
-                "social post marked as awaiting manual post"
-            );
-            return Ok(());
-        };
-
-        // Automatic mode, per platform: `social_lane` names the lane, this
-        // arm owns the publish or the hold.
-        match social_lane(&action.platform, &settings.social_autopost_platforms) {
-            SocialLane::Publish(SocialPublish::Facebook) => {
-                return self.publish_to_facebook_page(action).await;
-            }
-            SocialLane::Publish(SocialPublish::Instagram) => {
-                return self.publish_to_instagram(action).await;
-            }
-            SocialLane::Publish(SocialPublish::Telegram) => {
-                return self.publish_to_telegram(action).await;
+                match path {
+                    SocialPublish::Facebook => self.publish_to_facebook_page(action).await,
+                    SocialPublish::Instagram => self.publish_to_instagram(action).await,
+                    SocialPublish::Telegram => self.publish_to_telegram(action).await,
+                }
             }
             SocialLane::Hold(reason) => {
                 self.hold_for_human(action.id, reason).await?;
@@ -668,11 +647,11 @@ impl SocialPostExecutorWorker {
                     action_id = %action.action_id,
                     platform = %action.platform,
                     reason,
-                    "social post held for an operator: this platform does not publish automatically"
+                    "social post held for an operator"
                 );
+                Ok(())
             }
         }
-        Ok(())
     }
 
     /// Parks a drafted post for an operator, with the reason it was held.
