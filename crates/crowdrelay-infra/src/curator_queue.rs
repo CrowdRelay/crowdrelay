@@ -208,7 +208,7 @@ pub async fn mark_curator_dm_sent(
         "record_curator_dm_sent",
         "outreach_candidate",
         candidate_id,
-        "operator",
+        "admin_api_key",
         idempotency_key,
         request_id,
         &details,
