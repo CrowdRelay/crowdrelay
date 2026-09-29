@@ -791,6 +791,10 @@ impl CommunityExecutorWorker {
         .execute(&mut *tx)
         .await?;
 
+        // Format-declaring subs get their title rewritten before the row is
+        // ever claimable — see enforce_title_formats for why this runs here.
+        title::enforce_title_formats(&mut tx, ws).await?;
+
         // Step 2: Fail rows whose community stopped being admitted between
         // seed and claim — a demoted or re-screened target must not receive
         // the post it was queued for. Without this the row would sit in

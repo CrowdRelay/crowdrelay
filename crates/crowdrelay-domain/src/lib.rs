@@ -131,6 +131,7 @@ pub mod pricing;
 pub mod promotion;
 pub mod publish_guard;
 pub mod reddit_standing;
+pub mod reddit_title;
 pub mod referrals;
 pub mod relay_freshness;
 pub mod release_autopilot;
