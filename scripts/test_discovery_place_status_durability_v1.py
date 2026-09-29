@@ -91,7 +91,14 @@ class DiscoveryPlaceStatusDurability(unittest.TestCase):
                     writers.append(path.relative_to(ROOT).as_posix())
         self.assertEqual(
             sorted(set(writers)),
-            [],
+            [
+                # The rules-refresh worker archives a place whose subreddit
+                # 404s — a dead community is a measurement, not a ruling, so
+                # it writes `archived`, which keeps the refusal semantics
+                # (`blocked`) untouched. The status durability rule still
+                # holds: nothing *resets* a ruling anywhere.
+                "crates/crowdrelay-worker/src/community_rules.rs",
+            ],
             "a new deliberate writer of discovery_places.status appeared; "
             "re-read scripts/test_discovery_place_status_durability_v1.py and "
             "crates/crowdrelay-infra/tests/postgres/discovery_place_status.rs "

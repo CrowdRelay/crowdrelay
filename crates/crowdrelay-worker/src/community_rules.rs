@@ -171,9 +171,11 @@ impl CommunityRulesWorker {
                 }
                 Err(FetchError::NotFound) => {
                     // The subreddit is gone or private — a measurement of its
-                    // own kind. Mark the place so the sweep stops asking.
+                    // own kind. `archived` keeps it out of join lanes and
+                    // candidate lists without calling it "ruled out": the
+                    // community died, we did not refuse it.
                     let _ = sqlx::query(
-                        "UPDATE discovery_places SET status = 'inactive', updated_at = now() \
+                        "UPDATE discovery_places SET status = 'archived', updated_at = now() \
                          WHERE id = $1 AND workspace_id = $2",
                     )
                     .bind(place.id)
