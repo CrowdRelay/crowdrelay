@@ -308,6 +308,7 @@ async fn load_snapshot(
             )::bigint AS off_platform_push_attempts,
             (SELECT count(*) FROM community_posts p
              WHERE p.workspace_id=$1 AND p.status='awaiting_manual_post'
+               AND p.platform='reddit'
             )::bigint AS reddit_drafts_waiting,
             -- Failed drafts in the last day, as `count×reason`. Truncated,
             -- because the reason can carry a provider body and this travels in
@@ -317,6 +318,7 @@ async fn load_snapshot(
                 SELECT count(*) AS hits, left(coalesce(p.error_message, 'unknown'), 120) AS reason
                 FROM community_posts p
                 WHERE p.workspace_id=$1
+                  AND p.platform='reddit'
                   AND p.status='failed'
                   AND p.updated_at > now() - interval '1 day'
                 GROUP BY left(coalesce(p.error_message, 'unknown'), 120)
@@ -329,6 +331,7 @@ async fn load_snapshot(
             -- is worth reporting regardless of why the work is queued.
             (SELECT count(*) FROM community_posts p
              WHERE p.workspace_id=$1 AND p.status IN ('pending','rate_limited')
+               AND p.platform='reddit'
             )::bigint AS reddit_posting_demand,
             -- Approvals the operator never answered. `last_error_kind` is the
             -- only thing distinguishing these from an operator's own rejection,

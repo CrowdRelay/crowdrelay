@@ -40,7 +40,10 @@ impl AutoPostPlatforms {
         {
             Some("telegram") => self.telegram,
             Some("discord") => self.discord,
-            Some("instagram" | "facebook" | "x" | "twitter" | "social") => self.social,
+            // X is absent on purpose: its write API is paid-tier so no flag
+            // can ever mean "x auto-posts" — see `social_lane` in the
+            // executor, which holds every x draft for a person.
+            Some("instagram" | "facebook" | "social") => self.social,
             // Reddit and anything unrecognised: a person decides.
             _ => false,
         }
@@ -213,6 +216,19 @@ mod tests {
         );
         assert!(RedditPosture::Publishes.publishes());
         assert_eq!(RedditPosture::Publishes.missing_switch(), None);
+    }
+
+    /// X can never auto-post — its write API is paid-tier, so a flag that
+    /// claimed otherwise would lie to the operator reading the log.
+    #[test]
+    fn no_flag_can_ever_auto_post_to_x() {
+        let all_on = AutoPostPlatforms {
+            telegram: true,
+            discord: true,
+            social: true,
+        };
+        assert!(!all_on.permits(Some("x")));
+        assert!(!all_on.permits(Some("twitter")));
     }
 
     /// An unrecognised platform is exactly when a human should look.

@@ -578,12 +578,18 @@ async fn load_delivery_results(
     sqlx::query_as::<_, DeliveryResult>(
         r#"
         SELECT * FROM (
-            -- Community posts (Reddit): content, subreddit, status, URL, engagement
+            -- Community posts: content, place, status, URL, engagement
             SELECT
                 'community_post'::text AS kind,
                 cp.id::text AS id,
                 cp.action_id::text AS action_id,
-                COALESCE('r/' || cp.subreddit, '') AS channel,
+                COALESCE(
+                    CASE cp.platform
+                        WHEN 'reddit' THEN 'r/' || cp.subreddit
+                        ELSE cp.platform || '/' || cp.subreddit
+                    END,
+                    ''
+                ) AS channel,
                 jsonb_build_object(
                     'title', cp.title,
                     'body', cp.body,

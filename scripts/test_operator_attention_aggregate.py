@@ -104,6 +104,7 @@ class OperatorAttentionAggregateContract(unittest.TestCase):
             sorted(sections),
             [
                 "alerts",
+                "automatic_queue",
                 "blocked_communities",
                 "brain",
                 "dead_deliveries",

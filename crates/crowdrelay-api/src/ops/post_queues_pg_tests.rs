@@ -80,7 +80,7 @@ mod post_queues_postgres_tests {
 
         // Every post-table row needs a parent action — one each.
         let mut actions = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..9 {
             actions.push(seed_action(&pool, workspace_id, decision_id).await);
         }
 
@@ -145,6 +145,16 @@ mod post_queues_postgres_tests {
         .execute(&pool)
         .await
         .expect("discord draft");
+        // Community posts went beyond Reddit (0377): a forum draft must
+        // report channel 'forum', not read as Reddit.
+        sqlx::query(
+            "INSERT INTO community_posts (workspace_id, action_id, platform, subreddit, title, body, status) VALUES ($1,$2,'forum','metal','t','b','awaiting_manual_post')",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(actions[8])
+        .execute(&pool)
+        .await
+        .expect("forum draft");
 
         let ws = workspace_id.into_uuid();
         let drafts = load_unpublished_drafts(&pool, ws).await.expect("manual lane");
@@ -157,6 +167,7 @@ mod post_queues_postgres_tests {
         assert!(lanes.contains(&("instagram", 1)), "{lanes:?}");
         assert!(lanes.contains(&("x", 1)), "{lanes:?}");
         assert!(lanes.contains(&("reddit", 1)), "{lanes:?}");
+        assert!(lanes.contains(&("forum", 1)), "{lanes:?}");
         assert!(lanes.contains(&("discord", 1)), "{lanes:?}");
         assert!(!lanes.iter().any(|(channel, _)| *channel == "facebook"), "{lanes:?}");
 

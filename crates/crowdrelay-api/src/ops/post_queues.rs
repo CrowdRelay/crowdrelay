@@ -19,8 +19,8 @@
 /// Discord and the Meta pair are a setting away from publishing themselves.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct UnpublishedDraftChannel {
-    /// `reddit`, `telegram`, `discord`, or a social platform —
-    /// `instagram`, `facebook`, `x`.
+    /// A community platform (`reddit`, `lemmy`, `forum`, …), `telegram`,
+    /// `discord`, or a social platform — `instagram`, `facebook`, `x`.
     channel: String,
     drafts: i64,
     /// When the oldest draft on this channel was created. The age is the
@@ -38,9 +38,10 @@ struct UnpublishedDraftChannel {
 /// demand attention. The loud failed states still surface as alerts.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 struct AutomaticQueueChannel {
-    /// `reddit`, `telegram`, `discord`, or a social platform —
-    /// `instagram`, `facebook`, `x`. Social reports its platform so the
-    /// lane matches the manual queue's vocabulary exactly.
+    /// A community platform (`reddit`, `lemmy`, `forum`, …), `telegram`,
+    /// `discord`, or a social platform — `instagram`, `facebook`, `x`.
+    /// Social and community rows report their platform so the lane matches
+    /// the manual queue's vocabulary exactly.
     channel: String,
     in_flight: i64,
     failed: i64,
@@ -64,7 +65,7 @@ async fn load_unpublished_drafts(
         r#"
         SELECT channel, count(*)::bigint AS drafts, min(created_at) AS oldest_drafted_at
         FROM (
-            SELECT 'reddit' AS channel, created_at FROM community_posts
+            SELECT platform AS channel, created_at FROM community_posts
             WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
             UNION ALL
             SELECT 'telegram', created_at FROM telegram_posts
@@ -105,7 +106,7 @@ async fn load_automatic_queue(
                count(*) FILTER (WHERE status = 'failed') AS failed,
                min(created_at) FILTER (WHERE status IN ('pending', 'posting', 'rate_limited')) AS oldest_queued_at
         FROM (
-            SELECT 'reddit' AS channel, created_at, status FROM community_posts
+            SELECT platform AS channel, created_at, status FROM community_posts
             WHERE workspace_id = $1 AND status IN ('pending', 'posting', 'rate_limited', 'failed')
             UNION ALL
             SELECT 'telegram', created_at, status FROM telegram_posts
