@@ -157,10 +157,27 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
         archive_summary AS (
             SELECT
                 count(*) AS archive_imported,
+                -- The funnel the contact actually walks: still staged (a
+                -- person has not promoted it), imported to a pending fan
+                -- awaiting the double opt-in, confirmed with current
+                -- marketing consent, and engaged — the fan did something
+                -- real in Signal (`last_activity_at` is maintained by the
+                -- growth metrics refresh, same definition the brain uses).
+                count(*) FILTER (
+                    WHERE contact.fan_outcome = 'staged'
+                ) AS archive_staged,
+                count(*) FILTER (
+                    WHERE fan.status = 'pending'
+                ) AS archive_pending,
                 count(*) FILTER (
                     WHERE fan.status = 'active'
                       AND consent.granted
-                ) AS archive_confirmed
+                ) AS archive_confirmed,
+                count(*) FILTER (
+                    WHERE fan.status = 'active'
+                      AND consent.granted
+                      AND fan.last_activity_at IS NOT NULL
+                ) AS archive_engaged
             FROM drive_contacts AS contact
             LEFT JOIN fans AS fan
               ON fan.workspace_id = contact.workspace_id
@@ -195,7 +212,10 @@ async fn load_signal_summary(state: &OpsState) -> Result<SignalSummaryRow, OpsEr
             push_summary.pushes_delivered,
             push_summary.pushes_failed,
             archive_summary.archive_imported,
-            archive_summary.archive_confirmed
+            archive_summary.archive_staged,
+            archive_summary.archive_pending,
+            archive_summary.archive_confirmed,
+            archive_summary.archive_engaged
         FROM fan_summary
         CROSS JOIN consent_summary
         CROSS JOIN location_summary
@@ -747,7 +767,10 @@ mod signal_tests {
                 pushes_delivered: 8,
                 pushes_failed: 1,
                 archive_imported: 12,
+                archive_staged: 6,
+                archive_pending: 1,
                 archive_confirmed: 5,
+                archive_engaged: 3,
             },
             vec![SignalCitySummary {
                 slug: "wroclaw".to_owned(),
@@ -781,9 +804,13 @@ mod signal_tests {
             assert!(json.contains(stage), "missing retention stage {stage}");
         }
         // The archive line is part of the fan count — imported never appears
-        // without the confirmed half next to it.
+        // without the confirmed half next to it, and the full ladder is
+        // readable: staged, pending, confirmed, engaged.
         assert!(json.contains("\"archive_imported\":12"));
+        assert!(json.contains("\"archive_staged\":6"));
+        assert!(json.contains("\"archive_pending\":1"));
         assert!(json.contains("\"archive_confirmed\":5"));
+        assert!(json.contains("\"archive_engaged\":3"));
         assert!(!json.contains("email"));
         assert!(!json.contains("display_name"));
         assert!(!json.contains("fan_id"));
@@ -864,6 +891,18 @@ mod signal_tests {
         .await
         .expect("insert consent");
 
+        // The archived fan also did something real in Signal — a
+        // meaningful action the metrics refresh stamped — so the ladder's
+        // engaged rung is not just confirmed-minus-nothing.
+        sqlx::query(
+            "UPDATE fans SET last_activity_at = now() \
+             WHERE workspace_id = $1 AND normalized_email = 'archived@example.com'",
+        )
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("stamp engagement");
+
         // The archive: one confirmed, one pending opt-in, one still an
         // address on a sheet.
         for email in [
@@ -900,9 +939,13 @@ mod signal_tests {
         assert_eq!(row.new_fans_7d, 1);
         assert_eq!(row.new_fans_30d, 1);
         // The whole staged archive is imported; only the active fan with
-        // current consent is confirmed.
+        // current consent is confirmed — and the ladder reads
+        // staged(3) > pending(1) > confirmed(1) > engaged(1).
         assert_eq!(row.archive_imported, 3);
+        assert_eq!(row.archive_staged, 3);
+        assert_eq!(row.archive_pending, 1);
         assert_eq!(row.archive_confirmed, 1);
+        assert_eq!(row.archive_engaged, 1);
     }
 }
 
