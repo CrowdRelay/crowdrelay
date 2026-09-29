@@ -43,6 +43,7 @@ pub mod content_scorecard;
 pub mod content_suggestions;
 pub mod content_trends;
 pub mod cross_tenant_priors;
+pub mod curator_queue;
 pub mod database;
 pub mod ecosystem;
 pub mod events;

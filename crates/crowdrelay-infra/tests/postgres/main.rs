@@ -87,6 +87,7 @@ mod content_engine;
 mod content_peers;
 mod content_scorecard;
 mod content_suggestion_queue;
+mod curator_queue;
 mod discovery_place_status;
 mod duplicate_refused_letters;
 mod ecosystem;

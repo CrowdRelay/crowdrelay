@@ -11322,6 +11322,78 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/content/videos/{source_id}/curator-queue:
+    get:
+      operationId: listCuratorQueue
+      summary: Admitted curator handles with the drafted DM for this video
+      description: >-
+        Broadcast channels cannot be posted to, so their published admin
+        handles become the route instead. Each row is an admitted
+        `route_kind=handle` candidate ordered by audience size, carrying the
+        deterministic DM draft filled with this video's title and URL, and
+        `sent_at` when the operator already marked it sent for this video —
+        null while it still waits. Sending is always manual: the DM leaves
+        from the operator's own client.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The queue, largest audience first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CuratorQueueItem' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/content/videos/{source_id}/curator-queue/{candidate_id}/sent:
+    post:
+      operationId: markCuratorDmSent
+      summary: Record that the operator sent the curator DM for this video
+      description: >-
+        Writes one outbound `outreach_interactions` row linked to the
+        candidate (source key `manual:curator:{source_id}`), which takes the
+        row out of this video's queue. Requires `Idempotency-Key`; a replay
+        returns the original `sent_at` with `replayed: true`. Refused or
+        non-handle candidates conflict.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: candidate_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                note: { type: string }
+      responses:
+        '200':
+          description: The recorded send.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CuratorDmSent' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /control-plane/gig-plan/approve:
     post:
       operationId: approveGigProposal
@@ -13943,6 +14015,32 @@ components:
             daily_cap: { type: integer, minimum: 0 }
             hold_reason: { type: [string, 'null'] }
             halted_until: { type: [string, 'null'], format: date-time }
+    CuratorQueueItem:
+      type: object
+      additionalProperties: false
+      description: >-
+        One admitted handle candidate in a video's curator queue. `sent_at`
+        is null until the operator marks the DM sent for this video.
+      required: [candidate_id, display_name, handle, follower_count, evidence, source_reference, fit_basis_points, draft_dm, sent_at]
+      properties:
+        candidate_id: { type: string, format: uuid }
+        display_name: { type: string }
+        handle: { type: string }
+        follower_count: { type: [integer, 'null'], minimum: 0 }
+        evidence: { type: [string, 'null'] }
+        source_reference: { type: string }
+        fit_basis_points: { type: integer, minimum: 0, maximum: 10000 }
+        draft_dm: { type: string }
+        sent_at: { type: [string, 'null'], format: date-time }
+    CuratorDmSent:
+      type: object
+      additionalProperties: false
+      required: [candidate_id, source_id, sent_at, replayed]
+      properties:
+        candidate_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        sent_at: { type: string, format: date-time }
+        replayed: { type: boolean }
     SubmissionChannelRequest:
       type: object
       additionalProperties: false

@@ -320,6 +320,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/content/videos/{source_id}/scorecard",
             get(crate::video_scorecards::video_scorecard),
         )
+        // The curator queue: admin handles for channels nobody can post to,
+        // listed per video with the drafted DM. `sent` records that the
+        // operator sent it — the DM itself always leaves from the
+        // operator's own client.
+        .route(
+            "/v1/control-plane/content/videos/{source_id}/curator-queue",
+            get(crate::curator_queue::curator_queue),
+        )
+        .route(
+            "/v1/control-plane/content/videos/{source_id}/curator-queue/{candidate_id}/sent",
+            post(crate::curator_queue::curator_dm_sent),
+        )
         .route(
             "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
             post(crate::autopilot::record_team_opportunity_terms),

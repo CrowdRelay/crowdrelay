@@ -120,6 +120,7 @@ mod routing;
 mod security;
 mod signal_installations;
 pub use rate_limit::{RateLimitPolicy, RateLimiter};
+mod curator_queue;
 mod staff_sessions;
 mod synesthesia;
 mod synesthesia_gate;

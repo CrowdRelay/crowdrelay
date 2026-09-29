@@ -45,6 +45,7 @@ use crowdrelay_worker::{
     },
     community_join_executor::CommunityJoinExecutorWorker,
     community_rules,
+    curator_handles::CuratorHandleWorker,
     discord_executor::DiscordExecutorWorker,
     discovery::{DiscoveryConfig, RedditDiscoveryWorker, XDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
@@ -92,6 +93,8 @@ const DISCOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Peer feeds change at human speed; a few hours of lag is invisible to a
 /// weekly-content trend detector, and the dedup index makes resweeps free.
 const PEER_OBSERVATION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// The curator handle sweep reads a handful of t.me pages; daily is plenty.
+const CURATOR_HANDLE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// The graph changes at human speed; an hour of decay lag is invisible.
 const AUDIENCE_GRAPH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// A licensed venue fact's `expires_at` is a deletion deadline, not a
@@ -637,6 +640,21 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
             None
         }
     };
+    // The curator handle sweep reads tracked Telegram places' public pages
+    // and files the admin handles they publish; with no Telegram places it
+    // is a cheap no-op each day.
+    let curator_handles = match CuratorHandleWorker::new(
+        database.clone(),
+        workspace_id,
+        CURATOR_HANDLE_INTERVAL,
+        config.database.operation_timeout,
+    ) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            tracing::warn!(error = %error, "curator handle sweep disabled: HTTP client build failed");
+            None
+        }
+    };
     // Discovery sweeps stay dark until an operator configures queries; the
     // adapter then runs on the same polite cadence as every other worker.
     let discovery_config = DiscoveryConfig::from_env();
@@ -862,6 +880,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let x_discovery_shutdown = shutdown_receiver.clone();
     let audience_graph_shutdown = shutdown_receiver.clone();
     let peer_observation_shutdown = shutdown_receiver.clone();
+    let curator_handles_shutdown = shutdown_receiver.clone();
     let ad_conversion_shutdown = shutdown_receiver.clone();
     let agent_outcome_shutdown = shutdown_receiver.clone();
     let community_executor_shutdown = shutdown_receiver.clone();
@@ -988,6 +1007,11 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     if let Some(worker) = peer_observation {
         spawn_named(&mut runtime_tasks, "peer observation worker", async move {
             worker.run(peer_observation_shutdown).await;
+        });
+    }
+    if let Some(worker) = curator_handles {
+        spawn_named(&mut runtime_tasks, "curator handle sweep", async move {
+            worker.run(curator_handles_shutdown).await;
         });
     }
     if let Some(worker) = reddit_discovery {
