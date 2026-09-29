@@ -71,6 +71,30 @@ fn post_fullname(reddit_post_id: &str) -> String {
     }
 }
 
+/// The `/community/review` request body. `drafted_by_provider` is absent — not
+/// null — when the draft carries no provider: the agents schema is
+/// `z.string().optional()`, and zod's optional accepts a missing key but
+/// rejects an explicit `null` ("Expected string, received null"), which the
+/// caller reads as an unreachable reviewer and parks the draft for a person.
+fn review_payload(
+    kind: &str,
+    subreddit: &str,
+    text: &str,
+    context: &str,
+    drafted_by_provider: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "kind": kind,
+        "subreddit": subreddit,
+        "text": text.chars().take(4000).collect::<String>(),
+        "context": context.chars().take(4000).collect::<String>(),
+    });
+    if let (Some(provider), Some(object)) = (drafted_by_provider, payload.as_object_mut()) {
+        object.insert("drafted_by_provider".to_owned(), provider.into());
+    }
+    payload
+}
+
 #[derive(Deserialize)]
 struct AgentComment {
     id: String,
@@ -560,13 +584,7 @@ impl CommunityExecutorWorker {
         context: &str,
         drafted_by_provider: Option<&str>,
     ) -> ReviewOutcome {
-        let payload = serde_json::json!({
-            "kind": kind,
-            "subreddit": subreddit,
-            "text": text.chars().take(4000).collect::<String>(),
-            "context": context.chars().take(4000).collect::<String>(),
-            "drafted_by_provider": drafted_by_provider,
-        });
+        let payload = review_payload(kind, subreddit, text, context, drafted_by_provider);
         match self
             .agents_call::<Review>(
                 "/community/review",
@@ -760,5 +778,28 @@ mod replies_tests {
             let draw = unit_draw();
             assert!((0.0..1.0).contains(&draw), "{draw}");
         }
+    }
+
+    /// The agents schema is `z.string().optional()` — zod accepts the key
+    /// missing but answers 400 ("Expected string, received null") when it is
+    /// explicitly null. A post draft carries no provider, so serializing the
+    /// option verbatim held every community post for a person forever.
+    #[test]
+    fn review_payload_omits_provider_key_when_unknown() {
+        let payload = review_payload("reddit_post", "r/test", "body", "ctx", None);
+        assert!(
+            !payload
+                .as_object()
+                .unwrap()
+                .contains_key("drafted_by_provider")
+        );
+        assert_eq!(payload["kind"], "reddit_post");
+        assert_eq!(payload["subreddit"], "r/test");
+    }
+
+    #[test]
+    fn review_payload_sends_provider_string_when_known() {
+        let payload = review_payload("reddit_reply", "r/test", "body", "ctx", Some("claude"));
+        assert_eq!(payload["drafted_by_provider"], "claude");
     }
 }

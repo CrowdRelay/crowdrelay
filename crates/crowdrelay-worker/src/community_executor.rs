@@ -1300,13 +1300,23 @@ impl CommunityExecutorWorker {
             crate::discovery::AgentCapability::SocialPublish,
         );
         let url = format!("{}/reddit/post", self.agent_service_url);
-        let payload = serde_json::json!({
+        // `image_url` and `link_url` are zod `.optional()` on the agents side:
+        // absent is a rung the ladder skips, but an explicit `null` fails
+        // validation ("Expected string, received null") before the post is
+        // even looked at — the keys only go on the wire when they carry a URL.
+        let mut payload = serde_json::json!({
             "subreddit": action.subreddit,
             "title": action.title,
             "body": post_body,
-            "image_url": image_url,
-            "link_url": link_url,
         });
+        if let Some(object) = payload.as_object_mut() {
+            if let Some(url) = image_url {
+                object.insert("image_url".to_owned(), url.into());
+            }
+            if let Some(url) = link_url {
+                object.insert("link_url".to_owned(), url.into());
+            }
+        }
 
         let client = self
             .http_client
