@@ -775,6 +775,17 @@ pub fn assess_measurement_effect(
     })
 }
 
+/// Whether `observed` sits within counting noise of `expected` — an
+/// approximation of a two-sided Poisson test at about 95%. Counts scatter
+/// around their expectation by roughly two standard deviations, so a
+/// baseline of three observing zero is scatter, not a collapse; the floor
+/// keeps that scatter out of the verdict without touching the delta the
+/// posterior still reads.
+fn within_count_noise(expected: f64, observed: f64) -> bool {
+    let spread = (expected.max(observed).max(1.0)).sqrt() * 2.0;
+    (observed - expected).abs() < spread.max(1.0)
+}
+
 /// The primary-metric classification, before the harm override.
 fn assess_primary(
     measurement: &ClaimedAutopilotMeasurement,
@@ -829,8 +840,17 @@ fn assess_primary(
         // and all of them fed the two-worsened demotion guard. Under one fan
         // the honest verdict is Neutral; the raw effect still lands in
         // `observed_metrics` for the posterior.
-        let fractional_fan =
-            measurement.kind.counts_attributed_fans() && observed_value.abs() < 1.0;
+        //
+        // The floor also scales with the counterfactual the measurement was
+        // scheduled against: a miss of three against an expectation of three
+        // is within the same ~2σ Poisson scatter, not a regression — while a
+        // whole fan *up* is a real improvement and never floored away.
+        let fractional_fan = measurement.kind.counts_attributed_fans()
+            && observed_value < 1.0
+            && within_count_noise(
+                measurement.baseline_value,
+                measurement.baseline_value + observed_value,
+            );
         return Some(EffectResult {
             assessment: if fractional_fan {
                 EffectAssessment::Neutral
@@ -840,12 +860,32 @@ fn assess_primary(
             delta_basis_points: result.delta_basis_points,
         });
     }
-    assess_effect(
+    let result = assess_effect(
         measurement.baseline_value,
         observed_value,
         measurement.kind.direction(),
         500,
-    )
+    )?;
+    // Level counts carry the same small-count floor the attributed fan
+    // effect does: an installs window's observed count scatters around its
+    // expectation, and a Worsened inside that scatter is instrumentation
+    // noise feeding the demotion guard. The signed fan-growth kinds take
+    // their own floor above — and like that floor, a whole unit above the
+    // expectation is a real improvement and never floored away.
+    let level_count_noise = matches!(
+        measurement.kind,
+        AutopilotMeasurementKind::SignalInstalls1d
+            | AutopilotMeasurementKind::AgentRunSignalInstalls7d
+    ) && observed_value < measurement.baseline_value + 1.0
+        && within_count_noise(measurement.baseline_value, observed_value);
+    Some(EffectResult {
+        assessment: if level_count_noise {
+            EffectAssessment::Neutral
+        } else {
+            result.assessment
+        },
+        delta_basis_points: result.delta_basis_points,
+    })
 }
 
 #[cfg(test)]
@@ -1057,5 +1097,68 @@ mod tests {
         };
         let flat = assess_measurement_effect(&measurement, 0.0, &complaint).expect("flat");
         assert_eq!(flat.assessment, EffectAssessment::Worsened);
+    }
+
+    /// Small-count windows scatter around their expectation — a baseline of
+    /// three installs observing none is ordinary Poisson noise, while a
+    /// baseline of fifteen observing none is a real stop, and a quiet
+    /// workspace gaining six is a real start.
+    #[test]
+    fn installs_counts_read_small_windows_as_noise() {
+        for kind in [
+            AutopilotMeasurementKind::SignalInstalls1d,
+            AutopilotMeasurementKind::AgentRunSignalInstalls7d,
+        ] {
+            let small = ClaimedAutopilotMeasurement {
+                baseline_value: 3.0,
+                ..claimed(kind)
+            };
+            let flat =
+                assess_measurement_effect(&small, 0.0, &HarmObservation::default()).expect("flat");
+            assert_eq!(flat.assessment, EffectAssessment::Neutral, "{kind:?}");
+
+            let real_stop = ClaimedAutopilotMeasurement {
+                baseline_value: 15.0,
+                ..claimed(kind)
+            };
+            let stopped = assess_measurement_effect(&real_stop, 0.0, &HarmObservation::default())
+                .expect("stopped");
+            assert_eq!(stopped.assessment, EffectAssessment::Worsened, "{kind:?}");
+
+            let quiet = claimed(kind);
+            let start =
+                assess_measurement_effect(&quiet, 6.0, &HarmObservation::default()).expect("start");
+            assert_eq!(start.assessment, EffectAssessment::Improved, "{kind:?}");
+        }
+    }
+
+    /// The fan-growth noise floor scales with the counterfactual the
+    /// measurement was scheduled against: a miss of a few against an
+    /// expectation of a few is the scatter the count would have shown anyway;
+    /// a miss of fifteen against twenty is real harm.
+    #[test]
+    fn attributed_fan_growth_floors_misses_at_counterfactual_scale() {
+        for (baseline, observed) in [(3.35, -3.35), (0.43, -0.43)] {
+            let measurement = ClaimedAutopilotMeasurement {
+                baseline_value: baseline,
+                ..claimed(AutopilotMeasurementKind::AgentRunFanGrowth3d)
+            };
+            let result =
+                assess_measurement_effect(&measurement, observed, &HarmObservation::default())
+                    .expect("fan growth assessment");
+            assert_eq!(
+                result.assessment,
+                EffectAssessment::Neutral,
+                "counterfactual {baseline} delta {observed} should classify Neutral"
+            );
+        }
+
+        let measurement = ClaimedAutopilotMeasurement {
+            baseline_value: 20.0,
+            ..claimed(AutopilotMeasurementKind::AgentRunFanGrowth3d)
+        };
+        let result = assess_measurement_effect(&measurement, -15.0, &HarmObservation::default())
+            .expect("fan growth assessment");
+        assert_eq!(result.assessment, EffectAssessment::Worsened);
     }
 }
