@@ -44,6 +44,7 @@ use crowdrelay_worker::{
         worker::CommunityIntelligenceWorker,
     },
     community_join_executor::CommunityJoinExecutorWorker,
+    community_rules,
     discord_executor::DiscordExecutorWorker,
     discovery::{DiscoveryConfig, RedditDiscoveryWorker, XDiscoveryWorker},
     draws::{WeightedDrawWorker, WeightedDrawWorkerConfig},
@@ -865,6 +866,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let discord_executor_shutdown = shutdown_receiver.clone();
     let social_post_executor_shutdown = shutdown_receiver.clone();
     let community_join_executor_shutdown = shutdown_receiver.clone();
+    let community_rules_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let video_source_sync_shutdown = shutdown_receiver.clone();
     let release_source_sync_shutdown = shutdown_receiver.clone();
@@ -1084,6 +1086,16 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     if let Some(worker) = community_join_executor {
         spawn_named(&mut runtime_tasks, "community join executor", async move {
             worker.run(community_join_executor_shutdown).await;
+        });
+    }
+    if let Some(worker) = community_rules::CommunityRulesWorker::new(
+        database.clone(),
+        workspace_id,
+        config.agent_service_url.clone(),
+        agent_service_auth_key.clone(),
+    ) {
+        spawn_named(&mut runtime_tasks, "community rules refresh", async move {
+            worker.run(community_rules_shutdown).await;
         });
     }
     if let Some(worker) = growth_metric_sync {

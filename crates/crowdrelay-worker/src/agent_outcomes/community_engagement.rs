@@ -18,10 +18,28 @@ impl AgentOutcomeWorker {
         source_id: Option<Uuid>,
     ) -> Result<(Value, &'static str), AgentOutcomeError> {
         let item = outcome.payload.item.as_ref();
-        let subreddit = item
-            .and_then(|i| i.get("subreddit"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        // The community's platform is the target's, never the model's
+        // proposal — a Discord draft that says "reddit" lands in the wrong
+        // lane, and the seed gate is built on this field being true.
+        let target_platform: String = sqlx::query_scalar(
+            "SELECT COALESCE(NULLIF(platform, ''), 'reddit') \
+             FROM agent_outreach_targets WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(outcome.workspace_id)
+        .bind(target_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or_else(|| "reddit".to_owned());
+        let subreddit = if target_platform == "reddit" {
+            item.and_then(|i| i.get("subreddit"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        } else {
+            // Off Reddit the ledger's address column carries the community's
+            // display name; the model's `subreddit` field means nothing for
+            // a forum thread or a Discord server.
+            ""
+        };
         let raw_link = item
             .and_then(|i| i.get("smart_link"))
             .and_then(Value::as_str)
@@ -72,7 +90,7 @@ impl AgentOutcomeWorker {
                     outcome,
                     AgentSmartLinkRequest {
                         destination,
-                        channel_source: "reddit",
+                        channel_source: &target_platform,
                         // `channel_community` carries a CHECK (non-blank,
                         // <=120 chars); a payload string that violates it
                         // aborts the whole outcome transaction, not just the
@@ -118,7 +136,7 @@ impl AgentOutcomeWorker {
             json!({
                 "kind": "request_community_engagement",
                 "target_id": target_id,
-                "platform": "reddit",
+                "platform": target_platform,
                 "subreddit": subreddit,
                 "title": item.and_then(|i| i.get("title")).and_then(Value::as_str).unwrap_or(""),
                 "body": item.and_then(|i| i.get("body")).and_then(Value::as_str).unwrap_or(""),

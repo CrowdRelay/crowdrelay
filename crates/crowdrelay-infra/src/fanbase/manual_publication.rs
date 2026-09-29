@@ -96,18 +96,39 @@ pub async fn register_manual_reddit_post(
     community_post_id: Uuid,
     reddit_post_url: &str,
 ) -> Result<(), ManualRedditPostError> {
-    let reddit_post_id = extract_reddit_post_id(reddit_post_url).ok_or_else(|| {
-        ManualRedditPostError::InvalidUrl(format!(
-            "could not extract post ID from URL: {reddit_post_url}"
-        ))
-    })?;
+    let platform: String = sqlx::query_scalar(
+        "SELECT platform FROM community_posts WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(community_post_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_else(|| "reddit".to_owned());
+    // A Reddit permalink carries the post id the metrics poller reads. Any
+    // other platform's URL is stored whole — its id shape is its own, and
+    // `reddit_post_id` staying NULL keeps the Reddit-only poller from
+    // chasing an id that was never minted there.
+    let reddit_post_id = if platform == "reddit" {
+        Some(extract_reddit_post_id(reddit_post_url).ok_or_else(|| {
+            ManualRedditPostError::InvalidUrl(format!(
+                "could not extract post ID from URL: {reddit_post_url}"
+            ))
+        })?)
+    } else {
+        if !(reddit_post_url.starts_with("https://") || reddit_post_url.starts_with("http://")) {
+            return Err(ManualRedditPostError::InvalidUrl(format!(
+                "expected an http(s) post URL, got: {reddit_post_url}"
+            )));
+        }
+        None
+    };
 
     let mut transaction = pool.begin().await?;
     let result = sqlx::query(
         r#"
         UPDATE community_posts
         SET status = 'posted',
-            reddit_post_id = $3,
+            reddit_post_id = COALESCE($3, reddit_post_id),
             reddit_post_url = $4,
             posted_at = now(),
             updated_at = now(),
@@ -183,9 +204,13 @@ async fn record_publication_reach(
             workspace_id, action_id, recipient_kind, recipient_id, channel,
             template_id, estimated_reach, status, metadata, trace_id, causation_id
         )
-        SELECT $1, post.action_id, 'subreddit_audience', post.subreddit, 'reddit_post',
+        SELECT $1, post.action_id,
+               CASE WHEN post.platform = 'reddit' THEN 'subreddit_audience' ELSE 'community' END,
+               post.subreddit,
+               CASE WHEN post.platform = 'reddit' THEN 'reddit_post' ELSE 'community_post' END,
                'community-engager', 100, 'delivered',
                jsonb_build_object('subreddit', post.subreddit,
+                                  'platform', post.platform,
                                   'post_url', post.reddit_post_url,
                                   'published', 'manual'),
                action.trace_id, post.action_id

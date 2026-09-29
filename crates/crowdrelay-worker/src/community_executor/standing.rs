@@ -293,9 +293,54 @@ pub(super) async fn record_removal_state(
     )
     .bind(post_id)
     .bind(workspace_id)
-    .bind(category)
+    .bind(&category)
     .execute(&mut **tx)
     .await?;
+
+    // A verdict removal is the community's own answer about us, in writing.
+    // Feeding it back closes the loop the standing halt can only half-cover:
+    // the halt stops the account; this stops the target. Without it a
+    // community that removed us stays `admitted`, the brain drafts it again
+    // when the halt lifts, and the second removal lands on a moderator who
+    // already said no once.
+    if let Some(category) = &category
+        && RemovalCause::from_category(category).is_some_and(RemovalCause::is_verdict)
+    {
+        sqlx::query(
+            r#"
+            UPDATE agent_outreach_targets
+            SET screening_verdict = 'refused',
+                refusal_reason = 'previously_refused',
+                status = 'discarded',
+                updated_at = now()
+            WHERE workspace_id = $1
+              AND id = (SELECT target_id FROM community_posts
+                        WHERE id = $2 AND workspace_id = $1)
+              AND screening_verdict = 'admitted'
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(post_id)
+        .execute(&mut **tx)
+        .await?;
+        // The place the target points at is marked too — the discovery side
+        // of the same door, so a future screen does not re-walk it as a
+        // fresh candidate.
+        sqlx::query(
+            r#"
+            UPDATE discovery_places
+            SET membership_state = 'not_a_fit', updated_at = now()
+            WHERE workspace_id = $1
+              AND id = (SELECT place_id FROM community_posts
+                        WHERE id = $2 AND workspace_id = $1)
+              AND membership_state IS DISTINCT FROM 'not_a_fit'
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(post_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 

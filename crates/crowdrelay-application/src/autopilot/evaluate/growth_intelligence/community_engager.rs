@@ -8,6 +8,7 @@
 //! model.
 
 use super::*;
+use crowdrelay_brain::UnengagedTarget;
 use crowdrelay_brain::opportunity_graph::{
     DependencyKind, OpportunityGraph, community_membership_key, community_post_key,
 };
@@ -106,7 +107,7 @@ pub(super) fn community_engager_candidates(
     // unjoined would retire a working community over a missing column.
     let mut graph = OpportunityGraph::new();
     for target in &snapshot.unengaged_targets {
-        let membership = community_membership_key(&target.subreddit);
+        let membership = community_membership_key(&membership_address(target));
         graph.add(
             membership.clone(),
             community_post_key(target.target_id),
@@ -282,15 +283,37 @@ pub(super) fn community_engager_candidates(
         } else {
             CreativeFamily::rotate_with_event(posts_so_far, snapshot.has_upcoming_event)
         };
-        // Per-community prompt: one post for this specific community.
-        let mut prompt = format!(
-            "Draft an authentic community post for r/{}. Write like a band member, not a marketer. Match this community's tone and language.",
-            target.subreddit
-        );
-        prompt.push_str(&format!(
-            "\n\n- target_id: {}, subreddit: {} ({})",
-            target.target_id, target.subreddit, target.display_name
-        ));
+        // Per-community prompt: one post for this specific community, in the
+        // community's own frame — a subreddit reads "r/", a Discord server or
+        // a forum board reads as the room it is.
+        let mut prompt = if target.platform == "reddit" {
+            format!(
+                "Draft an authentic community post for r/{}. Write like a band member, not a marketer. Match this community's tone and language.",
+                target.subreddit
+            )
+        } else {
+            format!(
+                "Draft an authentic community post for the {} community \"{}\". Write like a band member, not a marketer. Match this community's tone and language.",
+                target.platform, target.display_name
+            )
+        };
+        if target.platform == "reddit" {
+            prompt.push_str(&format!(
+                "\n\n- target_id: {}, platform: reddit, subreddit: {} ({})",
+                target.target_id, target.subreddit, target.display_name
+            ));
+        } else {
+            // `platform` is what routes the draft to the right lane — the
+            // outcome resolves the community target on it, so the model must
+            // echo it verbatim.
+            prompt.push_str(&format!(
+                "\n\n- target_id: {}, platform: {}, community: \"{}\"",
+                target.target_id, target.platform, target.display_name
+            ));
+            if let Some(url) = &target.community_url {
+                prompt.push_str(&format!("\n- community url: {url}"));
+            }
+        }
         if let Some(members) = target.member_count {
             prompt.push_str(&format!("\n- members: {members}"));
         }
@@ -345,7 +368,11 @@ pub(super) fn community_engager_candidates(
         };
         // Per-community decision_key: includes target_id so each community
         // has its own idempotency, cooldown, and experiment assignment.
-        let community_unit_id = format!("r/{}", target.subreddit);
+        let community_unit_id = if target.platform == "reddit" {
+            format!("r/{}", target.subreddit)
+        } else {
+            format!("{}:{}", target.platform, target.subreddit)
+        };
         candidates.push(ScoredCandidate {
             candidate: DecisionCandidate {
                 context: policy.context,
@@ -394,11 +421,17 @@ pub(super) fn community_engager_candidates(
     Ok(candidates)
 }
 
-/// Appends community engagement performance history to the prompt so the
-/// LLM worker knows which subreddits respond well and which don't. This is
-/// the feedback loop: the brain feeds post performance data forward to the
-/// worker so it can write better posts and avoid wasting effort on dead
-/// communities.
+/// The membership-gate address for a target: the subreddit on Reddit, and a
+/// platform-qualified name anywhere else so a Discord server called "metal"
+/// is not the same membership as r/metal.
+fn membership_address(target: &UnengagedTarget) -> String {
+    if target.platform == "reddit" {
+        target.subreddit.clone()
+    } else {
+        format!("{}:{}", target.platform, target.subreddit)
+    }
+}
+
 /// Deterministic seed for the family draw — the same community at the same
 /// post count picks the same family, so re-evaluating a candidate inside one
 /// cycle cannot re-roll the dice. `posts_so_far` is in the hash because the
@@ -411,6 +444,11 @@ fn family_choice_seed(target_key: &str, posts_so_far: u32) -> u64 {
     hasher.finish()
 }
 
+/// Appends community engagement performance history to the prompt so the
+/// LLM worker knows which subreddits respond well and which don't. This is
+/// the feedback loop: the brain feeds post performance data forward to the
+/// worker so it can write better posts and avoid wasting effort on dead
+/// communities.
 fn push_engagement_history(
     prompt: &mut String,
     history: &[crowdrelay_brain::CommunityEngagementSummary],
@@ -450,7 +488,9 @@ mod tests {
         UnengagedTarget {
             target_id: uuid::Uuid::nil(),
             display_name: subreddit.to_owned(),
+            platform: "reddit".to_owned(),
             subreddit: subreddit.to_owned(),
+            community_url: None,
             member_count: Some(20_000),
             activity_basis_points: Some(4_000),
             genres: Vec::new(),

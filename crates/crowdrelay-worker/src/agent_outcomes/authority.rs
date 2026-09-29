@@ -161,7 +161,17 @@ fn community_target_id(outcome: &ValidatedOutcome) -> Option<Uuid> {
         .as_ref()
         .and_then(|i| i.get("platform"))
         .and_then(Value::as_str)
-        .filter(|platform| *platform == "reddit")
+        // The platforms a community may live on — the same set
+        // `community_posts.platform` names. A `social_post` outcome naming
+        // any other platform (an owned-channel post: instagram, facebook)
+        // with a `target_id` still resolves nothing, because the admit gate
+        // downstream only accepts a real admitted community target.
+        .filter(|platform| {
+            matches!(
+                *platform,
+                "reddit" | "discord" | "telegram" | "forum" | "lemmy" | "brutalland"
+            )
+        })
         .and_then(|_| {
             outcome
                 .payload

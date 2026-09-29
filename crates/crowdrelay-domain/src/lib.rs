@@ -77,6 +77,7 @@ pub mod community_intelligence;
 pub mod community_language;
 pub mod community_register;
 pub mod community_reply;
+pub mod community_rules;
 pub mod community_topic;
 pub mod content_engine;
 pub mod content_supply;

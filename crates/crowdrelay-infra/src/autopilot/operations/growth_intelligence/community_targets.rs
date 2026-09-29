@@ -38,6 +38,8 @@ type CommunityTargetRow = (
     uuid::Uuid,
     String,
     String,
+    String,
+    Option<String>,
     Option<i32>,
     Option<i32>,
     Vec<String>,
@@ -65,7 +67,14 @@ pub(super) async fn load_community_targets(
         r#"
         SELECT t.id,
                t.display_name,
-               t.subreddit,
+               -- The platform the target is, not the channel the registry
+               -- began on: older Reddit rows carry an empty platform.
+               COALESCE(NULLIF(t.platform, ''), 'reddit') AS platform,
+               -- The community address the ledger and the drafter know it
+               -- by: the subreddit slug on Reddit, the community's display
+               -- name anywhere else.
+               COALESCE(t.subreddit, t.display_name) AS community,
+               t.community_url,
                place.member_count,
                place.activity_bp,
                COALESCE(place.genres, ARRAY[]::text[]) AS genres,
@@ -86,7 +95,9 @@ pub(super) async fn load_community_targets(
             SELECT (EXTRACT(EPOCH FROM (now() - MAX(cp.posted_at))) / 86400)::int AS days_since
             FROM community_posts cp
             WHERE cp.workspace_id = t.workspace_id
-              AND normalize_subreddit(cp.subreddit) = normalize_subreddit(t.subreddit)
+              AND cp.platform = COALESCE(NULLIF(t.platform, ''), 'reddit')
+              AND normalize_subreddit(cp.subreddit) =
+                  normalize_subreddit(COALESCE(t.subreddit, t.display_name))
               AND cp.posted_at IS NOT NULL
         ) AS last_post ON true
         -- The community's own conversion record: fans this community's
@@ -104,12 +115,13 @@ pub(super) async fn load_community_targets(
                        AS interactions
             FROM fan_provenance_events pe
             WHERE pe.workspace_id = t.workspace_id
-              -- Only Reddit-channel evidence names a subreddit. Telegram and
-              -- Discord links write their own `channel_community` — a chat
-              -- named 'deathcore' would otherwise credit r/deathcore with
-              -- conversions a chat room made.
-              AND pe.channel = 'reddit'
-              AND normalize_subreddit(pe.community) = normalize_subreddit(t.subreddit)
+              -- Each channel's evidence names its communities its own way —
+              -- a subreddit slug, a chat name. A chat called 'deathcore'
+              -- must not credit r/deathcore with conversions the chat made,
+              -- so the match is platform-scoped, not just name-scoped.
+              AND pe.channel = COALESCE(NULLIF(t.platform, ''), 'reddit')
+              AND normalize_subreddit(pe.community) =
+                  normalize_subreddit(COALESCE(t.subreddit, t.display_name))
               AND pe.occurred_at >= now() - interval '90 days'
         ) AS provenance ON true
         -- Of those fans, the ones who stayed: still active, still consented
@@ -128,9 +140,10 @@ pub(super) async fn load_community_targets(
                   FROM fan_provenance_events pe
                   WHERE pe.workspace_id = t.workspace_id
                     AND pe.event_kind = 'conversion'
-                    AND pe.channel = 'reddit'
+                    AND pe.channel = COALESCE(NULLIF(t.platform, ''), 'reddit')
                     AND pe.fan_id IS NOT NULL
-                    AND normalize_subreddit(pe.community) = normalize_subreddit(t.subreddit)
+                    AND normalize_subreddit(pe.community) =
+                        normalize_subreddit(COALESCE(t.subreddit, t.display_name))
                     AND pe.occurred_at >= now() - interval '90 days'
               )
               AND EXISTS (
@@ -152,7 +165,13 @@ pub(super) async fn load_community_targets(
         WHERE t.workspace_id = $1
           AND t.status = 'promoted'
           AND t.target_kind = 'community'
-          AND t.subreddit IS NOT NULL
+          -- A community needs an address to post at: the subreddit slug, or
+          -- for every other platform the community's name/URL to publish
+          -- against. Neither is evidence — a name we cannot route to is not
+          -- a candidate.
+          AND (t.subreddit IS NOT NULL
+               OR (COALESCE(NULLIF(t.platform, ''), 'reddit') <> 'reddit'
+                   AND (t.display_name IS NOT NULL OR t.community_url IS NOT NULL)))
           -- A refusal recorded at ingest keeps the community out of the pool
           -- permanently. NULL means the row predates screening: unscreened is
           -- not the same as refused, so it still competes.
@@ -192,7 +211,9 @@ pub(super) async fn load_community_targets(
             |(
                 target_id,
                 display_name,
-                subreddit,
+                platform,
+                community,
+                community_url,
                 member_count,
                 activity_bp,
                 genres,
@@ -206,7 +227,9 @@ pub(super) async fn load_community_targets(
             )| UnengagedTarget {
                 target_id,
                 display_name,
-                subreddit,
+                platform,
+                subreddit: community,
+                community_url,
                 member_count: member_count.and_then(|v| u32::try_from(v).ok()),
                 activity_basis_points: activity_bp.and_then(|v| u16::try_from(v).ok()),
                 genres,

@@ -501,4 +501,213 @@ mod tests {
             "once the draft is given up on, the ledger must say so"
         );
     }
+
+    /// Seeds the decision → action → admitted-target → place chain the way
+    /// the claim sweep reads it, for a platform other than Reddit. Returns
+    /// `(action_id, target_id)` — no `community_posts` row yet, so the seed
+    /// step of the claim is what materializes it.
+    async fn seed_nonreddit_action(
+        worker: &CommunityExecutorWorker,
+        workspace_id: uuid::Uuid,
+        platform: &str,
+        community_name: &str,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        let place_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO discovery_places \
+               (id, workspace_id, place_kind, platform, name, url) \
+             VALUES ($1,$2,$3,$3,$4,$5)",
+        )
+        .bind(place_id)
+        .bind(workspace_id)
+        .bind(platform)
+        .bind(community_name)
+        .bind(format!("https://example.test/{community_name}"))
+        .execute(&worker.pool)
+        .await
+        .expect("place");
+        let target_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO agent_outreach_targets \
+               (id, workspace_id, target_kind, display_name, status, platform, place_id, \
+                screening_verdict) \
+             VALUES ($1,$2,'community',$4,'promoted',$3,$5,'admitted')",
+        )
+        .bind(target_id)
+        .bind(workspace_id)
+        .bind(platform)
+        .bind(community_name)
+        .bind(place_id)
+        .execute(&worker.pool)
+        .await
+        .expect("target");
+        let decision_id = uuid::Uuid::now_v7();
+        let action_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO autopilot_decisions \
+               (id, workspace_id, decision_key, context, subject_kind, subject_id, \
+                decision_kind, confidence_basis_points, disposition, reason, \
+                input_snapshot, policy_snapshot, recommendation, trace_id) \
+             VALUES ($1,$2,$3,'growth_metrics','target_community',$4, \
+                     'auto_execute',9000,'auto_execute','test', \
+                     '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())",
+        )
+        .bind(decision_id)
+        .bind(workspace_id)
+        .bind(format!("key-{action_id}"))
+        .bind(uuid::Uuid::now_v7())
+        .execute(&worker.pool)
+        .await
+        .expect("decision");
+        sqlx::query(
+            "INSERT INTO autopilot_actions \
+               (id, workspace_id, decision_id, context, action_kind, subject_kind, \
+                subject_id, idempotency_key, payload, status, action_class, \
+                finished_at) \
+             VALUES ($1,$2,$3,'growth_metrics','community.engage.request', \
+                     'target_community',$4,$5,$6,'succeeded','third_party', now())",
+        )
+        .bind(action_id)
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(uuid::Uuid::now_v7())
+        .bind(format!("idem-{action_id}"))
+        .bind(serde_json::json!({
+            "target_id": target_id,
+            "platform": platform,
+            "title": "t", "body": "b",
+        }))
+        .execute(&worker.pool)
+        .await
+        .expect("action");
+        (action_id, target_id)
+    }
+
+    /// A Discord draft must never enter the Reddit send lane — and it must
+    /// still materialize, because `awaiting_manual_post` is the surface the
+    /// operator publishes from.
+    #[tokio::test]
+    #[ignore = "requires CROWDRELAY_COMMUNITY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+    async fn a_nonreddit_delivery_waits_for_a_person_from_the_start() {
+        let Some((worker, workspace_id)) = live_worker(false).await else {
+            return;
+        };
+        let (_action_id, _target_id) =
+            seed_nonreddit_action(&worker, workspace_id, "discord", "The Pit").await;
+        let claimed = worker.claim_pending_actions().await.expect("claim");
+        let post: Option<(String, String)> = sqlx::query_as(
+            "SELECT platform, status FROM community_posts WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&worker.pool)
+        .await
+        .expect("post row");
+        let (platform, status) = post.expect("the action must materialize a ledger row");
+        assert_eq!(platform, "discord");
+        assert_eq!(status, "awaiting_manual_post");
+        assert!(
+            claimed.is_empty(),
+            "the Reddit claim lane must not take a Discord delivery: {claimed:?}"
+        );
+    }
+
+    /// A community whose own rules require a post flair is the same kind of
+    /// wait: the draft materializes for a person, and publishing stays out
+    /// of it even when manual mode is off — an adopted post without the
+    /// flair is a removal in writing.
+    #[tokio::test]
+    #[ignore = "requires CROWDRELAY_COMMUNITY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+    async fn a_flair_gated_community_is_never_adopted() {
+        let Some((worker, workspace_id)) = live_worker(false).await else {
+            return;
+        };
+        let place_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO discovery_places \
+               (id, workspace_id, place_kind, platform, name, url) \
+             VALUES ($1,$2,'subreddit','reddit','flaired','https://www.reddit.com/r/flaired')",
+        )
+        .bind(place_id)
+        .bind(workspace_id)
+        .execute(&worker.pool)
+        .await
+        .expect("place");
+        sqlx::query(
+            "INSERT INTO discovery_place_rules \
+               (place_id, requires_approval, self_promo_ratio_percent) \
+             VALUES ($1, true, 10)",
+        )
+        .bind(place_id)
+        .execute(&worker.pool)
+        .await
+        .expect("rules");
+        let target_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO agent_outreach_targets \
+               (id, workspace_id, target_kind, display_name, status, subreddit, place_id, \
+                screening_verdict) \
+             VALUES ($1,$2,'community',$3,'promoted',$3,$4,'admitted')",
+        )
+        .bind(target_id)
+        .bind(workspace_id)
+        .bind("flaired")
+        .bind(place_id)
+        .execute(&worker.pool)
+        .await
+        .expect("target");
+        let decision_id = uuid::Uuid::now_v7();
+        let action_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO autopilot_decisions \
+               (id, workspace_id, decision_key, context, subject_kind, subject_id, \
+                decision_kind, confidence_basis_points, disposition, reason, \
+                input_snapshot, policy_snapshot, recommendation, trace_id) \
+             VALUES ($1,$2,$3,'growth_metrics','target_community',$4, \
+                     'auto_execute',9000,'auto_execute','test', \
+                     '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())",
+        )
+        .bind(decision_id)
+        .bind(workspace_id)
+        .bind(format!("key-{action_id}"))
+        .bind(uuid::Uuid::now_v7())
+        .execute(&worker.pool)
+        .await
+        .expect("decision");
+        sqlx::query(
+            "INSERT INTO autopilot_actions \
+               (id, workspace_id, decision_id, context, action_kind, subject_kind, \
+                subject_id, idempotency_key, payload, status, action_class, \
+                finished_at) \
+             VALUES ($1,$2,$3,'growth_metrics','community.engage.request', \
+                     'target_community',$4,$5,$6,'succeeded','third_party', now())",
+        )
+        .bind(action_id)
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(uuid::Uuid::now_v7())
+        .bind(format!("idem-{action_id}"))
+        .bind(serde_json::json!({
+            "target_id": target_id,
+            "subreddit": "r/flaired",
+            "title": "t", "body": "b",
+        }))
+        .execute(&worker.pool)
+        .await
+        .expect("action");
+
+        let claimed = worker.claim_pending_actions().await.expect("claim");
+        let post: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM community_posts WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&worker.pool)
+        .await
+        .expect("post row");
+        assert_eq!(
+            post.map(|(status,)| status).as_deref(),
+            Some("awaiting_manual_post"),
+            "a flair-gated community seeds straight to the manual lane"
+        );
+        assert!(claimed.is_empty(), "and the send lane leaves it there");
+    }
 }

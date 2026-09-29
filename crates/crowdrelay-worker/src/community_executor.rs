@@ -687,14 +687,27 @@ impl CommunityExecutorWorker {
         sqlx::query(
             r#"
             INSERT INTO community_posts
-                (workspace_id, action_id, target_id, subreddit, title, body, smart_link,
+                (workspace_id, action_id, target_id, platform, place_id, subreddit,
+                 title, body, smart_link,
                  image_url, media_id, source_url, relay_source_id, status)
             SELECT
                 $1,
                 a.id,
-                CASE WHEN a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
-                     THEN (a.payload->>'target_id')::uuid END,
-                COALESCE(a.payload->>'subreddit', ''),
+                t.id,
+                -- The platform is the target's, not the model's claim — a
+                -- payload that calls a Discord server "reddit" seeds under
+                -- the platform the target actually is.
+                COALESCE(NULLIF(t.platform, ''), 'reddit'),
+                t.place_id,
+                -- `subreddit` is the ledger's community address column; it
+                -- predates other platforms and keeps its name. A Reddit row
+                -- takes the payload's `r/`-name (the identity the subreddit
+                -- match just verified); anything else takes the target's
+                -- own display name.
+                CASE WHEN COALESCE(NULLIF(t.platform, ''), 'reddit') = 'reddit'
+                     THEN COALESCE(a.payload->>'subreddit', '')
+                     ELSE COALESCE(NULLIF(t.display_name, ''), t.subreddit,
+                                   a.payload->>'subreddit', '') END,
                 COALESCE(a.payload->>'title', ''),
                 COALESCE(a.payload->>'body', ''),
                 a.payload->>'smart_link',
@@ -706,11 +719,6 @@ impl CommunityExecutorWorker {
                 -- cap — the operator approved the spread as one campaign.
                 CASE WHEN a.payload->>'source_id' ~ '^[0-9a-fA-F-]{36}$'
                      THEN (a.payload->>'source_id')::uuid END,
-                -- A delivery whose batch was answered while its action was
-                -- mid-flight lands dead, not pending: revoke is a content
-                -- veto, and a post seeded under a closed batch would sit
-                -- claimable-in-name forever since the claim lane refuses
-                -- closed batches.
                 CASE WHEN a.payload->>'source_id' ~ '^[0-9a-fA-F-]{36}$'
                           AND EXISTS (
                               SELECT 1 FROM community_relay_batches rb
@@ -718,23 +726,50 @@ impl CommunityExecutorWorker {
                                 AND rb.source_id = (a.payload->>'source_id')::uuid
                                 AND rb.status IN ('revoked', 'done')
                           )
-                     THEN 'cancelled' ELSE 'pending' END
+                     -- A delivery whose batch was answered while its action
+                     -- was mid-flight lands dead, not pending: revoke is a
+                     -- content veto, and a post seeded under a closed batch
+                     -- would sit claimable-in-name forever since the claim
+                     -- lane refuses closed batches.
+                     THEN 'cancelled'
+                     -- A delivery the send lane cannot make waits for a
+                     -- person from the start instead of passing through
+                     -- `posting` on its way there. Two cases: a platform
+                     -- this executor does not send to at all, and a Reddit
+                     -- community whose own rules gate the post on something
+                     -- automation cannot satisfy — a required flair, a mod
+                     -- check-in. The person publishes by hand and registers
+                     -- the URL; adopting either into the send lane would
+                     -- ship a post the community's stated rules reject.
+                     WHEN COALESCE(NULLIF(t.platform, ''), 'reddit') <> 'reddit'
+                          OR COALESCE(rules.requires_approval, false)
+                     THEN 'awaiting_manual_post'
+                     ELSE 'pending' END
             FROM autopilot_actions a
+            JOIN agent_outreach_targets t
+              ON t.workspace_id = a.workspace_id
+             AND t.id = CASE WHEN a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
+                             THEN (a.payload->>'target_id')::uuid END
+             AND t.target_kind = 'community'
+             AND t.screening_verdict = 'admitted'
+             AND t.status = 'promoted'
+             -- Identity check, per platform. Reddit targets keep the
+             -- subreddit-name match so a draft written for one community
+             -- cannot point its target_id at another. Any other platform's
+             -- target is identified by the target row itself plus the
+             -- platform the payload declares.
+             AND (
+                 normalize_subreddit(t.subreddit) =
+                     normalize_subreddit(a.payload->>'subreddit')
+                 OR (COALESCE(NULLIF(t.platform, ''), 'reddit') <> 'reddit'
+                     AND a.payload->>'platform' =
+                         COALESCE(NULLIF(t.platform, ''), 'reddit'))
+             )
+            LEFT JOIN discovery_place_rules rules ON rules.place_id = t.place_id
             WHERE a.workspace_id = $1
               AND a.action_kind = 'community.engage.request'
               AND a.status = 'succeeded'
               AND a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
-              AND EXISTS (
-                  SELECT 1 FROM agent_outreach_targets t
-                  WHERE t.workspace_id = a.workspace_id
-                    AND t.id = CASE WHEN a.payload->>'target_id' ~ '^[0-9a-fA-F-]{36}$'
-                                    THEN (a.payload->>'target_id')::uuid END
-                    AND t.target_kind = 'community'
-                    AND t.screening_verdict = 'admitted'
-                    AND t.status = 'promoted'
-                    AND normalize_subreddit(t.subreddit) =
-                        normalize_subreddit(a.payload->>'subreddit')
-              )
               AND NOT EXISTS (
                   SELECT 1 FROM community_posts cp WHERE cp.action_id = a.id
               )
@@ -834,6 +869,12 @@ impl CommunityExecutorWorker {
                             ON batch.workspace_id = c2.workspace_id
                            AND batch.source_id = c2.relay_source_id
                         WHERE c2.workspace_id = $1
+                          -- This executor is the Reddit lane. Deliveries for
+                          -- other platforms seed as `awaiting_manual_post`
+                          -- and wait for a person or their own executor —
+                          -- claiming them here would ship a Discord draft to
+                          -- Reddit's submit endpoint under a subreddit name.
+                          AND c2.platform = 'reddit'
                           AND (
                               c2.status = 'pending'
                               OR (c2.status = 'rate_limited'
@@ -852,7 +893,24 @@ impl CommunityExecutorWorker {
                               --
                               -- $3 is false in manual mode, so nothing is
                               -- adopted while a person is still the publisher.
-                              OR (c2.status = 'awaiting_manual_post' AND $3)
+                              --
+                              -- Two `awaiting_manual_post` kinds are never
+                              -- adopted: a non-Reddit delivery (the lane
+                              -- above already refuses it; repeated here so
+                              -- the status alone never smuggles one in), and
+                              -- a community whose own rules ask for what
+                              -- automation cannot do — a required flair —
+                              -- which is why it waited for a person in the
+                              -- first place.
+                              OR (c2.status = 'awaiting_manual_post' AND $3
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                      FROM agent_outreach_targets held
+                                      JOIN discovery_place_rules held_rules
+                                        ON held_rules.place_id = held.place_id
+                                      WHERE held.workspace_id = c2.workspace_id
+                                        AND held.id = c2.target_id
+                                        AND held_rules.requires_approval))
                           )
                           AND EXISTS (
                               SELECT 1 FROM agent_outreach_targets t
@@ -963,12 +1021,12 @@ impl CommunityExecutorWorker {
                     updated_at = now()
                 FROM target
                 WHERE cp.id = target.id
-                RETURNING cp.id, cp.action_id, cp.target_id, cp.subreddit, cp.title,
-                          cp.body, cp.smart_link, cp.image_url, cp.media_id,
+                RETURNING cp.id, cp.action_id, cp.target_id, cp.platform, cp.subreddit,
+                          cp.title, cp.body, cp.smart_link, cp.image_url, cp.media_id,
                           cp.source_url, cp.relay_source_id, target.claimed_from
             )
-            SELECT c.id, c.action_id, c.target_id, c.subreddit, c.title, c.body,
-                   c.smart_link, c.image_url, c.media_id, c.source_url,
+            SELECT c.id, c.action_id, c.target_id, c.platform, c.subreddit, c.title,
+                   c.body, c.smart_link, c.image_url, c.media_id, c.source_url,
                    c.relay_source_id, c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
@@ -989,6 +1047,31 @@ impl CommunityExecutorWorker {
     /// Processes a single claimed action: checks anti-spam guardrails,
     /// posts to Reddit via the agents service browser, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), CommunityExecutorError> {
+        // The claim lane is `platform = 'reddit'`, so this should be
+        // unreachable — but a row that got here on another platform must not
+        // be submitted to Reddit under a community name that is not a
+        // subreddit. Park it for a person instead of failing it: the draft
+        // itself is fine, the lane is wrong.
+        if action.platform != "reddit" {
+            sqlx::query(
+                "UPDATE community_posts \
+                 SET status = 'awaiting_manual_post', \
+                     attempts = attempts - 1, \
+                     updated_at = now() \
+                 WHERE id = $1 AND workspace_id = $2",
+            )
+            .bind(action.id)
+            .bind(self.workspace_id.into_uuid())
+            .execute(&self.pool)
+            .await?;
+            tracing::warn!(
+                post_id = %action.id,
+                platform = %action.platform,
+                subreddit = %action.subreddit,
+                "non-Reddit community delivery reached the Reddit lane — parked for manual publication"
+            );
+            return Ok(());
+        }
         if action.claimed_from == "awaiting_manual_post" {
             tracing::warn!(
                 post_id = %action.id,
@@ -1838,7 +1921,7 @@ impl CommunityExecutorWorker {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, Debug)]
 pub struct ClaimedAction {
     id: Uuid,
     /// The status this row held before the claim.
@@ -1854,6 +1937,10 @@ pub struct ClaimedAction {
     /// The community this delivery targets — the outreach target id a
     /// standing grant keys on. `None` means no grant can cover the row.
     target_id: Option<Uuid>,
+    /// The community surface this delivery is for. The claim lane only takes
+    /// `reddit`; the field rides along so a row that reached `process_action`
+    /// on another platform is recognised and parked, not submitted.
+    platform: String,
     subreddit: String,
     title: String,
     body: String,

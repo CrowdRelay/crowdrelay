@@ -97,7 +97,16 @@ pub struct GrowthIntelligenceSnapshot {
 pub struct UnengagedTarget {
     pub target_id: uuid::Uuid,
     pub display_name: String,
+    /// The community surface this target lives on — 'reddit', 'discord',
+    /// 'telegram', 'forum', 'lemmy'. 'reddit' for every row the registry
+    /// wrote before other platforms existed.
+    pub platform: String,
     pub subreddit: String,
+    /// The community's own URL, for a target that is not a subreddit — a
+    /// Discord invite, a forum board, a Telegram group link. `None` for the
+    /// Reddit targets that built this table.
+    #[serde(default)]
+    pub community_url: Option<String>,
     /// Members, where discovery has measured them.
     pub member_count: Option<u32>,
     /// Observed activity against that member count, in basis points.

@@ -32,6 +32,7 @@ pub mod city_geocoding;
 pub mod community_executor;
 pub mod community_intelligence;
 pub mod community_join_executor;
+pub mod community_rules;
 pub mod community_vetting;
 pub mod discord_executor;
 pub mod discovery;
