@@ -413,10 +413,29 @@ pub async fn promote_contact(
             let import = crowdrelay_infra::fan_import::PostgresFanImportRepository::new(
                 state.database.clone(),
             );
+            // The sheet's city becomes the fan's recorded interest — the
+            // same catalogue uniqueness rule the beacon promote applies:
+            // an ambiguous name resolves to nothing, never a guess.
+            let city_id = match contact.city.as_deref() {
+                Some(city) => match repo
+                    .staged_city_ids(std::slice::from_ref(&city.to_owned()))
+                    .await
+                {
+                    Ok(map) => map.get(&city.trim().to_lowercase()).copied(),
+                    Err(error) => {
+                        tracing::warn!(%error, "gdrive city resolve failed");
+                        return Problem::service_unavailable(request_id_value)
+                            .private()
+                            .into_response();
+                    }
+                },
+                None => None,
+            };
             let entries = [crowdrelay_infra::fan_import::ImportEntry {
                 email: contact.normalized_email.clone(),
                 display_name: contact.display_name.clone(),
                 locale: None,
+                city_id,
             }];
             // Attribution follows the contact, not the connector: an
             // address sighted in both Drive and Gmail reads "gdrive+gmail".
@@ -619,6 +638,14 @@ pub struct PromoteBatchRequest {
     /// The segment size the operator confirmed. Bounded so a nonsense
     /// number is a 400, not a successful no-op.
     expected_count: i64,
+    /// Caps the wave: absent means the whole segment (the one-click
+    /// promote), present means the top `limit` contacts by evidence —
+    /// inbound history outranks a dual-source sighting, which outranks a
+    /// bare row. `expected_count` still names the wave size the operator
+    /// confirmed, so a segment that shrank between render and click is a
+    /// 409, while a segment that grew stays capped instead of widening
+    /// the send.
+    limit: Option<i64>,
     /// The operator's one-line invitation reason, printed in the
     /// confirmation mail. Trimmed; empty is none.
     reason: Option<String>,
@@ -649,6 +676,12 @@ pub async fn promote_batch(
     if !(0..=EXPECTED_COUNT_MAX).contains(&request.expected_count) {
         return Problem::bad_request(request_id_value).into_response();
     }
+    if request
+        .limit
+        .is_some_and(|limit| !(1..=EXPECTED_COUNT_MAX).contains(&limit))
+    {
+        return Problem::bad_request(request_id_value).into_response();
+    }
     let reason = request
         .reason
         .as_deref()
@@ -669,6 +702,7 @@ pub async fn promote_batch(
         .staged_fan_contacts_in_segment(
             workspace_id,
             crowdrelay_infra::gdrive::ContactSegment::LikelyFan,
+            request.limit,
         )
         .await
     {
@@ -720,6 +754,23 @@ pub async fn promote_batch(
         }
     };
 
+    // The sheet cities become fan city interests — resolved in one round
+    // trip under the same uniqueness rule the beacon promote applies (an
+    // ambiguous name resolves to nothing, never a guess).
+    let city_texts: Vec<String> = contacts
+        .iter()
+        .filter_map(|contact| contact.city.clone())
+        .collect();
+    let city_ids = match repo.staged_city_ids(&city_texts).await {
+        Ok(map) => map,
+        Err(error) => {
+            tracing::warn!(%error, "gdrive promote-batch city resolve failed");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+
     // `import_batch` takes one source per batch; a contact sighted in Drive
     // and Gmail imports as "gdrive+gmail", so the batch is grouped on the
     // joined source string. One transaction holds every group plus the
@@ -745,6 +796,11 @@ pub async fn promote_batch(
                 email: contact.normalized_email.clone(),
                 display_name: contact.display_name.clone(),
                 locale: None,
+                city_id: contact
+                    .city
+                    .as_deref()
+                    .and_then(|city| city_ids.get(&city.trim().to_lowercase()))
+                    .copied(),
             })
             .collect();
         match import

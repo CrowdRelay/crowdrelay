@@ -28,6 +28,10 @@ pub struct StagedFanContact {
     pub normalized_email: String,
     pub display_name: Option<String>,
     pub sources: Vec<String>,
+    /// Raw city text from the sheet — the promote path resolves it through
+    /// the catalogue (`staged_city_id` rules: one unambiguous match or
+    /// nothing) before it reaches `ImportEntry.city_id`.
+    pub city: Option<String>,
 }
 
 /// The shared base of the two undecided cuts: staged, untyped, present,
@@ -158,25 +162,98 @@ impl super::PostgresGDriveRepository {
     /// The segment's promotable fan rows — `fan_outcome = 'staged'` always
     /// applies on top of the segment predicate, so `beacon` here means
     /// "typed rows still promotable as fans", not the whole beacon cut.
-    /// Ordered by id so a bulk promote's import order is stable.
+    ///
+    /// `limit` bounds the wave: `None` returns the whole segment (the
+    /// one-click bulk promote), `Some(n)` the top `n` by evidence — an
+    /// address that already wrote to the band outranks a dual-source
+    /// sighting, which outranks a bare row. Evidence order makes a capped
+    /// wave promote the contacts most likely to be real fans, not an
+    /// arbitrary slice.
     pub async fn staged_fan_contacts_in_segment(
         &self,
         workspace_id: Uuid,
         segment: ContactSegment,
+        limit: Option<i64>,
     ) -> Result<Vec<StagedFanContact>, GDriveError> {
         let sql = format!(
-            "SELECT c.id, c.normalized_email, c.display_name, c.sources \
+            "SELECT c.id, c.normalized_email, c.display_name, c.sources, c.city \
              FROM drive_contacts c \
              WHERE c.workspace_id = $1 AND c.fan_outcome = 'staged' \
                AND ({}) \
-             ORDER BY c.id",
+             ORDER BY (c.last_inbound_at IS NOT NULL) DESC, \
+                      (cardinality(c.sources) > 1) DESC, \
+                      (c.city IS NOT NULL AND btrim(c.city) <> '') DESC, \
+                      c.id \
+             LIMIT $2",
             segment.sql_predicate(),
         );
         sqlx::query_as::<_, StagedFanContact>(&sql)
             .bind(workspace_id)
+            .bind(limit.unwrap_or(i64::MAX))
             .fetch_all(self.pool())
             .await
             .map_err(GDriveError::Database)
+    }
+
+    /// The segment's live promotable count — the `expected_count` check
+    /// counts the table as it stands, not the page a wave would take.
+    pub async fn staged_fan_count_in_segment(
+        &self,
+        workspace_id: Uuid,
+        segment: ContactSegment,
+    ) -> Result<i64, GDriveError> {
+        let sql = format!(
+            "SELECT count(*) FROM drive_contacts c \
+             WHERE c.workspace_id = $1 AND c.fan_outcome = 'staged' \
+               AND ({})",
+            segment.sql_predicate(),
+        );
+        sqlx::query_scalar::<_, i64>(&sql)
+            .bind(workspace_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(GDriveError::Database)
+    }
+
+    /// Resolves sheet city texts through the catalogue, applying the same
+    /// uniqueness rule as `staged_city_id` — a text matching two different
+    /// cities resolves to nothing rather than guessing. One round trip for
+    /// a whole wave's distinct texts; keys are the lowercased inputs.
+    pub async fn staged_city_ids(
+        &self,
+        cities: &[String],
+    ) -> Result<std::collections::HashMap<String, Uuid>, GDriveError> {
+        let cleaned: Vec<String> = cities
+            .iter()
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect();
+        let mut resolved: std::collections::HashMap<String, Uuid> =
+            std::collections::HashMap::new();
+        if cleaned.is_empty() {
+            return Ok(resolved);
+        }
+        let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id, slug, lower(btrim(name)) FROM cities \
+             WHERE slug = ANY($1) OR lower(btrim(name)) = ANY($1)",
+        )
+        .bind(&cleaned)
+        .fetch_all(self.pool())
+        .await
+        .map_err(GDriveError::Database)?;
+        for text in cleaned {
+            let mut ids: Vec<Uuid> = rows
+                .iter()
+                .filter(|(_, slug, name)| slug == &text || name == &text)
+                .map(|(id, _, _)| *id)
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if let [id] = ids.as_slice() {
+                resolved.insert(text, *id);
+            }
+        }
+        Ok(resolved)
     }
 
     /// Marks the listed contacts' fan outcome promoted inside the caller's
