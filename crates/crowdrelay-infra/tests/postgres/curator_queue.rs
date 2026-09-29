@@ -56,13 +56,16 @@ async fn candidate(
     status: &str,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
+    // The table CHECK pairs `refused` with a non-null refusal_reason.
     sqlx::query(
         r#"INSERT INTO outreach_candidates
            (id, workspace_id, target_kind, display_name, source, source_reference,
             evidence, route_kind, route_value, route_is_published,
-            fit_basis_points, follower_count, status, screened_at)
+            fit_basis_points, follower_count, status, refusal_reason, screened_at)
            VALUES ($1,$2,'creator',$3,'curator_site','https://t.me/metalworld',
-                   'metal videos daily','handle',$4,true,6000,$5,$6,now())"#,
+                   'metal videos daily','handle',$4,true,6000,$5,$6,
+                   CASE WHEN $6 = 'refused' THEN 'poor_fit' END,
+                   now())"#,
     )
     .bind(id)
     .bind(workspace)
