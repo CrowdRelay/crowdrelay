@@ -152,9 +152,10 @@ const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(600);
 
 /// How long to wait before reconsidering a draft held by the subreddit cooldown.
 ///
-/// The cooldown is seven days, so the ten-minute window above would re-check
-/// the same draft a thousand times and log a thousand deferrals. Six hours is
-/// short enough that the draft goes out promptly once the window opens.
+/// The cooldown is at least seven days (longer where the community's own rules
+/// declare it), so the ten-minute window above would re-check the same draft a
+/// thousand times and log a thousand deferrals. Six hours is short enough that
+/// the draft goes out promptly once the window opens.
 const SUBREDDIT_COOLDOWN_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// How many times a transient failure may defer a draft before it is given up on.
@@ -859,7 +860,9 @@ impl CommunityExecutorWorker {
         // Step 3: Claim pending and rate_limited (past backoff) rows.
         // Transition them to `posting` atomically.
         // Guardrail 2: exclude rows whose subreddit is on cooldown (a post
-        // to that subreddit was made in the last SUBREDDIT_COOLDOWN_DAYS days).
+        // to that subreddit was made within the wider of the flat
+        // SUBREDDIT_COOLDOWN_DAYS floor and the community's own
+        // rules.cooldown_days).
         let rows = sqlx::query_as::<_, ClaimedAction>(
             r#"
             WITH target AS (
@@ -883,6 +886,13 @@ impl CommunityExecutorWorker {
                         LEFT JOIN community_relay_batches batch
                             ON batch.workspace_id = c2.workspace_id
                            AND batch.source_id = c2.relay_source_id
+                        -- Community size and self-promo ratio for the drip
+                        -- ordering below — global tables keyed by place.
+                        LEFT JOIN discovery_places cplace
+                            ON cplace.workspace_id = c2.workspace_id
+                           AND cplace.id = c2.place_id
+                        LEFT JOIN discovery_place_rules crules
+                            ON crules.place_id = c2.place_id
                         WHERE c2.workspace_id = $1
                           -- Only platforms this executor actually sends to.
                           -- Everything else seeds `awaiting_manual_post` and
@@ -937,11 +947,18 @@ impl CommunityExecutorWorker {
                           )
                           AND NOT EXISTS (
                               SELECT 1 FROM community_posts recent
+                              -- The community's own rules set the floor:
+                              -- a sub that declares cooldown_days = 14 sees
+                              -- a second post on day 8 as spam whatever our
+                              -- flat seven days said. No rules row keeps $2.
+                              LEFT JOIN discovery_place_rules recent_rules
+                                ON recent_rules.place_id = recent.place_id
                               WHERE recent.workspace_id = $1
                                 AND normalize_subreddit(recent.subreddit) =
                                     normalize_subreddit(c2.subreddit)
                                 AND recent.status = 'posted'
-                                AND recent.posted_at > now() - make_interval(days => $2)
+                                AND recent.posted_at > now() - make_interval(
+                                    days => GREATEST($2, COALESCE(recent_rules.cooldown_days::int, $2)))
                           )
                           -- Two lanes. An uncampaigned delivery obeys the
                           -- workspace 24h cap ($4). A campaign delivery obeys
@@ -1014,15 +1031,35 @@ impl CommunityExecutorWorker {
                                   )
                               )
                           )
-                        -- The oldest due delivery per batch; uncampaigned rows
-                        -- each form their own group on `id`, so the lane split
-                        -- does not collapse them. Fresh work ranks ahead of
-                        -- held drafts: a publish-guard hold re-adopts and
+                        -- The strongest due delivery per batch; uncampaigned
+                        -- rows each form their own group on `id`, so the lane
+                        -- split does not collapse them. Fresh work ranks ahead
+                        -- of held drafts: a publish-guard hold re-adopts and
                         -- re-holds deterministically, and if it also sat first
                         -- by age the batch's one-per-sweep slot churned on it
                         -- forever while every pending sibling starved.
+                        --
+                        -- Within a flag, a batch's deliveries go out best
+                        -- community first: sqrt(members) × survival ×
+                        -- self-promo allowance. Survival is fail-closed in the
+                        -- only direction that matters — a recorded removal
+                        -- zeroes the community; a post never read for removal
+                        -- is simply no evidence either way. Unknown member
+                        -- counts and undeclared ratios sort last and neutral
+                        -- respectively; this is ordering, not a gate.
                         ORDER BY COALESCE(c2.relay_source_id::text, c2.id::text),
                                  (c2.status = 'awaiting_manual_post'),
+                                 SQRT(COALESCE(cplace.member_count, 0)::float8)
+                                     * CASE WHEN EXISTS (
+                                           SELECT 1 FROM community_posts past
+                                           WHERE past.workspace_id = c2.workspace_id
+                                             AND normalize_subreddit(past.subreddit) =
+                                                 normalize_subreddit(c2.subreddit)
+                                             AND past.status = 'posted'
+                                             AND past.removed_by_category IS NOT NULL
+                                       ) THEN 0.0 ELSE 1.0 END
+                                     * (COALESCE(crules.self_promo_ratio_percent, 100)::float8 / 100.0)
+                                 DESC,
                                  c2.created_at
                     ) pick ON pick.id = c.id
                     ORDER BY c.created_at
@@ -1659,15 +1696,19 @@ impl CommunityExecutorWorker {
         Ok(PlatformSend::Posted { post_url })
     }
 
-    /// Checks if this subreddit has been posted to within the cooldown window.
+    /// Checks if this subreddit has been posted to within the cooldown
+    /// window — the wider of the flat floor and the community's own
+    /// `cooldown_days`, read off the place the earlier post went to.
     async fn subreddit_on_cooldown(&self, subreddit: &str) -> Result<bool, CommunityExecutorError> {
         let count: i64 = sqlx::query_scalar(
             r#"
-            SELECT count(*) FROM community_posts
-            WHERE workspace_id = $1
-              AND normalize_subreddit(subreddit) = normalize_subreddit($2)
-              AND status = 'posted'
-              AND posted_at > now() - make_interval(days => $3)
+            SELECT count(*) FROM community_posts recent
+            LEFT JOIN discovery_place_rules rules ON rules.place_id = recent.place_id
+            WHERE recent.workspace_id = $1
+              AND normalize_subreddit(recent.subreddit) = normalize_subreddit($2)
+              AND recent.status = 'posted'
+              AND recent.posted_at > now() - make_interval(
+                  days => GREATEST($3, COALESCE(rules.cooldown_days::int, $3)))
             "#,
         )
         .bind(self.workspace_id.into_uuid())
