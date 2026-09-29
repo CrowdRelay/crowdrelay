@@ -749,6 +749,7 @@ pub async fn import_fans_admin(
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_owned),
+                city_id: None,
             }),
             Err(_) => invalid += 1,
         }

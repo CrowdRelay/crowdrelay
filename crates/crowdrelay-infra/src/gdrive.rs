@@ -122,7 +122,7 @@ pub struct RegistrySummary {
 /// applies. A counterparty matches on the address alone: the registry's
 /// identity key is the email. `ORDER BY played_here DESC` inside the
 /// lateral makes a same-named room the band already played win the tie.
-const CONTACT_SELECT: &str = r#"
+pub(super) const CONTACT_SELECT: &str = r#"
     SELECT c.id, c.normalized_email, c.display_name, c.organization, c.phone,
            c.suggested_kind, c.city, c.staged_status, c.notes,
            c.source_file_id, c.source_file_name,

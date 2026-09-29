@@ -82,6 +82,14 @@ pub struct FanHomeProfile {
     display_name: Option<String>,
     locale: Option<String>,
     primary_city: Option<String>,
+    /// The catalogue slug behind `primary_city` — lets a one-tap "alerts
+    /// for this city" prompt write the fan's own location preference
+    /// without asking them to pick the city again.
+    primary_city_slug: Option<String>,
+    /// Whether the fan opted into nearby-gig delivery themselves
+    /// (`fan_location_preferences.nearby_gigs_enabled`). Interest rows a
+    /// sheet carried in never count: knowledge is not consent.
+    nearby_alerts_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -450,15 +458,25 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
     };
     let workspace_id = state.ticketing.workspace_id().into_uuid();
 
-    let primary_city = sqlx::query_scalar::<_, String>(
+    let primary_city = sqlx::query_as::<_, (String, String)>(
         r#"
-        SELECT city.name
+        SELECT city.name, city.slug
         FROM fan_city_interests AS interest
         INNER JOIN cities AS city ON city.id = interest.city_id
         WHERE interest.workspace_id = $1 AND interest.fan_id = $2
         ORDER BY interest.created_at, city.id
         LIMIT 1
         "#,
+    )
+    .bind(workspace_id)
+    .bind(fan.id)
+    .fetch_optional(state.ticketing.pool());
+
+    // The fan's own alert choice — never inferred from an imported city
+    // interest. A missing row and a disabled row both answer false.
+    let nearby_alerts = sqlx::query_scalar::<_, bool>(
+        "SELECT nearby_gigs_enabled FROM fan_location_preferences \
+         WHERE workspace_id = $1 AND fan_id = $2",
     )
     .bind(workspace_id)
     .bind(fan.id)
@@ -677,11 +695,17 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
     .bind(&fan.normalized_email)
     .fetch_one(state.ticketing.pool());
 
-    let (primary_city, next_event, synesthesia, referral, counts) =
-        match tokio::try_join!(primary_city, next_event, synesthesia, referral, counts,) {
-            Ok(values) => values,
-            Err(error) => return ContextError::sqlx(error).response(request_id_value),
-        };
+    let (primary_city, nearby_alerts, next_event, synesthesia, referral, counts) = match tokio::try_join!(
+        primary_city,
+        nearby_alerts,
+        next_event,
+        synesthesia,
+        referral,
+        counts,
+    ) {
+        Ok(values) => values,
+        Err(error) => return ContextError::sqlx(error).response(request_id_value),
+    };
 
     let synesthesia = match synesthesia {
         Some((
@@ -737,7 +761,9 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
             profile: FanHomeProfile {
                 display_name: fan.display_name,
                 locale: fan.locale,
-                primary_city,
+                primary_city: primary_city.as_ref().map(|(name, _)| name.clone()),
+                primary_city_slug: primary_city.as_ref().map(|(_, slug)| slug.clone()),
+                nearby_alerts_enabled: nearby_alerts.unwrap_or(false),
             },
             next_event,
             synesthesia,

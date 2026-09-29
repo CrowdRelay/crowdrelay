@@ -536,10 +536,19 @@ pub struct SignalActivitySummary {
     /// Every contact the Drive/Gmail archive ever staged — the "imported"
     /// half of the archive line.
     archive_imported: i64,
+    /// Still staged — a person has not promoted the contact. The backlog
+    /// number an operator acts on.
+    archive_staged: i64,
+    /// Imported to a pending fan — the double opt-in is out, unclicked.
+    archive_pending: i64,
     /// Of those addresses, how many are confirmed fans now (active +
     /// current marketing consent). The line reads `confirmed / imported`,
     /// never `imported` alone.
     archive_confirmed: i64,
+    /// Confirmed and did something real in Signal — `last_activity_at`
+    /// is set by the same meaningful-action definition the brain uses.
+    /// Confirmed alone is not the finish line; this is.
+    archive_engaged: i64,
 }
 
 /// The retention loop end to end: a fan asks for a city, the city gets
@@ -609,7 +618,10 @@ struct SignalSummaryRow {
     pushes_delivered: i64,
     pushes_failed: i64,
     archive_imported: i64,
+    archive_staged: i64,
+    archive_pending: i64,
     archive_confirmed: i64,
+    archive_engaged: i64,
 }
 
 #[derive(Debug, FromRow)]

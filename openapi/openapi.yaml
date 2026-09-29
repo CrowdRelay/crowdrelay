@@ -12682,6 +12682,12 @@ components:
         display_name: { type: [string, 'null'] }
         locale: { type: [string, 'null'] }
         primary_city: { type: [string, 'null'] }
+        # Optional so a client on an older snapshot still parses: the slug
+        # behind primary_city for one-tap alert setup, and whether the fan
+        # opted into nearby-gig delivery (an imported city interest never
+        # counts as that opt-in).
+        primary_city_slug: { type: [string, 'null'] }
+        nearby_alerts_enabled: { type: boolean }
     FanHomeReferral:
       type: object
       additionalProperties: false

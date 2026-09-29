@@ -20,6 +20,13 @@ pub struct ImportEntry {
     pub email: String,
     pub display_name: Option<String>,
     pub locale: Option<String>,
+    /// The catalogue city the source already knew the address by — the
+    /// archive promote resolves `drive_contacts.city` to it. Written to
+    /// `fan_city_interests` for the fans this batch invites: that table
+    /// records what is known about the fan, and only the fan's own
+    /// `fan_location_preferences` choice opts them into nearby-gig
+    /// delivery.
+    pub city_id: Option<Uuid>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -370,6 +377,48 @@ impl PostgresFanImportRepository {
                     fan_of.insert(*key, id);
                 }
             }
+        }
+
+        // ── 4b. Record the cities the source already knew ─────────────────
+        //
+        // A sheet city is the band's knowledge about the fan, so it lands in
+        // `fan_city_interests` — the Signal context and audience reads pick it
+        // up immediately. It is deliberately NOT a `fan_location_preferences`
+        // row: that table is the fan's own alert choice, and opting someone
+        // into nearby-gig pushes because a spreadsheet placed them somewhere
+        // is how an import turns into spam. The fan confirms the preference
+        // in-app; the onboarding flow can ask because the interest is here.
+        //
+        // Written for every invitee (senders) — pending fans in cooldown keep
+        // the knowledge even though no new mail leaves. Active fans stay
+        // untouched, consistent with the import's own rule.
+        let mut interest_fan_ids: Vec<Uuid> = Vec::new();
+        let mut interest_city_ids: Vec<Uuid> = Vec::new();
+        for (entry, repeat) in &candidates {
+            if *repeat || !senders.contains(&entry.email.as_str()) {
+                continue;
+            }
+            let (Some(fan_id), Some(city_id)) =
+                (fan_of.get(entry.email.as_str()).copied(), entry.city_id)
+            else {
+                continue;
+            };
+            interest_fan_ids.push(fan_id);
+            interest_city_ids.push(city_id);
+        }
+        if !interest_fan_ids.is_empty() {
+            sqlx::query(
+                "INSERT INTO fan_city_interests (workspace_id, fan_id, city_id) \
+                 SELECT $1, interest.fan_id, interest.city_id \
+                 FROM unnest($2::uuid[], $3::uuid[]) AS interest(fan_id, city_id) \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(workspace_id)
+            .bind(&interest_fan_ids)
+            .bind(&interest_city_ids)
+            .execute(&mut **tx)
+            .await
+            .map_err(FanImportError::Database)?;
         }
 
         // ── 5. Which of them are inside their confirmation cooldown ───────

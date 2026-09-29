@@ -438,11 +438,13 @@ async fn fan_import_lands_pending_and_respects_opt_outs() -> Result<(), Box<dyn 
             email: "new@x.test".into(),
             display_name: Some("New".into()),
             locale: Some("pl".into()),
+            city_id: None,
         },
         ImportEntry {
             email: "gone@x.test".into(),
             display_name: None,
             locale: None,
+            city_id: None,
         },
     ];
     let source = format!("pilot-batch-{}", workspace.simple());
@@ -837,6 +839,7 @@ async fn fan_import_admits_a_repeated_address_once() -> Result<(), Box<dyn std::
         email: email.to_owned(),
         display_name: None,
         locale: None,
+        city_id: None,
     };
     let counts = repo
         .import_batch(

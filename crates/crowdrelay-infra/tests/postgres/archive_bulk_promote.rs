@@ -66,7 +66,7 @@ async fn bulk_promote(
     let gdrive = PostgresGDriveRepository::new(pool.clone());
     let import = PostgresFanImportRepository::new(pool.clone());
     let contacts = gdrive
-        .staged_fan_contacts_in_segment(workspace, segment)
+        .staged_fan_contacts_in_segment(workspace, segment, None)
         .await?;
     let mut tx = pool.begin().await?;
     let mut counts = crowdrelay_infra::fan_import::ImportCounts::default();
@@ -82,6 +82,7 @@ async fn bulk_promote(
                 email: contact.normalized_email.clone(),
                 display_name: contact.display_name.clone(),
                 locale: None,
+                city_id: None,
             });
     }
     for (source, entries) in &groups {
@@ -246,6 +247,7 @@ async fn bulk_promote_rolls_back_when_mark_fails() -> Result<(), Box<dyn std::er
                 email: "rollback@gmail.com".to_owned(),
                 display_name: None,
                 locale: None,
+                city_id: None,
             }],
             2,
             60,
@@ -429,6 +431,7 @@ async fn confirmation_payload_carries_crew_locale_or_null() -> Result<(), Box<dy
                 email: "crew@x.test".to_owned(),
                 display_name: None,
                 locale: None,
+                city_id: None,
             }],
             2,
             60,
@@ -462,6 +465,7 @@ async fn confirmation_payload_carries_crew_locale_or_null() -> Result<(), Box<dy
                 email: "plain@x.test".to_owned(),
                 display_name: None,
                 locale: None,
+                city_id: None,
             }],
             2,
             60,
@@ -499,6 +503,7 @@ async fn confirmation_payload_carries_crew_locale_or_null() -> Result<(), Box<dy
                 email: "own@x.test".to_owned(),
                 display_name: None,
                 locale: Some("en".to_owned()),
+                city_id: None,
             }],
             2,
             60,

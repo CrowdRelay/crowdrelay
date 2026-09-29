@@ -56,20 +56,22 @@ async fn seed_drive_contact(
     workspace: Uuid,
     email: &str,
     suggested_kind: Option<&str>,
+    city: Option<&str>,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
         INSERT INTO drive_contacts
-            (id, workspace_id, normalized_email, suggested_kind,
+            (id, workspace_id, normalized_email, suggested_kind, city,
              source_file_id, source_file_name, sources)
-        VALUES ($1, $2, $3, $4, 'file-1', 'contacts.csv', '{gdrive}')
+        VALUES ($1, $2, $3, $4, $5, 'file-1', 'contacts.csv', '{gdrive}')
         "#,
     )
     .bind(id)
     .bind(workspace)
     .bind(email)
     .bind(suggested_kind)
+    .bind(city)
     .execute(pool)
     .await?;
     Ok(id)
@@ -93,10 +95,16 @@ async fn promote_batch_rejects_a_stale_count_then_promotes_the_segment()
         crowdrelay_api::HttpConfig::new(["http://localhost:4321".to_owned()])?,
     );
 
-    let fan_row = seed_drive_contact(&pool, workspace_uuid, "basia@gmail.com", None).await?;
-    let _org = seed_drive_contact(&pool, workspace_uuid, "bookings@klubx.pl", None).await?;
-    let _venue =
-        seed_drive_contact(&pool, workspace_uuid, "room@stodola.pl", Some("venue")).await?;
+    let fan_row = seed_drive_contact(&pool, workspace_uuid, "basia@gmail.com", None, None).await?;
+    let _org = seed_drive_contact(&pool, workspace_uuid, "bookings@klubx.pl", None, None).await?;
+    let _venue = seed_drive_contact(
+        &pool,
+        workspace_uuid,
+        "room@stodola.pl",
+        Some("venue"),
+        None,
+    )
+    .await?;
 
     let uri = "/v1/control-plane/gdrive/contacts/promote-batch";
 
@@ -128,6 +136,8 @@ async fn promote_batch_rejects_a_stale_count_then_promotes_the_segment()
         json!({"destination": "beacon", "segment": "likely_fan", "expected_count": 1}),
         json!({"destination": "fan", "segment": "likely_org", "expected_count": 1}),
         json!({"destination": "fan", "segment": "likely_fan", "expected_count": -1}),
+        json!({"destination": "fan", "segment": "likely_fan", "expected_count": 1, "limit": 0}),
+        json!({"destination": "fan", "segment": "likely_fan", "expected_count": 1, "limit": 100_001}),
     ] {
         let (status, _) = post(&app, uri, bad.clone()).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST, "bad request: {bad}");
@@ -223,6 +233,291 @@ async fn promote_batch_rejects_a_stale_count_then_promotes_the_segment()
     // is still staged, so it is not decided yet.
     assert_eq!(listed["segment_counts"]["decided"], 0);
     assert_eq!(listed["contacts"].as_array().map(Vec::len), Some(0));
+
+    Ok(())
+}
+
+/// The bounded wave: `limit` takes the top evidence slice — an inbound
+/// history outranks a dual-source sighting, which outranks a bare row —
+/// and `expected_count` names that slice, so a growing segment still 409s
+/// only when the wave itself drifted. A sheet city the catalogue
+/// recognises lands on the fan as a `fan_city_interests` row: the band's
+/// knowledge, not a notification opt-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn promote_batch_limit_takes_the_evidence_slice_and_carries_city()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let workspace_uuid = attestation_anchor::seed_workspace(&pool).await?;
+    let workspace_id = WorkspaceId::from_uuid(workspace_uuid);
+    let app = crowdrelay_api::router(
+        attestation_anchor::app_state(&pool, workspace_id)?,
+        crowdrelay_api::HttpConfig::new(["http://localhost:4321".to_owned()])?,
+    );
+
+    // The catalogue already seeds Wrocław — the test's city must be a real
+    // row, and the slug-name resolve path is what the promote uses.
+    let city_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM cities WHERE country_code = 'PL' AND slug = 'wroclaw'")
+            .fetch_one(&pool)
+            .await?;
+
+    // Three staged likely-fan rows in reverse evidence order.
+    let bare = seed_drive_contact(&pool, workspace_uuid, "bare@gmail.com", None, None).await?;
+    let dual = seed_drive_contact(&pool, workspace_uuid, "dual@gmail.com", None, None).await?;
+    sqlx::query("UPDATE drive_contacts SET sources = '{gdrive,gmail}' WHERE id = $1")
+        .bind(dual)
+        .execute(&pool)
+        .await?;
+    let inbound =
+        seed_drive_contact(&pool, workspace_uuid, "inbound@gmail.com", None, None).await?;
+    sqlx::query(
+        "UPDATE drive_contacts SET last_inbound_at = now(), city = 'Wrocław' WHERE id = $1",
+    )
+    .bind(inbound)
+    .execute(&pool)
+    .await?;
+
+    let uri = "/v1/control-plane/gdrive/contacts/promote-batch";
+
+    // The wave is capped at two — the bare row stays staged.
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({
+            "destination": "fan",
+            "segment": "likely_fan",
+            "expected_count": 2,
+            "limit": 2,
+            "reason": "Przenosimy listę do Signal",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "bounded promote failed: {body}");
+    assert_eq!(body["promoted"], 2);
+
+    let outcomes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT normalized_email, fan_outcome FROM drive_contacts \
+         WHERE workspace_id = $1 ORDER BY normalized_email",
+    )
+    .bind(workspace_uuid)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        outcomes,
+        vec![
+            ("bare@gmail.com".to_owned(), "staged".to_owned()),
+            ("dual@gmail.com".to_owned(), "promoted".to_owned()),
+            ("inbound@gmail.com".to_owned(), "promoted".to_owned()),
+        ],
+        "evidence order: inbound history + dual source outrank the bare row"
+    );
+
+    // The inbound row's sheet city resolved through the catalogue and
+    // reached the fan as an interest — never a location preference.
+    let interest: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_city_interests interest \
+         JOIN fans fan ON fan.workspace_id = interest.workspace_id \
+            AND fan.id = interest.fan_id \
+         WHERE interest.workspace_id = $1 \
+           AND fan.normalized_email = 'inbound@gmail.com' \
+           AND interest.city_id = $2",
+    )
+    .bind(workspace_uuid)
+    .bind(city_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(interest, 1, "the sheet city became the fan's interest");
+    let preferences: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fan_location_preferences WHERE workspace_id = $1")
+            .bind(workspace_uuid)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        preferences, 0,
+        "a sheet city never opts a fan into nearby pushes"
+    );
+
+    // The leftover row promotes on the next wave — count re-confirmed.
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({
+            "destination": "fan",
+            "segment": "likely_fan",
+            "expected_count": 1,
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "tail wave failed: {body}");
+    assert_eq!(body["promoted"], 1);
+    let bare_outcome: String =
+        sqlx::query_scalar("SELECT fan_outcome FROM drive_contacts WHERE id = $1")
+            .bind(bare)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(bare_outcome, "promoted");
+
+    Ok(())
+}
+
+/// The beacon half of the batch: every row is promoted through the same
+/// kind-routed methods the per-row endpoint calls — `radio` becomes a
+/// proposed outreach target, `venue` files under its resolved booking
+/// city, a `fan`-typed row is a staging kind the beacon vocabulary does
+/// not carry and stays staged, and the untyped org cut falls back to the
+/// same `press` default the single promote applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn promote_batch_beacon_routes_kinds_and_keeps_unpromotable_rows_staged()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let workspace_uuid = attestation_anchor::seed_workspace(&pool).await?;
+    let workspace_id = WorkspaceId::from_uuid(workspace_uuid);
+    let app = crowdrelay_api::router(
+        attestation_anchor::app_state(&pool, workspace_id)?,
+        crowdrelay_api::HttpConfig::new(["http://localhost:4321".to_owned()])?,
+    );
+
+    let radio = seed_drive_contact(
+        &pool,
+        workspace_uuid,
+        "radio@radiokampus.pl",
+        Some("radio"),
+        None,
+    )
+    .await?;
+    let venue = seed_drive_contact(
+        &pool,
+        workspace_uuid,
+        "room@stodola.pl",
+        Some("venue"),
+        Some("wroclaw"),
+    )
+    .await?;
+    let fan_typed =
+        seed_drive_contact(&pool, workspace_uuid, "kasia@o2.pl", Some("fan"), None).await?;
+    let org = seed_drive_contact(&pool, workspace_uuid, "biuro@fundacja.pl", None, None).await?;
+
+    let uri = "/v1/control-plane/gdrive/contacts/promote-batch";
+
+    // A fan-segment row can never batch through the beacon lane, and a
+    // drifted count still 409s with both numbers.
+    let (status, _) = post(
+        &app,
+        uri,
+        json!({"destination": "beacon", "segment": "likely_fan", "expected_count": 3}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({"destination": "beacon", "segment": "beacon", "expected_count": 99}),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a stale beacon count must 409: {body}"
+    );
+    // An unknown kind override is a caller bug, not a press contact.
+    let (status, _) = post(
+        &app,
+        uri,
+        json!({"destination": "beacon", "segment": "beacon", "expected_count": 3, "kind": "goblin"}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The confirmed beacon wave: radio → proposed outreach target, venue →
+    // booking route at its resolved city, the fan-typed row refused.
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({"destination": "beacon", "segment": "beacon", "expected_count": 3}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "beacon batch failed: {body}");
+    assert_eq!(body["promoted"], 2, "radio + venue promote: {body}");
+    assert_eq!(body["skipped_kind"], 1, "the fan-typed row stays: {body}");
+
+    let target_kind: String = sqlx::query_scalar(
+        "SELECT target_kind FROM agent_outreach_targets \
+         WHERE workspace_id = $1 AND contact_email = 'radio@radiokampus.pl'",
+    )
+    .bind(workspace_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(target_kind, "radio");
+    let target_status: String = sqlx::query_scalar(
+        "SELECT status FROM agent_outreach_targets \
+         WHERE workspace_id = $1 AND contact_email = 'radio@radiokampus.pl'",
+    )
+    .bind(workspace_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(target_status, "proposed", "screening still owns the send");
+
+    // The untyped org files under the same press default as the per-row
+    // promote — proposed, awaiting the screening loop.
+    let (status, body) = post(
+        &app,
+        uri,
+        json!({"destination": "beacon", "segment": "likely_org", "expected_count": 1}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "org batch failed: {body}");
+    assert_eq!(body["promoted"], 1);
+    let org_kind: String = sqlx::query_scalar(
+        "SELECT target_kind FROM agent_outreach_targets \
+         WHERE workspace_id = $1 AND contact_email = 'biuro@fundacja.pl'",
+    )
+    .bind(workspace_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(org_kind, "press");
+
+    // Outcome axis: promoted rows marked, the fan-typed row still staged
+    // on the beacon side.
+    let outcomes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT normalized_email, beacon_outcome FROM drive_contacts \
+         WHERE workspace_id = $1 ORDER BY normalized_email",
+    )
+    .bind(workspace_uuid)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        outcomes,
+        vec![
+            ("biuro@fundacja.pl".to_owned(), "promoted".to_owned()),
+            ("kasia@o2.pl".to_owned(), "staged".to_owned()),
+            ("radio@radiokampus.pl".to_owned(), "promoted".to_owned()),
+            ("room@stodola.pl".to_owned(), "promoted".to_owned()),
+        ],
+        "every promoted row marked, the refused kind untouched"
+    );
+    for id in [radio, venue, org] {
+        let marked: String =
+            sqlx::query_scalar("SELECT beacon_outcome FROM drive_contacts WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(marked, "promoted");
+    }
+    let fan_side_stays: String =
+        sqlx::query_scalar("SELECT fan_outcome FROM drive_contacts WHERE id = $1")
+            .bind(fan_typed)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        fan_side_stays, "staged",
+        "the beacon wave never touches the fan axis"
+    );
 
     Ok(())
 }
