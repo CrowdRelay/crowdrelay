@@ -111,6 +111,18 @@ pub(super) async fn record_execution_outcome(
             f64::from(*overdue_basis_points),
             None,
         ),
+        AutopilotActionPayload::RunArchivePromoteWave {
+            limit,
+            staged_count,
+            ..
+        } => (
+            // The wave size fired against the backlog it was raised on —
+            // confirmations are measured downstream by the fan lifecycle,
+            // not attributed to the approval click.
+            "archive_promote_wave_run",
+            *limit as f64,
+            Some(*staged_count as f64),
+        ),
         AutopilotActionPayload::RequestShowGrowth { .. } => ("show_growth_lever_requested", 1.0, None),
         AutopilotActionPayload::RequestContentArtifact { .. } => {
             ("content_artifact_requested", 1.0, None)

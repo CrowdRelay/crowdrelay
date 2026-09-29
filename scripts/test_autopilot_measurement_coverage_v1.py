@@ -71,6 +71,11 @@ KNOWN_UNMEASURED = {
     "RequestOutreachDiscovery",
     "RequestOutreachTarget",
     "RunPlayStep",
+    # A wave's own result — promoted rows, confirmation intents — is written
+    # in the execution transaction itself, and its conversion is read off the
+    # ops-summary archive ladder over days, not by an action-level effect
+    # window: invitees confirm, they do not reply.
+    "RunArchivePromoteWave",
     "SendTeamAssignmentEmail",
     "SubmitFundingApplication",
     "VerifyPlaylistPlacement",

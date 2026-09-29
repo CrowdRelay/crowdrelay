@@ -36,6 +36,7 @@ use crowdrelay_application::autopilot::{AutopilotControlMutation, RecordBookingR
 use crowdrelay_application::{IdempotencyKey, RepositoryError, RequestId};
 
 mod acquisition_channels;
+mod archive_wave;
 pub(in crate::autopilot) mod attribution;
 pub(in crate::autopilot) mod belief_revisions;
 mod booking_agent_reply_execution;
@@ -78,6 +79,7 @@ mod snapshots;
 mod source_campaign;
 
 pub(super) use acquisition_channels::*;
+pub(super) use archive_wave::*;
 pub(super) use booking_agent_reply_execution::*;
 pub(super) use booking_agent_wave_execution::*;
 pub(super) use booking_outreach_execution::*;

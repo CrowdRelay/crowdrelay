@@ -15,8 +15,10 @@ use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 
+mod promote_wave;
 mod segments;
 mod sightings;
+pub use promote_wave::*;
 pub use segments::*;
 
 #[derive(Debug, Error)]
