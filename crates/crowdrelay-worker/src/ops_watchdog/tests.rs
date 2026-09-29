@@ -11,10 +11,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::{MissingReason, OpsSnapshot, Pace, VideoScorecardView, conditions};
+    use super::{OpsSnapshot, conditions};
     use crate::auto_post_platforms::{PublishingPosture, RedditPosture};
     use sqlx::types::Json;
-    use time::OffsetDateTime;
 
     /// The posture of a workspace whose channels are all switched on.
     ///

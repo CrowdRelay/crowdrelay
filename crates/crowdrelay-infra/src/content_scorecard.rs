@@ -230,9 +230,12 @@ async fn scorecards_for(
         let attributed = measured.then(|| {
             series
                 .iter()
-                .filter(|row| row.metric_key.starts_with("ext:"))
                 .filter(|row| {
-                    video_scorecard::attributable_domain(&row.metric_key["ext:".len()..], &touched)
+                    row.metric_key
+                        .strip_prefix("ext:")
+                        .is_some_and(|domain| {
+                            video_scorecard::attributable_domain(domain, &touched)
+                        })
                 })
                 .map(|row| row.value.max(0) as u64)
                 .sum()
