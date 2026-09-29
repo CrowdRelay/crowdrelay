@@ -231,11 +231,9 @@ async fn scorecards_for(
             series
                 .iter()
                 .filter(|row| {
-                    row.metric_key
-                        .strip_prefix("ext:")
-                        .is_some_and(|domain| {
-                            video_scorecard::attributable_domain(domain, &touched)
-                        })
+                    row.metric_key.strip_prefix("ext:").is_some_and(|domain| {
+                        video_scorecard::attributable_domain(domain, &touched)
+                    })
                 })
                 .map(|row| row.value.max(0) as u64)
                 .sum()
