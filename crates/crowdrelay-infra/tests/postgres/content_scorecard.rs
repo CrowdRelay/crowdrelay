@@ -556,3 +556,55 @@ async fn scorecard_reads_the_release_and_its_ledgers() {
         .expect("unknown read");
     assert!(unknown.is_none());
 }
+
+/// A curator DM the operator marked sent must count in the ledger — the
+/// interaction links the candidate through `candidate_id`, not metadata, so
+/// a join that reads metadata would report every sent handle as unsent.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn a_marked_curator_send_counts_in_the_card() {
+    let f = setup().await.expect("fixture");
+    let ws = f.ws();
+    let video = f.video("youtube:technopho02", "Technophobia", 2).await;
+
+    let candidate = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO outreach_candidates
+           (workspace_id, id, target_kind, display_name, source,
+            source_reference, route_kind, route_value, route_is_published,
+            fit_basis_points, status, pitch_class)
+           VALUES ($1,$2,'creator','DJ','curator_site','https://x.test',
+                   'handle','@djhandle',true,8000,'admitted','third_party')"#,
+    )
+    .bind(ws)
+    .bind(candidate)
+    .execute(&f.pool)
+    .await
+    .expect("candidate");
+    sqlx::query(
+        r#"INSERT INTO outreach_interactions
+           (workspace_id, target_id, candidate_id, direction, phase,
+            source_key, occurred_at)
+           VALUES ($1, NULL, $2, 'outbound', 'initial', $3, now())"#,
+    )
+    .bind(ws)
+    .bind(candidate)
+    .bind(format!("manual:curator:{video}"))
+    .execute(&f.pool)
+    .await
+    .expect("sent mark");
+
+    let card = video_scorecard(&f.pool, f.workspace_id, video)
+        .await
+        .expect("card")
+        .expect("present");
+    assert_eq!(card.sends.curator_queue.sent, 1);
+    assert_eq!(card.sends.curator_queue.unsent, 0);
+    assert!(
+        !card
+            .missing
+            .iter()
+            .any(|reason| matches!(reason, MissingReason::CuratorQueueUnsent { .. })),
+        "a sent handle is not a missing reason"
+    );
+}
