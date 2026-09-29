@@ -311,6 +311,18 @@ pub fn evaluate_release(
             }
         }
     }
+    // A plan filed after publication — the upload watcher opens one when a
+    // fresh video appears — still gets its press wave. Inside the two-week
+    // tail the press rung outranks the post-release milestones it would
+    // otherwise lose to, so the first cycle asks for StartPress and the next
+    // ones resume the ladder where it stands.
+    if snapshot.press_enabled
+        && !snapshot.history.press_started
+        && until <= Duration::ZERO
+        && until > -Duration::days(14)
+    {
+        return request(ReleaseMilestone::StartPress, 9_100);
+    }
     if until <= -Duration::days(i64::from(policy.catalogue_rotation_days_after)) {
         return if snapshot.history.catalogue_rotation_sent {
             ReleaseDecision::Hold(ReleaseHoldReason::AlreadyDone)
@@ -717,6 +729,77 @@ mod tests {
             evaluate_release(&s, ReleaseAutopilotPolicy::default(), now()),
             ReleaseDecision::Request {
                 milestone: ReleaseMilestone::StartPress,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_post_publish_plan_starts_press_before_the_tail_rungs() {
+        let policy = ReleaseAutopilotPolicy::default();
+        // Released five days ago — Sustain is already due, and without the
+        // post-release branch the tail would answer before press ever starts.
+        let mut s = snapshot(-5);
+        s.history.calendar_seeded = true;
+        assert!(matches!(
+            evaluate_release(&s, policy, now()),
+            ReleaseDecision::Request {
+                milestone: ReleaseMilestone::StartPress,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_post_publish_plan_runs_press_then_release_day() {
+        let policy = ReleaseAutopilotPolicy::default();
+        // Inside the window but ahead of the tail rungs: press first, then
+        // the release-day post once press_started is on record.
+        let mut s = snapshot(-2);
+        s.history.calendar_seeded = true;
+        assert!(matches!(
+            evaluate_release(&s, policy, now()),
+            ReleaseDecision::Request {
+                milestone: ReleaseMilestone::StartPress,
+                ..
+            }
+        ));
+        s.history.press_started = true;
+        assert!(matches!(
+            evaluate_release(&s, policy, now()),
+            ReleaseDecision::Request {
+                milestone: ReleaseMilestone::ReleaseDay,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_plan_older_than_two_weeks_skips_the_press_wave() {
+        let policy = ReleaseAutopilotPolicy::default();
+        // Twenty days past release is outside the (−14d, 0] window: no press
+        // wave, the ladder's tail answers instead.
+        let mut s = snapshot(-20);
+        s.history.calendar_seeded = true;
+        assert!(matches!(
+            evaluate_release(&s, policy, now()),
+            ReleaseDecision::Request {
+                milestone: ReleaseMilestone::Wrap,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn press_disabled_post_release_goes_straight_to_release_day() {
+        let policy = ReleaseAutopilotPolicy::default();
+        let mut s = snapshot(-2);
+        s.history.calendar_seeded = true;
+        s.press_enabled = false;
+        assert!(matches!(
+            evaluate_release(&s, policy, now()),
+            ReleaseDecision::Request {
+                milestone: ReleaseMilestone::ReleaseDay,
                 ..
             }
         ));
