@@ -163,6 +163,13 @@ pub async fn register_manual_reddit_post(
         );
     }
     anchor_measurements_to_publication(&mut *transaction, workspace_id, community_post_id).await?;
+    schedule_link_click_measurement(
+        &mut transaction,
+        workspace_id,
+        "community_posts",
+        community_post_id,
+    )
+    .await?;
     record_publication_reach(&mut transaction, workspace_id, community_post_id).await?;
     transaction.commit().await?;
     Ok(())
@@ -499,6 +506,13 @@ pub async fn register_manual_telegram_post(
         telegram_post_id,
     )
     .await?;
+    schedule_link_click_measurement(
+        &mut transaction,
+        workspace_id,
+        "telegram_posts",
+        telegram_post_id,
+    )
+    .await?;
     record_content_publication_reach(
         &mut transaction,
         workspace_id,
@@ -568,6 +582,13 @@ pub async fn register_manual_discord_post(
         discord_post_id,
     )
     .await?;
+    schedule_link_click_measurement(
+        &mut transaction,
+        workspace_id,
+        "discord_posts",
+        discord_post_id,
+    )
+    .await?;
     record_content_publication_reach(
         &mut transaction,
         workspace_id,
@@ -620,6 +641,66 @@ pub async fn anchor_content_measurements_to_publication(
     sqlx::query(&query)
         .bind(workspace_id)
         .bind(post_id)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+/// Schedules the click measurement for a freshly posted community,
+/// Telegram or Discord post — `content_link_clicks_7d` anchored at the
+/// post's `posted_at`, due a week later.
+///
+/// The executors only mint measurements for actions the dispatcher planned
+/// this kind for; community, Telegram and Discord posts are not among them,
+/// so without this call the link a post carried never produced an outcome
+/// row and its clicks were invisible to the learner. The observation arm
+/// reads the union of the post's tracked link (`smart_link_id` where the
+/// column exists, the `/l/{slug}` in `smart_link` where it does not), so
+/// scheduling keys on the link being present at all.
+///
+/// Idempotent on (workspace_id, action_id, measurement_kind, subject_id):
+/// a replayed posted transition — or a manual registration retry — inserts
+/// nothing a second time. A post with no action id or no tracked link is
+/// unmeasurable and schedules nothing.
+///
+/// The table name is a compile-time constant from callers in this crate
+/// and the worker executors — never request input — so interpolation is
+/// safe here.
+pub async fn schedule_link_click_measurement(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    table: &str,
+    post_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let query = format!(
+        r#"
+        INSERT INTO autopilot_measurements (
+            id, workspace_id, action_id, measurement_kind, subject_id,
+            action_finished_at, baseline_value, due_at, available_at,
+            trace_id
+        )
+        SELECT $3, post.workspace_id, post.action_id, 'content_link_clicks_7d',
+               post.action_id, post.posted_at, 0.0,
+               post.posted_at + INTERVAL '7 days',
+               post.posted_at + INTERVAL '7 days',
+               action.trace_id
+        FROM {table} AS post
+        JOIN autopilot_actions AS action
+          ON action.workspace_id = post.workspace_id
+         AND action.id = post.action_id
+        WHERE post.workspace_id = $1
+          AND post.id = $2
+          AND post.action_id IS NOT NULL
+          AND post.smart_link IS NOT NULL
+          AND btrim(post.smart_link) <> ''
+        ON CONFLICT (workspace_id, action_id, measurement_kind, subject_id)
+            DO NOTHING
+        "#
+    );
+    sqlx::query(&query)
+        .bind(workspace_id)
+        .bind(post_id)
+        .bind(Uuid::now_v7())
         .execute(&mut **transaction)
         .await?;
     Ok(())

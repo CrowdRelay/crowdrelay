@@ -202,6 +202,275 @@ async fn content_link_clicks_counts_only_the_posts_own_traffic() {
     assert_eq!(observed, 3.0);
 }
 
+/// A community post carries no `smart_link_id` — only the `/l/{slug}` path
+/// in `smart_link`. The observation resolves the slug back to the
+/// `smart_links` row, so its clicks count the same as a joined id's.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn content_link_clicks_reads_a_community_posts_slug_link() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let action_id = insert_action(
+        &f,
+        "community.engage.request",
+        serde_json::json!({
+            "kind": "request_community_engagement",
+            "target_id": uuid::Uuid::now_v7(),
+            "platform": "reddit",
+            "title": "new single",
+            "body": "link inside",
+        }),
+    )
+    .await;
+    let link_id = insert_smart_link(&f, "community-link").await;
+    sqlx::query(
+        r#"INSERT INTO community_posts
+           (workspace_id, action_id, subreddit, title, body, smart_link,
+            status, posted_at)
+           VALUES ($1,$2,'Metal','new single','link inside','/l/community-link',
+                   'posted',$3)"#,
+    )
+    .bind(workspace)
+    .bind(action_id)
+    .bind(f.now - time::Duration::days(10))
+    .execute(&f.pool)
+    .await
+    .expect("community post");
+
+    // Three clicks inside the measurement's week, one outside it.
+    let anchor = f.now - time::Duration::days(14);
+    for days in [1, 3, 6, 9] {
+        sqlx::query(
+            "INSERT INTO click_events (workspace_id, smart_link_id, occurred_at) VALUES ($1,$2,$3)",
+        )
+        .bind(workspace)
+        .bind(link_id)
+        .bind(anchor + time::Duration::days(days))
+        .execute(&f.pool)
+        .await
+        .expect("click");
+    }
+
+    let observed = f
+        .repository
+        .observe_measurement(
+            f.workspace_id,
+            &measurement(
+                &f,
+                action_id,
+                AutopilotMeasurementKind::ContentLinkClicks7d,
+                action_id,
+            ),
+            f.now,
+        )
+        .await
+        .expect("a community post's slug link observes cleanly");
+    assert_eq!(observed, 3.0);
+}
+
+/// Telegram and Discord posts carry `smart_link_id` outright — same join as
+/// social, different table. A telegram post's clicks must reach its action's
+/// measurement; a discord post's too.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn content_link_clicks_reads_telegram_and_discord_link_ids() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let anchor = f.now - time::Duration::days(14);
+
+    for (table, extra) in [
+        ("telegram_posts", "channel"),
+        ("discord_posts", "channel_id"),
+    ] {
+        let action_id = insert_action(
+            &f,
+            "community.engage.request",
+            serde_json::json!({
+                "kind": "request_community_engagement",
+                "target_id": uuid::Uuid::now_v7(),
+                "platform": "reddit",
+                "title": "chat post",
+                "body": "link inside",
+            }),
+        )
+        .await;
+        let link_id = insert_smart_link(&f, &format!("{table}-link")).await;
+        sqlx::query(&format!(
+            "INSERT INTO {table}
+             (workspace_id, action_id, {extra}, smart_link, smart_link_id,
+              status, posted_at)
+             VALUES ($1,$2,'metal','/l/x',$3,'posted',$4)"
+        ))
+        .bind(workspace)
+        .bind(action_id)
+        .bind(link_id)
+        .bind(anchor + time::Duration::days(2))
+        .execute(&f.pool)
+        .await
+        .unwrap_or_else(|e| panic!("{table} post: {e}"));
+
+        for days in [1, 4] {
+            sqlx::query(
+                "INSERT INTO click_events (workspace_id, smart_link_id, occurred_at) VALUES ($1,$2,$3)",
+            )
+            .bind(workspace)
+            .bind(link_id)
+            .bind(anchor + time::Duration::days(days))
+            .execute(&f.pool)
+            .await
+            .expect("click");
+        }
+
+        let observed = f
+            .repository
+            .observe_measurement(
+                f.workspace_id,
+                &measurement(
+                    &f,
+                    action_id,
+                    AutopilotMeasurementKind::ContentLinkClicks7d,
+                    action_id,
+                ),
+                f.now,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{table} observation: {e}"));
+        assert_eq!(observed, 2.0, "{table}");
+    }
+}
+
+/// A published community post whose row carries no link still abandons —
+/// the union finding nothing tracked is the same verdict as a social post's
+/// missing `smart_link_id`.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn content_link_clicks_abandons_a_community_post_with_no_link() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let action_id = insert_action(
+        &f,
+        "community.engage.request",
+        serde_json::json!({
+            "kind": "request_community_engagement",
+            "target_id": uuid::Uuid::now_v7(),
+            "platform": "reddit",
+            "title": "no link",
+            "body": "plain text",
+        }),
+    )
+    .await;
+    sqlx::query(
+        r#"INSERT INTO community_posts
+           (workspace_id, action_id, subreddit, title, body, status, posted_at)
+           VALUES ($1,$2,'Metal','no link','plain text','posted',$3)"#,
+    )
+    .bind(workspace)
+    .bind(action_id)
+    .bind(f.now - time::Duration::days(10))
+    .execute(&f.pool)
+    .await
+    .expect("community post");
+
+    let result = f
+        .repository
+        .observe_measurement(
+            f.workspace_id,
+            &measurement(
+                &f,
+                action_id,
+                AutopilotMeasurementKind::ContentLinkClicks7d,
+                action_id,
+            ),
+            f.now,
+        )
+        .await;
+    match result {
+        Err(crowdrelay_application::RepositoryError::ConflictBecause(reason)) => {
+            assert_eq!(reason, AutopilotMeasurementKind::NO_TRACKED_LINK);
+        }
+        other => panic!("an untracked community post must abandon, not observe: {other:?}"),
+    }
+}
+
+/// The posted transition schedules exactly one `content_link_clicks_7d`
+/// measurement anchored at `posted_at` — and a replayed transition inserts
+/// nothing a second time. A post with no tracked link schedules nothing.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn posted_transition_schedules_one_click_measurement() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+
+    for with_link in [true, false] {
+        let action_id = insert_action(
+            &f,
+            "community.engage.request",
+            serde_json::json!({
+                "kind": "request_community_engagement",
+                "target_id": uuid::Uuid::now_v7(),
+                "platform": "reddit",
+                "title": "post",
+                "body": "text",
+            }),
+        )
+        .await;
+        let post_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO community_posts
+               (id, workspace_id, action_id, subreddit, title, body, smart_link,
+                status, posted_at)
+               VALUES ($1,$2,$3,'Metal','post','text',$4,'posted',$5)"#,
+        )
+        .bind(post_id)
+        .bind(workspace)
+        .bind(action_id)
+        .bind(if with_link { "/l/linked" } else { "" })
+        .bind(f.now)
+        .execute(&f.pool)
+        .await
+        .expect("community post");
+
+        let mut transaction = f.pool.begin().await.expect("tx");
+        crowdrelay_infra::fanbase::schedule_link_click_measurement(
+            &mut transaction,
+            workspace,
+            "community_posts",
+            post_id,
+        )
+        .await
+        .expect("first schedule");
+        // A replayed posted transition must not schedule a second time.
+        crowdrelay_infra::fanbase::schedule_link_click_measurement(
+            &mut transaction,
+            workspace,
+            "community_posts",
+            post_id,
+        )
+        .await
+        .expect("replayed schedule");
+        transaction.commit().await.expect("commit");
+
+        let (rows, due_offset_secs): (i64, Option<i64>) = sqlx::query_as(
+            r#"SELECT COUNT(*)::bigint,
+                      max(EXTRACT(EPOCH FROM (due_at - action_finished_at)))::bigint
+               FROM autopilot_measurements
+               WHERE workspace_id = $1 AND action_id = $2
+                 AND measurement_kind = 'content_link_clicks_7d'"#,
+        )
+        .bind(workspace)
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await
+        .expect("count");
+        if with_link {
+            assert_eq!(rows, 1, "one measurement even after a replay");
+            assert_eq!(due_offset_secs, Some(7 * 24 * 60 * 60));
+        } else {
+            assert_eq!(rows, 0, "an untracked post schedules nothing");
+        }
+    }
+}
+
 /// A published post whose draft named no trackable destination has no click
 /// count to report — `no_tracked_link` is the honest answer, not a zero the
 /// learner would read as the content failing.

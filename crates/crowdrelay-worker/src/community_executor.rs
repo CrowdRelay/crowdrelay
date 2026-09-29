@@ -1375,6 +1375,13 @@ impl CommunityExecutorWorker {
             action.id,
         )
         .await?;
+        crowdrelay_infra::fanbase::schedule_link_click_measurement(
+            &mut posted_tx,
+            self.workspace_id.into_uuid(),
+            "community_posts",
+            action.id,
+        )
+        .await?;
         // The reach row and the assignment transition belong to the same
         // commit as the post itself: a crash between "post marked posted"
         // and these writes would leave an assignment `dispatched` forever —

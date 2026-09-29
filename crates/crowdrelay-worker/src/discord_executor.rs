@@ -596,6 +596,13 @@ impl DiscordExecutorWorker {
             action.id,
         )
         .await?;
+        crowdrelay_infra::fanbase::schedule_link_click_measurement(
+            &mut posted_tx,
+            self.workspace_id.into_uuid(),
+            "discord_posts",
+            action.id,
+        )
+        .await?;
 
         // Reach ledger.
         sqlx::query(

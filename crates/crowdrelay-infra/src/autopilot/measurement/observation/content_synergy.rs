@@ -8,10 +8,14 @@
 use super::*;
 
 /// Clicks on the link this post carried — joined through the post's own
-/// `smart_link_id`, so the count is this action's traffic and not the
-/// workspace's. A published post with no tracked link is unmeasurable rather
-/// than a zero: the draft named a destination no redirect was minted for,
-/// and "the link was never instrumented" is not "nobody clicked".
+/// tracked link, so the count is this action's traffic and not the
+/// workspace's. The link resolves differently per post table: social,
+/// Telegram and Discord posts carry `smart_link_id` outright; a community
+/// post stores only the `/l/{slug}` path in `smart_link`, resolved back to
+/// the `smart_links` row that serves it. A published post with no tracked
+/// link is unmeasurable rather than a zero: the draft named a destination
+/// no redirect was minted for, and "the link was never instrumented" is
+/// not "nobody clicked".
 pub(super) async fn content_link_clicks(
     pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
@@ -20,9 +24,30 @@ pub(super) async fn content_link_clicks(
     let tracked = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)::bigint
-        FROM social_posts
-        WHERE workspace_id = $1 AND action_id = $2
-          AND smart_link_id IS NOT NULL
+        FROM (
+            SELECT post.smart_link_id AS link_id
+            FROM social_posts AS post
+            WHERE post.workspace_id = $1 AND post.action_id = $2
+              AND post.smart_link_id IS NOT NULL
+            UNION
+            SELECT post.smart_link_id
+            FROM telegram_posts AS post
+            WHERE post.workspace_id = $1 AND post.action_id = $2
+              AND post.smart_link_id IS NOT NULL
+            UNION
+            SELECT post.smart_link_id
+            FROM discord_posts AS post
+            WHERE post.workspace_id = $1 AND post.action_id = $2
+              AND post.smart_link_id IS NOT NULL
+            UNION
+            SELECT link.id
+            FROM community_posts AS post
+            JOIN smart_links AS link
+              ON link.workspace_id = post.workspace_id
+             AND link.slug = substring(post.smart_link from 4)
+            WHERE post.workspace_id = $1 AND post.action_id = $2
+              AND post.smart_link LIKE '/l/%'
+        ) AS links
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -39,13 +64,33 @@ pub(super) async fn content_link_clicks(
         r#"
         SELECT COUNT(*)::double precision
         FROM click_events AS click
-        JOIN social_posts AS post
-          ON post.workspace_id = click.workspace_id
-         AND post.smart_link_id = click.smart_link_id
-        WHERE post.workspace_id = $1
-          AND post.action_id = $2
+        WHERE click.workspace_id = $1
           AND click.occurred_at >= $3
           AND click.occurred_at < $3 + INTERVAL '7 days'
+          AND click.smart_link_id IN (
+              SELECT post.smart_link_id
+              FROM social_posts AS post
+              WHERE post.workspace_id = $1 AND post.action_id = $2
+                AND post.smart_link_id IS NOT NULL
+              UNION
+              SELECT post.smart_link_id
+              FROM telegram_posts AS post
+              WHERE post.workspace_id = $1 AND post.action_id = $2
+                AND post.smart_link_id IS NOT NULL
+              UNION
+              SELECT post.smart_link_id
+              FROM discord_posts AS post
+              WHERE post.workspace_id = $1 AND post.action_id = $2
+                AND post.smart_link_id IS NOT NULL
+              UNION
+              SELECT link.id
+              FROM community_posts AS post
+              JOIN smart_links AS link
+                ON link.workspace_id = post.workspace_id
+               AND link.slug = substring(post.smart_link from 4)
+              WHERE post.workspace_id = $1 AND post.action_id = $2
+                AND post.smart_link LIKE '/l/%'
+          )
         "#,
     )
     .bind(workspace_id.into_uuid())
