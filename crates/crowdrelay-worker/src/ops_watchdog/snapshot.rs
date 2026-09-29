@@ -517,13 +517,32 @@ async fn load_snapshot(
                         AND c.status IN ('scheduled','completed')
                   )
              ) AS stalled
-            ) AS stalled_drops
+            ) AS stalled_drops,
+            -- Deliveries still `claimed` past the alert age. The lease
+            -- sweep runs inside this same transaction before the snapshot,
+            -- so a row this old means the sweep is not doing its job —
+            -- the condition watches the watchdog's own recovery path.
+            (SELECT count(*) FROM communication_campaign_deliveries d
+             WHERE d.workspace_id=$1 AND d.status='claimed'
+               AND d.claimed_at < now() - make_interval(hours => $4::int)
+            )::bigint AS deliveries_stuck_claimed,
+            -- Claims the lease sweep had to fail in the last day: each is
+            -- a send the executor claimed and never reported — the mail
+            -- may or may not have left, and the ledger fails it closed.
+            -- Measured 2026-09-30: 116 of them, an executor that died
+            -- between claim and result.
+            (SELECT count(*) FROM communication_campaign_deliveries d
+             WHERE d.workspace_id=$1 AND d.status='failed'
+               AND d.error_code='claim_expired_unknown'
+               AND d.completed_at > now() - interval '1 day'
+            )::bigint AS abandoned_claims_24h
         FROM executor_instances WHERE workspace_id=$1
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(UNKNOWN_ALERT_AGE_THRESHOLD.as_secs() as i64)
     .bind(RELENTLESS_CYCLE_WINDOW)
+    .bind(crowdrelay_domain::campaign_lifecycle::STUCK_CLAIM_ALERT_HOURS as i32)
     .fetch_one(&mut **transaction)
     .await?;
 

@@ -1,4 +1,6 @@
-const DELIVERY_CLAIM_TTL_MINUTES: i64 = 15;
+// The lease length lives in `crowdrelay_domain::campaign_lifecycle` — the
+// ops watchdog sweeps the same lease when the executor never calls back.
+use crowdrelay_domain::campaign_lifecycle::DELIVERY_CLAIM_TTL_MINUTES;
 
 pub async fn delivery_plan(
     State(state): State<crate::AppState>,

@@ -78,6 +78,20 @@ pub enum EventCampaignPhase {
     ThankYou,
 }
 
+/// How long a claimed campaign delivery may go without a reported result
+/// before the lease fails closed. The API expires leases on its own
+/// delivery endpoints, but only when the executor calls them; the ops
+/// watchdog sweeps the same lease on every tick, so the length lives here
+/// for both. A send whose outcome never arrives reads `failed`, never
+/// `delivered` — Gmail exposes no idempotency primitive, so an unknown is
+/// not deliverable evidence.
+pub const DELIVERY_CLAIM_TTL_MINUTES: i64 = 15;
+
+/// How old a still-`claimed` delivery may get before it is reported. A
+/// claim that survives past the lease sweep is not a slow send, it is the
+/// sweep not running — the condition watches the watchdog's own work.
+pub const STUCK_CLAIM_ALERT_HOURS: i64 = 2;
+
 impl EventCampaignPhase {
     #[must_use]
     pub const fn template_key(self) -> &'static str {

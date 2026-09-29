@@ -76,6 +76,9 @@ fn publishing() -> PublishingPosture {
             guarded_policies: None,
             approved_failed_24h: 0,
             approved_failed_summary: None,
+            // No campaign delivery has been claimed and abandoned.
+            deliveries_stuck_claimed: 0,
+            abandoned_claims_24h: 0,
         }
     }
 
@@ -1118,6 +1121,32 @@ fn publishing() -> PublishingPosture {
         let raised = find(&snapshot);
         assert!(raised.active);
         assert_eq!(raised.details["stalled_drops"][0]["lanes"][0]["status"], "awaiting_approval");
+    }
+
+    /// An executor that claims a campaign delivery and never reports a
+    /// result is the failure the lease sweep fails closed — and the alarm
+    /// counts the rescues, because each one is a send whose fate is
+    /// unknown. A stale still-claimed row alone does not fire it: the
+    /// sweep runs before the snapshot, so that state only exists when the
+    /// watchdog itself is not running.
+    #[test]
+    fn abandoned_campaign_claims_raise_attention() {
+        let find = |snapshot: &OpsSnapshot| {
+            conditions(snapshot, publishing())
+                .into_iter()
+                .find(|c| c.key == "communications.deliveries_stuck_claimed")
+                .expect("the condition is evaluated")
+        };
+        assert!(!find(&healthy()).active);
+        let mut snapshot = healthy();
+        snapshot.deliveries_stuck_claimed = 5;
+        assert!(!find(&snapshot).active);
+        let mut snapshot = healthy();
+        snapshot.abandoned_claims_24h = 116;
+        let raised = find(&snapshot);
+        assert!(raised.active);
+        assert_eq!(raised.severity, "warning");
+        assert_eq!(raised.details["abandoned_claims_24h"], 116);
     }
 }
 

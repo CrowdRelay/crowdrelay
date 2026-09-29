@@ -632,5 +632,50 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            template join.",
             }),
         },
+        Condition {
+            // A claimed campaign delivery is a send in flight. The executor
+            // claims the row, mails the fan, then reports a result — and
+            // the API's claim lease marks the row `failed` with
+            // `claim_expired_unknown` when that result never arrives. This
+            // condition counts the ones the lease sweep rescued: every
+            // `claim_expired_unknown` in the last day is an executor that
+            // died between claim and result, and the mail's real fate is
+            // unknown — that is what "failed closed" means here, not "the
+            // send definitely did not happen".
+            //
+            // Measured 2026-09-30: the n8n campaign executor (VOSCAM) died
+            // at the Gmail step for every run, leaving 116 rows claimed
+            // across five campaigns for weeks — the API's expiry only runs
+            // when the executor calls back, and a dead executor never does.
+            // The sweep now runs on the watchdog tick, so this alarm is the
+            // remaining symptom: abandoned sends, named.
+            //
+            // `deliveries_stuck_claimed` — a still-claimed row older than
+            // the alert age — travels in the details rather than driving
+            // the predicate: the sweep runs before the snapshot in this
+            // same transaction, so a row that old means the sweep did not
+            // run at all, and nothing here would report it anyway. It is
+            // kept as a reading because a stale deployment running an old
+            // worker would show it.
+            //
+            // Warning, not critical: the send may well have happened, the
+            // fanbase is not being re-mailed, and the recovery already ran.
+            // What is lost is certainty per fan and the wave itself.
+            key: "communications.deliveries_stuck_claimed",
+            severity: "warning",
+            summary: "Campaign deliveries were claimed and never reported",
+            active: snapshot.abandoned_claims_24h > 0,
+            details: json!({
+                "abandoned_claims_24h": snapshot.abandoned_claims_24h,
+                "still_claimed_past_lease": snapshot.deliveries_stuck_claimed,
+                "remedy": "check the n8n workflow 'CrowdRelayOS communication \
+                           campaign executor' (VOSCAM000000001) — its claim \
+                           calls land but no result call follows. The Gmail \
+                           send or the report node is where the run dies; \
+                           failed rows carry error_code 'claim_expired_unknown' \
+                           and the campaigns behind them stay 'scheduled' until \
+                           every recipient resolves.",
+            }),
+        },
     ]
 }

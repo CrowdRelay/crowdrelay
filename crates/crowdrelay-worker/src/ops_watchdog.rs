@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 24 conditions. The count and this list are
+//! The watchdog monitors 25 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -156,6 +156,14 @@
 //!   executor failed, succeeded without a materialized receipt) so the fix
 //!   is routed, not rediscovered. Warning, not critical: the drop loses its
 //!   launch window, but the source stays eligible for a re-armed surge.
+//! - `communications.deliveries_stuck_claimed` — the campaign executor
+//!   claimed deliveries and never reported results, and the lease sweep
+//!   failed them closed. Measured 2026-09-30: the n8n executor died at the
+//!   Gmail step on every run for weeks — 116 claimed rows across five
+//!   campaigns, mails unknown, campaigns pinned `scheduled`. The API's
+//!   expiry only ran when the executor called back, which a dead executor
+//!   never does; this cycle now runs the sweep itself, and the alarm
+//!   counts the abandoned sends it has to rescue.
 //!
 //! # Contradictions are the one condition nothing else can find
 //!
@@ -284,6 +292,31 @@ impl OpsWatchdogWorker {
             .bind(format!("{}:crowdrelay-ops-watchdog", self.workspace_id))
             .execute(&mut *transaction)
             .await?;
+        // The campaign-delivery claim lease is the ledger's crash
+        // tolerance: a claim with no result after the TTL is a send whose
+        // outcome will never be known, and it fails closed rather than
+        // pinning the campaign `scheduled` forever. The API expires leases
+        // on its own delivery endpoints, but only when the executor calls
+        // them — measured in production 2026-09-30, where the executor died
+        // between claim and result and 116 rows stayed `claimed` for weeks
+        // because nothing ever called those endpoints again. This tick is
+        // the path that runs even when the executor is the part that died.
+        sqlx::query(
+            r#"
+            UPDATE communication_campaign_deliveries
+            SET status = 'failed',
+                error_code = COALESCE(error_code, 'claim_expired_unknown'),
+                completed_at = now(),
+                updated_at = now()
+            WHERE workspace_id = $1
+              AND status = 'claimed'
+              AND claimed_at < now() - make_interval(mins => $2::int)
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(crowdrelay_domain::campaign_lifecycle::DELIVERY_CLAIM_TTL_MINUTES as i32)
+        .execute(&mut *transaction)
+        .await?;
         let snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
         let conditions = conditions(&snapshot, self.posture);
         let states = load_states(&mut transaction, self.workspace_id).await?;
@@ -579,6 +612,13 @@ struct OpsSnapshot {
     /// states in the detail say whether the fix is an approval click or an
     /// executor repair.
     stalled_drops: Option<Value>,
+    /// Campaign deliveries still `claimed` past the alert age. The lease
+    /// sweep runs in this same cycle before the snapshot, so a row old
+    /// enough to appear here means the sweep itself is not running.
+    deliveries_stuck_claimed: i64,
+    /// Claims the lease sweep failed closed in the last day — each one a
+    /// send the executor claimed and never reported an outcome for.
+    abandoned_claims_24h: i64,
 }
 
 #[derive(Clone, Debug)]
