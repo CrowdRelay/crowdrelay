@@ -151,6 +151,7 @@ pub mod show_growth;
 pub mod show_operations;
 pub mod show_pitch_letter;
 pub mod show_settlement;
+pub mod social_autopost;
 pub mod standing_approval;
 pub mod target_discovery;
 pub mod team_approval_token;

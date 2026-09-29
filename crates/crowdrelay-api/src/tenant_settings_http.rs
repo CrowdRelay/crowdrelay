@@ -281,6 +281,18 @@ pub async fn get_brand_settings(
                     .cloned()
                     .unwrap_or_default(),
             );
+            // The autopost lanes surface their effective value, same as the
+            // join-ask defaults: absent stores nothing and means "every
+            // platform the executor can post".
+            settings.insert(
+                "social_autopost_platforms".to_owned(),
+                overrides
+                    .get("social_autopost_platforms")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crowdrelay_domain::social_autopost::DEFAULT_AUTOPOST_PLATFORMS.join(",")
+                    }),
+            );
             (
                 StatusCode::OK,
                 [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -337,6 +349,9 @@ fn validate_value(key: &str, value: &str) -> bool {
     }
     if key == "join_ask_platforms" {
         return crowdrelay_domain::join_ask::parse_platforms(value).is_some();
+    }
+    if key == "social_autopost_platforms" {
+        return crowdrelay_domain::social_autopost::parse_autopost_platforms(value).is_some();
     }
     // The area and live-page paths become URL segments; keep them URL-safe
     // like the defaults.

@@ -258,28 +258,45 @@ impl SocialPostExecutorWorker {
         }
     }
 
-    /// Returns true when the executor should draft (manual mode) rather than
-    /// publish automatically. Two switches gate publishing: the deployment
-    /// kill switch (`CROWDRELAY_SOCIAL_AUTO_POST`, off forces manual no matter
-    /// what the tenant setting says) and the tenant's own `social_auto_post`,
-    /// read live from the database (60s TTL cache) so the control plane toggle
-    /// takes effect without a restart. A settings read failure also holds —
-    /// a database blip must never silently enable publishing.
-    async fn is_manual_mode(&self) -> bool {
-        if self.env_manual_mode {
-            return true;
-        }
+    /// The tenant's brand settings, or `None` when they cannot be read.
+    /// The read goes through a 60s cache, so the per-action call in
+    /// `process_action` costs nothing and a control-plane toggle lands
+    /// without a restart.
+    async fn brand_settings(
+        &self,
+    ) -> Option<std::sync::Arc<crowdrelay_infra::tenant_settings::TenantBrandSettings>> {
         use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
         let repo = TenantSettingsRepository::new(self.pool.clone());
         match repo.brand_settings(self.workspace_id.into_uuid()).await {
-            Ok(settings) => !settings.social_auto_post,
+            Ok(settings) => Some(settings),
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "failed to read social_auto_post from tenant settings; holding posts for a human"
+                    "failed to read tenant settings; holding posts for a human"
                 );
-                true
+                None
             }
+        }
+    }
+
+    /// The lane a drafted platform takes this cycle, resolved live from
+    /// tenant_settings so a control-plane toggle lands without a restart.
+    ///
+    /// The human lane is the fail-closed answer: the deployment kill switch
+    /// (`CROWDRELAY_SOCIAL_AUTO_POST`) off, the tenant's `social_auto_post`
+    /// off, a settings read failure, or a platform outside
+    /// `social_autopost_platforms` all hold the draft for a person — a
+    /// database blip must never silently enable publishing.
+    async fn lane_for(&self, platform: &str) -> SocialLane {
+        if self.env_manual_mode {
+            return SocialLane::Hold("automatic posting is switched off");
+        }
+        match self.brand_settings().await {
+            Some(settings) if settings.social_auto_post => {
+                social_lane(platform, &settings.social_autopost_platforms)
+            }
+            Some(_) => SocialLane::Hold("automatic posting is switched off"),
+            None => SocialLane::Hold("tenant settings could not be read"),
         }
     }
 
@@ -594,74 +611,47 @@ impl SocialPostExecutorWorker {
             ));
         }
 
-        // Anti-spam: check platform cooldown.
-        if self.platform_on_cooldown(&action.platform).await? {
-            tracing::info!(
-                platform = %action.platform,
-                "platform on 12h cooldown, skipping"
-            );
-            self.mark_rate_limited(action.id).await?;
-            return Ok(());
-        }
+        // The lane decision runs before the anti-spam guardrails: cooldown
+        // and the 24h cap protect a platform from rapid publishes, and a
+        // draft heading for the human queue never reaches the platform.
+        // Holding it behind a rate_limited cycle would park it in the
+        // machine lane for hours for a throttle that cannot apply.
+        match self.lane_for(&action.platform).await {
+            SocialLane::Publish(path) => {
+                // Anti-spam: check platform cooldown.
+                if self.platform_on_cooldown(&action.platform).await? {
+                    tracing::info!(
+                        platform = %action.platform,
+                        "platform on 12h cooldown, skipping"
+                    );
+                    self.mark_rate_limited(action.id).await?;
+                    return Ok(());
+                }
 
-        // Anti-spam: check 24h rate limit.
-        if self.rate_limit_reached().await? {
-            tracing::info!("24h post limit reached, skipping");
-            self.mark_rate_limited(action.id).await?;
-            return Ok(());
-        }
+                // Anti-spam: check 24h rate limit.
+                if self.rate_limit_reached().await? {
+                    tracing::info!("24h post limit reached, skipping");
+                    self.mark_rate_limited(action.id).await?;
+                    return Ok(());
+                }
 
-        // Manual mode (default): mark as awaiting manual post.
-        // The operator posts manually to the platform and registers the
-        // post URL via the API.
-        //
-        // The live value is read from tenant_settings on each cycle so an
-        // operator can flip it from the control plane without a restart.
-        if self.is_manual_mode().await {
-            sqlx::query(
-                r#"
-                UPDATE social_posts
-                SET status = 'awaiting_manual_post',
-                    updated_at = now()
-                WHERE workspace_id = $1 AND id = $2
-                "#,
-            )
-            .bind(self.workspace_id.into_uuid())
-            .bind(action.id)
-            .execute(&self.pool)
-            .await?;
-            tracing::info!(
-                action_id = %action.action_id,
-                platform = %action.platform,
-                "social post marked as awaiting manual post"
-            );
-            return Ok(());
+                match path {
+                    SocialPublish::Facebook => self.publish_to_facebook_page(action).await,
+                    SocialPublish::Instagram => self.publish_to_instagram(action).await,
+                    SocialPublish::Telegram => self.publish_to_telegram(action).await,
+                }
+            }
+            SocialLane::Hold(reason) => {
+                self.hold_for_human(action.id, reason).await?;
+                tracing::info!(
+                    action_id = %action.action_id,
+                    platform = %action.platform,
+                    reason,
+                    "social post held for an operator"
+                );
+                Ok(())
+            }
         }
-
-        // Automatic mode. Facebook Pages and Instagram publish through the
-        // Graph API; Telegram through the Bot API when its own kill switch
-        // is on; X still drafts, because its write API is behind a paid tier
-        // this tenant does not hold. Held with the reason so the queue says
-        // why rather than looking like a stuck job.
-        if action.platform == "facebook" {
-            return self.publish_to_facebook_page(action).await;
-        }
-        if action.platform == "instagram" {
-            return self.publish_to_instagram(action).await;
-        }
-        if action.platform == "telegram" {
-            return self.publish_to_telegram(action).await;
-        }
-
-        let reason = "x publishing needs a paid API tier";
-        self.hold_for_human(action.id, reason).await?;
-        tracing::info!(
-            action_id = %action.action_id,
-            platform = %action.platform,
-            reason,
-            "social post held for an operator: this platform does not publish automatically"
-        );
-        Ok(())
     }
 
     /// Parks a drafted post for an operator, with the reason it was held.
@@ -860,6 +850,48 @@ struct ClaimedAction {
     trace_id: Option<Uuid>,
 }
 
+/// A platform with a first-party publish path — the only values the
+/// automatic lane can route to.
+enum SocialPublish {
+    Facebook,
+    Instagram,
+    Telegram,
+}
+
+/// The lane a drafted post takes once the tenant's automatic posting is
+/// live. Pure — the rule table is testable without a database.
+enum SocialLane {
+    Publish(SocialPublish),
+    /// `awaiting_manual_post` with this `error_message`: the queue says why
+    /// rather than looking like a stuck job.
+    Hold(&'static str),
+}
+
+/// Which lane a drafted platform takes in automatic mode.
+///
+/// A platform in the tenant's `social_autopost_platforms` publishes itself;
+/// one outside it waits for a person — the draft moves to the human queue,
+/// it does not block and it is not a fault. X always waits: its write API
+/// is behind a paid tier this stack does not hold, so it holds even if a
+/// direct database write put it in the list.
+fn social_lane(platform: &str, autopost_platforms: &[String]) -> SocialLane {
+    if platform == "x" {
+        return SocialLane::Hold("x publishing needs a paid API tier");
+    }
+    if !autopost_platforms
+        .iter()
+        .any(|candidate| candidate == platform)
+    {
+        return SocialLane::Hold("autoposting is off for this platform");
+    }
+    match platform {
+        "facebook" => SocialLane::Publish(SocialPublish::Facebook),
+        "instagram" => SocialLane::Publish(SocialPublish::Instagram),
+        "telegram" => SocialLane::Publish(SocialPublish::Telegram),
+        _ => SocialLane::Hold("this platform has no automatic publish path"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,5 +911,63 @@ mod tests {
     fn max_posts_per_24h_is_bounded() {
         // Bounded between 1 and 10 — prevents both spam and total silence.
         const { assert!(MAX_POSTS_PER_24H > 0 && MAX_POSTS_PER_24H <= 10) };
+    }
+
+    #[test]
+    fn a_platform_in_the_autopost_list_publishes() {
+        let platforms = vec![
+            "facebook".to_owned(),
+            "instagram".to_owned(),
+            "telegram".to_owned(),
+        ];
+        assert!(matches!(
+            social_lane("facebook", &platforms),
+            SocialLane::Publish(SocialPublish::Facebook)
+        ));
+        assert!(matches!(
+            social_lane("instagram", &platforms),
+            SocialLane::Publish(SocialPublish::Instagram)
+        ));
+        assert!(matches!(
+            social_lane("telegram", &platforms),
+            SocialLane::Publish(SocialPublish::Telegram)
+        ));
+    }
+
+    #[test]
+    fn a_platform_off_the_autopost_list_waits_for_a_person() {
+        // Meta removed from autoposting is a human-queue draft, not a
+        // failure — the whole reason the two lanes exist.
+        let platforms = vec!["telegram".to_owned()];
+        assert!(matches!(
+            social_lane("facebook", &platforms),
+            SocialLane::Hold("autoposting is off for this platform")
+        ));
+        assert!(matches!(
+            social_lane("instagram", &platforms),
+            SocialLane::Hold("autoposting is off for this platform")
+        ));
+    }
+
+    #[test]
+    fn x_waits_for_a_person_even_if_someone_wrote_it_into_the_list() {
+        // The settings parser refuses x, but a raw database write can still
+        // put it there — the paid-tier rule must hold anyway.
+        let platforms = vec!["x".to_owned(), "telegram".to_owned()];
+        assert!(matches!(
+            social_lane("x", &platforms),
+            SocialLane::Hold("x publishing needs a paid API tier")
+        ));
+    }
+
+    #[test]
+    fn an_unknown_platform_in_the_list_still_waits() {
+        // A platform the parser would refuse but a direct write inserted —
+        // in the list yet unroutable — holds rather than panicking.
+        let platforms = vec!["discord".to_owned()];
+        assert!(matches!(
+            social_lane("discord", &platforms),
+            SocialLane::Hold("this platform has no automatic publish path")
+        ));
     }
 }
