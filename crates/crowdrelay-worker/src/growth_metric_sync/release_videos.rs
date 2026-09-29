@@ -8,10 +8,9 @@
 //! staleness the same way a connection's sync is due on its own.
 
 use super::{
-    GrowthMetricSyncError, GrowthMetricSyncWorker, SYNC_INTERVAL, normalize_count,
-    record_subject_metric_point,
+    GrowthMetricSyncError, GrowthMetricSyncWorker, SYNC_INTERVAL, YoutubeVideosResponse,
+    normalize_count, record_subject_metric_point,
 };
-use serde::Deserialize;
 use sqlx::types::Uuid;
 use time::OffsetDateTime;
 
@@ -117,27 +116,6 @@ impl GrowthMetricSyncWorker {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct YoutubeVideosResponse {
-    items: Vec<YoutubeVideoItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct YoutubeVideoItem {
-    id: String,
-    statistics: YoutubeVideoStatistics,
-}
-
-#[derive(Debug, Deserialize)]
-struct YoutubeVideoStatistics {
-    #[serde(rename = "viewCount")]
-    view_count: Option<serde_json::Value>,
-    #[serde(rename = "likeCount")]
-    like_count: Option<serde_json::Value>,
-    #[serde(rename = "commentCount")]
-    comment_count: Option<serde_json::Value>,
 }
 
 /// The eleven-character video id out of the YouTube link shapes a release

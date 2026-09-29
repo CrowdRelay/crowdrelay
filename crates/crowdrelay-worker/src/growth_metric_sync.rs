@@ -33,6 +33,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crowdrelay_infra::sensitive_response::{SensitiveResponseKey, decrypt_value, encrypt_value};
 
 mod connection_health;
+mod owned_videos;
 mod release_videos;
 mod simple_platforms;
 mod spotify_cities;
@@ -293,9 +294,16 @@ impl GrowthMetricSyncWorker {
 
         loop {
             let next_due = self.next_due_time().await;
-            let sleep_duration = next_due
+            let mut sleep_duration = next_due
                 .map(|instant| instant.saturating_duration_since(Instant::now()))
                 .unwrap_or(FALLBACK_SLEEP);
+
+            // Fresh owned uploads are read hourly. A quiet connection
+            // schedule could otherwise sleep a whole day past a video's
+            // launch window, so the wake is capped while any exist.
+            if self.youtube_api_key.is_some() && self.has_fresh_owned_videos().await {
+                sleep_duration = sleep_duration.min(owned_videos::FRESH_VIDEO_INTERVAL);
+            }
 
             tokio::select! {
                 biased;
@@ -363,6 +371,11 @@ impl GrowthMetricSyncWorker {
             // connection is due.
             if let Err(error) = self.sync_release_video_stats().await {
                 tracing::warn!(error = %error, "release video stats sweep failed");
+            }
+            // Owned uploads share the posture: due on their own series'
+            // staleness, so the sweep runs even when no connection is due.
+            if let Err(error) = self.sync_owned_video_stats().await {
+                tracing::warn!(error = %error, "owned video stats sweep failed");
             }
             Ok::<_, GrowthMetricSyncError>(())
         })
@@ -1711,6 +1724,32 @@ fn urlencode(s: &str) -> String {
 struct RedditObserveResponse {
     subscribers: Option<i64>,
     title: Option<String>,
+}
+
+// --- YouTube videos endpoint response types ---
+//
+// Shared by the release-video and owned-video sweeps: both read the same
+// `videos?part=statistics` payload, so the shape lives here rather than in
+// either caller.
+#[derive(Debug, Deserialize)]
+struct YoutubeVideosResponse {
+    items: Vec<YoutubeVideoItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YoutubeVideoItem {
+    id: String,
+    statistics: YoutubeVideoStatistics,
+}
+
+#[derive(Debug, Deserialize)]
+struct YoutubeVideoStatistics {
+    #[serde(rename = "viewCount")]
+    view_count: Option<serde_json::Value>,
+    #[serde(rename = "likeCount")]
+    like_count: Option<serde_json::Value>,
+    #[serde(rename = "commentCount")]
+    comment_count: Option<serde_json::Value>,
 }
 
 /// Accepts a count only where it is a whole, non-negative number. YouTube
