@@ -14,6 +14,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         command: UpsertReleasePlan,
+        actor_type: &'static str,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<ReleasePlanMutation, RepositoryError> {
@@ -70,7 +71,7 @@ impl AutopilotTeamStateRepository for PostgresAutopilotRepository {
                 "upsert_autopilot_release_plan",
                 "release_plan",
                 release_id.into_uuid(),
-                "admin_api_key",
+                actor_type,
                 idempotency_key,
                 request_id,
                 &details,

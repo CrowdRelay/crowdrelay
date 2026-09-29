@@ -389,7 +389,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     );
     let autopilot_worker = if config.autopilot_enabled {
         Some(AutopilotWorker::new(
-            autopilot_repository,
+            autopilot_repository.clone(),
             workspace_id,
             config.autopilot_poll_interval,
         ))
@@ -759,9 +759,13 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // Video source sync — watches each connected YouTube channel's uploads
     // (Data API when the key is set, the Atom feed otherwise) and registers new uploads as trusted `video` content sources.
     // This is how a new video reaches the community loop on its own.
-    let video_source_sync =
-        VideoSourceSyncWorker::new(database.clone(), workspace_id.into_uuid(), youtube_api_key)
-            .context("invalid video source sync worker configuration")?;
+    let video_source_sync = VideoSourceSyncWorker::new(
+        database.clone(),
+        workspace_id.into_uuid(),
+        youtube_api_key,
+        autopilot_repository.clone(),
+    )
+    .context("invalid video source sync worker configuration")?;
 
     // Release source sync — watches connected Spotify/Bandcamp/SoundCloud
     // accounts and registers new releases as trusted `release` content

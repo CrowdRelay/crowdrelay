@@ -578,6 +578,7 @@ async fn the_press_milestone_schedules_funnel_metrics_without_a_send()
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &IdempotencyKey::parse("campaign-metrics-press").expect("bounded key"),
             None,
         )

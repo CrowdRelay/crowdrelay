@@ -358,6 +358,7 @@ pub async fn upsert_release_plan(
         .upsert_release_plan(
             state.ops.workspace_id(),
             command,
+            "admin_api_key",
             &idempotency_key,
             request_id_value.as_ref(),
         )

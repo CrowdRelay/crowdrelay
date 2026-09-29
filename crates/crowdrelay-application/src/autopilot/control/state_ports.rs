@@ -608,10 +608,13 @@ pub struct RecordTeamOpportunityTerms {
 
 #[async_trait]
 pub trait AutopilotTeamStateRepository: Send + Sync {
+    /// `actor_type` names who the audit row answers for — `admin_api_key`
+    /// for the control plane route, `video-watcher` for the upload sync.
     async fn upsert_release_plan(
         &self,
         workspace_id: WorkspaceId,
         command: UpsertReleasePlan,
+        actor_type: &'static str,
         idempotency_key: &IdempotencyKey,
         request_id: Option<&RequestId>,
     ) -> Result<ReleasePlanMutation, RepositoryError>;

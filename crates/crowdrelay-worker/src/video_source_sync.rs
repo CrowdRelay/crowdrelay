@@ -35,6 +35,10 @@
 
 use std::time::Duration;
 
+use crowdrelay_application::IdempotencyKey;
+use crowdrelay_application::autopilot::{AutopilotTeamStateRepository, UpsertReleasePlan};
+use crowdrelay_domain::WorkspaceId;
+use crowdrelay_infra::autopilot::PostgresAutopilotRepository;
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgListener};
 use thiserror::Error;
@@ -74,6 +78,8 @@ pub struct VideoSourceSyncWorker {
     /// The Data API key the metric sync already reads with. Present, uploads
     /// come from the API; absent, from the Atom feed.
     youtube_api_key: Option<String>,
+    /// The autopilot repository a first-seen upload asks for a release plan.
+    autopilot: PostgresAutopilotRepository,
 }
 
 /// The longest description kept as a voice sample.
@@ -87,15 +93,15 @@ const MAX_DESCRIPTION_CHARS: usize = 1_000;
 
 /// One `<entry>` from a channel's Atom feed.
 #[derive(Debug)]
-struct FeedEntry {
-    video_id: String,
-    title: String,
-    published: Option<OffsetDateTime>,
+pub struct FeedEntry {
+    pub video_id: String,
+    pub title: String,
+    pub published: Option<OffsetDateTime>,
     /// What the band typed under the video. `None` when the feed carries no
     /// `<media:description>` or it is blank — an absent description is absent,
     /// never an empty string, so `list_voice_samples` can exclude it on the
     /// same `btrim(...) <> ''` test it applies to every other source.
-    description: Option<String>,
+    pub description: Option<String>,
 }
 
 impl VideoSourceSyncWorker {
@@ -103,6 +109,7 @@ impl VideoSourceSyncWorker {
         pool: PgPool,
         workspace_id: Uuid,
         youtube_api_key: Option<String>,
+        autopilot: PostgresAutopilotRepository,
     ) -> Result<Self, VideoSourceSyncError> {
         let http_client = reqwest::Client::builder()
             .connect_timeout(HTTP_TIMEOUT.min(Duration::from_secs(10)))
@@ -118,6 +125,7 @@ impl VideoSourceSyncWorker {
             http_client,
             workspace_id,
             youtube_api_key,
+            autopilot,
         })
     }
 
@@ -305,7 +313,7 @@ impl VideoSourceSyncWorker {
     /// Idempotent upsert keyed on the video id. A title change bumps the
     /// version and records history; an unchanged row is a no-op so a re-read
     /// of the same feed writes nothing.
-    async fn upsert_video(&self, channel_id: &str, entry: &FeedEntry) -> Result<(), String> {
+    pub async fn upsert_video(&self, channel_id: &str, entry: &FeedEntry) -> Result<(), String> {
         let source_key = format!("youtube:{}", entry.video_id);
         let occurred_at = entry.published.unwrap_or_else(OffsetDateTime::now_utc);
         let expires_at = occurred_at + time::Duration::days(SOURCE_LIFETIME_DAYS);
@@ -331,8 +339,9 @@ impl VideoSourceSyncWorker {
 
         // An existing row only bumps version when the facts changed (the
         // WHERE on DO UPDATE), so re-reading the same feed writes nothing and
-        // produces no history spam.
-        let upserted: Option<(Uuid, i64)> = sqlx::query_as(
+        // produces no history spam. `xmax = 0` marks the first insert — the
+        // one moment a video is new enough to deserve a release plan.
+        let upserted: Option<(Uuid, i64, bool)> = sqlx::query_as(
             r#"
             INSERT INTO content_sources (
                 id, workspace_id, source_kind, source_key, title,
@@ -348,7 +357,7 @@ impl VideoSourceSyncWorker {
                OR content_sources.occurred_at IS DISTINCT FROM EXCLUDED.occurred_at
                OR content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
                OR content_sources.metadata IS DISTINCT FROM EXCLUDED.metadata
-            RETURNING id, version
+            RETURNING id, version, (xmax = 0)
             "#,
         )
         .bind(self.workspace_id)
@@ -362,7 +371,8 @@ impl VideoSourceSyncWorker {
         .await
         .map_err(|e| format!("upsert: {e}"))?;
 
-        if let Some((source_id, version)) = upserted {
+        let first_insert = upserted.as_ref().is_some_and(|(_, _, inserted)| *inserted);
+        if let Some((source_id, version, _)) = upserted {
             sqlx::query(
                 r#"
                 INSERT INTO content_source_history (
@@ -391,6 +401,75 @@ impl VideoSourceSyncWorker {
         }
 
         tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+        if first_insert {
+            self.maybe_open_release_plan(&title, occurred_at, &entry.video_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// A just-uploaded video opens its own release plan — once, and only
+    /// while the upload is still fresh. Three days is the window in which a
+    /// release-day push is still worth anything; an older video surfaced by
+    /// a first feed read is catalogue, not a release.
+    ///
+    /// A plan already carrying this video's listen url was entered by an
+    /// operator (or an earlier watcher run) — the watcher defers to it
+    /// rather than inserting a second row under the same key, which the
+    /// upsert would merge into anyway.
+    async fn maybe_open_release_plan(
+        &self,
+        title: &str,
+        occurred_at: OffsetDateTime,
+        video_id: &str,
+    ) -> Result<(), String> {
+        if occurred_at < OffsetDateTime::now_utc() - time::Duration::days(3) {
+            return Ok(());
+        }
+        let listen_url = format!("https://youtu.be/{video_id}");
+        let plan_exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM release_plans
+                WHERE workspace_id = $1
+                  AND active
+                  AND listen_url IN ($2, $3)
+            )
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(&listen_url)
+        .bind(format!("https://www.youtube.com/watch?v={video_id}"))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| format!("release plan check: {e}"))?;
+        if plan_exists {
+            return Ok(());
+        }
+        let idempotency_key = IdempotencyKey::parse(format!("video-watcher:youtube:{video_id}"))
+            .map_err(|e| format!("video-watcher key: {e}"))?;
+        self.autopilot
+            .upsert_release_plan(
+                WorkspaceId::from_uuid(self.workspace_id),
+                UpsertReleasePlan {
+                    release_id: None,
+                    source_key: format!("youtube:{video_id}"),
+                    title: title.to_owned(),
+                    release_at: occurred_at,
+                    listen_url: Some(listen_url),
+                    tier: None,
+                    active: true,
+                    assets_ready: true,
+                    communication_enabled: true,
+                    press_enabled: true,
+                    expected_version: 0,
+                },
+                "video-watcher",
+                &idempotency_key,
+                None,
+            )
+            .await
+            .map_err(|e| format!("release plan upsert: {e}"))?;
         Ok(())
     }
 }

@@ -35,4 +35,5 @@ mod sheet_intake;
 mod standing_approvals;
 mod strategy_proposals;
 mod ticketmaster_sweep;
+mod video_release_plan;
 mod zz_wire_dates;

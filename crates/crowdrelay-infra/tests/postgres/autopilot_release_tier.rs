@@ -85,6 +85,7 @@ async fn an_absent_tier_never_resets_the_bands_call() -> Result<(), Box<dyn std:
         .upsert_release_plan(
             fixture.workspace_id,
             plan_cmd("tier-single", Some(ReleaseTier::Single), 0),
+            "admin_api_key",
             &idem_key,
             None,
         )
@@ -102,6 +103,7 @@ async fn an_absent_tier_never_resets_the_bands_call() -> Result<(), Box<dyn std:
                 title: "tier-single retitled".into(),
                 ..plan_cmd("tier-single", None, 1)
             },
+            "admin_api_key",
             &idem("tier-update"),
             None,
         )
@@ -125,6 +127,7 @@ async fn an_absent_tier_never_resets_the_bands_call() -> Result<(), Box<dyn std:
         .upsert_release_plan(
             fixture.workspace_id,
             plan_cmd("tier-default", None, 0),
+            "admin_api_key",
             &idem("tier-default"),
             None,
         )
@@ -154,6 +157,7 @@ async fn milestone_marks_are_workspace_scoped_and_parse_cleanly()
         .upsert_release_plan(
             fixture.workspace_id,
             plan_cmd("marks-plan", Some(ReleaseTier::Track), 0),
+            "admin_api_key",
             &idem("marks-plan"),
             None,
         )
@@ -203,6 +207,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &idem("projection"),
             None,
         )
@@ -256,6 +261,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
                 expected_version: 1,
                 ..plan_cmd("projection-plan", None, 1)
             },
+            "admin_api_key",
             &idem("projection-off"),
             None,
         )
@@ -282,6 +288,7 @@ async fn an_active_release_projects_into_the_supply_chain() -> Result<(), Box<dy
                 expected_version: 2,
                 ..plan_cmd("projection-plan", None, 2)
             },
+            "admin_api_key",
             &idem("projection-on"),
             None,
         )
@@ -339,6 +346,7 @@ async fn a_flag_flip_defeats_a_queued_release_artifact() -> Result<(), Box<dyn s
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &idem("flagflip"),
             None,
         )
@@ -406,6 +414,7 @@ async fn a_flag_flip_defeats_a_queued_release_artifact() -> Result<(), Box<dyn s
                 expected_version: 1,
                 ..plan_cmd("flagflip-plan", None, 1)
             },
+            "admin_api_key",
             &idem("flagflip-off"),
             None,
         )
@@ -550,6 +559,7 @@ async fn the_sustain_milestone_writes_the_r3_report_and_binds_the_release_campai
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &idem("r3report"),
             None,
         )
@@ -849,6 +859,7 @@ async fn a_held_milestone_dedupes_in_week_and_refires_after_it_clears()
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &idem("collision-plan"),
             None,
         )
@@ -960,6 +971,7 @@ async fn a_held_milestone_is_not_growth_debt() -> Result<(), Box<dyn std::error:
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &idem("held-plan"),
             None,
         )
@@ -1041,6 +1053,7 @@ async fn a_filler_plan_owes_no_assets_gate() -> Result<(), Box<dyn std::error::E
                     press_enabled: true,
                     expected_version: 0,
                 },
+                "admin_api_key",
                 &idem(key),
                 None,
             )
@@ -1096,6 +1109,7 @@ async fn the_countdown_tags_every_likely_listener_in_one_pass()
                 press_enabled: true,
                 expected_version: 0,
             },
+            "admin_api_key",
             &idem("countdown-tags"),
             None,
         )
