@@ -21,8 +21,10 @@ use crowdrelay_domain::community_reply::{
 const GRAPH_API_BASE: &str = "https://graph.facebook.com/v21.0";
 /// Synced posts harvested per cycle.
 const OWNED_POSTS_PER_CYCLE: i64 = 5;
-/// How long after posting a post's comments are still harvested.
-const OWNED_HARVEST_DAYS: i32 = 14;
+/// How long after posting a post's comments are still harvested. Thirty
+/// days, not a fortnight: Meta comments keep arriving for weeks on a
+/// catalog post, and stopping early dropped real reply work.
+const OWNED_HARVEST_DAYS: i32 = 30;
 const OWNED_HARVEST_PER_POST: usize = 25;
 const GRAPH_TIMEOUT: Duration = Duration::from_secs(20);
 
