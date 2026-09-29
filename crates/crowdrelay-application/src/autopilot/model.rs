@@ -1112,6 +1112,16 @@ pub enum AutopilotActionPayload {
         priority: u16,
         template_key: String,
     },
+    /// A bounded archive promotion wave: the top `limit` staged likely-fan
+    /// contacts by evidence get the double opt-in invitation. Forced to
+    /// `RequireApproval` — a DOI wave never self-sends — and the executor
+    /// re-reads the segment at run time. `staged_count` is the backlog as
+    /// raised; `reason` is the line the invitation mail prints.
+    RunArchivePromoteWave {
+        limit: i64,
+        reason: Option<String>,
+        staged_count: i64,
+    },
     /// Deliver one step of a running play to one consented fan.
     ///
     /// One recipient per action on purpose. It makes the send idempotent on a
@@ -1364,6 +1374,9 @@ impl AutopilotActionPayload {
             // A partner being asked to carry invite codes is a real-world
             // approach to somebody else's community, not a message to ours.
             | Self::RequestBeaconInviteBatch { .. }
+            // An archive wave mails staged contacts who never wrote to the
+            // app — a first approach at the wave's size, inside one card.
+            | Self::RunArchivePromoteWave { .. }
             | Self::ApplyLiveOpportunity { .. }
             // A counter and an acceptance are both statements to somebody
             // outside the workspace, and an acceptance is a commitment of the

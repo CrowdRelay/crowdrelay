@@ -280,4 +280,58 @@ mod growth_debt_candidate_tests {
         assert!(growth_debt_candidate(&cold, &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), now())?.is_none());
         Ok(())
     }
+
+    /// The archive backlog is the one debt kind whose card is itself the
+    /// remedy: it raises the bounded promote wave, and no autonomy level
+    /// self-sends a mail to people who never wrote in.
+    #[test]
+    fn archive_backlog_raises_a_bounded_wave_that_never_auto_executes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backlog = GrowthDebtObservation {
+            kind: GrowthDebtKind::ArchiveBacklogUnpromoted,
+            subject: GrowthDebtSubject::Workspace(uuid::Uuid::from_u128(7).into()),
+            idle_hours: 0,
+            outstanding_items: 870,
+            tracked_items: 1_200,
+            relationship_score: None,
+            hours_until_deadline: None,
+            hours_since_last_signal: None,
+        };
+
+        // BoundedAuto with measured evidence auto-executes the ordinary
+        // kinds; the wave still waits for a person.
+        let auto = policy(AutonomyLevel::BoundedAuto)?;
+        let candidate = growth_debt_candidate(&backlog, &auto, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), now())?
+            .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        assert_eq!(candidate.disposition, PolicyDisposition::RequireApproval);
+        assert_eq!(candidate.action.action_kind(), "archive.promotion.run");
+        let AutopilotActionPayload::RunArchivePromoteWave {
+            limit,
+            reason,
+            staged_count,
+        } = &candidate.action
+        else {
+            return Err(std::io::Error::other("wave payload expected").into());
+        };
+        // The wave is capped by policy, not by however big the backlog is.
+        assert_eq!(*limit, 100);
+        assert_eq!(*staged_count, 1_200);
+        assert_eq!(reason, &None);
+
+        // A backlog under the cap proposes exactly the backlog, no padding.
+        let small = GrowthDebtObservation {
+            outstanding_items: 37,
+            tracked_items: 50,
+            ..backlog
+        };
+        let small_candidate = growth_debt_candidate(&small, &auto, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), now())?
+            .ok_or_else(|| std::io::Error::other("candidate expected"))?;
+        let AutopilotActionPayload::RunArchivePromoteWave { limit, .. } =
+            &small_candidate.action
+        else {
+            return Err(std::io::Error::other("wave payload expected").into());
+        };
+        assert_eq!(*limit, 37);
+        Ok(())
+    }
 }

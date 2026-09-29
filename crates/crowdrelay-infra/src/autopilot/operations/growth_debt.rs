@@ -693,6 +693,44 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         });
     }
 
+    // §4i-0e: the archive's stalled head. Every aggregate source ends in
+    // `drive_contacts`, and a staged likely-fan row nobody has promoted is
+    // the funnel blocked at its widest point — a debt the remediation wave
+    // actually retires, unlike the notification-only kinds. The workspace
+    // is the subject, like the filler shelf: the backlog belongs to the
+    // archive, not to any one contact. Both counts are the promotable cut
+    // on purpose — the outstanding share is measured against the work the
+    // wave can retire, so an org-heavy review queue never mutes real fans
+    // waiting behind it. Nothing promotable, no debt.
+    let segments = crate::gdrive::PostgresGDriveRepository::new(repo.pool().clone())
+        .segment_counts(workspace)
+        .await
+        .map_err(|error| match error {
+            crate::gdrive::GDriveError::Database(inner) => map_sqlx(inner),
+            // `segment_counts` only ever fails on the database arm; the
+            // other variants are unreachable but the enum is shared.
+            _ => RepositoryError::Unexpected,
+        })?;
+    if segments.likely_fan > 0 {
+        observations.push(GrowthDebtObservation {
+            kind: GrowthDebtKind::ArchiveBacklogUnpromoted,
+            subject: GrowthDebtSubject::Workspace(workspace_id),
+            idle_hours: 0,
+            outstanding_items: u32::try_from(segments.likely_fan).unwrap_or(u32::MAX),
+            tracked_items: u32::try_from(segments.likely_fan).unwrap_or(u32::MAX),
+            relationship_score: None,
+            hours_until_deadline: None,
+            hours_since_last_signal: last_signal_at
+                .get(&(
+                    workspace,
+                    GrowthDebtKind::ArchiveBacklogUnpromoted
+                        .decision_kind()
+                        .to_owned(),
+                ))
+                .map(|at| u32::try_from((now - *at).whole_hours().max(0)).unwrap_or(u32::MAX)),
+        });
+    }
+
     Ok(observations)
 }
 

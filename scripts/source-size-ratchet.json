@@ -6,7 +6,7 @@
     "crates/crowdrelay-api/src/lib_tests.rs": 1278,
     "crates/crowdrelay-api/src/routing.rs": 1159,
     "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs": 1208,
-    "crates/crowdrelay-application/src/autopilot/model.rs": 2069,
+    "crates/crowdrelay-application/src/autopilot/model.rs": 2154,
     "crates/crowdrelay-application/src/autopilot/model/briefing_locale.rs": 1235,
     "crates/crowdrelay-application/src/autopilot/ports.rs": 1211,
     "crates/crowdrelay-brain/src/bayesian.rs": 1316,

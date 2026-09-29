@@ -10,6 +10,7 @@ mod archive_bulk_promote;
 mod attestation;
 mod audience_portfolio;
 mod autopilot_approve_revision;
+mod autopilot_archive_wave;
 mod autopilot_attention_budget;
 mod autopilot_attributed_fans;
 mod autopilot_attribution_outbox;

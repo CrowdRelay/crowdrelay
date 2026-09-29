@@ -80,6 +80,11 @@ pub enum GrowthDebtKind {
     /// signal, and the remedy offered is honest: schedule a moment, or lower
     /// the cadence — both are legitimate, and the setting is the tenant's own.
     CadenceMomentMissed,
+    /// The digitised archive still holds contacts nobody promoted — every
+    /// staged row is a fan the band never asked. Structural like the empty
+    /// shelf: the backlog is either there or it is not, and the remedy is a
+    /// bounded, consent-preserving promote wave a person approves.
+    ArchiveBacklogUnpromoted,
 }
 
 impl GrowthDebtKind {
@@ -95,6 +100,7 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => "ticket_sales_behind_pace",
             Self::FillerShelfEmpty => "filler_shelf_empty",
             Self::CadenceMomentMissed => "cadence_moment_missed",
+            Self::ArchiveBacklogUnpromoted => "archive_backlog_unpromoted",
         }
     }
 
@@ -110,6 +116,7 @@ impl GrowthDebtKind {
             "ticket_sales_behind_pace" => Some(Self::TicketSalesBehindPace),
             "filler_shelf_empty" => Some(Self::FillerShelfEmpty),
             "cadence_moment_missed" => Some(Self::CadenceMomentMissed),
+            "archive_backlog_unpromoted" => Some(Self::ArchiveBacklogUnpromoted),
             _ => None,
         }
     }
@@ -146,6 +153,9 @@ impl GrowthDebtKind {
             Self::CadenceMomentMissed => {
                 "the committed cadence has produced no serious moment for two intervals running and none is scheduled"
             }
+            Self::ArchiveBacklogUnpromoted => {
+                "staged archive contacts sit unpromoted — the list the band digitised has not been turned into opt-in invitations"
+            }
         }
     }
 
@@ -163,6 +173,7 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => "announce_show_to_local_fans",
             Self::FillerShelfEmpty => "restock_filler_shelf",
             Self::CadenceMomentMissed => "schedule_moment_or_lower_cadence",
+            Self::ArchiveBacklogUnpromoted => "run_archive_promotion_wave",
         }
     }
 
@@ -184,6 +195,7 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => "raise_growth_debt_ticket_sales_behind_pace",
             Self::FillerShelfEmpty => "raise_growth_debt_filler_shelf_empty",
             Self::CadenceMomentMissed => "raise_growth_debt_cadence_moment_missed",
+            Self::ArchiveBacklogUnpromoted => "raise_growth_debt_archive_backlog",
         }
     }
 
@@ -199,6 +211,7 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => "growth_debt_ticket_sales_pace",
             Self::FillerShelfEmpty => "growth_debt_filler_shelf",
             Self::CadenceMomentMissed => "growth_debt_cadence_moment",
+            Self::ArchiveBacklogUnpromoted => "growth_debt_archive_backlog",
         }
     }
 
@@ -214,7 +227,8 @@ impl GrowthDebtKind {
             | Self::ReleaseAssetsMissing
             | Self::CalendarRoutingConflict
             | Self::TicketSalesBehindPace
-            | Self::CadenceMomentMissed => MetricValueTier::Downstream,
+            | Self::CadenceMomentMissed
+            | Self::ArchiveBacklogUnpromoted => MetricValueTier::Downstream,
             Self::RelationshipQuiet | Self::FillerShelfEmpty => MetricValueTier::Intermediate,
             Self::StaleContactData => MetricValueTier::Vanity,
         }
@@ -255,6 +269,7 @@ impl GrowthDebtKind {
                 | Self::TicketSalesBehindPace
                 | Self::FillerShelfEmpty
                 | Self::CadenceMomentMissed
+                | Self::ArchiveBacklogUnpromoted
         )
     }
 
@@ -266,6 +281,9 @@ impl GrowthDebtKind {
             Self::TicketSalesBehindPace => 72,
             Self::ReleaseMilestonesMissed => 65,
             Self::CadenceMomentMissed => 60,
+            // Fans nobody asked are the widest leak the archive has — the
+            // whole funnel above it is already built.
+            Self::ArchiveBacklogUnpromoted => 68,
             Self::RelationshipQuiet => 50,
             Self::FillerShelfEmpty => 45,
             Self::StaleContactData => 30,
@@ -336,7 +354,7 @@ pub struct GrowthDebtObservation {
 
 /// Tunable thresholds for the `growth_debt` context. Horizons are hours so a
 /// single unit covers a 3-day grace period and a 6-month one.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct GrowthDebtPolicy {
     /// A warm relationship is quiet after this long with no interaction.
@@ -359,6 +377,15 @@ pub struct GrowthDebtPolicy {
     pub cooldown_hours: u32,
     /// Inside this many hours of its own date, deadline-bound debt is urgent.
     pub deadline_urgency_hours: u32,
+    /// The most staged contacts one archive-promotion wave may promote. A
+    /// wave is a double opt-in send to people who never asked for it, so
+    /// the cap is the blast-radius bound — the wave never widens itself.
+    pub archive_wave_cap: i64,
+    /// The one sentence the invitation mail prints to explain why the fan
+    /// is hearing from the crew. `None` sends the mail without the line.
+    /// Operator-editable policy: the words go verbatim into the send, so
+    /// they live where an operator can read them rather than in code.
+    pub archive_invite_reason: Option<String>,
 }
 
 impl Default for GrowthDebtPolicy {
@@ -381,6 +408,12 @@ impl Default for GrowthDebtPolicy {
             minimum_outstanding_basis_points: 2_500,
             cooldown_hours: 336,
             deadline_urgency_hours: 168,
+            // One hundred: the pilot-wave size. Big enough to measure the
+            // funnel, small enough that a bad wave costs a hundred mails.
+            archive_wave_cap: 100,
+            // No default line: a wave that cannot explain itself sends the
+            // mail unadorned rather than borrowing the last tenant's words.
+            archive_invite_reason: None,
         }
     }
 }
@@ -411,7 +444,7 @@ pub enum GrowthDebtDecision {
 
 /// The horizon a kind is allowed to sit idle for before it is debt.
 #[must_use]
-pub const fn horizon_hours(kind: GrowthDebtKind, policy: GrowthDebtPolicy) -> u32 {
+pub const fn horizon_hours(kind: GrowthDebtKind, policy: &GrowthDebtPolicy) -> u32 {
     match kind {
         GrowthDebtKind::RelationshipQuiet => policy.relationship_quiet_after_hours,
         GrowthDebtKind::EventLeversSkipped => policy.event_lever_lead_time_hours,
@@ -433,6 +466,9 @@ pub const fn horizon_hours(kind: GrowthDebtKind, policy: GrowthDebtPolicy) -> u3
         // Two empty intervals are the finding itself — the loader has already
         // counted the moments, so nothing here needs to age further.
         GrowthDebtKind::CadenceMomentMissed => 0,
+        // The backlog is present or it is not — the loader only emits the
+        // observation when staged rows exist, so nothing needs to age.
+        GrowthDebtKind::ArchiveBacklogUnpromoted => 0,
     }
 }
 
@@ -468,7 +504,7 @@ fn priority_from(
     overdue_basis_points: u32,
     outstanding_basis_points: u32,
     hours_until_deadline: Option<i64>,
-    policy: GrowthDebtPolicy,
+    policy: &GrowthDebtPolicy,
 ) -> u16 {
     let magnitude = u16::try_from(overdue_basis_points.saturating_sub(10_000) / 2_000)
         .unwrap_or(u16::MAX)
@@ -499,7 +535,7 @@ fn priority_from(
 #[must_use]
 pub fn evaluate_growth_debt(
     observation: &GrowthDebtObservation,
-    policy: GrowthDebtPolicy,
+    policy: &GrowthDebtPolicy,
 ) -> GrowthDebtDecision {
     if observation
         .hours_since_last_signal
@@ -641,7 +677,7 @@ mod tests {
             ..quiet_relationship()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -650,7 +686,7 @@ mod tests {
     fn work_past_its_horizon_is_raised_with_a_measured_overdue_ratio() {
         let item = raised(evaluate_growth_debt(
             &quiet_relationship(),
-            GrowthDebtPolicy::default(),
+            &GrowthDebtPolicy::default(),
         ));
         assert_eq!(item.kind, GrowthDebtKind::RelationshipQuiet);
         // 2000 idle hours against a 1440-hour horizon.
@@ -665,7 +701,7 @@ mod tests {
             ..quiet_relationship()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -677,7 +713,7 @@ mod tests {
             ..quiet_relationship()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -689,7 +725,7 @@ mod tests {
             ..skipped_levers()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -701,7 +737,7 @@ mod tests {
             ..skipped_levers()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -714,7 +750,7 @@ mod tests {
             ..skipped_levers()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -727,7 +763,7 @@ mod tests {
             ..skipped_levers()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -740,7 +776,7 @@ mod tests {
             ..quiet_relationship()
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, policy),
+            evaluate_growth_debt(&observation, &policy),
             GrowthDebtDecision::Hold
         );
 
@@ -749,7 +785,7 @@ mod tests {
             ..quiet_relationship()
         };
         assert!(matches!(
-            evaluate_growth_debt(&observation, policy),
+            evaluate_growth_debt(&observation, &policy),
             GrowthDebtDecision::Raise(_)
         ));
     }
@@ -765,7 +801,7 @@ mod tests {
                 hours_until_deadline: Some(1_000),
                 ..skipped_levers()
             },
-            policy,
+            &policy,
         ));
         let hygiene = raised(evaluate_growth_debt(
             &GrowthDebtObservation {
@@ -775,7 +811,7 @@ mod tests {
                 hours_until_deadline: None,
                 ..quiet_relationship()
             },
-            policy,
+            &policy,
         ));
         assert_eq!(levers.overdue_basis_points, hygiene.overdue_basis_points);
         assert!(levers.priority > hygiene.priority);
@@ -789,14 +825,14 @@ mod tests {
                 hours_until_deadline: Some(i64::from(policy.deadline_urgency_hours) + 1),
                 ..skipped_levers()
             },
-            policy,
+            &policy,
         ));
         let near = raised(evaluate_growth_debt(
             &GrowthDebtObservation {
                 hours_until_deadline: Some(i64::from(policy.deadline_urgency_hours)),
                 ..skipped_levers()
             },
-            policy,
+            &policy,
         ));
         assert!(near.priority > far.priority);
     }
@@ -804,7 +840,7 @@ mod tests {
     #[test]
     fn confidence_grows_with_overdue_share_and_corroboration() {
         let policy = GrowthDebtPolicy::default();
-        let single = raised(evaluate_growth_debt(&quiet_relationship(), policy));
+        let single = raised(evaluate_growth_debt(&quiet_relationship(), &policy));
         let wide = raised(evaluate_growth_debt(
             &GrowthDebtObservation {
                 idle_hours: policy.event_lever_lead_time_hours * 3,
@@ -812,7 +848,7 @@ mod tests {
                 tracked_items: 10,
                 ..skipped_levers()
             },
-            policy,
+            &policy,
         ));
         assert!(wide.confidence > single.confidence);
         assert!(single.confidence < Confidence::MAX);
@@ -829,7 +865,7 @@ mod tests {
                 hours_until_deadline: Some(1),
                 ..skipped_levers()
             },
-            policy,
+            &policy,
         ));
         assert!(item.priority <= 100);
         assert!(item.confidence <= Confidence::MAX);
@@ -864,7 +900,7 @@ mod tests {
             ..GrowthDebtPolicy::default()
         };
         assert_eq!(
-            evaluate_growth_debt(&quiet_relationship(), policy),
+            evaluate_growth_debt(&quiet_relationship(), &policy),
             GrowthDebtDecision::Hold
         );
     }
@@ -892,7 +928,7 @@ mod release_assets_tests {
         // A week of silence with the operator's own flag saying not ready and
         // no listen URL anywhere.
         let decision =
-            evaluate_growth_debt(&observation(24 * 8, 24 * 30), GrowthDebtPolicy::default());
+            evaluate_growth_debt(&observation(24 * 8, 24 * 30), &GrowthDebtPolicy::default());
         let GrowthDebtDecision::Raise(item) = decision else {
             panic!("expected a raise, got {decision:?}");
         };
@@ -908,7 +944,7 @@ mod release_assets_tests {
     fn an_operator_still_touching_the_plan_is_not_neglect() {
         // Edited an hour ago: whatever the flags say, somebody is on it.
         assert_eq!(
-            evaluate_growth_debt(&observation(1, 24 * 30), GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation(1, 24 * 30), &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -918,7 +954,7 @@ mod release_assets_tests {
         // A missing listen URL for a show that already played is a reminder
         // about nothing.
         assert_eq!(
-            evaluate_growth_debt(&observation(24 * 60, -5), GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation(24 * 60, -5), &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -963,7 +999,7 @@ mod structural_kind_tests {
         // already filtered to a real finding.
         let decision = evaluate_growth_debt(
             &ticket_sales_observation(24 * 14),
-            GrowthDebtPolicy::default(),
+            &GrowthDebtPolicy::default(),
         );
         let GrowthDebtDecision::Raise(item) = decision else {
             panic!("expected Raise for behind-pace show, got {decision:?}");
@@ -976,7 +1012,7 @@ mod structural_kind_tests {
     #[test]
     fn calendar_routing_conflict_raises_when_finding_is_present() {
         let decision =
-            evaluate_growth_debt(&routing_observation(24 * 14), GrowthDebtPolicy::default());
+            evaluate_growth_debt(&routing_observation(24 * 14), &GrowthDebtPolicy::default());
         let GrowthDebtDecision::Raise(item) = decision else {
             panic!("expected Raise for routing conflict, got {decision:?}");
         };
@@ -998,7 +1034,7 @@ mod structural_kind_tests {
             hours_since_last_signal: Some(1), // within cooldown
         };
         assert_eq!(
-            evaluate_growth_debt(&observation, GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&observation, &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -1007,7 +1043,7 @@ mod structural_kind_tests {
     fn structural_kind_still_respects_expired_deadline() {
         // A routing conflict for a show that already happened is useless.
         assert_eq!(
-            evaluate_growth_debt(&routing_observation(-1), GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&routing_observation(-1), &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Hold
         );
     }
@@ -1030,7 +1066,7 @@ mod structural_kind_tests {
 
     #[test]
     fn an_empty_filler_shelf_raises_against_the_workspace() {
-        let decision = evaluate_growth_debt(&shelf_observation(), GrowthDebtPolicy::default());
+        let decision = evaluate_growth_debt(&shelf_observation(), &GrowthDebtPolicy::default());
         let GrowthDebtDecision::Raise(item) = decision else {
             panic!("expected Raise for an empty filler shelf, got {decision:?}");
         };
@@ -1053,7 +1089,7 @@ mod structural_kind_tests {
         // must not drop the finding the way it drops a played-out show.
         assert!(!GrowthDebtKind::FillerShelfEmpty.is_deadline_bound());
         assert!(matches!(
-            evaluate_growth_debt(&shelf_observation(), GrowthDebtPolicy::default()),
+            evaluate_growth_debt(&shelf_observation(), &GrowthDebtPolicy::default()),
             GrowthDebtDecision::Raise(_)
         ));
     }
@@ -1070,7 +1106,7 @@ mod structural_kind_tests {
             hours_until_deadline: None,
             hours_since_last_signal: None,
         };
-        let decision = evaluate_growth_debt(&observation, GrowthDebtPolicy::default());
+        let decision = evaluate_growth_debt(&observation, &GrowthDebtPolicy::default());
         let GrowthDebtDecision::Raise(item) = decision else {
             panic!("expected Raise for a slipped cadence, got {decision:?}");
         };

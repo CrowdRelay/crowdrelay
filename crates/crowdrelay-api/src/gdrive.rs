@@ -35,8 +35,6 @@ use crate::{Problem, request_id};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const LIST_LIMIT: i64 = 500;
-const ACCESS_TOKEN_TTL_DAYS: i64 = 30;
-const ACCESS_RESEND_COOLDOWN_SECONDS: i64 = 300;
 
 /// Beacon/outreach target kinds — mirrors the CHECK on
 /// `agent_outreach_targets.target_kind`.
@@ -445,8 +443,8 @@ pub async fn promote_contact(
                     workspace_id,
                     &arrival_source,
                     &entries,
-                    ACCESS_TOKEN_TTL_DAYS,
-                    ACCESS_RESEND_COOLDOWN_SECONDS,
+                    crowdrelay_infra::gdrive::ARCHIVE_ACCESS_TOKEN_TTL_DAYS,
+                    crowdrelay_infra::gdrive::ARCHIVE_RESEND_COOLDOWN_SECONDS,
                 )
                 .await
             {
@@ -797,99 +795,20 @@ pub async fn promote_batch(
                 .into_response();
         }
     };
-
-    // The sheet cities become fan city interests — resolved in one round
-    // trip under the same uniqueness rule the beacon promote applies (an
-    // ambiguous name resolves to nothing, never a guess).
-    let city_texts: Vec<String> = contacts
-        .iter()
-        .filter_map(|contact| contact.city.clone())
-        .collect();
-    let city_ids = match repo.staged_city_ids(&city_texts).await {
-        Ok(map) => map,
-        Err(error) => {
-            tracing::warn!(%error, "gdrive promote-batch city resolve failed");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-
-    // `import_batch` takes one source per batch; a contact sighted in Drive
-    // and Gmail imports as "gdrive+gmail", so the batch is grouped on the
-    // joined source string. One transaction holds every group plus the
-    // marks — the whole promote commits or none of it does.
-    let mut groups: std::collections::BTreeMap<
-        String,
-        Vec<&crowdrelay_infra::gdrive::StagedFanContact>,
-    > = std::collections::BTreeMap::new();
-    for contact in &contacts {
-        groups
-            .entry(contact.sources.join("+"))
-            .or_default()
-            .push(contact);
-    }
-    let import =
-        crowdrelay_infra::fan_import::PostgresFanImportRepository::new(state.database.clone());
-    let mut totals = crowdrelay_infra::fan_import::ImportCounts::default();
-    let mut suppressed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (source, group) in &groups {
-        let entries: Vec<crowdrelay_infra::fan_import::ImportEntry> = group
-            .iter()
-            .map(|contact| crowdrelay_infra::fan_import::ImportEntry {
-                email: contact.normalized_email.clone(),
-                display_name: contact.display_name.clone(),
-                locale: None,
-                city_id: contact
-                    .city
-                    .as_deref()
-                    .and_then(|city| city_ids.get(&city.trim().to_lowercase()))
-                    .copied(),
-            })
-            .collect();
-        match import
-            .import_batch_in_tx(
-                &mut tx,
-                workspace_id,
-                source,
-                &entries,
-                ACCESS_TOKEN_TTL_DAYS,
-                ACCESS_RESEND_COOLDOWN_SECONDS,
-                &invitation,
-            )
-            .await
-        {
-            Ok(outcome) => {
-                totals.imported_pending += outcome.counts.imported_pending;
-                totals.confirmation_resent += outcome.counts.confirmation_resent;
-                totals.already_active += outcome.counts.already_active;
-                totals.skipped_suppressed += outcome.counts.skipped_suppressed;
-                totals.cooldown_skipped += outcome.counts.cooldown_skipped;
-                suppressed.extend(outcome.suppressed_emails);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "gdrive promote-batch import failed");
-                return Problem::service_unavailable(request_id_value)
-                    .private()
-                    .into_response();
-            }
-        }
-    }
-
-    // A suppressed address is not promoted, whatever the click said — same
-    // rule the single promote applies.
-    let promotable: Vec<uuid::Uuid> = contacts
-        .iter()
-        .filter(|contact| !suppressed.contains(contact.normalized_email.as_str()))
-        .map(|contact| contact.id)
-        .collect();
-    let promoted = match repo
-        .mark_fans_promoted_by_ids(&mut tx, workspace_id, &promotable)
-        .await
+    // One transaction holds every group's import plus the marks — the whole
+    // promote commits or none of it does.
+    let wave = match crowdrelay_infra::gdrive::promote_fan_wave_in_tx(
+        &mut tx,
+        &repo,
+        workspace_id,
+        &contacts,
+        &invitation,
+    )
+    .await
     {
-        Ok(marked) => marked,
+        Ok(wave) => wave,
         Err(error) => {
-            tracing::warn!(%error, "gdrive promote-batch mark failed");
+            tracing::warn!(%error, "gdrive promote-batch wave failed");
             return Problem::service_unavailable(request_id_value)
                 .private()
                 .into_response();
@@ -905,12 +824,12 @@ pub async fn promote_batch(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "promoted": promoted,
-            "imported_pending": totals.imported_pending,
-            "confirmation_resent": totals.confirmation_resent,
-            "already_active": totals.already_active,
-            "skipped_suppressed": totals.skipped_suppressed,
-            "cooldown_skipped": totals.cooldown_skipped,
+            "promoted": wave.promoted,
+            "imported_pending": wave.counts.imported_pending,
+            "confirmation_resent": wave.counts.confirmation_resent,
+            "already_active": wave.counts.already_active,
+            "skipped_suppressed": wave.counts.skipped_suppressed,
+            "cooldown_skipped": wave.counts.cooldown_skipped,
         })),
     )
         .into_response()

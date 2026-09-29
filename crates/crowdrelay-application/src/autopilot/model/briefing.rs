@@ -875,6 +875,25 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::RunArchivePromoteWave { limit, reason, staged_count } => ActionBriefing {
+                summary: format!("Invite {limit} archive contacts to Signal"),
+                why_it_matters: "These are real inboxes — the top of the staged archive by evidence. Each one gets a double opt-in invitation; nobody joins without clicking confirm, but a sent mail cannot be unsent.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Check the wave size and the invitation line".into(), why_it_matters: "The send goes to the evidence-ranked top of the staged list, live at approve time".into() },
+                    BriefingStep { what_to_do: "Click APPROVE to send the wave".into(), why_it_matters: "Each recipient gets one confirmation mail and stays staged only if they suppressed".into() },
+                ],
+                content: {
+                    let mut fields = vec![
+                        BriefingField { label: "Wave size".into(), value: limit.to_string() },
+                        BriefingField { label: "Archive backlog".into(), value: staged_count.to_string() },
+                    ];
+                    if let Some(line) = reason {
+                        fields.push(BriefingField { label: "Invitation line".into(), value: line.clone() });
+                    }
+                    fields
+                },
+                deadline_note: String::new(),
+            },
             Self::RaiseContentSuggestion { format_key, concept, reason, distribution_promise, .. } => ActionBriefing {
                 summary: format!("Make this: {}", concept),
                 why_it_matters: "The content engine ranked this beat against everything else the band could make — it is the suggestion, not one of thirty.".into(),
