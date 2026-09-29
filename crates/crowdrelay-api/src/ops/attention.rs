@@ -303,10 +303,22 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let findings = run_limited(budget, timeout_duration, load_open_findings(&state));
     let needs_you = run_limited(budget, timeout_duration, load_needs_you(&state.ops));
     let brain = run_limited(budget, timeout_duration, load_brain_assessment(&state.ops));
-    let unpublished_drafts =
-        run_limited(budget, timeout_duration, load_unpublished_drafts(&state));
-    let automatic_queue =
-        run_limited(budget, timeout_duration, load_automatic_queue(&state));
+    let unpublished_drafts = run_limited(
+        budget,
+        timeout_duration,
+        load_unpublished_drafts(
+            state.ticketing.pool(),
+            state.ticketing.workspace_id().into_uuid(),
+        ),
+    );
+    let automatic_queue = run_limited(
+        budget,
+        timeout_duration,
+        load_automatic_queue(
+            state.ticketing.pool(),
+            state.ticketing.workspace_id().into_uuid(),
+        ),
+    );
     let blocked_communities =
         run_limited(budget, timeout_duration, load_blocked_communities(&state.ops));
     let lapsed = run_limited(budget, timeout_duration, load_lapsed_approvals(&state.ops));

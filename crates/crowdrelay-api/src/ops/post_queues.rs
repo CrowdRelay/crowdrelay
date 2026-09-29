@@ -57,7 +57,8 @@ struct AutomaticQueueChannel {
 /// and `failed` are deliberately absent: those are the system's problem and
 /// already surface as alerts, while `awaiting_manual_post` is the operator's.
 async fn load_unpublished_drafts(
-    state: &crate::AppState,
+    pool: &PgPool,
+    workspace_id: Uuid,
 ) -> Result<Vec<UnpublishedDraftChannel>, OpsError> {
     sqlx::query_as::<_, UnpublishedDraftChannel>(
         r#"
@@ -79,8 +80,8 @@ async fn load_unpublished_drafts(
         ORDER BY min(created_at)
         "#,
     )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .fetch_all(state.ticketing.pool())
+    .bind(workspace_id)
+    .fetch_all(pool)
     .await
     .map_err(OpsError::sqlx)
 }
@@ -94,7 +95,8 @@ async fn load_unpublished_drafts(
 /// `awaiting_manual_post` are absent by construction: done is not a queue,
 /// and waiting-for-a-person is the other queue.
 async fn load_automatic_queue(
-    state: &crate::AppState,
+    pool: &PgPool,
+    workspace_id: Uuid,
 ) -> Result<Vec<AutomaticQueueChannel>, OpsError> {
     sqlx::query_as::<_, AutomaticQueueChannel>(
         r#"
@@ -119,8 +121,8 @@ async fn load_automatic_queue(
         ORDER BY channel
         "#,
     )
-    .bind(state.ticketing.workspace_id().into_uuid())
-    .fetch_all(state.ticketing.pool())
+    .bind(workspace_id)
+    .fetch_all(pool)
     .await
     .map_err(OpsError::sqlx)
 }

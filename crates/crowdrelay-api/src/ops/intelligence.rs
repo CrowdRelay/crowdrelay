@@ -91,12 +91,18 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
     let drafts = run_limited(
         budget,
         timeout_duration,
-        load_unpublished_drafts(&state),
+        load_unpublished_drafts(
+            state.ticketing.pool(),
+            state.ticketing.workspace_id().into_uuid(),
+        ),
     );
     let automatic_queue = run_limited(
         budget,
         timeout_duration,
-        load_automatic_queue(&state),
+        load_automatic_queue(
+            state.ticketing.pool(),
+            state.ticketing.workspace_id().into_uuid(),
+        ),
     );
     let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
 

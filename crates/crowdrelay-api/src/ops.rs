@@ -47,6 +47,7 @@ include!("ops_action_ledger.rs");
 include!("ops/handlers.rs");
 include!("ops/attention.rs");
 include!("ops/post_queues.rs");
+include!("ops/post_queues_pg_tests.rs");
 include!("ops/funnel.rs");
 include!("ops/funnel_pg_tests.rs");
 include!("ops/outcomes.rs");
