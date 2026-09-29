@@ -647,8 +647,14 @@ pub struct PromoteBatchRequest {
     /// the send.
     limit: Option<i64>,
     /// The operator's one-line invitation reason, printed in the
-    /// confirmation mail. Trimmed; empty is none.
+    /// confirmation mail. Trimmed; empty is none. Fan destination only —
+    /// nothing mails a beacon contact, so a beacon batch ignores it.
     reason: Option<String>,
+    /// Beacon destination only: the kind every promoted contact files
+    /// under, overriding the sheet's `suggested_kind`. Same vocabulary as
+    /// the per-row promote — an unknown value is a caller bug, not a
+    /// press contact.
+    kind: Option<String>,
 }
 
 const EXPECTED_COUNT_MAX: i64 = 100_000;
@@ -663,15 +669,23 @@ pub async fn promote_batch(
     let Ok(Json(request)) = payload else {
         return Problem::bad_request(request_id_value).into_response();
     };
-    if request.destination != "fan" {
-        return Problem::bad_request(request_id_value).into_response();
-    }
-    if crowdrelay_infra::gdrive::ContactSegment::parse(&request.segment)
-        != Some(crowdrelay_infra::gdrive::ContactSegment::LikelyFan)
-    {
-        // Bulk promote exists for the fan cut only — organisations and
-        // beacons stay per-row decisions a person makes.
-        return Problem::bad_request(request_id_value).into_response();
+    let segment = match crowdrelay_infra::gdrive::ContactSegment::parse(&request.segment) {
+        Some(segment) => segment,
+        None => return Problem::bad_request(request_id_value).into_response(),
+    };
+    match request.destination.as_str() {
+        "fan" if segment == crowdrelay_infra::gdrive::ContactSegment::LikelyFan => {}
+        "beacon"
+            if matches!(
+                segment,
+                crowdrelay_infra::gdrive::ContactSegment::Beacon
+                    | crowdrelay_infra::gdrive::ContactSegment::LikelyOrg
+            ) => {}
+        // Bulk promote exists for the fan cut, and for the beacon cuts
+        // whose kind is known — `beacon` carries the sheet's typing,
+        // `likely_org` files under an explicit or defaulted kind. Every
+        // other pairing stays a per-row decision a person makes.
+        _ => return Problem::bad_request(request_id_value).into_response(),
     }
     if !(0..=EXPECTED_COUNT_MAX).contains(&request.expected_count) {
         return Problem::bad_request(request_id_value).into_response();
@@ -681,6 +695,36 @@ pub async fn promote_batch(
         .is_some_and(|limit| !(1..=EXPECTED_COUNT_MAX).contains(&limit))
     {
         return Problem::bad_request(request_id_value).into_response();
+    }
+    // A beacon wave's kind comes from the request, the sheet's
+    // `suggested_kind`, or the same `press` default the per-row promote
+    // applies — resolved and validated once here so a bad vocabulary word
+    // fails the click, not contact 57 of the wave.
+    let kind_override = if request.destination == "beacon" {
+        match request
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(|k| k.to_ascii_lowercase().replace([' ', '-'], "_"))
+        {
+            Some(kind)
+                if OUTREACH_KINDS.contains(&kind.as_str())
+                    || BOOKING_KINDS.contains(&kind.as_str())
+                    || REPRESENTATION_KINDS.contains(&kind.as_str())
+                    || AGENT_KINDS.contains(&kind.as_str()) =>
+            {
+                Some(kind)
+            }
+            Some(_) => return Problem::bad_request(request_id_value).into_response(),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if request.destination == "beacon" {
+        return promote_beacon_batch(&state, request, segment, kind_override, request_id_value)
+            .await;
     }
     let reason = request
         .reason
@@ -867,6 +911,121 @@ pub async fn promote_batch(
             "already_active": totals.already_active,
             "skipped_suppressed": totals.skipped_suppressed,
             "cooldown_skipped": totals.cooldown_skipped,
+        })),
+    )
+        .into_response()
+}
+
+/// The beacon half of `promote-batch`. Every selected contact is promoted
+/// through the same kind-routed methods the per-row endpoint calls — the
+/// sheet's `suggested_kind` (or the request's `kind` override, or `press`)
+/// decides whether the row becomes a proposed outreach target, a booking
+/// route, a booking agent, or a representation entry. Each promote commits
+/// its own transaction including the `beacon_outcome` mark, so a contact
+/// that cannot be filed — an unresolved booking city, a route already
+/// refused, a kind the vocabulary does not carry — stays staged and is
+/// counted, never silently marked.
+async fn promote_beacon_batch(
+    state: &crate::AppState,
+    request: PromoteBatchRequest,
+    segment: crowdrelay_infra::gdrive::ContactSegment,
+    kind_override: Option<String>,
+    request_id_value: Option<String>,
+) -> Response {
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let repo = repo(state);
+    let contacts = match repo
+        .staged_beacon_contacts_in_segment(workspace_id, segment, request.limit)
+        .await
+    {
+        Ok(contacts) => contacts,
+        Err(error) => {
+            tracing::warn!(%error, "gdrive beacon segment read failed");
+            return Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response();
+        }
+    };
+    let live = contacts.len() as i64;
+    if live != request.expected_count {
+        return Problem::conflict_owned(
+            std::borrow::Cow::Owned(format!(
+                "The segment holds {live} contacts now, you confirmed {expected}. Refresh and confirm again.",
+                expected = request.expected_count,
+            )),
+            request_id_value,
+        )
+        .private()
+        .into_response();
+    }
+
+    let mut promoted = 0i64;
+    let mut skipped_kind = 0i64;
+    let mut skipped_city = 0i64;
+    let mut skipped_route = 0i64;
+    let mut failed = 0i64;
+    for contact in &contacts {
+        // Per-row precedence: the click's explicit kind, then the sheet's
+        // typing, then the same press default the single promote applies.
+        // `suggested_kind` normalises the way the file extractor wrote it.
+        let normalized_kind = contact
+            .suggested_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(|k| k.to_ascii_lowercase().replace([' ', '-'], "_"));
+        let kind = kind_override
+            .clone()
+            .or(normalized_kind)
+            .unwrap_or_else(|| "press".to_owned());
+        let kind = kind.as_str();
+        let promoted_one = if AGENT_KINDS.contains(&kind) {
+            repo.promote_beacon_agent(workspace_id, contact).await
+        } else if REPRESENTATION_KINDS.contains(&kind) {
+            repo.promote_beacon_representation(workspace_id, contact, kind)
+                .await
+        } else if BOOKING_KINDS.contains(&kind) {
+            match repo
+                .promote_beacon_booking(workspace_id, contact, kind, contact.city.as_deref())
+                .await
+            {
+                Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::Done) => Ok(()),
+                Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::CityRequired)
+                | Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::UnknownCity) => {
+                    skipped_city += 1;
+                    continue;
+                }
+                Ok(crowdrelay_infra::gdrive::BookingPromoteOutcome::RouteRefused) => {
+                    skipped_route += 1;
+                    continue;
+                }
+                Err(error) => Err(error),
+            }
+        } else if OUTREACH_KINDS.contains(&kind) {
+            repo.promote_beacon(workspace_id, contact, kind).await
+        } else {
+            // "fan" and friends are legal staging kinds but not beacon
+            // kinds — the row stays staged for a per-row decision.
+            skipped_kind += 1;
+            continue;
+        };
+        match promoted_one {
+            Ok(()) => promoted += 1,
+            Err(error) => {
+                tracing::warn!(%error, contact_id = %contact.id, "gdrive beacon batch promote failed");
+                failed += 1;
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "promoted": promoted,
+            "skipped_kind": skipped_kind,
+            "skipped_city": skipped_city,
+            "skipped_route": skipped_route,
+            "failed": failed,
         })),
     )
         .into_response()

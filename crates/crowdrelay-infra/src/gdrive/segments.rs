@@ -195,6 +195,40 @@ impl super::PostgresGDriveRepository {
             .map_err(GDriveError::Database)
     }
 
+    /// The segment's promotable beacon rows — `beacon_outcome = 'staged'`
+    /// always applies on top of the segment predicate, so `likely_fan`
+    /// here means "fan-typed rows still promotable as beacons". Same
+    /// evidence ordering and `limit` semantics as the fan sibling: a
+    /// capped wave takes the contacts most likely to be real targets,
+    /// and the full `DriveContactRow` comes back because every kind of
+    /// promote (outreach, booking, agent, representation) reads
+    /// different columns of it.
+    pub async fn staged_beacon_contacts_in_segment(
+        &self,
+        workspace_id: Uuid,
+        segment: ContactSegment,
+        limit: Option<i64>,
+    ) -> Result<Vec<super::DriveContactRow>, GDriveError> {
+        let sql = format!(
+            "{SELECT} \
+             WHERE c.workspace_id = $1 AND c.beacon_outcome = 'staged' \
+               AND ({predicate}) \
+             ORDER BY (c.last_inbound_at IS NOT NULL) DESC, \
+                      (cardinality(c.sources) > 1) DESC, \
+                      (c.city IS NOT NULL AND btrim(c.city) <> '') DESC, \
+                      c.id \
+             LIMIT $2",
+            SELECT = super::CONTACT_SELECT,
+            predicate = segment.sql_predicate(),
+        );
+        sqlx::query_as::<_, super::DriveContactRow>(&sql)
+            .bind(workspace_id)
+            .bind(limit.unwrap_or(i64::MAX))
+            .fetch_all(self.pool())
+            .await
+            .map_err(GDriveError::Database)
+    }
+
     /// The segment's live promotable count — the `expected_count` check
     /// counts the table as it stands, not the page a wave would take.
     pub async fn staged_fan_count_in_segment(
