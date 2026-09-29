@@ -650,36 +650,28 @@ impl SocialPostExecutorWorker {
             return Ok(());
         };
 
-        // Automatic mode, per platform. A platform in the tenant's autopost
-        // list publishes itself; one outside it waits for a person — the
-        // draft moves to the human queue, it does not block and it is not a
-        // fault. X always waits: its write API is behind a paid tier this
-        // stack does not hold, so it can never enter the autopost list.
-        // Held with the reason so the queue says why rather than looking
-        // like a stuck job.
-        let reason = if action.platform == "x" {
-            "x publishing needs a paid API tier"
-        } else if !settings
-            .social_autopost_platforms
-            .iter()
-            .any(|platform| platform == &action.platform)
-        {
-            "autoposting is off for this platform"
-        } else {
-            match action.platform.as_str() {
-                "facebook" => return self.publish_to_facebook_page(action).await,
-                "instagram" => return self.publish_to_instagram(action).await,
-                "telegram" => return self.publish_to_telegram(action).await,
-                _ => "this platform has no automatic publish path",
+        // Automatic mode, per platform: `social_lane` names the lane, this
+        // arm owns the publish or the hold.
+        match social_lane(&action.platform, &settings.social_autopost_platforms) {
+            SocialLane::Publish(SocialPublish::Facebook) => {
+                return self.publish_to_facebook_page(action).await;
             }
-        };
-        self.hold_for_human(action.id, reason).await?;
-        tracing::info!(
-            action_id = %action.action_id,
-            platform = %action.platform,
-            reason,
-            "social post held for an operator: this platform does not publish automatically"
-        );
+            SocialLane::Publish(SocialPublish::Instagram) => {
+                return self.publish_to_instagram(action).await;
+            }
+            SocialLane::Publish(SocialPublish::Telegram) => {
+                return self.publish_to_telegram(action).await;
+            }
+            SocialLane::Hold(reason) => {
+                self.hold_for_human(action.id, reason).await?;
+                tracing::info!(
+                    action_id = %action.action_id,
+                    platform = %action.platform,
+                    reason,
+                    "social post held for an operator: this platform does not publish automatically"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -879,6 +871,48 @@ struct ClaimedAction {
     trace_id: Option<Uuid>,
 }
 
+/// A platform with a first-party publish path — the only values the
+/// automatic lane can route to.
+enum SocialPublish {
+    Facebook,
+    Instagram,
+    Telegram,
+}
+
+/// The lane a drafted post takes once the tenant's automatic posting is
+/// live. Pure — the rule table is testable without a database.
+enum SocialLane {
+    Publish(SocialPublish),
+    /// `awaiting_manual_post` with this `error_message`: the queue says why
+    /// rather than looking like a stuck job.
+    Hold(&'static str),
+}
+
+/// Which lane a drafted platform takes in automatic mode.
+///
+/// A platform in the tenant's `social_autopost_platforms` publishes itself;
+/// one outside it waits for a person — the draft moves to the human queue,
+/// it does not block and it is not a fault. X always waits: its write API
+/// is behind a paid tier this stack does not hold, so it holds even if a
+/// direct database write put it in the list.
+fn social_lane(platform: &str, autopost_platforms: &[String]) -> SocialLane {
+    if platform == "x" {
+        return SocialLane::Hold("x publishing needs a paid API tier");
+    }
+    if !autopost_platforms
+        .iter()
+        .any(|candidate| candidate == platform)
+    {
+        return SocialLane::Hold("autoposting is off for this platform");
+    }
+    match platform {
+        "facebook" => SocialLane::Publish(SocialPublish::Facebook),
+        "instagram" => SocialLane::Publish(SocialPublish::Instagram),
+        "telegram" => SocialLane::Publish(SocialPublish::Telegram),
+        _ => SocialLane::Hold("this platform has no automatic publish path"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,5 +932,63 @@ mod tests {
     fn max_posts_per_24h_is_bounded() {
         // Bounded between 1 and 10 — prevents both spam and total silence.
         const { assert!(MAX_POSTS_PER_24H > 0 && MAX_POSTS_PER_24H <= 10) };
+    }
+
+    #[test]
+    fn a_platform_in_the_autopost_list_publishes() {
+        let platforms = vec![
+            "facebook".to_owned(),
+            "instagram".to_owned(),
+            "telegram".to_owned(),
+        ];
+        assert!(matches!(
+            social_lane("facebook", &platforms),
+            SocialLane::Publish(SocialPublish::Facebook)
+        ));
+        assert!(matches!(
+            social_lane("instagram", &platforms),
+            SocialLane::Publish(SocialPublish::Instagram)
+        ));
+        assert!(matches!(
+            social_lane("telegram", &platforms),
+            SocialLane::Publish(SocialPublish::Telegram)
+        ));
+    }
+
+    #[test]
+    fn a_platform_off_the_autopost_list_waits_for_a_person() {
+        // Meta removed from autoposting is a human-queue draft, not a
+        // failure — the whole reason the two lanes exist.
+        let platforms = vec!["telegram".to_owned()];
+        assert!(matches!(
+            social_lane("facebook", &platforms),
+            SocialLane::Hold("autoposting is off for this platform")
+        ));
+        assert!(matches!(
+            social_lane("instagram", &platforms),
+            SocialLane::Hold("autoposting is off for this platform")
+        ));
+    }
+
+    #[test]
+    fn x_waits_for_a_person_even_if_someone_wrote_it_into_the_list() {
+        // The settings parser refuses x, but a raw database write can still
+        // put it there — the paid-tier rule must hold anyway.
+        let platforms = vec!["x".to_owned(), "telegram".to_owned()];
+        assert!(matches!(
+            social_lane("x", &platforms),
+            SocialLane::Hold("x publishing needs a paid API tier")
+        ));
+    }
+
+    #[test]
+    fn an_unknown_platform_in_the_list_still_waits() {
+        // A platform the parser would refuse but a direct write inserted —
+        // in the list yet unroutable — holds rather than panicking.
+        let platforms = vec!["discord".to_owned()];
+        assert!(matches!(
+            social_lane("discord", &platforms),
+            SocialLane::Hold("this platform has no automatic publish path")
+        ));
     }
 }
