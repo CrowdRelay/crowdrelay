@@ -1276,14 +1276,6 @@ impl CommunityExecutorWorker {
             return Ok(());
         }
 
-        // The picture, fresh if we can re-mint it. Stored media URLs are
-        // signed CDN links that expire between sync and post time; the
-        // Graph id re-mints a working one. Both media and the source
-        // permalink go to the agents service — the submit ladder there is
-        // image → link → self, so a subreddit that refuses image posts
-        // still gets the repost as a link rather than a failure.
-        let image_url = self.resolve_image_url(action).await;
-
         // On the link rung the body is not rendered — the submitted URL is
         // the post's only clickable. When the draft carries a tracked link,
         // submit that instead of the bare permalink: it resolves to the same
@@ -1298,6 +1290,15 @@ impl CommunityExecutorWorker {
         // it, same class as a publish-guard hold.
         let outcome = match action.platform.as_str() {
             "reddit" => {
+                // The picture, fresh if we can re-mint it. Stored media URLs
+                // are signed CDN links that expire between sync and post
+                // time; the Graph id re-mints a working one. Both media and
+                // the source permalink go to the agents service — the submit
+                // ladder there is image → link → self, so a subreddit that
+                // refuses image posts still gets the repost as a link rather
+                // than a failure. Reddit-only: the other lanes carry no
+                // image and a Meta call here would be spent on nothing.
+                let image_url = self.resolve_image_url(action).await;
                 let result = self
                     .submit_via_agent_browser(
                         action,
