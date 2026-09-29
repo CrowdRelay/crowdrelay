@@ -35,14 +35,12 @@ async fn place_with_rules(
     .await
     .context("insert discovery place")?;
     if let Some(days) = cooldown_days {
-        sqlx::query(
-            "INSERT INTO discovery_place_rules (place_id, cooldown_days) VALUES ($1,$2)",
-        )
-        .bind(id)
-        .bind(days)
-        .execute(pool)
-        .await
-        .context("insert place rules")?;
+        sqlx::query("INSERT INTO discovery_place_rules (place_id, cooldown_days) VALUES ($1,$2)")
+            .bind(id)
+            .bind(days)
+            .execute(pool)
+            .await
+            .context("insert place rules")?;
     }
     Ok(id)
 }
@@ -139,11 +137,7 @@ async fn pending_post(
     Ok(())
 }
 
-async fn post_status(
-    pool: &PgPool,
-    workspace_id: WorkspaceId,
-    subreddit: &str,
-) -> Result<String> {
+async fn post_status(pool: &PgPool, workspace_id: WorkspaceId, subreddit: &str) -> Result<String> {
     sqlx::query_scalar(
         "SELECT status FROM community_posts \
          WHERE workspace_id=$1 AND subreddit=$2 AND status <> 'posted' \
@@ -173,8 +167,7 @@ async fn a_communitys_own_cooldown_extends_the_flat_floor() -> Result<()> {
     posted_row(&pool, ws, "testsub", open_place, 8).await?;
 
     for subreddit in ["metalcore", "testsub"] {
-        let target =
-            super::community_relay_batch::community_target(&pool, ws, subreddit).await?;
+        let target = super::community_relay_batch::community_target(&pool, ws, subreddit).await?;
         pending_post(&pool, ws, subreddit, target).await?;
     }
 

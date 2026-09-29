@@ -122,15 +122,15 @@ pub fn title_for(
         track.to_owned()
     };
     let mut title = format!("{} - {}", ascii_dashes(band), ascii_dashes(&track));
-    if requirements.year {
-        if let Some(year) = year {
-            title.push_str(&format!(" ({year})"));
-        }
+    if requirements.year
+        && let Some(year) = year
+    {
+        title.push_str(&format!(" ({year})"));
     }
-    if requirements.genre {
-        if let Some(genre) = genre.map(str::trim).filter(|g| !g.is_empty()) {
-            title.push_str(&format!(" [{genre}]"));
-        }
+    if requirements.genre
+        && let Some(genre) = genre.map(str::trim).filter(|g| !g.is_empty())
+    {
+        title.push_str(&format!(" [{genre}]"));
     }
     Some(title)
 }
@@ -167,11 +167,11 @@ pub fn split_draft_title(draft: &str, band: &str) -> DraftParts {
     // would eat the whole title, so only a tail preceded by a track-sized
     // head counts.
     let tail_at = body.find(['(', '[']);
-    let (track, descriptor) = match tail_at {
-        Some(at) if !body[..at].trim().is_empty() => (
-            body[..at].trim().to_owned(),
-            Some(body[at..].trim().to_owned()),
-        ),
+    let (track, descriptor) = match tail_at.and_then(|at| Some((body.get(..at)?, body.get(at..)?)))
+    {
+        Some((head, tail)) if !head.trim().is_empty() => {
+            (head.trim().to_owned(), Some(tail.trim().to_owned()))
+        }
         _ => (body, None),
     };
     let year = descriptor.as_deref().and_then(|tail| {
@@ -194,7 +194,8 @@ pub fn split_draft_title(draft: &str, band: &str) -> DraftParts {
 fn strip_trailing_groups(track: &str) -> String {
     track
         .find(['(', '['])
-        .map(|at| track[..at].trim().to_owned())
+        .and_then(|at| track.get(..at))
+        .map(|head| head.trim().to_owned())
         .filter(|head| !head.is_empty())
         .unwrap_or_else(|| track.trim().to_owned())
 }
