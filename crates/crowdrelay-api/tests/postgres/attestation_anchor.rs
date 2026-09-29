@@ -56,6 +56,10 @@ use url::Url;
 use uuid::Uuid;
 
 const ADMIN_KEY: &str = "test-admin-api-key-123456789012";
+
+/// The internal-communications bearer the `app_state` hash authenticates —
+/// `/v1/internal/communications/…` checks the commerce capability.
+pub(crate) const COMMERCE_KEY: &str = "test-commerce-api-key-123456789012";
 pub(crate) const SIGNING_SECRET: &[u8] = b"attestation-anchor-test-signing-secret";
 
 // ── Disposable database, same pattern as the infra postgres suites. ──────────
@@ -324,7 +328,7 @@ pub(crate) fn app_state(
         Some(Sha256::digest(b"test-staff-api-key-123456789012".as_slice()).into()),
         None,
         None,
-        None,
+        Some(Sha256::digest(COMMERCE_KEY.as_bytes()).into()),
         None,
         Some([7_u8; 32]),
     );

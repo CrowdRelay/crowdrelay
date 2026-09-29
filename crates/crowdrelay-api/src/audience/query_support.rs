@@ -413,6 +413,16 @@ async fn ensure_recipient_snapshot(
         |bound| i64::from(bound.max(1)),
     );
 
+    // Fan email throttle (D1): a fan with a delivery row — claimed,
+    // delivered or failed — on any OTHER campaign inside the gap window is
+    // not snapshotted. `claimed_at` is the row's own timestamp for every
+    // status, so the window measures "when this address was last mailed or
+    // nearly mailed", which is the thing the throttle exists to bound.
+    let min_gap_hours = if channel == "email" {
+        crowdrelay_domain::campaign_lifecycle::FAN_EMAIL_MIN_GAP_HOURS
+    } else {
+        0
+    };
     let sql = format!(
         r#"
         INSERT INTO communication_campaign_recipients (workspace_id, campaign_id, fan_id)
@@ -435,6 +445,14 @@ async fn ensure_recipient_snapshot(
                     ORDER BY newest.recorded_at DESC, newest.id DESC
                     LIMIT 1
                 )
+          ))
+          AND ($17::int <= 0 OR NOT EXISTS (
+              SELECT 1
+              FROM communication_campaign_deliveries recent
+              WHERE recent.workspace_id = fan.workspace_id
+                AND recent.fan_id = fan.id
+                AND recent.campaign_id <> $14
+                AND recent.claimed_at > now() - make_interval(hours => $17::int)
           ))
         ORDER BY fan.id
         LIMIT $16
@@ -459,6 +477,7 @@ async fn ensure_recipient_snapshot(
         .bind(campaign_id)
         .bind(require_marketing)
         .bind(recipient_bound)
+        .bind(min_gap_hours)
         .execute(&mut *transaction)
         .await?;
 

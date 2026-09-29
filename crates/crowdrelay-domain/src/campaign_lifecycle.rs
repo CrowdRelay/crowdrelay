@@ -78,6 +78,14 @@ pub enum EventCampaignPhase {
     ThankYou,
 }
 
+/// Minimum gap between one fan email campaign delivery and the next for
+/// the same address. Campaigns are snapshots of an overlapping audience —
+/// without this, three due campaigns mail the same fan three times in a
+/// day, which a person reads as spam and Gmail reads as a sender-reputation
+/// problem. Applies at recipient-snapshot time, to `email` only: push has
+/// its own collapse semantics and a different tolerance.
+pub const FAN_EMAIL_MIN_GAP_HOURS: i64 = 72;
+
 /// How long a claimed campaign delivery may go without a reported result
 /// before the lease fails closed. The API expires leases on its own
 /// delivery endpoints, but only when the executor calls them; the ops
