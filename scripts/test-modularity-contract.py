@@ -113,6 +113,7 @@ CONTRACT = {
     "crates/crowdrelay-application/src/autopilot/control.rs": [
         "control/state_ports.rs",
         "control/runtime_ports.rs",
+        "control/scorecard_views.rs",
     ],
     "crates/crowdrelay-infra/src/config.rs": [
         "config/parsing.rs",
