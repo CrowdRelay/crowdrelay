@@ -128,6 +128,7 @@ pub mod tenant;
 mod tenant_settings_http;
 mod ticket_qr;
 mod ticketing;
+mod video_scorecards;
 mod workspace_secrets_http;
 
 pub use acquisition::{

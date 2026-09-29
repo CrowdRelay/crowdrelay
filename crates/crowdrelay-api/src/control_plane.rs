@@ -308,6 +308,18 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/autopilot/community-relays/{source_id}/revoke",
             post(crate::autopilot::revoke_community_relay),
         )
+        // Per-video scorecards: each new video's march on "+1000
+        // CrowdRelay-driven views in 14 days" — attributed views where the
+        // Analytics split exists, the click floor where it does not, and the
+        // ordered list of what is missing.
+        .route(
+            "/v1/control-plane/content/videos/scorecards",
+            get(crate::video_scorecards::list_video_scorecards),
+        )
+        .route(
+            "/v1/control-plane/content/videos/{source_id}/scorecard",
+            get(crate::video_scorecards::video_scorecard),
+        )
         .route(
             "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
             post(crate::autopilot::record_team_opportunity_terms),

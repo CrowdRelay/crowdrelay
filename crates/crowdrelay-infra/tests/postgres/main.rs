@@ -85,6 +85,7 @@ mod contact_governor_org;
 mod content_arcs;
 mod content_engine;
 mod content_peers;
+mod content_scorecard;
 mod content_suggestion_queue;
 mod discovery_place_status;
 mod duplicate_refused_letters;

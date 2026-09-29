@@ -26,6 +26,7 @@
         /v1/control-plane/autopilot/content-sources/* \
         /v1/control-plane/content/pipeline \
         /v1/control-plane/content/hooks \
+        /v1/control-plane/content/videos/* \
         /v1/control-plane/autopilot/content-suggestions/* \
         /v1/control-plane/autopilot/outreach/candidates \
         /v1/control-plane/autopilot/outreach/candidates/* \

@@ -11269,6 +11269,59 @@ paths:
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/content/videos/scorecards:
+    get:
+      operationId: listVideoScorecards
+      summary: Per-video scorecards for the last 30 days, newest first
+      description: >-
+        Each recent video read against the "+1000 CrowdRelay-driven views in
+        14 days" plan: attributed views where the Analytics split exists —
+        `attributed_views` is null when no `traffic:*` series was ever
+        recorded, never a zero stand-in — the tracked-click floor per lane,
+        the per-lane sends ledger, the pace label, and the ordered list of
+        what is missing.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema: { type: integer, minimum: 1, maximum: 30, default: 10 }
+      responses:
+        '200':
+          description: Scorecards, newest video first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VideoScorecard' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+  /control-plane/content/videos/{source_id}/scorecard:
+    get:
+      operationId: getVideoScorecard
+      summary: One video's scorecard by its content-source id
+      description: >-
+        The same card the list serves, for one video source — including
+        videos older than the list's 30-day window, while the source stays
+        active.
+      security:
+      - controlPlaneBearer: []
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The video's scorecard.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VideoScorecard' }
+        '400': { $ref: '#/components/responses/PrivateProblem' }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /control-plane/gig-plan/approve:
     post:
       operationId: approveGigProposal
@@ -13827,6 +13880,69 @@ components:
           maxItems: 200
           items: { type: string, format: uuid }
         replayed: { type: boolean }
+    VideoScorecard:
+      type: object
+      additionalProperties: false
+      description: >-
+        One video read against the "+1000 CrowdRelay-driven views in 14 days"
+        plan. `attributed_views` is null while no `traffic:*` series exists —
+        it distinguishes "unmeasured" from zero.
+      required: [source_id, source_key, video_id, title, url, published_at, age_days, view_target, window_days, expected_by_now, attributed_views, total_views, ads_views, analytics_through, pace, tracked_clicks, sends, missing, reddit]
+      properties:
+        source_id: { type: string, format: uuid }
+        source_key: { type: string }
+        video_id: { type: string }
+        title: { type: string }
+        url: { type: [string, 'null'] }
+        published_at: { type: string, format: date-time }
+        age_days: { type: integer, format: int64 }
+        view_target: { type: integer, minimum: 0 }
+        window_days: { type: integer, format: int64 }
+        expected_by_now: { type: integer, minimum: 0 }
+        attributed_views: { type: [integer, 'null'], minimum: 0 }
+        total_views: { type: [integer, 'null'], minimum: 0 }
+        ads_views: { type: [integer, 'null'], minimum: 0 }
+        analytics_through: { type: [string, 'null'], format: date-time }
+        pace: { type: string, enum: [on_track, behind, unmeasured, closed] }
+        tracked_clicks:
+          type: object
+          additionalProperties: false
+          required: [community, telegram, discord, social, total]
+          properties:
+            community: { type: integer, minimum: 0 }
+            telegram: { type: integer, minimum: 0 }
+            discord: { type: integer, minimum: 0 }
+            social: { type: integer, minimum: 0 }
+            total: { type: integer, minimum: 0 }
+        sends:
+          type: object
+          description: >-
+            Per-lane post counts (posted / waiting / failed /
+            awaiting_manual_post), the release's fan-email campaigns and
+            deliveries, push deliveries, the press wave (seeded / pitched /
+            remaining / replies_unanswered), the curator queue, and approved
+            YouTube replies still waiting. The release-scoped ledgers are
+            null when the video has no release plan.
+          additionalProperties: true
+        missing:
+          type: array
+          description: >-
+            Ordered blockers, most structural first. Each entry carries a
+            snake_case `reason` tag (`reddit_halted`, `manual_posts_waiting`,
+            `no_release_plan`, `press_not_seeded`, `press_queued`,
+            `press_replies_unanswered`, `no_analytics_grant`,
+            `fan_email_undelivered`, `curator_queue_unsent`,
+            `approved_youtube_replies_blocked`) plus its counts.
+          items: { type: object }
+        reddit:
+          type: object
+          additionalProperties: false
+          required: [open, daily_cap, hold_reason, halted_until]
+          properties:
+            open: { type: boolean }
+            daily_cap: { type: integer, minimum: 0 }
+            hold_reason: { type: [string, 'null'] }
+            halted_until: { type: [string, 'null'], format: date-time }
     SubmissionChannelRequest:
       type: object
       additionalProperties: false
