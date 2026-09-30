@@ -248,13 +248,9 @@ async fn persist_decision_and_action_tx(
         AutopilotActionPayload::RequestShowGrowth { lever, .. }
             if lever.is_relationship_sensitive()
     );
-    let relationship_backstop_authorized = candidate
-        .policy_snapshot
-        .get("relationship_backstop_authorized")
-        == Some(&json!(true));
     let mut ladder_authorized = candidate.context == AutopilotContext::ShowGrowth
-        && candidate.policy_snapshot.get("ladder_authorized") == Some(&json!(true))
-        && (!relationship_sensitive_show_growth || relationship_backstop_authorized);
+        && !relationship_sensitive_show_growth
+        && candidate.policy_snapshot.get("ladder_authorized") == Some(&json!(true));
     if ladder_authorized {
         // The flag was read when the snapshot loaded; a revoke may have
         // landed since. Re-ask inside this transaction — a rung queued under
