@@ -172,6 +172,17 @@ pub struct JoinAskPostRow {
     pub status: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// The exact tenant-authored variant this historical action carried.
+    /// Text, not an index: reordering/editing settings must not assign an old
+    /// outcome to different words.
+    pub text: String,
+    /// Publication is the outcome clock. An awaiting-manual row has no
+    /// complete seven-day observation window and cannot train the selector.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub posted_at: Option<OffsetDateTime>,
+    /// Distinct fans acquired through this post's tracked link in its first
+    /// seven days. The loader computes the exact click→visitor→signup join.
+    pub fans_7d: u32,
 }
 
 /// Everything one cycle needs to decide this week's asks, assembled by the
@@ -220,9 +231,17 @@ pub struct JoinAskSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JoinAskAsk {
     pub platform: String,
-    /// Which of the tenant's variants posts this week — `prior_count %
-    /// variants.len()`, so a fixed rotation cannot prefer one forever.
+    /// Which tenant-authored variant posts this week. Unseen variants are
+    /// explored first; after every current variant has mature evidence, a
+    /// deterministic UCB1 bandit balances acquired-fan reward with continued
+    /// exploration.
     pub variant_index: u32,
+    /// Mature historical trials for the selected text on this platform.
+    pub variant_trials: u32,
+    /// Distinct acquired fans across those mature trials.
+    pub variant_fans: u32,
+    /// Stable audit label: `explore_unseen` or `fan_bandit`.
+    pub selection_reason: &'static str,
     /// The variant text, verbatim. The tracked link is appended by the
     /// executor at publish time, not here — the decision stores what the
     /// tenant wrote.
@@ -413,6 +432,79 @@ pub struct JoinAskPlan {
 /// this week's ask already answered.
 const LIVE_POST_STATUSES: [&str; 4] = ["pending", "posting", "posted", "awaiting_manual_post"];
 
+/// A post gets a complete week to earn fans before it becomes evidence.
+const JOIN_ASK_OUTCOME_DAYS: i64 = 7;
+/// UCB rewards are bounded so one anomalous viral week cannot pin a variant
+/// forever. Three acquired fans in one weekly ask is already a full reward.
+const JOIN_ASK_REWARD_FAN_CAP: u32 = 3;
+
+fn choose_variant(
+    snapshot: &JoinAskSnapshot,
+    platform: &str,
+    prior_count: u32,
+    now: OffsetDateTime,
+) -> (u32, u32, u32, &'static str) {
+    let variant_count = snapshot.variants.len();
+    if variant_count == 0 {
+        return (0, 0, 0, "explore_unseen");
+    }
+
+    let mut trials = vec![0_u32; variant_count];
+    let mut fans = vec![0_u32; variant_count];
+    let mut reward = vec![0.0_f64; variant_count];
+    let mature_before = now - time::Duration::days(JOIN_ASK_OUTCOME_DAYS);
+
+    for post in &snapshot.posts {
+        if post.platform != platform
+            || post.status != "posted"
+            || post.posted_at.is_none_or(|posted_at| posted_at > mature_before)
+        {
+            continue;
+        }
+        let Some(index) = snapshot.variants.iter().position(|variant| variant == &post.text) else {
+            // The operator edited/removed this wording. Its evidence belongs
+            // to the old text and must not silently transfer by array index.
+            continue;
+        };
+        trials[index] = trials[index].saturating_add(1);
+        fans[index] = fans[index].saturating_add(post.fans_7d);
+        reward[index] += f64::from(post.fans_7d.min(JOIN_ASK_REWARD_FAN_CAP))
+            / f64::from(JOIN_ASK_REWARD_FAN_CAP);
+    }
+
+    // Every current wording gets one complete attempt before exploitation.
+    // Start at the old rotation cursor so a newly configured set does not
+    // always privilege index zero.
+    let start = (prior_count as usize) % variant_count;
+    for offset in 0..variant_count {
+        let index = (start + offset) % variant_count;
+        if trials[index] == 0 {
+            return (index as u32, 0, 0, "explore_unseen");
+        }
+    }
+
+    let total_trials = f64::from(trials.iter().copied().sum::<u32>()).max(1.0);
+    let mut best_index = start;
+    let mut best_score = f64::NEG_INFINITY;
+    for offset in 0..variant_count {
+        let index = (start + offset) % variant_count;
+        let n = f64::from(trials[index]);
+        let mean_reward = reward[index] / n;
+        let exploration = (2.0 * total_trials.ln() / n).sqrt();
+        let score = mean_reward + exploration;
+        if score > best_score {
+            best_score = score;
+            best_index = index;
+        }
+    }
+    (
+        best_index as u32,
+        trials[best_index],
+        fans[best_index],
+        "fan_bandit",
+    )
+}
+
 /// Evaluates every configured platform for this week.
 ///
 /// Pure: every fact the decision needs is on the snapshot. Per platform the
@@ -469,11 +561,14 @@ pub fn evaluate_join_ask(snapshot: &JoinAskSnapshot, now: OffsetDateTime) -> Joi
             continue;
         };
         let prior = prior_counts.get(platform).copied().unwrap_or(0);
-        let variant_index =
-            prior % u32::try_from(snapshot.variants.len().max(1)).unwrap_or(u32::MAX);
+        let (variant_index, variant_trials, variant_fans, selection_reason) =
+            choose_variant(snapshot, platform, prior, now);
         plan.asks.push(JoinAskAsk {
             platform: platform.to_owned(),
             variant_index,
+            variant_trials,
+            variant_fans,
+            selection_reason,
             text: snapshot
                 .variants
                 .get(variant_index as usize)

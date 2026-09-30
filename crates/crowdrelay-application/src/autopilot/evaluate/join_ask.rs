@@ -26,12 +26,12 @@ pub(super) struct JoinAskEvaluation {
     pub held: Vec<(String, JoinAskHold)>,
 }
 
-/// The ask is fixed — the tenant wrote the words, the rotation chose which.
-/// Confidence here answers "is this worth doing at all", and the honest
-/// answer is the feature's premise: the followers already on the page are
-/// the cheapest fans to win, so the ask is confident whenever it is
-/// eligible. What varies week to week is which variant, and that is a
-/// rotation, not a judgement.
+/// The ask is fixed — the tenant wrote the words, and the fan-outcome
+/// selector chose which one to test/exploit this week. Confidence here answers
+/// "is this worth doing at all", not "which wording wins": the followers
+/// already on the page are the cheapest fans to win, so the ask is confident
+/// whenever it is eligible. Variant choice stays auditable in the input
+/// snapshot below.
 const JOIN_ASK_CONFIDENCE_BASIS_POINTS: u16 = 7_000;
 
 fn join_ask_candidate(
@@ -60,11 +60,14 @@ fn join_ask_candidate(
         decision_kind: "publish_join_ask",
         confidence,
         disposition,
-        reason: "the weekly ask to followers who have not joined yet",
+        reason: "weekly join ask; tenant-authored wording selected from first-party fan outcomes",
         input_snapshot: serde_json::json!({
             "platform": ask.platform,
             "week": ask.week_key,
             "variant_index": ask.variant_index,
+            "variant_trials": ask.variant_trials,
+            "variant_fans": ask.variant_fans,
+            "variant_selection": ask.selection_reason,
             "text": ask.text,
             "cta_url": ask.cta_url,
             "image_url": ask.image_url,
