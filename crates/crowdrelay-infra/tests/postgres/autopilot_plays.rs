@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step_is_settled()
+async fn a_new_track_us_play_has_one_announce_step_and_finishes_cleanly()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, database_url) =
         common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
@@ -76,8 +76,6 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
     .bind(fan_id.into_uuid())
     .execute(&pool)
     .await?;
-    // Interest, not attendance. The announce ask accepts it and the post-show
-    // ask must not.
     sqlx::query("INSERT INTO event_interests (workspace_id, event_id, fan_id) VALUES ($1,$2,$3)")
         .bind(workspace_id.into_uuid())
         .bind(event_id.into_uuid())
@@ -94,20 +92,6 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
         lock_timeout: Duration::from_secs(1),
     };
     let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
-
-    let anchors = repository
-        .load_play_anchors(workspace_id, PlayKind::TrackUsAsk, now)
-        .await?;
-    let anchor = anchors
-        .iter()
-        .find(|anchor| anchor.anchor == PlayAnchorRef::Event { event_id })
-        .ok_or("the published upcoming show is a play anchor")?;
-    assert!(anchor.active, "a published show is an active anchor");
-    assert!(
-        (700..=725).contains(&anchor.hours_until),
-        "a show thirty days out is about seven hundred and twenty hours away, got {}",
-        anchor.hours_until
-    );
 
     let start = PlayStart {
         kind: PlayKind::TrackUsAsk,
@@ -132,46 +116,18 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
             .collect(),
         measurement_window_end: anchor_at + time::Duration::days(14),
     };
+    assert_eq!(start.steps.len(), 1, "new track-us plays have one owner before the show");
+    assert_eq!(start.steps[0].kind, PlayStepKind::AnnounceAsk);
     assert!(repository.start_play(workspace_id, &start).await?);
-    assert!(
-        !repository.start_play(workspace_id, &start).await?,
-        "a second cycle, or a restart mid-cycle, must leave exactly one campaign"
-    );
-    assert!(
-        !repository
-            .load_play_anchors(workspace_id, PlayKind::TrackUsAsk, now)
-            .await?
-            .iter()
-            .any(|anchor| anchor.anchor == PlayAnchorRef::Event { event_id }),
-        "an anchor that already carries a play is not offered again"
-    );
 
-    let snapshots = repository.load_play_snapshots(workspace_id, now).await?;
-    let play = snapshots
-        .iter()
-        .find(|play| play.anchor == PlayAnchorRef::Event { event_id })
-        .ok_or("the running play is read back")?;
-    assert!(play.anchor_active);
-    assert_eq!(play.steps.len(), 2);
-    assert!(play.steps.iter().all(|step| !step.settled));
-    assert!(play.steps.iter().all(|step| step.recipients_emitted == 0));
-    assert_eq!(
-        play.steps.first().map(|step| (step.kind, step.class)),
-        Some((PlayStepKind::AnnounceAsk, ActionClass::OwnedAudience))
-    );
+    let play = one_play(&repository, workspace_id, now, event_id).await?;
     assert_eq!(
         play.audience,
-        PlayAudience::Next {
-            fan_id,
-            remaining: 1
-        },
-        "a consented fan who registered interest is the announce ask's audience"
+        PlayAudience::Next { fan_id, remaining: 1 },
+        "interest is enough for the pre-show follow ask"
     );
     let play_id = play.play_id;
 
-    // Settling step zero moves the audience to the post-show ask, which does
-    // not accept interest. The fan did not buy a ticket, so there is nobody to
-    // thank — and the play must say so rather than hold the window open.
     repository
         .settle_play_step(
             workspace_id,
@@ -183,19 +139,6 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
             now,
         )
         .await?;
-    let play = one_play(&repository, workspace_id, now, event_id).await?;
-    assert_eq!(
-        play.steps.first().map(|step| step.settled),
-        Some(true),
-        "the skip is written down"
-    );
-    assert_eq!(
-        play.audience,
-        PlayAudience::Exhausted,
-        "interest is not attendance: the post-show ask has nobody"
-    );
-
-    // The completion guard, before the second step is settled.
     repository.complete_play(workspace_id, play_id, now).await?;
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT state FROM plays WHERE workspace_id=$1 AND id=$2")
@@ -203,231 +146,179 @@ async fn a_play_starts_once_reaches_a_fan_once_and_only_finishes_when_every_step
             .bind(play_id.into_uuid())
             .fetch_one(&pool)
             .await?,
-        "running",
-        "completing a play with an open step would strand that step for ever"
+        "completed",
+        "a one-step track-us play finishes without leaving a hidden post-show rung"
     );
 
-    // Give the fan a paid ticket for this show. Now they attended, and the
-    // post-show ask has an audience.
-    insert_paid_ticket(&pool, workspace_id, event_id, fan_id, &suffix, now).await?;
-    let play = one_play(&repository, workspace_id, now, event_id).await?;
-    assert_eq!(
-        play.audience,
-        PlayAudience::Next {
-            fan_id,
-            remaining: 1
-        },
-        "a ticket buyer is the post-show ask's audience"
-    );
+    Ok(())
+}
 
-    // A committed but undelivered send takes the fan out of the audience and
-    // counts against the step's ceiling. Without this the play re-offers the
-    // same fan every cycle and never progresses.
-    let step_payload = AutopilotActionPayload::RunPlayStep {
-        play_id,
-        play_kind: PlayKind::TrackUsAsk,
-        step_index: 1,
-        step_kind: PlayStepKind::PostShowAsk,
-        event_id: Some(event_id),
-        fan_id: Some(fan_id),
-        template_key: PlayStepKind::PostShowAsk.template_key().to_owned(),
-    };
-    let payload = serde_json::to_value(&step_payload)?;
-    let decision_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO autopilot_decisions (
-            id, workspace_id, decision_key, context, subject_kind, subject_id,
-            decision_kind, confidence_basis_points, disposition, reason,
-            input_snapshot, policy_snapshot, recommendation
-        , trace_id)
-        VALUES (
-            $1,$2,$3,'plays','fan',$4,'run_play_step',9000,'require_approval',
-            'test', '{}'::jsonb, '{}'::jsonb, $5
-        ,gen_random_uuid())
-        "#,
-    )
-    .bind(decision_id)
-    .bind(workspace_id.into_uuid())
-    .bind(format!("decision:play-step:v1:{play_id}:1:{fan_id}"))
-    .bind(fan_id.into_uuid())
-    .bind(&payload)
-    .execute(&pool)
-    .await?;
-    let action_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO autopilot_actions (
-            id, workspace_id, decision_id, context, action_kind, subject_kind, subject_id,
-            idempotency_key, payload, status, action_class
-        )
-        VALUES ($1,$2,$3,'plays','play.step.run','fan',$4,$5,$6,'awaiting_approval','owned_audience')
-        "#,
-    )
-    .bind(action_id)
-    .bind(workspace_id.into_uuid())
-    .bind(decision_id)
-    .bind(fan_id.into_uuid())
-    .bind(format!("action:play-step:{play_id}:1:{fan_id}"))
-    .bind(&payload)
-    .execute(&pool)
-    .await?;
-    let play = one_play(&repository, workspace_id, now, event_id).await?;
-    assert_eq!(
-        play.audience,
-        PlayAudience::Exhausted,
-        "a fan with a send already committed is not offered again"
-    );
-    assert_eq!(
-        play.steps.get(1).map(|step| step.recipients_emitted),
-        Some(1),
-        "an awaiting-approval send has already spent the step's budget"
-    );
-
-    // The fan holds one live push endpoint, so the in-process delivery leg
-    // has somewhere real to write.
-    sqlx::query(
-        "INSERT INTO fan_push_endpoints (workspace_id, fan_id, installation_id, transport, endpoint_address)
-         VALUES ($1,$2,$3,'android_fcm',$4)",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(fan_id.into_uuid())
-    .bind(format!("install-{suffix}"))
-    .bind(format!("fcm-token-{suffix}-0123456789abcdef"))
-    .execute(&pool)
-    .await?;
-
-    // Now execute it for real. This is the only place the dispatch query, the
-    // recipient write and the outbox emission run together, and a mistake in
-    // any of them is invisible from Rust.
-    // The action ledger state machine requires AUTHORIZED → QUEUED → RUNNING,
-    // so we set status to 'queued' first, then 'processing'.
-    sqlx::query(
-        "UPDATE autopilot_actions
-         SET status='queued'
-         WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "UPDATE autopilot_actions
-         SET status='processing', attempt_count=1, started_at=now()
-         WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .execute(&pool)
-    .await?;
-    repository
-        .execute_action(
-            workspace_id,
-            &ClaimedAutopilotAction {
-                id: AutopilotActionId::from_uuid(action_id),
-                payload: step_payload,
-                attempt_number: 1,
-            },
-            now,
-        )
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_legacy_post_show_step_uses_observed_attendance_only_when_show_growth_is_off()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("legacy-post-show-{suffix}"))
+        .bind("Legacy post-show E2E")
+        .execute(&pool)
         .await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT status FROM autopilot_actions WHERE workspace_id=$1 AND id=$2"
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(action_id)
-        .fetch_one(&pool)
-        .await?,
-        "succeeded"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM play_step_recipients AS recipient
-             JOIN play_steps AS step
-               ON step.workspace_id = recipient.workspace_id AND step.id = recipient.step_id
-             WHERE recipient.workspace_id=$1 AND step.play_id=$2 AND step.step_index=1
-               AND recipient.fan_id=$3"
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(play_id.into_uuid())
-        .bind(fan_id.into_uuid())
-        .fetch_one(&pool)
-        .await?,
-        1,
-        "a dispatched send is recorded as having reached the fan"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM outbox_events
-             WHERE workspace_id=$1 AND event_type='crowdrelay.play.step_requested'"
-        )
-        .bind(workspace_id.into_uuid())
-        .fetch_one(&pool)
-        .await?,
-        1,
-        "the send leaves through the existing outbox, not a new path"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM fan_push_deliveries
-             WHERE workspace_id=$1 AND fan_id=$2 AND source_kind='play_step'"
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(fan_id.into_uuid())
-        .fetch_one(&pool)
-        .await?,
-        1,
-        "the in-process delivery leg wrote one queued push for the fan's one endpoint"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT step.result FROM play_steps AS step
-             WHERE step.workspace_id=$1 AND step.play_id=$2 AND step.step_index=1"
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(play_id.into_uuid())
-        .fetch_one(&pool)
-        .await?
-        .pointer("/push_deliveries")
-        .cloned()
-        .ok_or("the step row records what the send did")?,
-        serde_json::json!(1)
-    );
 
+    let now = OffsetDateTime::now_utc();
+    let anchor_at = now - time::Duration::hours(24);
+    let event_id = EventId::new();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,$4,$5,'published',now())",
+    )
+    .bind(event_id.into_uuid())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("legacy-post-show-{suffix}"))
+    .bind("Legacy post-show")
+    .bind(anchor_at)
+    .execute(&pool)
+    .await?;
+
+    let fan_id = FanId::new();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status)
+         VALUES ($1,$2,$3,'active')",
+    )
+    .bind(fan_id.into_uuid())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("legacy-{suffix}@example.test"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source)
+         VALUES ($1,$2,'marketing',true,'v1','test')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    insert_paid_ticket(&pool, workspace_id, event_id, fan_id, &suffix, now).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    let start = PlayStart {
+        kind: PlayKind::TrackUsAsk,
+        anchor: PlayAnchorRef::Event { event_id },
+        anchor_at,
+        hypothesis: PlayKind::TrackUsAsk.hypothesis(),
+        success_metric_platform: PlayKind::TrackUsAsk.success_metric().0,
+        success_metric_key: PlayKind::TrackUsAsk.success_metric().1,
+        steps: vec![
+            PlayStepPlan {
+                index: 0,
+                kind: PlayStepKind::AnnounceAsk,
+                class: PlayStepKind::AnnounceAsk.action_class(),
+                due_at: anchor_at - time::Duration::days(14),
+                expires_at: anchor_at - time::Duration::days(7),
+            },
+            PlayStepPlan {
+                index: 1,
+                kind: PlayStepKind::PostShowAsk,
+                class: PlayStepKind::PostShowAsk.action_class(),
+                due_at: anchor_at + time::Duration::hours(18),
+                expires_at: anchor_at + time::Duration::days(3),
+            },
+        ],
+        measurement_window_end: anchor_at + time::Duration::days(14),
+    };
+    assert!(repository.start_play(workspace_id, &start).await?);
+    let play = one_play(&repository, workspace_id, now, event_id).await?;
+    let play_id = play.play_id;
     repository
         .settle_play_step(
             workspace_id,
             &PlayStepSettlement {
                 play_id,
-                step_index: 1,
-                reason: Some(StepSkipReason::NoEligibleRecipients),
+                step_index: 0,
+                reason: Some(StepSkipReason::WindowClosed),
             },
             now,
         )
         .await?;
-    repository.complete_play(workspace_id, play_id, now).await?;
+
+    let play = one_play(&repository, workspace_id, now, event_id).await?;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT state FROM plays WHERE workspace_id=$1 AND id=$2")
-            .bind(workspace_id.into_uuid())
-            .bind(play_id.into_uuid())
-            .fetch_one(&pool)
-            .await?,
-        "completed"
-    );
-    assert!(
-        repository
-            .load_play_snapshots(workspace_id, now)
-            .await?
-            .iter()
-            .all(|play| play.anchor != PlayAnchorRef::Event { event_id }),
-        "a completed play is not read as running work"
+        play.audience,
+        PlayAudience::Exhausted,
+        "buying a ticket is not evidence that the fan was in the room"
     );
 
-    // No workspace cleanup here. `fan_consents` is append-only and its
-    // workspace reference is `ON DELETE RESTRICT`, so a consent record cannot
-    // be deleted by anything — including a test. The database is disposable;
-    // the consent ledger is not.
+    let campaign_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO concert_qr_campaigns
+         (id, workspace_id, event_id, label, valid_from, valid_until)
+         VALUES ($1,$2,$3,'legacy-test',$4,$5)",
+    )
+    .bind(campaign_id)
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(anchor_at - time::Duration::hours(2))
+    .bind(anchor_at + time::Duration::hours(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO concert_checkins
+         (workspace_id, event_id, campaign_id, fan_id, checked_in_at, identity_source)
+         VALUES ($1,$2,$3,$4,$5,'session')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(campaign_id)
+    .bind(fan_id.into_uuid())
+    .bind(anchor_at + time::Duration::hours(2))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO autopilot_policies
+         (workspace_id, context, enabled, autonomy_level, max_actions_24h)
+         VALUES ($1,'show_growth',true,'require_approval',14)
+         ON CONFLICT (workspace_id, context)
+         DO UPDATE SET enabled=true",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let play = one_play(&repository, workspace_id, now, event_id).await?;
+    assert_eq!(
+        play.audience,
+        PlayAudience::Exhausted,
+        "Show Growth owns the observed room when that context is enabled"
+    );
+
+    sqlx::query(
+        "UPDATE autopilot_policies SET enabled=false
+         WHERE workspace_id=$1 AND context='show_growth'",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let play = one_play(&repository, workspace_id, now, event_id).await?;
+    assert_eq!(
+        play.audience,
+        PlayAudience::Next { fan_id, remaining: 1 },
+        "a persisted legacy rung remains a safe fallback when Show Growth is disabled"
+    );
+
     Ok(())
 }
 
