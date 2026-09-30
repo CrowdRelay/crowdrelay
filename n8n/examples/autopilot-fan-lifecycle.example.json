@@ -1,10 +1,8 @@
 {
-  "name": "CrowdRelay — CrowdRelay fan lifecycle message executor",
+  "name": "CrowdRelay \u2014 CrowdRelay fan lifecycle message executor",
   "nodes": [
     {
-      "parameters": {
-        "inputSource": "passthrough"
-      },
+      "parameters": {"inputSource": "passthrough"},
       "id": "fl-trigger",
       "name": "Called by verified ingress",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
