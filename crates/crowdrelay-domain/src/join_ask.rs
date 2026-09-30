@@ -466,10 +466,16 @@ fn choose_variant(
             // to the old text and must not silently transfer by array index.
             continue;
         };
-        trials[index] = trials[index].saturating_add(1);
-        fans[index] = fans[index].saturating_add(post.fans_7d);
-        reward[index] += f64::from(post.fans_7d.min(JOIN_ASK_REWARD_FAN_CAP))
-            / f64::from(JOIN_ASK_REWARD_FAN_CAP);
+        if let (Some(trials_slot), Some(fans_slot), Some(reward_slot)) = (
+            trials.get_mut(index),
+            fans.get_mut(index),
+            reward.get_mut(index),
+        ) {
+            *trials_slot = trials_slot.saturating_add(1);
+            *fans_slot = fans_slot.saturating_add(post.fans_7d);
+            *reward_slot += f64::from(post.fans_7d.min(JOIN_ASK_REWARD_FAN_CAP))
+                / f64::from(JOIN_ASK_REWARD_FAN_CAP);
+        }
     }
 
     // Every current wording gets one complete attempt before exploitation.
@@ -478,7 +484,7 @@ fn choose_variant(
     let start = (prior_count as usize) % variant_count;
     for offset in 0..variant_count {
         let index = (start + offset) % variant_count;
-        if trials[index] == 0 {
+        if trials.get(index).copied() == Some(0) {
             return (index as u32, 0, 0, "explore_unseen");
         }
     }
@@ -488,8 +494,8 @@ fn choose_variant(
     let mut best_score = f64::NEG_INFINITY;
     for offset in 0..variant_count {
         let index = (start + offset) % variant_count;
-        let n = f64::from(trials[index]);
-        let mean_reward = reward[index] / n;
+        let n = f64::from(trials.get(index).copied().unwrap_or(0));
+        let mean_reward = reward.get(index).copied().unwrap_or(0.0) / n;
         let exploration = (2.0 * total_trials.ln() / n).sqrt();
         let score = mean_reward + exploration;
         if score > best_score {
@@ -499,8 +505,8 @@ fn choose_variant(
     }
     (
         best_index as u32,
-        trials[best_index],
-        fans[best_index],
+        trials.get(best_index).copied().unwrap_or(0),
+        fans.get(best_index).copied().unwrap_or(0),
         "fan_bandit",
     )
 }
@@ -633,6 +639,9 @@ mod tests {
             platform: "facebook".to_owned(),
             status: "posted".to_owned(),
             created_at: datetime!(2026-09-20 10:00 UTC),
+            text: "join us".to_owned(),
+            posted_at: Some(datetime!(2026-09-20 10:00 UTC)),
+            fans_7d: 0,
         });
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
         assert_eq!(plan.asks.len(), 1);
@@ -652,6 +661,9 @@ mod tests {
             platform: "facebook".to_owned(),
             status: "posted".to_owned(),
             created_at: datetime!(2026-09-10 10:00 UTC),
+            text: "join us".to_owned(),
+            posted_at: Some(datetime!(2026-09-10 10:00 UTC)),
+            fans_7d: 0,
         });
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
         assert_eq!(plan.asks.len(), 2);
@@ -767,6 +779,11 @@ mod tests {
                 platform: "facebook".to_owned(),
                 status: "posted".to_owned(),
                 created_at: datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index),
+                text: "join us".to_owned(),
+                posted_at: Some(
+                    datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index),
+                ),
+                fans_7d: 0,
             });
         }
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
@@ -860,6 +877,9 @@ mod tests {
             platform: "facebook".to_owned(),
             status: "posted".to_owned(),
             created_at: datetime!(2026-09-20 10:00 UTC),
+            text: "join us".to_owned(),
+            posted_at: Some(datetime!(2026-09-20 10:00 UTC)),
+            fans_7d: 0,
         });
         assert!(join_ask_readiness(&snapshot).is_empty());
         assert!(!JoinAskHold::OnCadence.needs_a_person());
