@@ -2,6 +2,7 @@
 
 use super::*;
 use crowdrelay_brain::SocialContentPerformance;
+use crowdrelay_domain::hook_scorecard::parse_social_count;
 
 /// A recent owned-social post with first-party fan outcomes. Kept distinct
 /// from attention metrics so the next draft can learn what created people in
@@ -11,7 +12,7 @@ struct SocialPerformanceRow {
     platform: String,
     media_type: Option<String>,
     body: Option<String>,
-    reach: Option<i64>,
+    reach: Option<String>,
     fans_acquired: i64,
     fans_activated_within_30d: i64,
 }
@@ -25,20 +26,23 @@ pub(super) async fn load_social_content_history(
     // scorecard's first-party attribution: action -> last-tracked-click
     // conversion -> fan. Only posts that actually acquired at least one fan
     // ride the prompt, bounded to five examples from the same 60-day window.
+    // Activated fans outrank signup-only examples. Historical activity in the
+    // acquisition window survives a later return outside that window.
     let social_rows: Vec<SocialPerformanceRow> = sqlx::query_as(
         r#"
         SELECT source.metadata->>'platform' AS platform,
                source.metadata->>'media_type' AS media_type,
                source.metadata->>'body' AS body,
-               (source.metadata->>'reach')::bigint AS reach,
+               source.metadata->>'reach' AS reach,
                count(DISTINCT provenance.fan_id)::bigint AS fans_acquired,
                count(DISTINCT provenance.fan_id) FILTER (
                    WHERE fan.status = 'active'
                      AND consent.granted
-                     AND activity.last_action_at IS NOT NULL
-                     AND activity.last_action_at >= fan.created_at
-                     AND activity.last_action_at <= $2
-                     AND activity.last_action_at <= fan.created_at + interval '30 days'
+                     AND fan_has_meaningful_action_between(
+                         fan.workspace_id, fan.id, fan.normalized_email,
+                         fan.created_at,
+                         LEAST($2, fan.created_at + interval '30 days')
+                     )
                )::bigint AS fans_activated_within_30d
         FROM content_sources AS source
         JOIN autopilot_actions AS action
@@ -61,19 +65,16 @@ pub(super) async fn load_social_content_history(
             WHERE latest.workspace_id = fan.workspace_id
               AND latest.fan_id = fan.id
               AND latest.purpose = 'marketing'
+              AND latest.recorded_at <= $2
             ORDER BY latest.recorded_at DESC, latest.id DESC
             LIMIT 1
         ) AS consent ON true
-        LEFT JOIN LATERAL (
-            SELECT fan_last_meaningful_action(
-                fan.workspace_id,
-                fan.id,
-                fan.normalized_email
-            ) AS last_action_at
-        ) AS activity ON true
         WHERE source.workspace_id = $1
           AND source.source_kind = 'social_post'
           AND source.occurred_at >= $2 - interval '60 days'
+          AND source.occurred_at <= $2
+          AND provenance.occurred_at >= $2 - interval '60 days'
+          AND provenance.occurred_at <= $2
           AND provenance.occurred_at >= source.occurred_at
           AND provenance.occurred_at < source.occurred_at + interval '14 days'
           AND source.metadata->>'platform' IS NOT NULL
@@ -81,7 +82,7 @@ pub(super) async fn load_social_content_history(
                  source.metadata->>'media_type', source.metadata->>'body',
                  source.metadata->>'reach', source.occurred_at
         HAVING count(DISTINCT provenance.fan_id) > 0
-        ORDER BY fans_acquired DESC, fans_activated_within_30d DESC,
+        ORDER BY fans_activated_within_30d DESC, fans_acquired DESC,
                  source.occurred_at DESC
         LIMIT 5
         "#,
@@ -95,7 +96,8 @@ pub(super) async fn load_social_content_history(
     Ok(social_rows
         .into_iter()
         .map(|row| {
-            let reach = row.reach.and_then(|value| u64::try_from(value.max(0)).ok());
+            let reach = parse_social_count(row.reach.as_deref())
+                .and_then(|value| u64::try_from(value).ok());
             let fans_acquired = u32::try_from(row.fans_acquired.max(0)).unwrap_or(u32::MAX);
             let fans_activated_within_30d =
                 u32::try_from(row.fans_activated_within_30d.max(0)).unwrap_or(u32::MAX);

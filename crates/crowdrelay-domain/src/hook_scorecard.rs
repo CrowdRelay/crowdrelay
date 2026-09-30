@@ -22,6 +22,17 @@ pub const MIN_PEERS: usize = 4;
 /// Reach below this is too small for a rate to say anything.
 pub const MIN_REACH: i64 = 100;
 
+/// Provider metadata is optional evidence. Invalid, negative or oversized
+/// counts remain unknown instead of breaking a read or fabricating zeroes.
+#[must_use]
+pub fn parse_social_count(value: Option<&str>) -> Option<i64> {
+    value?
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 0)
+}
+
 /// A post, as the scorecard reads it.
 #[derive(Clone, Debug, Default)]
 pub struct HookPost {
@@ -128,6 +139,27 @@ pub fn score_hooks(posts: &[HookPost]) -> Vec<HookScore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_provider_counts_stay_unknown() {
+        for value in [
+            None,
+            Some(""),
+            Some("unknown"),
+            Some("-1"),
+            Some("1.5"),
+            Some("9223372036854775808"),
+            Some("{\"count\":10}"),
+        ] {
+            assert_eq!(parse_social_count(value), None, "{value:?}");
+        }
+        assert_eq!(parse_social_count(Some("0")), Some(0));
+        assert_eq!(parse_social_count(Some(" 1000 ")), Some(1000));
+        assert_eq!(
+            parse_social_count(Some("9223372036854775807")),
+            Some(i64::MAX)
+        );
+    }
 
     fn video(watch_ms: i64) -> HookPost {
         HookPost {
