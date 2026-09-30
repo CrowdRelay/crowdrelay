@@ -52,7 +52,7 @@ pub fn youtube_video_id(metadata: &Value) -> Option<String> {
 }
 
 /// Missing policy on a video excludes Meta, not community distribution.
-/// An explicit empty list permits Meta; malformed stored policy fails closed.
+/// An explicit empty list permits Meta; malformed stored policy fails closed on every promotion surface.
 pub fn excluded_platforms(kind: &str, metadata: &Value) -> Vec<String> {
     if !metadata.is_object() {
         return PROMOTION_PLATFORMS
