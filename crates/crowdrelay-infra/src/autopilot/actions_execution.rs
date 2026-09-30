@@ -60,24 +60,48 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
-                    // The referral invite template needs the fan's active
-                    // referral code so the executor can build the referral
-                    // link. The code is created at signup, so it always
-                    // exists by day 3 (referral_invite_after_days). Other
-                    // templates leave this null — the field is additive.
-                    let referral_code = if template_key == "crowdrelay.fan.referral_invite.v1" {
-                        sqlx::query_scalar::<_, Option<String>>(
-                            "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(fan_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?
-                        .flatten()
-                    } else {
-                        None
-                    };
+                    let wordmark = sqlx::query_scalar::<_, String>(
+                        "SELECT crowdrelay_workspace_wordmark($1)",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    // The referral invite is the fan→fan growth loop. The
+                    // executor receives a complete first-party URL rather than
+                    // reconstructing one from the code: domains are tenant
+                    // configuration, not executor knowledge. Missing code or
+                    // site is terminal for this message — sending a share ask
+                    // with a dead/wrong link is worse than sending nothing.
+                    let (referral_code, referral_url) =
+                        if template_key == "crowdrelay.fan.referral_invite.v1" {
+                            let code = sqlx::query_scalar::<_, Option<String>>(
+                                "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(fan_id.into_uuid())
+                            .fetch_optional(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?
+                            .flatten()
+                            .ok_or(RepositoryError::ConflictBecause(
+                                "referral invite refused: fan has no active referral code",
+                            ))?;
+                            let brand = crate::tenant_settings::TenantSettingsRepository::new(
+                                self.pool.clone(),
+                            )
+                            .brand_settings(workspace_id.into_uuid())
+                            .await
+                            .map_err(map_sqlx)?;
+                            let url = brand.referral_url(&code).ok_or(
+                                RepositoryError::ConflictBecause(
+                                    "referral invite refused: tenant has no member site URL",
+                                ),
+                            )?;
+                            (Some(code), Some(url))
+                        } else {
+                            (None, None)
+                        };
                     emit_outward_action(
                         &mut transaction,
                         workspace_id,
@@ -91,11 +115,15 @@ impl PostgresAutopilotRepository {
                             "action_id": action.id,
                             "fan_id": fan_id,
                             "template_key": template_key,
+                            "brand": {
+                                "wordmark": wordmark,
+                            },
                             "fan": {
                                 "email": fan.0,
                                 "display_name": fan.1,
                                 "locale": fan.2,
                                 "referral_code": referral_code,
+                                "referral_url": referral_url,
                             },
                         }),
                     )

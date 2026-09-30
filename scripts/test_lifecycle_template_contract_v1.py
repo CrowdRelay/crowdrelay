@@ -32,6 +32,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATES = ROOT / "crates" / "crowdrelay-application" / "src" / "autopilot" / "evaluate" / "candidates.rs"
 CONTRACT = ROOT / "n8n" / "crowdrelay-executor-contract.md"
+EXECUTION = ROOT / "crates" / "crowdrelay-infra" / "src" / "autopilot" / "actions_execution.rs"
+TENANT_SETTINGS = ROOT / "crates" / "crowdrelay-infra" / "src" / "tenant_settings.rs"
+WORKFLOW = ROOT / "n8n" / "examples" / "autopilot-fan-lifecycle.example.json"
 
 
 def emitted_keys() -> set[str]:
@@ -106,6 +109,32 @@ class TheVocabularyIsPublished(unittest.TestCase):
         body = CONTRACT.read_text(encoding="utf-8").split("### Fan lifecycle messages", 1)[1]
         section = body.split("\n## ", 1)[0]
         self.assertIn("fan.referral_code", section)
+        self.assertIn("fan.referral_url", section)
+
+    def test_referral_invite_url_is_tenant_native_and_emitted_complete(self) -> None:
+        """The executor must never learn a band's hostname.
+
+        The runtime owns tenant settings, so it emits the complete URL and a
+        consumer can only send it verbatim. This is what makes the fan→fan
+        loop safe for a second band, roster or label.
+        """
+        contract = CONTRACT.read_text(encoding="utf-8")
+        section = contract.split("### Fan lifecycle messages", 1)[1].split("\n## ", 1)[0]
+        execution = EXECUTION.read_text(encoding="utf-8")
+        settings = TENANT_SETTINGS.read_text(encoding="utf-8")
+        self.assertIn('"referral_url": referral_url', execution)
+        self.assertIn("brand.referral_url(&code)", execution)
+        self.assertIn("pub fn referral_url(&self, code: &str)", settings)
+        self.assertNotIn("https://virya.music/r/", section)
+        self.assertIn("never construct a hostname", section)
+
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("referral_url", workflow)
+        self.assertIn("brand.wordmark", workflow)
+        self.assertNotIn("https://virya.music/r/", workflow)
+        self.assertNotIn("'- VIRYA'", workflow)
+        self.assertNotIn("'Witamy w VIRYA'", workflow)
+        self.assertIn("crowdrelay_workspace_wordmark", execution)
 
 
 if __name__ == "__main__":
