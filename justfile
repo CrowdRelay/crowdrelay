@@ -178,6 +178,7 @@ test-postgres-env:
       queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event \
       a_far_out_approval_is_held_for_the_briefing \
       an_anchor_is_one_room_whoever_claims_it \
+      lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient \
       channel_yield_waits_for_full_retention_window \
       two_acts_arrivals_become_one_sample
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \

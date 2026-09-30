@@ -680,7 +680,13 @@ pub(super) async fn observe(
             // Engagement is counted as any of:
             //   - A redeemed admission pass (fan attended a show)
             //   - A Signal push endpoint creation (fan installed Signal)
-            //   - A referral attribution (fan was referred by someone)
+            //   - A qualified referral created by this fan
+            //
+            // Referral direction is load-bearing: the lifecycle message's
+            // subject is the referrer we are trying to activate, never the
+            // person somebody else happened to refer. Pending/rejected/
+            // reversed attributions are not growth outcomes, so only a
+            // qualification inside the measurement window counts.
             //
             // Each is a distinct signal that the message moved the fan
             // from passive to active. The baseline is 0 — lifecycle
@@ -725,9 +731,10 @@ pub(super) async fn observe(
                     SELECT COUNT(*)::double precision
                     FROM referral_attributions
                     WHERE workspace_id = $1
-                      AND referred_fan_id = $2
-                      AND accepted_at >= $3
-                      AND accepted_at < $3 + INTERVAL '7 days'
+                      AND referrer_fan_id = $2
+                      AND status = 'qualified'
+                      AND qualified_at >= $3
+                      AND qualified_at < $3 + INTERVAL '7 days'
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
