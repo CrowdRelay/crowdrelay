@@ -646,9 +646,9 @@ pub async fn anchor_content_measurements_to_publication(
     Ok(())
 }
 
-/// Schedules the click measurement for a freshly posted community,
-/// Telegram or Discord post — `content_link_clicks_7d` anchored at the
-/// post's `posted_at`, due a week later.
+/// Schedules the content funnel measurements for a freshly posted community,
+/// Telegram or Discord post — clicks plus acquired fans, both anchored at the
+/// post's `posted_at` and due a week later.
 ///
 /// The executors only mint measurements for actions the dispatcher planned
 /// this kind for; community, Telegram and Discord posts are not among them,
@@ -679,7 +679,7 @@ pub async fn schedule_link_click_measurement(
             action_finished_at, baseline_value, due_at, available_at,
             trace_id
         )
-        SELECT $3, post.workspace_id, post.action_id, 'content_link_clicks_7d',
+        SELECT gen_random_uuid(), post.workspace_id, post.action_id, kind.measurement_kind,
                post.action_id, post.posted_at, 0.0,
                post.posted_at + INTERVAL '7 days',
                post.posted_at + INTERVAL '7 days',
@@ -688,6 +688,9 @@ pub async fn schedule_link_click_measurement(
         JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id
          AND action.id = post.action_id
+        CROSS JOIN (
+            VALUES ('content_link_clicks_7d'), ('content_fan_acquisition_7d')
+        ) AS kind(measurement_kind)
         WHERE post.workspace_id = $1
           AND post.id = $2
           AND post.action_id IS NOT NULL
@@ -700,7 +703,6 @@ pub async fn schedule_link_click_measurement(
     sqlx::query(&query)
         .bind(workspace_id)
         .bind(post_id)
-        .bind(Uuid::now_v7())
         .execute(&mut **transaction)
         .await?;
     Ok(())
