@@ -185,14 +185,17 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                         r#"
                         SELECT action.id, action.context, action.action_kind, action.subject_kind,
                                action.subject_id, action.payload,
-                       decision.input_snapshot AS decision_input_snapshot,
-                       action.created_at,
+                               decision.input_snapshot AS decision_input_snapshot,
+                               action.created_at,
                                action.approval_expires_at,
                                assignment.assignee_member_id,
                                profile.member_key AS assignee_member_key,
                                member.display_name AS assignee_display_name,
                                assignment.due_at AS assignment_due_at
                         FROM autopilot_actions action
+                        LEFT JOIN autopilot_decisions decision
+                          ON decision.workspace_id=action.workspace_id
+                         AND decision.id=action.decision_id
                         LEFT JOIN team_assignments assignment
                           ON assignment.workspace_id=action.workspace_id
                          AND assignment.action_id=action.id
