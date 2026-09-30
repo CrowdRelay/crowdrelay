@@ -534,7 +534,10 @@ async fn concert_checkin_alone_can_activate_a_consented_recent_fan()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(activated, 1, "observed room attendance must count as real activation");
+    assert_eq!(
+        activated, 1,
+        "observed room attendance must count as real activation"
+    );
     assert_eq!(
         last_action,
         Some(now - time::Duration::days(1)),
