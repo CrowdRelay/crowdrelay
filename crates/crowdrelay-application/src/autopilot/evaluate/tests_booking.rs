@@ -407,7 +407,11 @@ mod tests_booking {
         };
 
         let candidates = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
-        assert_eq!(candidates.len(), 2, "the refusal and the next due lever");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the reciprocity refusal stays visible, but generic show growth does not invent a relationship destination"
+        );
         let declined = &candidates[0];
         assert_eq!(declined.decision_kind, "unreciprocated_crossbill");
         assert_eq!(declined.disposition, PolicyDisposition::Deny);
@@ -419,32 +423,15 @@ mod tests_booking {
                 ..
             }
         ));
-        // Forty days out with partner masked, grassroots scene relay is the
-        // next lever the night is owed — the gate must not starve it.
-        let next = &candidates[1];
-        assert_eq!(next.decision_kind, "activate_show_growth_lever");
-        assert!(matches!(
-            next.action,
-            AutopilotActionPayload::RequestShowGrowth {
-                lever: ShowGrowthLever::GrassrootsSceneRelay,
-                ..
-            }
-        ));
 
-        // The same due lever fires the moment the edge is reciprocated —
-        // one candidate, the ordinary request, no refusal row.
+        // Once reciprocated there is no generic partner action. The exact
+        // Beacon/booking loop owns the named counterparty; at forty days no
+        // later owned lever is due yet, so this evaluator returns nothing.
         let candidates = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
-        assert_eq!(candidates.len(), 1);
-        let proposed = &candidates[0];
-        assert_eq!(proposed.decision_kind, "activate_show_growth_lever");
-        assert_eq!(proposed.disposition, PolicyDisposition::RequireApproval);
-        assert!(matches!(
-            proposed.action,
-            AutopilotActionPayload::RequestShowGrowth {
-                lever: ShowGrowthLever::PartnerCrossPromo,
-                ..
-            }
-        ));
+        assert!(
+            candidates.is_empty(),
+            "relationship work belongs to named-target loops, not generic show growth"
+        );
         Ok(())
     }
 
@@ -499,11 +486,14 @@ mod tests_booking {
 
         let mut standings = std::collections::HashMap::new();
         standings.insert(
-            "show.growth.request:partner_cross_promo".to_owned(),
+            "show.growth.request:free_listing_sweep".to_owned(),
             Standing::Retired {
                 reason: RetirementReason::RepeatedlyWorsened,
             },
         );
+        let mut snapshot = snapshot;
+        snapshot.history.free_listing_sweep_requested = false;
+        snapshot.history.audience_capture_setup_requested = false;
         let candidates = show_growth::show_growth_candidates(
             snapshot,
             &policy,
@@ -520,13 +510,13 @@ mod tests_booking {
         assert!(matches!(
             candidates[0].action,
             AutopilotActionPayload::RequestShowGrowth {
-                lever: ShowGrowthLever::PartnerCrossPromo,
+                lever: ShowGrowthLever::FreeListingSweep,
                 ..
             }
         ));
 
-        // An unrelated lever's retirement must not touch the one due —
-        // standing keys are per lever, not per ladder.
+        // An unrelated relationship lever's retirement must not touch the
+        // deterministic free-distribution lever due on this show.
         let mut standings = std::collections::HashMap::new();
         standings.insert(
             "show.growth.request:grassroots_scene_relay".to_owned(),
