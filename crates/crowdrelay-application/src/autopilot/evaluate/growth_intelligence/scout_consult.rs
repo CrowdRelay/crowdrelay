@@ -162,6 +162,7 @@ mod dispatch_rule_tests {
             unengaged_targets: Vec::new(),
             recent_insights: Vec::new(),
             community_engagement_history: Vec::new(),
+            social_content_history: Vec::new(),
             standing: Standing::Untested { measured: 0 },
             world_model: WorldModel::default(),
             tenant_preference: TenantPreferencePosterior::default(),
