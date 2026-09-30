@@ -80,7 +80,9 @@ mod plays_tests {
             ..near
         };
         let start = play_start(PlayKind::TrackUsAsk, far, &policy)
-            .expect("a show a month out can carry the whole schedule");
+            .expect("a show a month out can carry the announce ask");
+        assert_eq!(start.steps.len(), 1);
+        assert_eq!(start.steps[0].kind, PlayStepKind::AnnounceAsk);
         assert_eq!(start.steps.len(), PlayKind::TrackUsAsk.steps().len());
         // The claim is frozen at start, not reconstructed later from whatever
         // the code says by then.
@@ -217,39 +219,20 @@ mod plays_tests {
     }
 
     #[test]
-    fn the_post_show_step_is_reached_only_after_the_announce_one_settles() {
-        // The property that keeps a gated or missed step from stalling the
-        // campaign behind it.
-        let mut snapshot = running(PlayAudience::Next {
+    fn new_track_us_plays_do_not_create_a_second_post_show_owner() {
+        let snapshot = running(PlayAudience::Next {
             fan_id: FanId::new(),
             remaining: 12,
         });
-        let post_show_due = snapshot
-            .steps
-            .get(1)
-            .map(|step| step.due_at + time::Duration::hours(1))
-            .expect("two steps");
-        let blocked = play_decision(&snapshot, &policy(AutonomyLevel::BoundedAuto), post_show_due)
-            .expect("decided");
+
+        assert_eq!(snapshot.steps.len(), 1);
+        assert_eq!(snapshot.steps[0].kind, PlayStepKind::AnnounceAsk);
         assert!(
-            matches!(blocked, PlayDecision::SettleStep { index: 0, .. }),
-            "the earlier step settles first, as a recorded skip"
+            snapshot
+                .steps
+                .iter()
+                .all(|step| step.kind != PlayStepKind::PostShowAsk),
+            "Show Growth owns the post-show room; new TrackUsAsk plays must not create a competing T+ ask"
         );
-        if let Some(step) = snapshot.steps.first_mut() {
-            step.settled = true;
-        }
-        let decision = play_decision(&snapshot, &policy(AutonomyLevel::BoundedAuto), post_show_due)
-            .expect("decided");
-        let candidate = play_step_candidate(&snapshot, decision, &policy(AutonomyLevel::BoundedAuto))
-            .expect("serializable")
-            .expect("sends");
-        assert!(matches!(
-            candidate.action,
-            AutopilotActionPayload::RunPlayStep {
-                step_index: 1,
-                step_kind: PlayStepKind::PostShowAsk,
-                ..
-            }
-        ));
     }
 }
