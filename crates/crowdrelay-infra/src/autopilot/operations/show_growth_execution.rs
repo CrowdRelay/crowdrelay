@@ -34,6 +34,16 @@ pub(in crate::autopilot) async fn execute_show_growth(
     send_at: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // Legacy/stale generic relationship actions fail closed. They do not name
+    // a counterparty, while the Beacon and booking actions do. An executor
+    // must never turn "partner cross-promo" into permission to choose a venue,
+    // promoter, creator or scene contact on CrowdRelay's behalf.
+    if lever.is_relationship_sensitive() {
+        return Err(RepositoryError::ConflictBecause(
+            "relationship-sensitive show growth requires a named Beacon or booking target",
+        ));
+    }
+
     let event = sqlx::query_as::<_, GrowthEventFacts>(
         r#"
         SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url,

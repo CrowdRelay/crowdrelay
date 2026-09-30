@@ -134,7 +134,7 @@ pub use reply_model::{
 pub use resource_cost::{CostSource, ResourceCost};
 pub use snapshot::{
     CommunityEngagementSummary, GrowthIntelligencePolicy, GrowthIntelligenceSnapshot,
-    RecentInsight, UnengagedTarget,
+    RecentInsight, SocialContentPerformance, UnengagedTarget,
 };
 pub use standing::{
     AgentTier, agent_standing_policy, effective_agent_cooldown, effective_agent_tier,

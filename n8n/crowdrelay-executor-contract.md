@@ -22,9 +22,13 @@ Every workflow entered through `n8n-nodes-base.executeWorkflowTrigger` must decl
 
 ### Attendance-growth execution
 
-`show.growth` is deliberately an **external-lever capability**, not a second promotion policy engine. CrowdRelay chooses the event, lever, timing and safety contract. The executor may: publish/submit the canonical event to free or owned listings, ask an already verified venue/bill/scene Beacon for the supplied cross-promotion action, or format a factual social-proof packet for the requested channel.
+`show.growth` is deliberately an **infrastructure-growth capability**, not a second promotion policy engine. CrowdRelay chooses the event, lever, timing and safety contract. This generic capability handles deterministic free/owned setup such as listing distribution and audience-capture surfaces.
 
-Every `crowdrelay.show_growth.requested` payload also carries `acts` — the announced bill in play order as `{slug, name}[]`, empty when no bill was declared. For `partner_cross_promo`, the `support_or_bill_cross_post` ask must name these acts rather than a generic "the bill"; when `acts` is empty the bill step is inapplicable and the receipt records it under `skipped_with_reason`, not silently. The `partner_cross_promo` receipt contract requires `metadata.activations[]`, `metadata.manual_steps[]` and `metadata.skipped_with_reason[]` so a step that never fired still leaves a trace.
+Partner and scene outreach execute through `crowdrelay.beacon.outreach_requested`, which names a concrete verified `beacon_id` and carries suppression, consent/relevance and relationship-phase checks. Stale generic relationship actions must also be refused.
+
+Relationship-sensitive promotion does **not** use this generic route. Venue, promoter, creator, bill-mate and scene-partner contact must travel through a named-target CrowdRelay action (for example `RequestBeaconOutreach` with an exact `beacon_id`, or the booking/outreach loops with an exact target). The executor never chooses a relationship destination from a generic `partner_cross_promo`, `grassroots_scene_relay` or `social_proof_relay` intent.
+
+Every `crowdrelay.show_growth.requested` payload also carries `acts` — the announced bill in play order as `{slug, name}[]`, empty when no bill was declared. The generic show-growth executor may use those facts only for deterministic listing/capture work. They are context, not permission to contact the named acts. Cross-promotion with a bill-mate is represented by that act's named Beacon/booking action instead.
 
 For `beacon.discovery`, prioritize the supplied `priority_source_classes`: local metal media/podcasts, independent radio/music programmes, venue/promoter/support-band networks, record stores/rehearsal studios/music shops, tattoo/alternative-fashion/scene businesses, student/culture portals, moderated metal communities/forums and local live creators/photographers/reviewers. A generic local business is not a Scene Partner without public evidence of real scene relevance. Never scrape private member lists or personal contact data; community candidates should include public rules or a moderator contact when available.
 

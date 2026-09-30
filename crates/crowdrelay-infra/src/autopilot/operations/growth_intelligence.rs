@@ -35,6 +35,7 @@ mod evidence_replay;
 mod exchange;
 mod fatigue;
 mod rescans;
+mod social_performance;
 use evidence_replay::{
     PosteriorReplay, apply_evidence_to_model, apply_evidence_to_model_with_contrast,
     apply_evidence_to_stored_strategy_posterior,
@@ -472,6 +473,9 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             avg_upvote_ratio: row.avg_upvote_ratio,
         })
         .collect();
+
+    let social_content_history =
+        social_performance::load_social_content_history(pool, workspace_id, now).await?;
 
     // Standings and tenant preference, both derived from the same bounded
     // window of operator feedback and measurement outcomes.
@@ -1126,6 +1130,11 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         } else {
             Vec::new()
         };
+        let social_history = if *template_id == "social-post" {
+            social_content_history.clone()
+        } else {
+            Vec::new()
+        };
 
         snapshots.push(GrowthIntelligenceSnapshot {
             template_id: (*template_id).to_owned(),
@@ -1138,6 +1147,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             unengaged_targets: targets,
             recent_insights: template_insights,
             community_engagement_history: history,
+            social_content_history: social_history,
             // The measured standing from past dispatch outcomes. Workers
             // with no measured outcomes are untested (run at base cadence).
             // Standings are keyed `action_kind:identity` — agent templates

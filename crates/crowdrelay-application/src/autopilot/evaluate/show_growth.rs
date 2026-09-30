@@ -44,17 +44,18 @@ pub(super) fn show_growth_candidates(
             .copied()
             .unwrap_or(0)
     };
-    // Passed over: levers only an external executor can carry out while none
-    // is live, and levers that failed `MAX_LEVER_ATTEMPTS` times. Either
-    // would otherwise hold every later lever of the ladder.
+    // Generic show growth owns deterministic free/owned distribution. A
+    // relationship-sensitive move needs a named counterparty, so it belongs to
+    // the Beacon/booking loops that carry an exact beacon_id/target_id,
+    // relationship evidence and their own cooldown. Passing those levers over
+    // here prevents a vague "contact a partner" action from competing with the
+    // precise relationship engine and lets the owned ladder keep moving.
+    //
+    // External infrastructure levers are also passed over while no executor
+    // can carry them, and repeatedly failed levers cannot block the ladder.
     let evaluate = |snapshot| {
         evaluate_show_growth_passing_over(snapshot, domain_policy, now, |lever| {
-            // Partner/scene outreach has one owner: the Beacon evaluator emits
-            // a named RequestBeaconOutreach with beacon_id, verification,
-            // suppression and phase. A generic show.growth action has none of
-            // that target identity, so it must never compete for the same
-            // relationship.
-            lever.is_beacon_outreach()
+            lever.is_relationship_sensitive()
                 || (!external_executor_live && !lever.is_first_party())
                 || failed(lever) >= MAX_LEVER_ATTEMPTS
         })
@@ -142,24 +143,17 @@ fn request_candidate(
         RATE_FLOOR,
     );
     let mut policy_snapshot = policy_evidence(policy, domain_policy)?;
-    // Adaptive autonomy: an active tenant-side booking cadence keeps
-    // relationship-sensitive promotion human-led. If that cadence is sparse,
-    // an explicitly approved show ladder becomes a bounded backstop instead
-    // of letting the event stall. The persistence seam re-checks this marker.
+    // A broad show-ladder approval may release repeatable owned/first-party
+    // promotion. Relationship-sensitive moves stay per-action regardless of
+    // booking cadence: silence in the interaction ledger is not authority.
     if snapshot.ladder_approved
-        && lever.ladder_may_pre_authorize(snapshot.human_booking_targets_30d)
+        && lever.ladder_may_pre_authorize()
         && let Some(map) = policy_snapshot.as_object_mut()
     {
         map.insert(
             "ladder_authorized".to_owned(),
             serde_json::Value::Bool(true),
         );
-        if lever.is_relationship_sensitive() {
-            map.insert(
-                "relationship_backstop_authorized".to_owned(),
-                serde_json::Value::Bool(true),
-            );
-        }
     }
     let action = AutopilotActionPayload::RequestShowGrowth {
         event_id: snapshot.event_id,

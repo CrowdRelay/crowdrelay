@@ -60,6 +60,38 @@ async fn serve_agents(listener: TcpListener) {
     }
 }
 
+/// Same wire path, but a newer drafter explicitly identifies a commenter who
+/// asked how to stay connected. The reply itself remains conversational and
+/// link-free; CrowdRelay decides whether to offer the tracked owned link.
+async fn serve_capture_agents(listener: TcpListener) {
+    while let Ok((mut stream, _)) = listener.accept().await {
+        let mut buffer = [0_u8; 16 * 1024];
+        let read = match stream.read(&mut buffer).await {
+            Ok(read) => read,
+            Err(_) => continue,
+        };
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let path = request
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_owned();
+        let body = match path.as_str() {
+            "/community/reply-draft" => {
+                r#"{"reply":"Jasne — dzięki, że pytasz.","capture_intent":"join","capture_evidence":"gdzie mogę was śledzić?","provider":"mock","model":"mock"}"#
+            }
+            "/community/review" => r#"{"score":9.0,"pass":true}"#,
+            _ => r#"{"error":"unknown"}"#,
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    }
+}
+
 async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
@@ -381,6 +413,116 @@ async fn the_register_guard_does_not_govern_owned_replies() -> Result<()> {
         Ok(())
     }
     .await;
+    server.abort();
+    result
+}
+
+/// Explicit follow/join intent on the band's own Meta post becomes a measured
+/// capture opportunity, never an unattended CTA. The smart link carries the
+/// platform/comment/creative dimensions the normal acquisition ledger reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn explicit_meta_follow_intent_gets_a_human_reviewed_tracked_capture_link() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .context("connect to the migrated suite database")?;
+    let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))
+        .await
+        .context("bind capture mock agents service")?;
+    let agents_url = format!(
+        "http://{}",
+        listener.local_addr().context("read listener address")?
+    );
+    let server = tokio::spawn(serve_capture_agents(listener));
+
+    let result = async {
+        let ws = workspace(&pool).await?;
+        sqlx::query(
+            "INSERT INTO tenant_settings (workspace_id, key, value)
+             VALUES ($1, 'member_site_base_url', 'https://band.example')",
+        )
+        .bind(ws.into_uuid())
+        .execute(&pool)
+        .await
+        .context("configure member site")?;
+
+        let source_id = social_source(&pool, ws).await?;
+        let comment_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO community_comments
+                (id, workspace_id, platform, content_source_id,
+                 platform_comment_id, parent_id, author, body, status)
+            VALUES ($1,$2,'instagram',$3,'991','555','fan1',
+                    'gdzie mogę was śledzić?','unanswered')
+            "#,
+        )
+        .bind(comment_id)
+        .bind(ws.into_uuid())
+        .bind(source_id)
+        .execute(&pool)
+        .await
+        .context("insert explicit follow intent")?;
+
+        let worker = worker(&pool, ws, true, &agents_url)?;
+        worker.run_reply_lane().await?;
+
+        let (status, draft, hold_reason): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, draft, hold_reason
+                 FROM community_comments WHERE id = $1",
+            )
+            .bind(comment_id)
+            .fetch_one(&pool)
+            .await?;
+        ensure!(
+            status == "awaiting_approval",
+            "a capture CTA must never leave unattended, got {status}"
+        );
+        let draft = draft.context("capture reply should have a draft")?;
+        let expected_slug = format!("reply-capture-{}", comment_id.simple());
+        ensure!(
+            draft.contains(&format!("/l/{expected_slug}")),
+            "the human should review the exact tracked CTA, got {draft:?}"
+        );
+        ensure!(
+            hold_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("explicitly asked how to follow/join")),
+            "the queue should explain why the CTA was proposed, got {hold_reason:?}"
+        );
+
+        let (slug, destination, source, community, creative): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT slug, destination_url, channel_source, channel_community,
+                    channel_creative
+             FROM smart_links
+             WHERE workspace_id = $1 AND slug = $2",
+        )
+        .bind(ws.into_uuid())
+        .bind(&expected_slug)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(slug == expected_slug);
+        ensure!(
+            destination.starts_with(
+                "https://band.example/signal?utm_source=instagram&utm_medium=comment_reply"
+            ),
+            "capture stays tenant-native and source-tagged: {destination}"
+        );
+        ensure!(source.as_deref() == Some("instagram"));
+        let expected_community = format!("comment:{comment_id}");
+        ensure!(community.as_deref() == Some(expected_community.as_str()));
+        ensure!(creative.as_deref() == Some("owned_reply_capture"));
+        Ok(())
+    }
+    .await;
+
     server.abort();
     result
 }
