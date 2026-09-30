@@ -224,7 +224,7 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
         &fixture.pool,
         fixture.workspace_id,
         fixture.event_id,
-        crowdrelay_domain::show_growth::ACTIVE_BOOKING_TOUCHES_30D,
+        3,
     )
     .await?;
 
@@ -366,7 +366,7 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn quiet_tenant_show_ladder_releases_partner_backstop()
+async fn quiet_tenant_show_ladder_still_keeps_partner_human_owned()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("ladder-quiet").await?;
     let partner = seed_rung(
@@ -389,11 +389,14 @@ async fn quiet_tenant_show_ladder_releases_partner_backstop()
             None,
         )
         .await?;
-    assert_eq!(mutation.status, "approved:1");
+    assert_eq!(
+        mutation.status, "approved:0",
+        "a broad ladder never releases a relationship-sensitive rung"
+    );
 
     let (status, approved_by) = rung_state(&fixture.pool, fixture.workspace_id, partner).await?;
-    assert_eq!(status, "queued", "quiet tenant gets the bounded backstop");
-    assert_eq!(approved_by.as_deref(), Some("operator:show_ladder"));
+    assert_eq!(status, "awaiting_approval", "the booker still owns the move");
+    assert!(approved_by.is_none());
     Ok(())
 }
 
