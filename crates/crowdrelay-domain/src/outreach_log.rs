@@ -1,13 +1,13 @@
 //! Reading the band's outreach workbooks — the `OUTREACH` tabs the band
 //! fills in by hand.
 //!
-//! Two dialects share one sheet shape: `VIRYA_MASTER.xlsx` (English
-//! headers — `Sent_At`, `Reply_At`, `Result`, `Recipient`) and
+//! Three dialects feed the same history: `VIRYA_MASTER.xlsx` (English
+//! headers — `Sent_At`, `Reply_At`, `Result`, `Recipient`),
 //! `PROMO.xlsx` (Polish headers — `Data_wysłania`, `Data_odpowiedzi`,
-//! `Wynik`, `Kontakt`). Both carry `Outreach_ID` first and the reply
-//! columns nobody else's sheets have, which is what claims the tab before
-//! the registry-dump guard or the contact reader can file it as something
-//! it is not.
+//! `Wynik`, `Kontakt`), and the compact human `SCOUT.OUTREACH_LOG`.
+//! MASTER/PROMO carry explicit `Outreach_ID` values; SCOUT carries the
+//! counterparty + subject + date instead, from which this reader derives a
+//! stable id. The header pins keep all three ahead of the contact fallback.
 //!
 //! # What a row means
 //!
@@ -110,8 +110,8 @@ const REPLIED_STATUSES: &[&str] = &["replied", "answered", "odpowiedziano"];
 
 /// Which workbook dialect a claimed sheet speaks — decided from the
 /// header, not the file name, so a renamed copy or a `BACKUP` export
-/// still dedupes onto the same `source_key` namespace the one-off import
-/// wrote (`master:ORC-…`, `promo:OUT-…`).
+/// still dedupes onto the same `source_key` namespace (`master:ORC-…`,
+/// `promo:OUT-…`, or `scout:<derived-id>`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutreachBook {
     /// `VIRYA_MASTER` shape — `Recipient`, `Gmail_Thread_ID`, `Result`.
@@ -144,8 +144,9 @@ impl OutreachBook {
 pub struct OutreachLogEntry {
     /// The sheet's own row identity — the dedupe key the interactions
     /// carry (`{book}:{outreach_id}` / `{book}:{outreach_id}:reply`).
-    /// Required: a row without one cannot be told apart from its own
-    /// re-import and is refused.
+    /// MASTER/PROMO require the sheet to supply this. SCOUT derives it
+    /// deterministically from recipient/email + subject + date, so a rescan
+    /// refreshes the same interaction instead of inventing another.
     pub outreach_id: String,
     /// `Entity_ID`/`Lead_ID` — kept for audit and metadata, not a join.
     pub entity_ref: Option<String>,
@@ -293,7 +294,8 @@ impl OutreachLogEntry {
 }
 
 /// Why a row was not usable. Numbered for the sheet, not the grid —
-/// a spreadsheet's own row number is what the operator sees.
+/// a spreadsheet's own row number is what the operator sees. SCOUT may
+/// omit an explicit id only when its stable identity fields can derive one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutreachLogRefusal {
     /// No `Outreach_ID`: the row cannot be told apart from its own
@@ -326,12 +328,10 @@ pub struct OutreachLogReport {
     pub rows_read: usize,
 }
 
-/// Whether a header row is an outreach log. `Outreach_ID` plus the reply
-/// columns is the pin — every other sheet in either workbook stops at
-/// naming things, while these columns record that a letter moved. A
-/// `Reply_At`/`Data_odpowiedzi` column and a verdict column are both
-/// required: an export that logs only sends is a contact history, not
-/// this reader's sheet.
+/// Whether a header row is an outreach log. MASTER/PROMO pin on
+/// `Outreach_ID` + send/reply/verdict columns. Human SCOUT pins on its
+/// complete seven-column compact history shape; a plain contact list still
+/// cannot satisfy either contract.
 #[must_use]
 pub fn is_outreach_log(header: &[String]) -> bool {
     let has = |name: &str| {
