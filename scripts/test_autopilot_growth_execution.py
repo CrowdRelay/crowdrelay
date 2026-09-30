@@ -193,6 +193,33 @@ class AutopilotGrowthExecutionContractTest(unittest.TestCase):
         for forbidden in ("contact_email", "display_name", "fan_id", "email"):
             self.assertNotIn(forbidden, adapter, forbidden)
 
+    def test_generic_show_growth_never_chooses_relationship_destinations(self):
+        evaluator = self.read(
+            "crates/crowdrelay-application/src/autopilot/evaluate/show_growth.rs"
+        )
+        execution = self.read(
+            "crates/crowdrelay-infra/src/autopilot/operations/show_growth_execution.rs"
+        )
+        workflow = self.read(
+            "n8n/examples/autopilot-growth-route-executor.example.json"
+        )
+        self.assertIn("lever.is_relationship_sensitive()", evaluator)
+        self.assertIn(
+            "relationship-sensitive show growth requires a named Beacon or booking target",
+            execution,
+        )
+        for forbidden in (
+            "partner_cross_promo",
+            "grassroots_scene_relay",
+            "social_proof_relay",
+        ):
+            allowed_prefix = "const allowed=['free_listing_sweep','audience_capture_setup'];"
+            self.assertIn(allowed_prefix, workflow)
+            self.assertNotIn(
+                f"const allowed=['free_listing_sweep','audience_capture_setup','{forbidden}",
+                workflow,
+            )
+
     def test_no_growth_workflow_contains_fake_stream_or_paid_placement_automation(self):
         paths = [
             "n8n/examples/autopilot-outreach-executor.example.json",
