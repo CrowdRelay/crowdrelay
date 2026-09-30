@@ -10,5 +10,6 @@ mod concert_scan_split;
 mod console_views;
 mod gdrive_promote_batch;
 mod outreach_contacts;
+mod registry_sync;
 mod replies_waiting;
 mod team_approvals;

@@ -1,0 +1,566 @@
+{
+  "name": "VIRYA — Scout registry sync (GH snapshot → SCOUT dedupe append)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "scout-sync-manual",
+      "name": "Run by an operator",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-1400, 300]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "15 11 * * *"
+            }
+          ]
+        }
+      },
+      "id": "scout-sync-schedule",
+      "name": "Daily 11:15 Europe/Warsaw",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1400, 480]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://raw.githubusercontent.com/' + ($env.VIRYA_REGISTRY_REPO || 'wojciechbator/crowdrelay-db') + '/' + ($env.VIRYA_REGISTRY_REF || 'main') + '/scout_runs/current.json' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "scout-sync-fetch-snapshot",
+      "name": "Fetch SCOUT_PL snapshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1160, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://api.github.com/repos/' + ($env.VIRYA_REGISTRY_REPO || 'wojciechbator/crowdrelay-db') + '/contents/?ref=' + ($env.VIRYA_REGISTRY_REF || 'main') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "scout-sync-repo-listing",
+      "name": "List registry repo root",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1160, 120]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "OPPORTUNITIES",
+          "mode": "name"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "headerRow": 3
+            }
+          }
+        }
+      },
+      "id": "scout-sync-gs-scout-opp",
+      "name": "GS — SCOUT.OPPORTUNITIES",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, -300]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "META_TARGETS",
+          "mode": "name"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "headerRow": 3
+            }
+          }
+        }
+      },
+      "id": "scout-sync-gs-scout-meta",
+      "name": "GS — SCOUT.META_TARGETS",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, -160]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "SUPPORT_TARGETS",
+          "mode": "name"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "headerRow": 3
+            }
+          }
+        }
+      },
+      "id": "scout-sync-gs-scout-support",
+      "name": "GS — SCOUT.SUPPORT_TARGETS",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, -20]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "OUTREACH_LOG",
+          "mode": "name"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "headerRow": 3
+            }
+          }
+        }
+      },
+      "id": "scout-sync-gs-scout-outreach",
+      "name": "GS — SCOUT.OUTREACH_LOG",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, 120]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_MASTER_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "OPPORTUNITIES",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "scout-sync-gs-master-opp",
+      "name": "GS — MASTER.OPPORTUNITIES",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, 260]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_MASTER_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "ENTITIES",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "scout-sync-gs-master-entities",
+      "name": "GS — MASTER.ENTITIES",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, 400]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_MASTER_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "CONTACTS",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "scout-sync-gs-master-contacts",
+      "name": "GS — MASTER.CONTACTS",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, 540]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_AUTO_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "OPPORTUNITIES",
+          "mode": "name"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "headerRow": 4
+            }
+          }
+        }
+      },
+      "id": "scout-sync-gs-auto-opp",
+      "name": "GS — AUTO.OPPORTUNITIES",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, 680]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_AUTO_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "MARCIN_FEED",
+          "mode": "name"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "headerRow": 4
+            }
+          }
+        }
+      },
+      "id": "scout-sync-gs-auto-marcin",
+      "name": "GS — AUTO.MARCIN_FEED",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-880, 820]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedupe the GitHub SCOUT_PL snapshot against everything the band\n// already knows, then map the survivors onto SCOUT.OPPORTUNITIES' columns.\n//\n// Dedupe universe, per the scout's own rule (FLOW_MAP: URL + tytuł +\n// organizator, and MASTER as the canonical CRM):\n//   - every Dedupe Key a sheet already carries;\n//   - every destination URL, normalized (scheme/www./trailing slash/query\n//     folded — the same page spelled two ways is the same page);\n//   - every opportunity title's lead words ('KozyNostra Rock Fest' matches\n//     'KozyNostra Rock Fest — Przegląd Zespołów');\n//   - every public email any file lists, for the contact side.\n//\n// A GH row that hits ANY of those is already known and skipped — a\n// duplicate append is the failure mode the whole job exists to prevent,\n// so a match in doubt counts as a hit. Contacts and organizers are NOT\n// appended to the sheet (user call: Postgres-only via the CrowdRelay\n// rescan this job triggers); they only enrich a new row's Public Contact.\n\nconst MAX_APPEND = 20; // SCOUT AUTO FLOW_MAP: 'Maks. 20/run'.\n\nfunction clean(v) { return String(v === undefined || v === null ? '' : v).trim(); }\nfunction lower(v) { return clean(v).toLowerCase(); }\nfunction normUrl(v) {\n  let u = lower(v);\n  if (!u.startsWith('http')) return '';\n  u = u.replace(/^https?:\\/\\//, '').replace(/^www\\./, '');\n  u = u.split('#')[0].split('?')[0].replace(/\\/+$/, '');\n  return u;\n}\nfunction leadSlug(v) {\n  // The lead segment before the em-dash, first three words — the piece of\n  // a title every sheet spells the same way.\n  const lead = lower(v).split(/[—–]/)[0].replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();\n  return lead.split(' ').filter(Boolean).slice(0, 3).join('-');\n}\nfunction hostOf(v) {\n  const u = normUrl(v);\n  return u ? u.split('/')[0] : '';\n}\n\nconst itemsOf = (name) => { try { return $(name).all().map(i => i.json); } catch (e) { return []; } };\n\n// ---- known universe -----------------------------------------------------\nconst urls = new Set(), keys = new Set(), leads = new Set(), emails = new Set();\nconst learn = (row, fields) => {\n  for (const f of fields.urls || []) { const u = normUrl(row[f]); if (u) urls.add(u); }\n  for (const f of fields.keys || []) { const k = lower(row[f]); if (k) keys.add(k); }\n  for (const f of fields.leads || []) { const s = leadSlug(row[f]); if (s) leads.add(s); }\n  for (const f of fields.emails || []) { const e = lower(row[f]); if (e.includes('@')) emails.add(e); }\n};\n\nitemsOf('GS — SCOUT.OPPORTUNITIES').forEach(r => learn(r, { keys: ['Dedupe Key'], urls: ['URL'], leads: ['Name'], emails: ['Public Contact'] }));\nitemsOf('GS — SCOUT.META_TARGETS').forEach(r => learn(r, { keys: ['Dedupe Key'], urls: ['Public URL / Username'], leads: ['Name'], emails: ['Public Contact'] }));\nitemsOf('GS — SCOUT.SUPPORT_TARGETS').forEach(r => learn(r, { keys: ['Dedupe Key'], urls: ['Public URL'], leads: ['Band / Artist'] }));\nitemsOf('GS — SCOUT.OUTREACH_LOG').forEach(r => learn(r, { leads: ['Recipient / Organization'], emails: ['Public Email'] }));\nitemsOf('GS — MASTER.OPPORTUNITIES').forEach(r => learn(r, { urls: ['Application_URL'], leads: ['Opportunity_Name'] }));\nitemsOf('GS — MASTER.ENTITIES').forEach(r => learn(r, { urls: ['Website'], leads: ['Canonical_Name', 'Display_Name'], emails: ['Primary_Email'] }));\nitemsOf('GS — MASTER.CONTACTS').forEach(r => learn(r, { emails: ['Email'] }));\nitemsOf('GS — AUTO.OPPORTUNITIES').forEach(r => learn(r, { keys: ['Dedupe_Key'], urls: ['URL'], leads: ['Title'], emails: ['Contact_Email'] }));\nitemsOf('GS — AUTO.MARCIN_FEED').forEach(r => learn(r, { keys: ['Dedupe Key'], urls: ['URL'], leads: ['Name'], emails: ['Public Contact'] }));\n\n// ---- the snapshot --------------------------------------------------------\nconst snapshot = itemsOf('Fetch SCOUT_PL snapshot')[0] || {};\nconst sheets = snapshot.sheets || {};\nconst rowsOf = (name) => {\n  const sh = sheets[name];\n  if (!sh || !Array.isArray(sh.headers) || !Array.isArray(sh.rows)) return [];\n  return sh.rows.map(cells => Object.fromEntries(sh.headers.map((h, i) => [h, cells[i]])));\n};\nconst oppRows = rowsOf('OPPORTUNITIES');\nconst contactRows = [...rowsOf('CONTACTS'), ...rowsOf('ORGANIZERS'), ...rowsOf('CANONICAL_APPEND')];\n\n// Contact enrichment: organizer name or site host → a public email the\n// snapshot itself lists.\nconst contactByName = new Map(), contactByHost = new Map();\nfor (const c of contactRows) {\n  const email = lower(c.Email);\n  if (!email.includes('@')) continue;\n  for (const n of [c.Organization, c['Organization/Event'], c.Name]) {\n    const key = lower(n);\n    if (key && !contactByName.has(key)) contactByName.set(key, email);\n  }\n  for (const n of [c.Website, c.Source_URL, c.Source, c['History/Notes']]) {\n    const host = hostOf(n);\n    if (host && !contactByHost.has(host)) contactByHost.set(host, email);\n  }\n}\n\nconst skipped = { url: 0, lead: 0, key: 0 };\nconst candidates = [];\nfor (const r of oppRows) {\n  const name = clean(r.Name);\n  if (!name) continue;\n  const url = normUrl(r.Source_URL);\n  if (url && urls.has(url)) { skipped.url++; continue; }\n  const lead = leadSlug(name);\n  if (lead && leads.has(lead)) { skipped.lead++; continue; }\n  candidates.push(r);\n}\n// Strong-fit findings first; input order keeps the rest stable.\nconst fitRank = (r) => /strong/i.test(clean(r.Eligibility)) ? 0 : 1;\ncandidates.sort((a, b) => fitRank(a) - fitRank(b));\nconst toAppend = candidates.slice(0, MAX_APPEND).map(r => {\n  const organizer = clean(r.Organizer);\n  const email = contactByName.get(lower(organizer)) || contactByHost.get(hostOf(r.Source_URL)) || '';\n  const lead = leadSlug(r.Name) || 'find';\n  const kind = /contest|konkurs|competition|przegl/i.test(clean(r.Type)) ? 'contest' : 'festival';\n  return {\n    'Name': name,\n    'Type': clean(r.Type),\n    'Country / City': 'Polska / ' + clean(r.City),\n    'Deadline': clean(r.Application_Deadline),\n    'Event Date': clean(r.Event_Date),\n    'URL': clean(r.Source_URL),\n    'Public Contact': email,\n    'Submission Method': 'Official call / registration route — verify on site',\n    'Free to Apply': /free|bez op/i.test(clean(r.Economics)) ? 'Tak' : '',\n    'Relevance Score': '',\n    'Priority': /strong/i.test(clean(r.Eligibility)) ? 'B' : 'C',\n    'Status': 'Do weryfikacji',\n    'Why Fit': clean(r.Eligibility),\n    'Red Flags': clean(r.Current_Status),\n    'Next Step': clean(r.Next_Action),\n    'Dedupe Key': `${lead}|${kind}|virya`,\n    'Raw Snippet': clean(r.Evidence).slice(0, 500),\n    'Source Checked': clean(snapshot.run_date),\n    'Outreach Date': '',\n    'Notes': [clean(r.VIRYA_History), clean(r.Next_Cycle)].filter(Boolean).join(' | ')\n  };\n});\n\nconst commit = String($env.VIRYA_SCOUT_SYNC_COMMIT || '').toUpperCase() === 'TRUE';\nreturn [{\n  json: {\n    commit,\n    toAppend,\n    appendedPreview: toAppend.map(r => r.Name).slice(0, 8),\n    overflow: Math.max(0, candidates.length - toAppend.length),\n    counts: {\n      snapshot_rows: oppRows.length,\n      new_candidates: candidates.length,\n      appended: toAppend.length,\n      skipped_by_url: skipped.url,\n      skipped_by_lead: skipped.lead,\n      known_universe: { urls: urls.size, keys: keys.size, leads: leads.size, emails: emails.size }\n    }\n  }\n}];\n"
+      },
+      "id": "scout-sync-dedupe",
+      "name": "Dedupe & map new rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-560, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.commit }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "scout-sync-commit-gate",
+      "name": "Commit or dry run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-320, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "toAppend",
+        "options": {}
+      },
+      "id": "scout-sync-split",
+      "name": "One item per new row",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-80, 200]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.VIRYA_SCOUT_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "OPPORTUNITIES",
+          "mode": "name"
+        },
+        "operation": "append",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "schema": [
+            { "id": "Name", "displayName": "Name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Type", "displayName": "Type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Country / City", "displayName": "Country / City", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Deadline", "displayName": "Deadline", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Event Date", "displayName": "Event Date", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "URL", "displayName": "URL", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Public Contact", "displayName": "Public Contact", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Submission Method", "displayName": "Submission Method", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Free to Apply", "displayName": "Free to Apply", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Relevance Score", "displayName": "Relevance Score", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Priority", "displayName": "Priority", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Status", "displayName": "Status", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Why Fit", "displayName": "Why Fit", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Red Flags", "displayName": "Red Flags", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Next Step", "displayName": "Next Step", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Dedupe Key", "displayName": "Dedupe Key", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Raw Snippet", "displayName": "Raw Snippet", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Source Checked", "displayName": "Source Checked", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Outreach Date", "displayName": "Outreach Date", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true },
+            { "id": "Notes", "displayName": "Notes", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedInMatching": true }
+          ]
+        },
+        "options": {}
+      },
+      "id": "scout-sync-append",
+      "name": "Append to SCOUT.OPPORTUNITIES",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [160, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregates regardless of the branch taken — dry runs report what\n// would have appended, commits report what did.\nconst dedupe = $('Dedupe & map new rows').first().json;\nlet appended = 0;\ntry { appended = $('Append to SCOUT.OPPORTUNITIES').all().length; } catch (e) {}\nconst c = dedupe.counts;\nconst lines = [\n  '**VIRYA — scout registry sync**',\n  '',\n  dedupe.commit ? 'Tryb: ZAPIS do SCOUT.OPPORTUNITIES' : 'Tryb: PROBNY (nic nie dopisano)',\n  'Snapshot rows: ' + c.snapshot_rows + ' → new candidates: ' + c.new_candidates,\n  (dedupe.commit ? 'Appended: ' : 'Would append: ') + (dedupe.commit ? appended : c.appended) + (c.overflow > 0 ? ' (+' + c.overflow + ' over the 20/run cap)' : ''),\n  'Skipped — same URL: ' + c.skipped_by_url + ', same title: ' + c.skipped_by_lead,\n  'Known universe: ' + c.known_universe.urls + ' urls / ' + c.known_universe.keys + ' dedupe keys / ' + c.known_universe.leads + ' titles / ' + c.known_universe.emails + ' emails',\n  '',\n  'Nowe: ' + dedupe.appendedPreview.join(', ')\n];\nif (!dedupe.commit) lines.push('', 'Ustaw VIRYA_SCOUT_SYNC_COMMIT=TRUE i uruchom ponownie, aby dopisac.');\nconst content = lines.join('\\n').slice(0, 1900);\nreturn [{ json: { discordBody: JSON.stringify({ content, allowed_mentions: { parse: [] } }) } }];\n"
+      },
+      "id": "scout-sync-report",
+      "name": "Build the sync report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.CROWDRELAY_INTERNAL_BASE_URL || ($env.CROWDRELAY_API_URL || 'https://signal-api.virya.music/v1').replace(/\\/$/, '')) + '/internal/registry/sync' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.CROWDRELAY_COMMERCE_TOKEN }}"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "=scout-registry-sync:{{ $execution.resumeUrl ? 'manual' : 'scheduled' }}:{{ $today.toFormat('yyyy-LL-dd') }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "scout-sync-wake",
+      "name": "Wake CrowdRelay registry sync",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VIRYA_OPS_ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Virya-n8n/1.0 (https://virya.music)"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.discordBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "scout-sync-discord",
+      "name": "Report what was matched",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Documentation node — never executes.\n//\n// Where this job's data goes:\n//\n//  - scout_runs/current.json is the SCOUT_PL run's own snapshot, the same\n//    rows database_festivals.xlsx renders. Reading the JSON avoids parsing\n//    the binary and stays inside the repo's validation contract\n//    (validate-scout-pl-snapshot.yml guards its shape).\n//  - Appends land ONLY on SCOUT.OPPORTUNITIES — the human scout file the\n//    team edits. GH contacts/organizers/canonical-append rows never write\n//    a sheet; they enrich a new row's Public Contact and reach Postgres\n//    through the CrowdRelay rescan this job triggers.\n//  - SCOUT AUTO is a per-run snapshot and MASTER is the CRM truth — both\n//    are read, never written by this workflow.\n//\n// What CrowdRelay does with the same files: the gdrive + github registry\n// workers re-run the shared sheet intake — OPPORTUNITIES →\n// team_opportunities, META_TARGETS → beacons, SUPPORT_TARGETS → peer_acts,\n// every email column → drive_contacts — all deduped on each registry's\n// own conflict key, so a re-run of an unchanged file is a no-op.\n//\n// Env: VIRYA_SCOUT_SHEET_ID, VIRYA_MASTER_SHEET_ID,\n// VIRYA_SCOUT_AUTO_SHEET_ID, VIRYA_REGISTRY_REPO/REF (optional,\n// defaults wojciechbator/crowdrelay-db@main), VIRYA_SCOUT_SYNC_COMMIT,\n// CROWDRELAY_INTERNAL_BASE_URL (or CROWDRELAY_API_URL),\n// CROWDRELAY_COMMERCE_TOKEN, VIRYA_OPS_ALERT_WEBHOOK_URL.\nreturn [];\n"
+      },
+      "id": "scout-sync-notes",
+      "name": "Scope notes (documentation only)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-560, 540]
+    }
+  ],
+  "connections": {
+    "Run by an operator": {
+      "main": [
+        [
+          { "node": "Fetch SCOUT_PL snapshot", "type": "main", "index": 0 },
+          { "node": "List registry repo root", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Daily 11:15 Europe/Warsaw": {
+      "main": [
+        [
+          { "node": "Fetch SCOUT_PL snapshot", "type": "main", "index": 0 },
+          { "node": "List registry repo root", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch SCOUT_PL snapshot": {
+      "main": [
+        [
+          { "node": "GS — SCOUT.OPPORTUNITIES", "type": "main", "index": 0 },
+          { "node": "GS — SCOUT.META_TARGETS", "type": "main", "index": 0 },
+          { "node": "GS — SCOUT.SUPPORT_TARGETS", "type": "main", "index": 0 },
+          { "node": "GS — SCOUT.OUTREACH_LOG", "type": "main", "index": 0 },
+          { "node": "GS — MASTER.OPPORTUNITIES", "type": "main", "index": 0 },
+          { "node": "GS — MASTER.ENTITIES", "type": "main", "index": 0 },
+          { "node": "GS — MASTER.CONTACTS", "type": "main", "index": 0 },
+          { "node": "GS — AUTO.OPPORTUNITIES", "type": "main", "index": 0 },
+          { "node": "GS — AUTO.MARCIN_FEED", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "List registry repo root": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — SCOUT.OPPORTUNITIES": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — SCOUT.META_TARGETS": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — SCOUT.SUPPORT_TARGETS": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — SCOUT.OUTREACH_LOG": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — MASTER.OPPORTUNITIES": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — MASTER.ENTITIES": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — MASTER.CONTACTS": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — AUTO.OPPORTUNITIES": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "GS — AUTO.MARCIN_FEED": {
+      "main": [[{ "node": "Dedupe & map new rows", "type": "main", "index": 0 }]]
+    },
+    "Dedupe & map new rows": {
+      "main": [[{ "node": "Commit or dry run?", "type": "main", "index": 0 }]]
+    },
+    "Commit or dry run?": {
+      "main": [
+        [{ "node": "One item per new row", "type": "main", "index": 0 }],
+        [{ "node": "Build the sync report", "type": "main", "index": 0 }]
+      ]
+    },
+    "One item per new row": {
+      "main": [[{ "node": "Append to SCOUT.OPPORTUNITIES", "type": "main", "index": 0 }]]
+    },
+    "Append to SCOUT.OPPORTUNITIES": {
+      "main": [[{ "node": "Build the sync report", "type": "main", "index": 0 }]]
+    },
+    "Build the sync report": {
+      "main": [[{ "node": "Wake CrowdRelay registry sync", "type": "main", "index": 0 }]]
+    },
+    "Wake CrowdRelay registry sync": {
+      "main": [[{ "node": "Report what was matched", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

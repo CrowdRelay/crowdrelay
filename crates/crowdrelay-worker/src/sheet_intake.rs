@@ -4,6 +4,7 @@
 //!
 //! Dispatch order is the whole contract:
 //!   agent seed → beacon seed → outreach log → festival profile →
+//!   opportunity seed → scout meta-targets →
 //!   registry dump → venue seed → band seed → contact list
 //! The booking-agent sheet is claimed first because its own header carries
 //! registry state columns (`Refused_Until`, `Do_Not_Contact`) that would
@@ -15,17 +16,26 @@
 //! its contact column is history, not leads to stage); the festival
 //! profile claims on its `Entity_Name`/`Application_Cycle` pair — the
 //! `deadline=` cells seed `festival_editions`, which is the only input the
-//! festival-window evaluator reads; the dump guard runs before the venue
-//! reader because a registry readout's `Name`/`City`/`Source_URL`
-//! satisfies the venue pin and must never mint its rows as rooms. Only a
-//! sheet none of the six claims reaches the contact reader.
+//! festival-window evaluator reads; the scout OPPORTUNITIES grammars
+//! (MASTER, SCOUT AUTO, SCOUT_PL, SCOUT/MARCIN_FEED) claim next because
+//! the SCOUT_PL shape (`Name` + `City` + `Source_URL`) satisfies the venue
+//! pin and would otherwise mint festivals as rooms; the human scout's
+//! `META_TARGETS` claim emits the same `BeaconSeedReport` the beacon
+//! reader produces and lands in the same roster. The dump guard runs
+//! before the venue reader because a registry readout's `Name`/`City`/
+//! `Source_URL` satisfies the venue pin and must never mint its rows as
+//! rooms. Only a sheet none of the eight claims reaches the contact
+//! reader.
 //!
 //! A workbook may carry a banner above the real header ("venue_seed intake
-//! columns — re-importable as-is"). A banner hides the sheet from every
-//! reader, so when nothing claims the grid as-is the dispatch retries with
-//! row one dropped. Probing is parse-only — extracting a report does no
-//! writes — so trying both views is safe, and the retry is strictly
-//! fallback: a sheet that already parses keeps its first row.
+//! columns — re-importable as-is"), and the scout workbooks stack up to
+//! three: a title row, a rule note and a blank row before the header
+//! (`SCOUT AUTO` OPPORTUNITIES heads at row 4). A banner hides the sheet
+//! from every reader, so when nothing claims the grid as-is the dispatch
+//! retries with leading rows dropped, bounded at four. Probing is
+//! parse-only — extracting a report does no writes — so trying successive
+//! views is safe, and the retry is strictly fallback: a sheet that already
+//! parses keeps its first row.
 
 use crowdrelay_domain::beacon_seed::{BeaconSeedReport, extract_beacon_sheet};
 use crowdrelay_domain::booking_agent_seed::{AgentSheetReport, extract_agent_sheet};
@@ -33,15 +43,19 @@ use crowdrelay_domain::drive_contacts::{
     ExtractedContact, extract_contacts, is_email_header, is_registry_dump,
 };
 use crowdrelay_domain::festival_seed::{FestivalSeedReport, extract_festival_sheet};
+use crowdrelay_domain::opportunity_seed::{OpportunitySeedReport, extract_opportunity_sheet};
 use crowdrelay_domain::outreach_log::{OutreachLogReport, extract_outreach_log};
 use crowdrelay_domain::peer_act_seed::{
     PeerActSeedReport, extract_seed_sheet as extract_band_sheet,
 };
+use crowdrelay_domain::scout_targets::extract_scout_meta_targets;
 use crowdrelay_domain::venue_seed::{SeedSheetReport, extract_seed_sheet as extract_venue_sheet};
 use crowdrelay_infra::{
     beacon_seed::PostgresBeaconSeedRepository, booking_agents::PostgresBookingAgentRepository,
-    festival_seed::PostgresFestivalSeedRepository, outreach_log::PostgresOutreachLogRepository,
-    peer_act_seed::PostgresPeerActSeedRepository, venue_seed::PostgresVenueSeedRepository,
+    festival_seed::PostgresFestivalSeedRepository,
+    opportunity_seed::PostgresOpportunitySeedRepository,
+    outreach_log::PostgresOutreachLogRepository, peer_act_seed::PostgresPeerActSeedRepository,
+    venue_seed::PostgresVenueSeedRepository,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -55,7 +69,13 @@ pub const MAX_ROWS_PER_FILE: usize = 5000;
 /// every transport's skip-unchanged marker (`<sha|mtime>#<rev>`). Bump it
 /// when the intake rules change or previously-scanned files stay skipped
 /// under rules they predate.
-pub const SHEET_INTAKE_REVISION: u32 = 6;
+pub const SHEET_INTAKE_REVISION: u32 = 7;
+
+/// How many leading rows a banner may occupy before the sheet is left to
+/// the contact fallback. `SCOUT AUTO` tabs stack title + rule note + a
+/// blank row, so the real header sits at index 3; one more row of slack
+/// covers the next banner a sheet will grow.
+const MAX_BANNER_ROWS: usize = 4;
 
 /// One worksheet: its tab name when the transport knows it (a CSV has
 /// none) and the grid of cell text.
@@ -148,6 +168,20 @@ pub struct SheetHarvest {
     pub festival_unmatched: usize,
     /// Festival rows whose own write failed — isolated per row.
     pub festival_failed: u64,
+    /// Sheets carrying a scout `OPPORTUNITIES` tab (any dialect).
+    pub opportunity_sheets: usize,
+    /// Opportunity rows newly inserted into `team_opportunities`.
+    pub opportunities_seeded: u64,
+    /// Opportunity rows the `(workspace, scout_sheet, external_key)`
+    /// conflict key already knew — refreshed in place.
+    pub opportunities_refreshed: u64,
+    /// Opportunity rows the parser refused (no title, unmapped kind).
+    pub opportunity_refusals: usize,
+    /// Opportunity rows whose own write failed — isolated per row.
+    pub opportunities_failed: u64,
+    /// Sheets carrying the human scout's `META_TARGETS` tab — counted
+    /// separately even though the rows land through the beacon import.
+    pub scout_meta_sheets: usize,
 }
 
 /// Which structured reader claims a view, if one does. Extraction is
@@ -158,6 +192,11 @@ enum Claim {
     Beacon(BeaconSeedReport),
     OutreachLog(OutreachLogReport),
     Festival(FestivalSeedReport),
+    Opportunity(OpportunitySeedReport),
+    /// The human scout's `META_TARGETS` — a beacon registry in a different
+    /// header spelling, emitted as the same report so the same import
+    /// path and dedupe keys apply.
+    ScoutTargets(BeaconSeedReport),
     Dump,
     Venue(SeedSheetReport),
     Band(PeerActSeedReport),
@@ -189,6 +228,17 @@ fn claim(view: &[Vec<String>]) -> Option<Claim> {
         // to read. Ahead of the dump guard for the same reason the agent
         // sheet is: its columns are the band's bookkeeping, not a readout.
         Some(Claim::Festival(report))
+    } else if let Some(report) = extract_opportunity_sheet(view) {
+        // The scout OPPORTUNITIES grammars — ahead of the dump guard AND
+        // the venue reader: the SCOUT_PL shape (`Name` + `City` +
+        // `Source_URL`) satisfies the venue pin, and opportunities landing
+        // as venues is exactly the misrouting the guard exists to stop.
+        Some(Claim::Opportunity(report))
+    } else if let Some(report) = extract_scout_meta_targets(view) {
+        // The human scout's `META_TARGETS` — target rows that belong in
+        // the beacon roster, ahead of the guard and the venue reader for
+        // the same reason.
+        Some(Claim::ScoutTargets(report))
     } else if view.first().is_some_and(|header| is_registry_dump(header)) {
         // A registry readout is context for a human, not intake — without
         // this its `Name`/`City`/`Source_URL` mints press contacts as venues.
@@ -200,19 +250,21 @@ fn claim(view: &[Vec<String>]) -> Option<Claim> {
     }
 }
 
-/// The view a contact list is read through. Row 1 wins only when it
-/// carries the email header and row 0 doesn't: a banner over a real list
-/// loses the banner, while a one-column `Email` sheet keeps its header.
-fn contacts_view<'a>(full: &'a [Vec<String>], stripped: &'a [Vec<String>]) -> &'a [Vec<String>] {
+/// The view a contact list is read through. The earliest header row that
+/// carries an email column wins — a banner over a real list loses the
+/// banner, while a one-column `Email` sheet keeps its header.
+fn contacts_view(grid: &[Vec<String>]) -> &[Vec<String>] {
     let has_email = |view: &[Vec<String>]| {
         view.first()
             .is_some_and(|row| row.iter().any(|cell| is_email_header(cell)))
     };
-    if !has_email(full) && has_email(stripped) {
-        stripped
-    } else {
-        full
+    for skip in 0..=MAX_BANNER_ROWS {
+        let Some(view) = grid.get(skip..) else { break };
+        if has_email(view) {
+            return view;
+        }
     }
+    grid
 }
 
 /// How far a sheet's structure may be trusted. The registry claims —
@@ -244,24 +296,31 @@ pub async fn harvest_grids(
     for sheet in sheets {
         let grid: Vec<Vec<String>> = sheet.grid.into_iter().take(MAX_ROWS_PER_FILE + 1).collect();
         let full: &[Vec<String>] = &grid;
-        let stripped: &[Vec<String>] = grid.get(1..).unwrap_or(full);
 
         // Structured readers first, on the grid as written; a banner row
-        // pins nothing, so an unclaimed grid retries on the stripped view.
-        // `row_shift` re-anchors a refusal's spreadsheet row number after
-        // the strip — the extractors report view-relative rows.
-        let (view, claimed, row_shift) = match claim(full) {
-            Some(claim) => (full, claim, 0usize),
-            None => match claim(stripped) {
-                Some(claim) => (stripped, claim, 1usize),
+        // pins nothing, so an unclaimed grid retries on successively
+        // stripped views until the banner is gone. `row_shift` re-anchors
+        // a refusal's spreadsheet row number after the strip — the
+        // extractors report view-relative rows.
+        let (view, claimed, row_shift) = {
+            let mut found = None;
+            for skip in 0..=MAX_BANNER_ROWS {
+                let Some(view) = grid.get(skip..) else { break };
+                if let Some(claim) = claim(view) {
+                    found = Some((view, claim, skip));
+                    break;
+                }
+            }
+            match found {
+                Some(found) => found,
                 // Contacts is the terminal fallback — it claims on its own
                 // terms (an email column in the header, or email-shaped
                 // data below whatever header the sheet carries).
                 None => {
-                    let view = contacts_view(full, stripped);
+                    let view = contacts_view(full);
                     (view, Claim::Contacts, grid.len() - view.len())
                 }
-            },
+            }
         };
 
         // An untrusted sheet keeps only its contacts: every registry
@@ -277,6 +336,8 @@ pub async fn harvest_grids(
             | (SheetTrust::InboundUntrusted, Claim::Beacon(_))
             | (SheetTrust::InboundUntrusted, Claim::OutreachLog(_))
             | (SheetTrust::InboundUntrusted, Claim::Festival(_))
+            | (SheetTrust::InboundUntrusted, Claim::Opportunity(_))
+            | (SheetTrust::InboundUntrusted, Claim::ScoutTargets(_))
             | (SheetTrust::InboundUntrusted, Claim::Venue(_))
             | (SheetTrust::InboundUntrusted, Claim::Band(_)) => (Claim::Contacts, true),
             (_, claim) => (claim, false),
@@ -405,6 +466,66 @@ pub async fn harvest_grids(
                     );
                 }
                 harvest.festival_failed += summary.failed;
+            }
+            Claim::Opportunity(report) => {
+                harvest.opportunity_sheets += 1;
+                harvest.rows_read += report.rows.len() + report.refusals.len();
+                if !report.refusals.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        refusals = ?report
+                            .refusals
+                            .iter()
+                            .map(|(row, refusal)| (*row + row_shift, refusal.message()))
+                            .collect::<Vec<_>>(),
+                        "opportunity seed rows refused"
+                    );
+                }
+                // A scout row's contact cell is a lead — stage it beside
+                // every other file's contacts so the same address dedupes
+                // to one identity no matter which sheet listed it.
+                if !report.contacts.is_empty() {
+                    harvest.contacts.extend(report.contacts.iter().cloned());
+                    harvest.saw_email_column = true;
+                }
+                let summary = PostgresOpportunitySeedRepository::new(pool.clone())
+                    .import_sheet(
+                        workspace_id,
+                        &format!("{file_name}#{}", sheet.name.as_deref().unwrap_or("sheet")),
+                        &report.rows,
+                    )
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                harvest.opportunities_seeded += summary.seeded;
+                harvest.opportunities_refreshed += summary.refreshed;
+                harvest.opportunities_failed += summary.failed;
+            }
+            Claim::ScoutTargets(report) => {
+                // Same import path as the beacon registry sheet — one
+                // roster, one dedupe key — with its own counter so the
+                // cycle report names which file fed it.
+                harvest.scout_meta_sheets += 1;
+                let summary = PostgresBeaconSeedRepository::new(pool.clone())
+                    .import_sheet(workspace_id, file_name, &report)
+                    .await
+                    .map_err(|e: sqlx::Error| e.to_string())?;
+                if !report.refusals.is_empty() {
+                    tracing::info!(
+                        file = %file_name,
+                        refusals = ?report
+                            .refusals
+                            .iter()
+                            .map(|(row, refusal)| (*row + row_shift, refusal.message()))
+                            .collect::<Vec<_>>(),
+                        "scout meta-target rows refused"
+                    );
+                }
+                harvest.rows_read += report.beacons.len() + report.refusals.len();
+                harvest.beacons_imported += summary.imported;
+                harvest.beacons_refreshed += summary.refreshed;
+                harvest.beacon_refusals += report.refusals.len();
+                harvest.beacons_unresolved_city += summary.unresolved_city;
+                harvest.beacons_failed += summary.failed;
             }
             Claim::Dump => {
                 harvest.registry_dump_sheets += 1;

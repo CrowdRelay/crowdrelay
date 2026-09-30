@@ -51,4 +51,11 @@ pub(crate) fn router() -> Router<crate::AppState> {
             "/v1/admin/ops/deliveries/{delivery_id}/retry",
             post(crate::ops::retry_delivery),
         )
+        // Executor wake-up for the scout-registry n8n job: internal
+        // (commerce-key) surface, notifies both sync workers. Lives here
+        // rather than `routing.rs`, which is at its size-ratchet ceiling.
+        .route(
+            "/v1/internal/registry/sync",
+            post(crate::registry_sync::registry_sync_now),
+        )
 }

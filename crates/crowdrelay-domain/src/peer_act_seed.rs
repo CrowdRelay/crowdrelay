@@ -229,6 +229,7 @@ const INACTIVE_STATUS: &[&str] = &[
     "rozwiązany",
     "rozwiazany",
     "nieaktywny",
+    "nieaktualne",
     "zawieszony",
 ];
 
@@ -447,16 +448,22 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
         return Some(name);
     }
     match cell.as_str() {
-        "nazwa" | "zespol" | "zespoł" | "band" | "zespół" | "artist" => Some(columns::NAME),
+        "nazwa" | "zespol" | "zespoł" | "band" | "zespół" | "artist" | "band_artist" => {
+            Some(columns::NAME)
+        }
         "kraj" | "country_code" => Some(columns::COUNTRY),
         "miasto" | "miejscowosc" | "miejscowość" | "city_region" | "region" | "city_country" => {
             Some(columns::CITY)
         }
         "gatunek" | "gatunki" | "styl" | "style" => Some(columns::GENRE),
-        "mail" | "e_mail" | "public_contact_email" | "contact_email" => Some(columns::EMAIL),
+        "mail" | "e_mail" | "public_contact_email" | "contact_email" | "official_contact" => {
+            Some(columns::EMAIL)
+        }
         "fb" | "facebook" | "instagram" | "ig" => Some(columns::SOCIAL),
-        "linki" | "link" | "url" | "urls" => Some(columns::LINKS),
-        "strona" | "strona_www" | "www" | "homepage" => Some(columns::WEBSITE),
+        "linki" | "link" | "url" | "urls" | "public_url" | "public_url_username" => {
+            Some(columns::LINKS)
+        }
+        "strona" | "strona_www" | "www" | "homepage" | "official_url" => Some(columns::WEBSITE),
         "zrodlo" | "źródło" | "source" | "activity_source" | "evidence_source" => {
             Some(columns::SOURCE_URL)
         }

@@ -11,7 +11,7 @@ use crowdrelay_worker::sheet_intake::{SheetTrust, harvest_grids};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn workspace(pool: &PgPool, label: &str) -> Result<Uuid> {
+pub(crate) async fn workspace(pool: &PgPool, label: &str) -> Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
@@ -30,7 +30,7 @@ async fn workspace(pool: &PgPool, label: &str) -> Result<Uuid> {
     Ok(id)
 }
 
-fn grid(rows: &[&[&str]]) -> Vec<Vec<String>> {
+pub(crate) fn grid(rows: &[&[&str]]) -> Vec<Vec<String>> {
     rows.iter()
         .map(|r| r.iter().map(|c| c.to_string()).collect())
         .collect()

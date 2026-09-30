@@ -283,3 +283,40 @@ The heartbeat records component `n8n` automatically. Other production components
 ## Circuit breaker
 
 Three distinct `failed` action receipts from the same executor inside 15 minutes open a 15-minute executor circuit breaker. While open, that executor contributes no capabilities even if its heartbeat remains fresh. A later provider-confirmed `succeeded` receipt or guard expiry closes it. Heartbeats intentionally do not clear the guard, so a restart cannot immediately hide a provider outage.
+
+## Scout registry sync (inbound wake: n8n → CrowdRelay)
+
+Most of this contract covers work CrowdRelay emits and the executor performs. The scout-registry sync runs the other way: n8n is the merge layer between the team's spreadsheets, and CrowdRelay is where the merged data lands durable.
+
+`examples/scout-registry-sync.example.json` is the workflow. It reads the GitHub registry snapshot (`scout_runs/current.json` — the same rows `database_festivals.xlsx` renders, versioned and validated in-repo), reads the three Google workbooks, dedupes the snapshot's opportunity rows against everything the band already knows, appends the survivors to the one writable tab, then wakes CrowdRelay.
+
+### Source roles — read every run, write only one
+
+| Source | Role | This job may |
+| --- | --- | --- |
+| `wojciechbator/crowdrelay-db` (`database_festivals.xlsx` / `scout_runs/current.json`) | SCOUT_PL candidate snapshot produced by the scouting pipeline | read |
+| MASTER sheet | canonical CRM — entities, contacts, opportunities | read |
+| SCOUT sheet (`SCOUT.OPPORTUNITIES`) | the tab humans triage; the ONLY append target | read + append ≤20 rows/run |
+| SCOUT AUTO sheet | per-run machine snapshot — a report, not a ledger | read |
+
+Dedupe follows the scout's own FLOW_MAP rule — URL + title + organizer — enlarged to the whole known universe: every dedupe key, destination URL, opportunity title lead, and public email across SCOUT, MASTER, SCOUT AUTO, and the snapshot itself. A match in doubt counts as known; a duplicate append is the failure mode the job exists to prevent. Appends are capped at 20 per run and ordered strong-fit first.
+
+`VIRYA_SCOUT_SYNC_COMMIT=TRUE` turns writes on; without it the run is a dry-run that reports what it would have appended and writes nothing. `CONTACTS`, `ORGANIZERS` and `CANONICAL_APPEND` rows never reach a Google Sheet — they are Postgres-only, picked up by the rescan below, and in the workflow they serve only to enrich a new row's `Public Contact`.
+
+### The wake: `POST /v1/internal/registry/sync`
+
+After the merge (commit or dry-run — a re-scan of an unchanged source is free), the job calls the internal wake instead of touching Postgres:
+
+```
+POST {base}/v1/internal/registry/sync
+Authorization: Bearer {CROWDRELAY_COMMERCE_TOKEN}
+Idempotency-Key: scout-registry-sync:{mode}:{date}
+```
+
+No body. `202 {"scan":"requested"}` means both listeners were notified; `503` means the database refused the notify — retry the POST, the wake itself is idempotent. The handler issues `pg_notify` on the two channels the workers already subscribe to: `gdrive_contacts` (Drive workbooks: SCOUT, SCOUT AUTO, MASTER, PROMO…) and `github_registry` (the registry repo). It is fire-and-forget — the workers decide what actually changed; a missed wake is covered by the next scheduled sweep, and a doubled one costs one no-change scan.
+
+Do not write raw `pg_notify` from n8n, and do not connect to Postgres at all: the route is the abstraction, and the intake owns parsing, dedupe, policy, persistence and audit. On the CrowdRelay side the same files re-run through the shared sheet intake — `OPPORTUNITIES → team_opportunities`, `META_TARGETS → beacons`, `SUPPORT_TARGETS → peer_acts`, every email column → `drive_contacts` — each on its own conflict key, so an unchanged file is a no-op and a row-level refusal retries instead of sealing the file as consumed.
+
+### Environment
+
+`VIRYA_SCOUT_SHEET_ID`, `VIRYA_MASTER_SHEET_ID`, `VIRYA_SCOUT_AUTO_SHEET_ID` (Google Sheets OAuth credential — anonymous reads return 401), `VIRYA_REGISTRY_REPO`/`VIRYA_REGISTRY_REF` (default `wojciechbator/crowdrelay-db@main`), `VIRYA_SCOUT_SYNC_COMMIT`, `CROWDRELAY_INTERNAL_BASE_URL` (or `CROWDRELAY_API_URL`), `CROWDRELAY_COMMERCE_TOKEN`, `VIRYA_OPS_ALERT_WEBHOOK_URL`.

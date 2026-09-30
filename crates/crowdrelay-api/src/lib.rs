@@ -107,6 +107,7 @@ mod proofs;
 mod push;
 mod rate_limit;
 mod referrals;
+mod registry_sync;
 mod releases;
 mod roster_act_report;
 mod roster_catalogue_rotation;

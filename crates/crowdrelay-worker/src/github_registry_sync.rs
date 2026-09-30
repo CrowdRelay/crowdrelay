@@ -120,6 +120,16 @@ struct CycleCounts {
     outreach_replies_recorded: u64,
     outreach_unmatched: u64,
     outreach_failed: u64,
+    /// Scout `OPPORTUNITIES` sheets claimed and their `team_opportunities`
+    /// writes — new, refreshed, refused by the parser, failed to write.
+    opportunity_sheets: usize,
+    opportunities_seeded: u64,
+    opportunities_refreshed: u64,
+    opportunity_refusals: usize,
+    opportunities_failed: u64,
+    /// Sheets carrying the human scout's `META_TARGETS` tab; their rows
+    /// land in the beacon counters above.
+    scout_meta_sheets: usize,
 }
 
 impl GithubRegistrySyncWorker {
@@ -284,6 +294,12 @@ impl GithubRegistrySyncWorker {
                     counts.outreach_replies_recorded += file_counts.outreach_replies_recorded;
                     counts.outreach_unmatched += file_counts.outreach_unmatched;
                     counts.outreach_failed += file_counts.outreach_failed;
+                    counts.opportunity_sheets += file_counts.opportunity_sheets;
+                    counts.opportunities_seeded += file_counts.opportunities_seeded;
+                    counts.opportunities_refreshed += file_counts.opportunities_refreshed;
+                    counts.opportunity_refusals += file_counts.opportunity_refusals;
+                    counts.opportunities_failed += file_counts.opportunities_failed;
+                    counts.scout_meta_sheets += file_counts.scout_meta_sheets;
                 }
                 Err(error) => {
                     counts.files_failed += 1;
@@ -324,6 +340,12 @@ impl GithubRegistrySyncWorker {
             outreach_replies = counts.outreach_replies_recorded,
             outreach_unmatched = counts.outreach_unmatched,
             outreach_failed = counts.outreach_failed,
+            opportunity_sheets = counts.opportunity_sheets,
+            opportunities_seeded = counts.opportunities_seeded,
+            opportunities_refreshed = counts.opportunities_refreshed,
+            opportunity_refusals = counts.opportunity_refusals,
+            opportunities_failed = counts.opportunities_failed,
+            scout_meta_sheets = counts.scout_meta_sheets,
             "github registry sync cycle"
         );
     }
@@ -450,6 +472,12 @@ impl GithubRegistrySyncWorker {
         counts.outreach_replies_recorded = harvest.outreach_replies_recorded;
         counts.outreach_unmatched = harvest.outreach_unmatched;
         counts.outreach_failed = harvest.outreach_failed;
+        counts.opportunity_sheets = harvest.opportunity_sheets;
+        counts.opportunities_seeded = harvest.opportunities_seeded;
+        counts.opportunities_refreshed = harvest.opportunities_refreshed;
+        counts.opportunity_refusals = harvest.opportunity_refusals;
+        counts.opportunities_failed = harvest.opportunities_failed;
+        counts.scout_meta_sheets = harvest.scout_meta_sheets;
         let contacts = harvest.contacts;
         let saw_email_column = harvest.saw_email_column;
         let rows_read = harvest.rows_read;
@@ -460,7 +488,8 @@ impl GithubRegistrySyncWorker {
             + harvest.peer_acts_failed
             + harvest.agents_failed
             + harvest.beacons_failed
-            + harvest.outreach_failed;
+            + harvest.outreach_failed
+            + harvest.opportunities_failed;
 
         // A re-listed file is the truth about its rows: contacts it no
         // longer carries mark disappeared, exactly like a Drive file.

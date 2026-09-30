@@ -64,6 +64,7 @@ pub mod media;
 pub mod mobile_fan;
 pub mod night;
 pub mod observability;
+pub mod opportunity_seed;
 pub mod organization_settings;
 pub mod outreach_log;
 pub mod outreach_mail;
