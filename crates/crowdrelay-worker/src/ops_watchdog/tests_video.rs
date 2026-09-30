@@ -29,6 +29,8 @@ mod video_tests {
             analytics_through: Some(OffsetDateTime::now_utc()),
             pace: Pace::OnTrack,
             tracked_clicks: Default::default(),
+            acquired_fans: 0,
+            fan_conversion_basis_points: None,
             sends: Default::default(),
             missing: Vec::new(),
             reddit: crowdrelay_application::autopilot::VideoRedditStanding {
