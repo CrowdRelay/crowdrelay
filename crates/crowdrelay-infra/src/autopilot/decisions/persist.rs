@@ -248,13 +248,9 @@ async fn persist_decision_and_action_tx(
         AutopilotActionPayload::RequestShowGrowth { lever, .. }
             if lever.is_relationship_sensitive()
     );
-    let relationship_backstop_authorized = candidate
-        .policy_snapshot
-        .get("relationship_backstop_authorized")
-        == Some(&json!(true));
     let mut ladder_authorized = candidate.context == AutopilotContext::ShowGrowth
-        && candidate.policy_snapshot.get("ladder_authorized") == Some(&json!(true))
-        && (!relationship_sensitive_show_growth || relationship_backstop_authorized);
+        && !relationship_sensitive_show_growth
+        && candidate.policy_snapshot.get("ladder_authorized") == Some(&json!(true));
     if ladder_authorized {
         // The flag was read when the snapshot loaded; a revoke may have
         // landed since. Re-ask inside this transaction — a rung queued under
@@ -270,22 +266,6 @@ async fn persist_decision_and_action_tx(
         .fetch_one(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
-
-        if ladder_authorized && relationship_sensitive_show_growth {
-            let human_targets = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(DISTINCT target_id)::bigint \
-                 FROM booking_interactions \
-                 WHERE workspace_id=$1 AND occurred_at >= now() - INTERVAL '30 days' \
-                   AND (source_key LIKE 'gmail:%' OR source_key LIKE 'master:%' \
-                        OR source_key LIKE 'promo:%')",
-            )
-            .bind(workspace_id.into_uuid())
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(map_sqlx)?;
-            ladder_authorized = human_targets
-                < i64::from(crowdrelay_domain::show_growth::ACTIVE_BOOKING_TOUCHES_30D);
-        }
     }
     // The standing-grant half of the same gate: an operator who already
     // answered "this target is fine, stop asking" is not asked again. Read
