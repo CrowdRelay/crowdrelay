@@ -498,11 +498,14 @@ mod tests_booking {
 
         let mut standings = std::collections::HashMap::new();
         standings.insert(
-            "show.growth.request:social_proof_relay".to_owned(),
+            "show.growth.request:free_listing_sweep".to_owned(),
             Standing::Retired {
                 reason: RetirementReason::RepeatedlyWorsened,
             },
         );
+        let mut snapshot = snapshot;
+        snapshot.history.free_listing_sweep_requested = false;
+        snapshot.history.audience_capture_setup_requested = false;
         let retired = show_growth::show_growth_candidates(
             snapshot,
             &policy,
@@ -517,7 +520,7 @@ mod tests_booking {
         assert!(matches!(
             retired[0].action,
             AutopilotActionPayload::RequestShowGrowth {
-                lever: ShowGrowthLever::SocialProofRelay,
+                lever: ShowGrowthLever::FreeListingSweep,
                 ..
             }
         ));
@@ -542,7 +545,7 @@ mod tests_booking {
         assert!(matches!(
             active[0].action,
             AutopilotActionPayload::RequestShowGrowth {
-                lever: ShowGrowthLever::SocialProofRelay,
+                lever: ShowGrowthLever::FreeListingSweep,
                 ..
             }
         ));
