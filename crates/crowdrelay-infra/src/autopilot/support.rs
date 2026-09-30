@@ -282,6 +282,12 @@ fn pending_action(
     let mut briefing = payload
         .briefing_on(&|at| crate::regional::format_on_clock(at, &crew.zone))
         .localized(locale);
+    enrich_show_growth_briefing(
+        &mut briefing,
+        &payload,
+        row.decision_input_snapshot.as_ref(),
+        locale,
+    );
     briefing.deadline_note = format_deadline_note(
         row.approval_expires_at,
         row.assignment_due_at,
@@ -315,6 +321,99 @@ fn pending_action(
         assignment_due_at: row.assignment_due_at,
         revisable,
     })
+}
+
+fn enrich_show_growth_briefing(
+    briefing: &mut crowdrelay_application::autopilot::ActionBriefing,
+    payload: &AutopilotActionPayload,
+    snapshot: Option<&Value>,
+    locale: crowdrelay_application::autopilot::BriefingLocale,
+) {
+    use crowdrelay_application::autopilot::{BriefingField, BriefingLocale, BriefingStep};
+
+    let AutopilotActionPayload::RequestShowGrowth { lever, .. } = payload else {
+        return;
+    };
+    let Some(snapshot) = snapshot.and_then(Value::as_object) else {
+        return;
+    };
+
+    let number = |key: &str| snapshot.get(key).and_then(Value::as_u64);
+    let field = |en: &str, pl: &str, value: String| BriefingField {
+        label: match locale {
+            BriefingLocale::Pl => pl,
+            BriefingLocale::En => en,
+        }
+        .to_owned(),
+        value,
+    };
+
+    if let Some(paid) = number("paid_tickets") {
+        let value = number("capacity")
+            .filter(|capacity| *capacity > 0)
+            .map_or_else(|| paid.to_string(), |capacity| format!("{paid} / {capacity}"));
+        briefing.content.push(field("Paid tickets", "Sprzedane bilety", value));
+    }
+    if let Some(last_7d) = number("paid_tickets_last_7d") {
+        briefing
+            .content
+            .push(field("Tickets, last 7d", "Bilety, ostatnie 7 dni", last_7d.to_string()));
+    }
+    if let Some(interested) = number("interested_fans") {
+        briefing
+            .content
+            .push(field("Interested fans", "Zainteresowani fani", interested.to_string()));
+    }
+    if let Some(local) = number("city_signal_fans") {
+        briefing
+            .content
+            .push(field("Fans in this city", "Fani w tym mieście", local.to_string()));
+    }
+    if let Some(referrers) = number("qualified_referrers_in_city") {
+        briefing.content.push(field(
+            "Local fan referrers",
+            "Lokalni fani polecający",
+            referrers.to_string(),
+        ));
+    }
+    if let Some(partners) = number("beacon_partners") {
+        briefing
+            .content
+            .push(field("Active local partners", "Aktywni lokalni partnerzy", partners.to_string()));
+    }
+
+    if lever.requires_relationship_approval() {
+        match locale {
+            BriefingLocale::En => {
+                briefing.why_it_matters =
+                    "CrowdRelay found a relationship-sensitive organic promotion move. The evidence below explains why it is due; no venue, promoter, creator or scene partner is contacted until you approve this individual move.".to_owned();
+                briefing.steps = vec![
+                    BriefingStep {
+                        what_to_do: "Check the local signal and relationship fit".to_owned(),
+                        why_it_matters: "The machine can rank evidence; you own the relationship and timing".to_owned(),
+                    },
+                    BriefingStep {
+                        what_to_do: "Approve only if this is the right human move now".to_owned(),
+                        why_it_matters: "Approval may spend relationship capital outside the band's owned channels".to_owned(),
+                    },
+                ];
+            }
+            BriefingLocale::Pl => {
+                briefing.why_it_matters =
+                    "CrowdRelay wykrył organiczny ruch promocyjny wymagający relacji. Dane poniżej pokazują, dlaczego ruch jest teraz zasadny; żaden venue, promotor, twórca ani partner sceny nie zostanie skontaktowany bez Twojej osobnej zgody.".to_owned();
+                briefing.steps = vec![
+                    BriefingStep {
+                        what_to_do: "Sprawdź lokalny sygnał i dopasowanie relacji".to_owned(),
+                        why_it_matters: "Maszyna może uporządkować dowody; relacja i timing należą do Ciebie".to_owned(),
+                    },
+                    BriefingStep {
+                        what_to_do: "Zatwierdź tylko, jeśli to właściwy ruch człowieka teraz".to_owned(),
+                        why_it_matters: "Zgoda może wykorzystać kapitał relacyjny poza własnymi kanałami zespołu".to_owned(),
+                    },
+                ];
+            }
+        }
+    }
 }
 
 /// The crew's briefing language and clock, read once for a whole queue.

@@ -705,6 +705,10 @@ struct PendingActionRow {
     subject_kind: String,
     subject_id: Uuid,
     payload: Value,
+    /// Evidence frozen on the decision that created this action. The
+    /// execution payload stays minimal; approval UI may use this context to
+    /// explain why a human-owned move is worth considering.
+    decision_input_snapshot: Option<Value>,
     created_at: OffsetDateTime,
     approval_expires_at: Option<OffsetDateTime>,
     assignee_member_id: Option<Uuid>,
