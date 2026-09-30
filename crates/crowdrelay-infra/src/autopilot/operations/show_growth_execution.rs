@@ -1147,7 +1147,7 @@ pub(in crate::autopilot) async fn issue_post_show_report(
            VALUES($1,$2,'post_show_report','post_show',320,'done','T+7 report issued by CrowdRelay to band and counterparty',$3)
            ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE
            SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at
-           WHERE show_checklist_items.status<>'done'"#,
+           WHERE show_checklist_items.status NOT IN ('done','skipped','blocked')"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(event_id.into_uuid())

@@ -115,6 +115,31 @@ mod relay_push_text_tests {
     }
 }
 
+/// Whether a (post, community) relay lane may emit: `Some("")` on a fresh
+/// lane, `Some(":attempt{n}")` on a retry, `None` while the backoff runs or
+/// the lane exhausted its attempts. Mirrors `surge_retry` — a dead dispatch
+/// re-raised under the same key dedupes onto the failed action, which used
+/// to freeze the lane while the rotation kept offering the community.
+fn relay_retry(
+    target: &CommunityRelayTarget,
+    source: crowdrelay_domain::ContentSourceId,
+    now: OffsetDateTime,
+) -> Option<String> {
+    let Some(failure) = target
+        .relay_failures
+        .iter()
+        .find(|failure| failure.source_id == source)
+    else {
+        return Some(String::new());
+    };
+    if failure.failures >= crowdrelay_domain::content_supply::MAX_ARTIFACT_ATTEMPTS
+        || now < failure.retry_due()
+    {
+        return None;
+    }
+    Some(format!(":attempt{}", failure.failures))
+}
+
 /// The relay fan-out for one synced band post: one push to the owned
 /// audience, plus one community post per admitted community. No version in
 /// either key — a caption edit bumps the source version, and re-relaying an
@@ -244,6 +269,9 @@ fn relay_candidates(
         {
             continue;
         }
+        let Some(retry) = relay_retry(target, snapshot.source_id, now) else {
+            continue;
+        };
         let address = if target.platform == "reddit" {
             format!("r/{}", target.subreddit)
         } else {
@@ -322,10 +350,12 @@ fn relay_candidates(
                 tier: crowdrelay_brain::AgentTier::Basic,
             },
             decision_key: format!(
-                "decision:relay:v{}:{source}:community:{target_id}",
+                "decision:relay:v{}:{source}:community:{target_id}{retry}",
                 policy.version
             ),
-            action_idempotency_key: format!("action:relay:{source}:community:{target_id}"),
+            action_idempotency_key: format!(
+                "action:relay:{source}:community:{target_id}{retry}"
+            ),
         });
     }
     Ok(out)

@@ -59,6 +59,7 @@ fn surge_community() -> crowdrelay_domain::content_supply::CommunityRelayTarget 
         platform: "reddit".to_owned(),
         community_url: None,
         language: Some("en".to_owned()),
+        relay_failures: Vec::new(),
     }
 }
 
@@ -376,5 +377,126 @@ fn a_source_without_a_link_or_with_communication_off_never_surges()
             "url={url:?} communication={communication:?} must not surge"
         );
     }
+    Ok(())
+}
+
+/// A relay dispatch whose action — or the drafting task it queued —
+/// failed is neither sent nor in flight. Re-emitting it under the same
+/// key dedupes onto the dead action while the target loader keeps
+/// re-selecting the community, so the retry carries its attempt number
+/// and waits out the same backoff the artifact chain uses.
+#[test]
+fn a_failed_community_relay_retries_under_an_attempt_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_domain::{
+        ContentSourceId, OutreachTargetId,
+        content_supply::{
+            CommunityRelayTarget, ContentSupplyPolicy, ContentSupplySnapshot, PostResonance,
+            RelayLaneFailure, SocialPostFact,
+        },
+    };
+    let now = OffsetDateTime::now_utc();
+    let source = ContentSourceId::new();
+    let snapshot = ContentSupplySnapshot {
+        source_id: source,
+        source_kind: ContentSourceKind::SocialPost,
+        source_version: 1,
+        source_key: String::new(),
+        title: String::new(),
+        source_url: None,
+        source_body: None,
+        source_thumbnail_url: None,
+        site_origin: None,
+        drop_surge_failures: Vec::new(),
+        surge_requested_at: None,
+        promotion_excluded_platforms: Vec::new(),
+        occurred_at: now - time::Duration::hours(40),
+        expires_at: now + time::Duration::days(40),
+        communication_enabled: None,
+        press_enabled: None,
+        release_tier: None,
+        completed_artifacts: Vec::new(),
+        in_flight_artifacts: Vec::new(),
+        failed_artifacts: Vec::new(),
+        social_post: Some(SocialPostFact {
+            title: "rehearsal cut".to_owned(),
+            url: Some("https://instagram.com/p/xyz".to_owned()),
+            platform: "instagram".to_owned(),
+            body: Some("rehearsal cut of the new one".to_owned()),
+            media_url: None,
+            media_id: None,
+            media_type: None,
+            thumbnail_url: None,
+            acquired_fans: 1,
+            resonance: Some(PostResonance {
+                engagement: 10,
+                peer_median: Some(40),
+                peers: 12,
+                ..Default::default()
+            }),
+        }),
+    };
+    let policy = AutopilotPolicy {
+        context: AutopilotContext::ContentSupply,
+        enabled: true,
+        autonomy_level: AutonomyLevel::BoundedAuto,
+        minimum_confidence: Confidence::from_basis_points(5_000)?,
+        max_actions_24h: 10,
+        config: AutopilotPolicyConfig::ContentSupply(ContentSupplyPolicy::default()),
+        version: 1,
+        guarded_until: None,
+        guardrail_reason: None,
+    };
+    let community = |failures: Vec<RelayLaneFailure>| {
+        CommunityRelayTarget {
+            target_id: OutreachTargetId::new(),
+            subreddit: "doommetal".to_owned(),
+            platform: "reddit".to_owned(),
+            community_url: None,
+            language: Some("en".to_owned()),
+            relay_failures: failures,
+        }
+    };
+    let failure = |failures: u32, ago: time::Duration| RelayLaneFailure {
+        source_id: source,
+        failures,
+        last_failed_at: now - ago,
+    };
+    let relay_key = |communities: &[CommunityRelayTarget]| {
+        content_candidates(&snapshot, &policy, communities, None, ContextEvidence::UNPROVEN, now)
+            .map(|candidates| {
+                candidates.iter().find_map(|candidate| {
+                    candidate
+                        .action_idempotency_key
+                        .contains(":community:")
+                        .then(|| candidate.action_idempotency_key.clone())
+                })
+            })
+    };
+
+    // A lane with no failures emits the base key; one due failure emits
+    // the first retry key — a new action, not a dedupe onto the dead one.
+    let fresh = relay_key(&[community(Vec::new())])?;
+    assert!(fresh.is_some_and(|key| !key.contains(":attempt")));
+    let due = relay_key(&[community(vec![failure(1, time::Duration::minutes(31))])])?;
+    assert_eq!(due.as_deref().map(|key| &key[key.len() - 8..]), Some("attempt1"));
+
+    // Inside the backoff window the lane waits; at the attempt cap it
+    // stays silent rather than spamming the community.
+    let waiting = relay_key(&[community(vec![failure(1, time::Duration::minutes(5))])])?;
+    assert!(waiting.is_none(), "a lane in backoff emits nothing");
+    let spent = relay_key(&[community(vec![failure(
+        crowdrelay_domain::content_supply::MAX_ARTIFACT_ATTEMPTS,
+        time::Duration::days(30),
+    )])])?;
+    assert!(spent.is_none(), "an exhausted lane emits nothing");
+
+    // A failure that carried another source never touches this lane.
+    let foreign = relay_key(&[community(vec![RelayLaneFailure {
+        source_id: ContentSourceId::new(),
+        failures: crowdrelay_domain::content_supply::MAX_ARTIFACT_ATTEMPTS,
+        last_failed_at: now - time::Duration::days(30),
+    }])])?;
+    assert!(foreign.is_some_and(|key| !key.contains(":attempt")));
     Ok(())
 }

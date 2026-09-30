@@ -585,6 +585,7 @@ mod tests {
                 platform: "reddit".to_owned(),
                 community_url: None,
                 language: Some("en".to_owned()),
+                relay_failures: Vec::new(),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
@@ -592,6 +593,7 @@ mod tests {
                 platform: "reddit".to_owned(),
                 community_url: None,
                 language: None,
+                relay_failures: Vec::new(),
             },
         ];
 
@@ -833,6 +835,7 @@ mod tests {
             platform: "reddit".to_owned(),
             community_url: None,
             language: Some("en".to_owned()),
+            relay_failures: Vec::new(),
         }];
         // Five hours old: doing well, but too early to tell.
         let fresh = content_candidates(
@@ -955,6 +958,7 @@ mod tests {
                 platform: "reddit".to_owned(),
                 community_url: None,
                 language: Some("en".to_owned()),
+                relay_failures: Vec::new(),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
@@ -962,6 +966,7 @@ mod tests {
                 platform: "reddit".to_owned(),
                 community_url: None,
                 language: None,
+                relay_failures: Vec::new(),
             },
         ];
 

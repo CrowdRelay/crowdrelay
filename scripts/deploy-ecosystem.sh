@@ -204,7 +204,9 @@ old_tag="sha-${target}"
 sed -i "s|^CONTROL_PLANE_IMAGE_TAG=.*|CONTROL_PLANE_IMAGE_TAG=${old_tag}|" .env
 compose_args=(-f compose.production.yml -f compose.area.yml)
 [[ -f compose.agents.yml ]] && compose_args+=(-f compose.agents.yml)
-docker compose "${compose_args[@]}" up -d --no-deps --force-recreate --wait app virya-area-tunnel
+# The area tunnel service was removed from the control-plane stack — naming
+# it here aborts the rollback on a nonexistent service.
+docker compose "${compose_args[@]}" up -d --no-deps --force-recreate --wait app
 printf 'CONTROL_PLANE_ROLLBACK=PASS sha=%s\n' "$target"
 CP_ROLLBACK
 

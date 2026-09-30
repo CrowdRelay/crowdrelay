@@ -132,7 +132,7 @@ impl PgOutboxStore {
         let (inserted, completed) = sqlx::query_as::<_, (i64, i64)>(
             r#"
             WITH eligible AS (
-                SELECT event.id, event.workspace_id
+                SELECT event.id, event.workspace_id, event.event_type
                 FROM outbox_events AS event
                 WHERE event.id = ANY($1)
                   AND event.status = 'processing'
@@ -153,6 +153,12 @@ impl PgOutboxStore {
                 JOIN webhook_endpoints AS endpoint
                   ON endpoint.workspace_id = event.workspace_id
                  AND endpoint.active
+                 -- NULL event_types keeps the all-events default; a set
+                 -- list is the endpoint's subscription, so events the
+                 -- receiver cannot route (the n8n bridge answers 422 for
+                 -- them) never materialize as dead deliveries.
+                 AND (endpoint.event_types IS NULL
+                      OR event.event_type = ANY(endpoint.event_types))
                 ON CONFLICT (workspace_id, outbox_event_id, endpoint_id)
                 DO NOTHING
                 RETURNING 1

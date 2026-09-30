@@ -750,7 +750,9 @@ async fn route_capture_plan(
                VALUES ($1,$2,'capture_plan','done','Plan ujęć wydany — lista trafiła do przypisanej osoby.')
                ON CONFLICT (workspace_id, event_id, item_key)
                DO UPDATE SET status='done', updated_at=now()
-               WHERE show_checklist_items.status <> 'done'"#,
+               -- 'skipped'/'blocked' are operator calls — a verified fact
+               -- must not silently erase the note saying why.
+               WHERE show_checklist_items.status NOT IN ('done','skipped','blocked')"#,
         )
         .bind(workspace_id.into_uuid())
         .bind(event_id)

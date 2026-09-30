@@ -150,6 +150,12 @@ pub struct OutreachSnapshot {
     /// because the reply belongs to an opportunity that has since expired.
     pub target_ever_replied: bool,
     pub last_reply: OutreachReplyDisposition,
+    /// When the newest decline arrived, relationship-wide. The cooldown counts
+    /// from the "no" itself — measuring from `last_outreach_at` shortens it by
+    /// however long the answer took to come back, so a slow decline exits the
+    /// cooldown almost immediately.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_declined_at: Option<OffsetDateTime>,
     pub in_flight: bool,
     /// The opportunity may only be pitched inside a wave. Catalogue pitches
     /// are evergreen and plentiful — 196 contacts for one album in
@@ -296,7 +302,7 @@ pub fn evaluate_outreach(
             return OutreachDecision::Hold(OutreachHoldReason::AlreadyReplied);
         }
         OutreachReplyDisposition::Declined => {
-            if snapshot.last_outreach_at.is_none_or(|at| {
+            if snapshot.last_declined_at.is_none_or(|at| {
                 now - at < Duration::days(i64::from(policy.declined_cooldown_days))
             }) {
                 return OutreachDecision::Hold(OutreachHoldReason::Cooldown);
@@ -334,14 +340,14 @@ pub fn evaluate_outreach(
             if now - last >= Duration::days(i64::from(policy.thread_followup_window_days)) {
                 return OutreachDecision::Hold(OutreachHoldReason::StaleOpportunity);
             }
-            return request(OutreachPhase::FollowUp, snapshot);
+            return request(OutreachPhase::FollowUp, snapshot, policy);
         }
         if snapshot.target_last_outreach_at.is_some_and(|at| {
             at > now || now - at < Duration::days(i64::from(policy.initial_cooldown_days))
         }) {
             return OutreachDecision::Hold(OutreachHoldReason::Cooldown);
         }
-        return request(OutreachPhase::Initial, snapshot);
+        return request(OutreachPhase::Initial, snapshot, policy);
     };
     if last_outreach > now {
         return OutreachDecision::Hold(OutreachHoldReason::InvalidSnapshot);
@@ -352,13 +358,17 @@ pub fn evaluate_outreach(
     if now - last_outreach < Duration::days(i64::from(policy.followup_after_days)) {
         return OutreachDecision::Hold(OutreachHoldReason::FollowUpNotDue);
     }
-    request(OutreachPhase::FollowUp, snapshot)
+    request(OutreachPhase::FollowUp, snapshot, policy)
 }
 
-fn request(phase: OutreachPhase, snapshot: OutreachSnapshot) -> OutreachDecision {
+fn request(
+    phase: OutreachPhase,
+    snapshot: OutreachSnapshot,
+    policy: OutreachPolicy,
+) -> OutreachDecision {
     let relevance_bonus = snapshot
         .relevance_basis_points
-        .saturating_sub(7_000)
+        .saturating_sub(policy.minimum_relevance_basis_points)
         .min(1_000);
     let confidence = snapshot
         .evidence_confidence
@@ -481,6 +491,7 @@ mod tests {
             lifetime_outbound: 0,
             target_ever_replied: false,
             last_reply: OutreachReplyDisposition::None,
+            last_declined_at: None,
             in_flight: false,
             wave_only: false,
             thread_followup: false,
@@ -517,6 +528,71 @@ mod tests {
             evaluate_outreach(data, OutreachPolicy::default(), now()),
             OutreachDecision::Hold(OutreachHoldReason::AlreadyReplied),
         );
+    }
+
+    /// A "no" cools the thread from the day it landed, not from the pitch it
+    /// answered: pitches long past their own cooldown still hold while the
+    /// decline is fresh.
+    #[test]
+    fn a_decline_cools_down_from_the_decline_not_the_last_pitch() {
+        let mut snapshot = eligible();
+        snapshot.last_reply = OutreachReplyDisposition::Declined;
+        snapshot.last_declined_at = Some(now() - Duration::days(30));
+        snapshot.last_outreach_at = Some(now() - Duration::days(400));
+        snapshot.target_last_outreach_at = Some(now() - Duration::days(400));
+        snapshot.target_ever_replied = true;
+        assert_eq!(
+            evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
+            OutreachDecision::Hold(OutreachHoldReason::Cooldown)
+        );
+    }
+
+    /// Once the decline has aged past its cooldown the contact may be
+    /// approached again — the opportunity still has to clear the relevance
+    /// floor, which happens before the reply gate.
+    #[test]
+    fn a_decline_older_than_its_cooldown_requalifies() {
+        let mut snapshot = eligible();
+        snapshot.last_reply = OutreachReplyDisposition::Declined;
+        snapshot.last_declined_at = Some(now() - Duration::days(200));
+        snapshot.last_outreach_at = Some(now() - Duration::days(200));
+        snapshot.target_ever_replied = true;
+        assert!(matches!(
+            evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
+            OutreachDecision::Request { .. }
+        ));
+    }
+
+    /// An explicit opt-out is not a cooldown: it never expires.
+    #[test]
+    fn a_do_not_contact_is_permanent() {
+        let mut snapshot = eligible();
+        snapshot.last_reply = OutreachReplyDisposition::DoNotContact;
+        snapshot.last_declined_at = Some(now() - Duration::days(10_000));
+        snapshot.last_outreach_at = Some(now() - Duration::days(10_000));
+        snapshot.target_ever_replied = true;
+        assert_eq!(
+            evaluate_outreach(snapshot, OutreachPolicy::default(), now()),
+            OutreachDecision::Hold(OutreachHoldReason::AlreadyReplied)
+        );
+    }
+
+    /// The relevance bonus counts from the configured floor: an operator who
+    /// raises the bar must see request confidence fall with it, not ride on a
+    /// stale constant.
+    #[test]
+    fn the_relevance_bonus_is_measured_above_the_policy_floor() {
+        let policy = OutreachPolicy {
+            minimum_relevance_basis_points: 8_000,
+            ..OutreachPolicy::default()
+        };
+        let OutreachDecision::Request { confidence, .. } =
+            evaluate_outreach(eligible(), policy, now())
+        else {
+            panic!("an eligible snapshot must produce a request");
+        };
+        // 8500 relevance − 8000 floor = 500 bonus over 9000 evidence.
+        assert_eq!(confidence.basis_points(), 9_500);
     }
 
     #[test]

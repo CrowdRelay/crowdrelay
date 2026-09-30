@@ -173,6 +173,9 @@ async fn process_one(
         WHERE workspace_id = $1
           AND action_id = $2
           AND resolved_at IS NOT NULL
+        -- Normally one row per action; legacy duplicates made the pick
+        -- nondeterministic, and a rerun could attribute a different amount.
+        ORDER BY resolved_at DESC, id DESC
         LIMIT 1
         "#,
     )

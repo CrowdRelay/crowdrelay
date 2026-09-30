@@ -220,6 +220,22 @@ impl BootstrapSpec {
             if !(MIN_WEBHOOK_ATTEMPTS..=MAX_WEBHOOK_ATTEMPTS).contains(&raw_endpoint.max_attempts) {
                 return Err(invalid_field("webhook_endpoints[].max_attempts"));
             }
+            let event_types = raw_endpoint
+                .event_types
+                .map(|types| {
+                    types
+                        .into_iter()
+                        .map(|event_type| {
+                            let trimmed = event_type.trim().to_owned();
+                            if trimmed.is_empty() {
+                                Err(invalid_field("webhook_endpoints[].event_types"))
+                            } else {
+                                Ok(trimmed)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?;
 
             webhook_endpoints.push(WebhookEndpointSpec {
                 name,
@@ -228,6 +244,7 @@ impl BootstrapSpec {
                 timeout_ms: raw_endpoint.timeout_ms,
                 max_attempts: raw_endpoint.max_attempts,
                 active: raw_endpoint.active,
+                event_types,
             });
         }
 

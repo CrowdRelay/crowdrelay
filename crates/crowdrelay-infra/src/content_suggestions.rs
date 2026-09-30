@@ -275,7 +275,7 @@ impl PostgresContentEngineRepository {
                 FROM content_sources AS source
                 JOIN autopilot_actions AS action
                   ON action.workspace_id = source.workspace_id
-                 AND lower(action.payload->>'source_id') = source.id::text
+                 AND lower(COALESCE(action.payload->>'source_id', action.payload->'draft'->>'source_id')) = source.id::text
                 JOIN post_receipts AS post
                   ON post.workspace_id = action.workspace_id
                  AND post.action_id = action.id
@@ -291,7 +291,7 @@ impl PostgresContentEngineRepository {
                 FROM published_sources AS source
                 JOIN autopilot_actions AS action
                   ON action.workspace_id = $1
-                 AND lower(action.payload->>'source_id') = source.source_id::text
+                 AND lower(COALESCE(action.payload->>'source_id', action.payload->'draft'->>'source_id')) = source.source_id::text
                 WHERE source.published_at <=
                       now() - make_interval(days => $2)
             )
@@ -439,7 +439,7 @@ impl PostgresContentEngineRepository {
                 FROM content_sources AS source
                 JOIN autopilot_actions AS action
                   ON action.workspace_id = source.workspace_id
-                 AND lower(action.payload->>'source_id') = source.id::text
+                 AND lower(COALESCE(action.payload->>'source_id', action.payload->'draft'->>'source_id')) = source.id::text
                 JOIN post_receipts AS post
                   ON post.workspace_id = action.workspace_id
                  AND post.action_id = action.id
@@ -456,7 +456,7 @@ impl PostgresContentEngineRepository {
                 FROM published_sources AS source
                 JOIN autopilot_actions AS action
                   ON action.workspace_id = source.workspace_id
-                 AND lower(action.payload->>'source_id') = source.source_id::text
+                 AND lower(COALESCE(action.payload->>'source_id', action.payload->'draft'->>'source_id')) = source.source_id::text
                 WHERE source.published_at <=
                       now() - make_interval(days => $2)
             )

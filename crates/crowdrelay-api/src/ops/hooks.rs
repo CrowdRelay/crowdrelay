@@ -205,6 +205,10 @@ async fn load_fan_links(
             FROM fan_provenance_events AS pe
             WHERE pe.workspace_id = $1
               AND pe.event_kind = 'conversion'
+              -- source_target carries a smart-link slug only for tracked
+              -- clicks — direct arrivals and referral rows write fan ids and
+              -- labels there, which must not join against links.
+              AND pe.attribution_method = 'last_tracked_click'
               AND pe.fan_id IS NOT NULL
               AND pe.source_target IS NOT NULL
               AND pe.occurred_at >= $2 - interval '90 days'

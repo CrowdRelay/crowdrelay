@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::common;
 use crowdrelay_application::autopilot::EvaluateAutopilot;
-use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::{OutreachTargetId, WorkspaceId, outreach::OutreachReplyDisposition};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -1102,6 +1102,59 @@ async fn a_show_opportunity_writes_the_show_letter_to_local_contacts_only()
     assert!(
         !body.contains("zaproponować Wam Echoes"),
         "the album pitch: {body}"
+    );
+    Ok(())
+}
+
+/// A "no, thanks" starts its cooldown on the day it landed, and the evaluator
+/// can only count from it when the snapshot carries the decline's own
+/// timestamp — this is the query that teaches it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_declined_reply_starts_its_cooldown_on_the_day_it_landed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = fixture("decline-clock").await?;
+    let target = f.target("Grumpy Zine", "press", true, false, None).await?;
+    sqlx::query(
+        "INSERT INTO outreach_opportunities
+             (workspace_id, target_id, source, subject_kind, subject_key, template_key,
+              relevance_basis_points, confidence_basis_points, observed_at, expires_at)
+         VALUES ($1, $2, 'release_autopilot', 'release', 'release:x', 'release',
+                 8500, 9000, $3, $4)",
+    )
+    .bind(f.ws())
+    .bind(target)
+    .bind(f.now - time::Duration::days(400))
+    .bind(f.now + time::Duration::days(30))
+    .execute(&f.pool)
+    .await?;
+    // The pitch is ancient; the "no" is fresh. The clock belongs to the "no".
+    f.message(target, "outbound", None, 400, "pitch-1").await?;
+    sqlx::query(
+        "INSERT INTO outreach_interactions
+             (workspace_id, target_id, opportunity_id, direction, phase, disposition,
+              source_key, occurred_at)
+         VALUES ($1, $2, NULL, 'inbound', 'reply', 'declined', 'decline-1', $3)",
+    )
+    .bind(f.ws())
+    .bind(target)
+    .bind(f.now - time::Duration::days(30))
+    .execute(&f.pool)
+    .await?;
+
+    let snapshots = f
+        .repository
+        .load_target_outreach_snapshots(f.workspace_id, OutreachTargetId::from_uuid(target))
+        .await?;
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = &snapshots[0];
+    assert_eq!(snapshot.last_reply, OutreachReplyDisposition::Declined);
+    let declined_at = snapshot
+        .last_declined_at
+        .expect("the decline's own timestamp is in the snapshot");
+    assert!(
+        (declined_at - (f.now - time::Duration::days(30))).abs() < time::Duration::seconds(1),
+        "the decline time survived the round trip: {declined_at}"
     );
     Ok(())
 }

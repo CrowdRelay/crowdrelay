@@ -152,32 +152,32 @@ impl GrowthMetricSyncWorker {
               AND cs.source_kind = 'video'
               AND cs.source_key LIKE 'youtube:%'
               AND cs.occurred_at > now() - ($1::bigint * interval '1 second')
-            ORDER BY cs.occurred_at DESC
+              -- Due-ness belongs to the query, not the page: LIMIT before it
+              -- let fifty fresh videos permanently starve every stale one.
+              AND (latest.captured_at IS NULL
+                   OR latest.captured_at <= now() - ($3::bigint * interval '1 second'))
+            ORDER BY latest.captured_at ASC NULLS FIRST, cs.occurred_at DESC
             LIMIT $2
             "#,
         )
         .bind(TRAFFIC_WINDOW.as_secs() as i64)
         .bind(MAX_VIDEOS_PER_CYCLE)
+        .bind(TRAFFIC_INTERVAL.as_secs() as i64)
         .fetch_all(&self.pool)
         .await?;
 
-        let now = OffsetDateTime::now_utc();
         // Tokens are resolved per workspace and cached for the cycle, so a
         // workspace without a grant warns once rather than once per video.
         let mut tokens: HashMap<Uuid, Option<String>> = HashMap::new();
-        // A refused token ends the cycle: every remaining video would meet
-        // the same 401/403, and the warn below already said so once.
-        let mut auth_blocked = false;
-        for (source_id, workspace_id, source_key, title, occurred_at, latest) in sources {
-            if auth_blocked {
-                break;
-            }
-            let due = match latest {
-                Some(captured_at) => (now - captured_at).unsigned_abs() >= TRAFFIC_INTERVAL,
-                // No traffic point yet — first sight is always due.
-                None => true,
-            };
-            if !due {
+        // A refused token ends the cycle for its workspace alone: every
+        // remaining video of that tenant would meet the same 401/403, and the
+        // warn below already said so once. Other workspaces still sweep.
+        let mut auth_blocked: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        // A request error is one video's problem, not the sweep's — keep
+        // going and report the first failure once everything else ran.
+        let mut first_error: Option<GrowthMetricSyncError> = None;
+        for (source_id, workspace_id, source_key, title, occurred_at, _latest) in sources {
+            if auth_blocked.contains(&workspace_id) {
                 continue;
             }
             let Some(video_id) = source_key
@@ -212,12 +212,20 @@ impl GrowthMetricSyncWorker {
             {
                 Ok(()) => {}
                 Err(TrafficError::Forbidden) => {
-                    auth_blocked = true;
+                    auth_blocked.insert(workspace_id);
                 }
-                Err(TrafficError::Request(error)) => return Err(error),
+                Err(TrafficError::Request(error)) => {
+                    tracing::warn!(%error, %source_id, "youtube analytics: video traffic read failed; continuing sweep");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// The channel owner's grant for Analytics reads, refreshed if due.
@@ -228,6 +236,9 @@ impl GrowthMetricSyncWorker {
             r#"
             SELECT id, external_account_ref FROM fanbase_connections
             WHERE workspace_id = $1 AND platform = 'youtube_account' AND status = 'connected'
+              -- The scorecard calls the same scope test "measured"; a grant
+              -- without it only produces 403s against the Analytics endpoint.
+              AND token_scope ILIKE '%yt-analytics%'
             ORDER BY updated_at DESC
             LIMIT 1
             "#,
@@ -241,7 +252,8 @@ impl GrowthMetricSyncWorker {
         });
         let Some((connection_id, account_ref)) = grant else {
             tracing::warn!(
-                "youtube analytics: no youtube_account grant; traffic sources are unmeasured"
+                "youtube analytics: no youtube_account grant carrying yt-analytics scope; \
+                 traffic sources are unmeasured until the connection is re-authorised"
             );
             return None;
         };
@@ -263,6 +275,29 @@ impl GrowthMetricSyncWorker {
             Ok(token) => Some(token),
             Err(error) => {
                 tracing::warn!(%error, "youtube analytics: grant could not produce an access token");
+                // A terminal auth failure is a dead grant, not a retryable
+                // miss — mark it expired the way the TikTok refresh path does
+                // so the connections surface says re-auth, not still-connected.
+                if (error.contains("invalid_grant")
+                    || error.contains("status=400")
+                    || error.contains("status=401"))
+                    && let Err(write) = sqlx::query(
+                        "UPDATE fanbase_connections SET status = 'expired', \
+                         last_sync_failed_at = now(), last_sync_error = $3, \
+                         updated_at = now() \
+                         WHERE workspace_id = $1 AND id = $2",
+                    )
+                    .bind(workspace_id)
+                    .bind(connection_id)
+                    .bind(&error)
+                    .execute(&self.pool)
+                    .await
+                {
+                    tracing::warn!(
+                        %write, %connection_id,
+                        "youtube analytics: could not mark the connection expired"
+                    );
+                }
                 None
             }
         }

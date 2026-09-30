@@ -387,9 +387,10 @@ async fn upsert_webhook_endpoint(
             signing_secret_ref,
             timeout_ms,
             max_attempts,
-            active
+            active,
+            event_types
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (workspace_id, name) DO NOTHING
         RETURNING id
         "#,
@@ -401,6 +402,7 @@ async fn upsert_webhook_endpoint(
     .bind(i32::try_from(endpoint.timeout_ms).map_err(|_| BootstrapError::Database)?)
     .bind(i32::from(endpoint.max_attempts))
     .bind(endpoint.active)
+    .bind(endpoint.event_types.as_deref())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| BootstrapError::Database)?;
@@ -434,11 +436,12 @@ async fn upsert_webhook_endpoint(
             url = $3,
             timeout_ms = $4,
             max_attempts = $5,
-            active = $6
+            active = $6,
+            event_types = $7
         WHERE workspace_id = $1
           AND id = $2
-          AND ROW(url, timeout_ms, max_attempts, active)
-              IS DISTINCT FROM ROW($3, $4, $5, $6)
+          AND ROW(url, timeout_ms, max_attempts, active, event_types)
+              IS DISTINCT FROM ROW($3, $4, $5, $6, $7)
         "#,
     )
     .bind(workspace_id)
@@ -447,6 +450,7 @@ async fn upsert_webhook_endpoint(
     .bind(i32::try_from(endpoint.timeout_ms).map_err(|_| BootstrapError::Database)?)
     .bind(i32::from(endpoint.max_attempts))
     .bind(endpoint.active)
+    .bind(endpoint.event_types.as_deref())
     .execute(&mut **transaction)
     .await
     .map_err(|_| BootstrapError::Database)?

@@ -531,7 +531,9 @@ async fn persist_decision_and_action_tx(
         .map_err(map_sqlx)?;
     }
     Ok(DecisionActionOutcome::ActionReady {
-        decision_created: true,
+        // The decision INSERT dedupes on a prior cycle's row — `inserted`
+        // reporting must say so or the ledger overcounts new decisions.
+        decision_created: inserted_decision.is_some(),
         action_id: real_action_id,
         inserted: action_inserted,
     })

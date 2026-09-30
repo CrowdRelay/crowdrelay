@@ -77,19 +77,15 @@ class BoringProductionDeployContract(unittest.TestCase):
         self.assertIn("verify_management_proxy", CTL)
         self.assertIn("MANAGEMENT_PROXY=PASS", CTL)
         self.assertIn("CROWDRELAY_AREA_MANAGEMENT_CONFIG_SHA256", CTL)
-        for route in (
-            "/v1/control-plane/area",
-            "/v1/control-plane/ops/summary",
-            "/v1/control-plane/ecosystem/flags",
-            "/v1/control-plane/autopilot/overview",
-        ):
-            self.assertIn(route, SAFE_DEPLOY)
+        # The virya-area-tunnel proxy was removed; the gate asserts the direct
+        # management URL instead of inspecting a container that is gone.
+        self.assertNotIn("crowdrelay-control-plane-virya-area-tunnel", SAFE_DEPLOY)
         self.assertIn("expected=401", SAFE_DEPLOY)
         self.assertIn("CROWDRELAY_CONTROL_PLANE_HOST:-virya-crowdrelay", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_AREA_MANAGEMENT_MASTER_KEY", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_MANAGEMENT_MASTER_KEY", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_VIRYA_MANAGEMENT_URL", SAFE_DEPLOY)
-        self.assertIn("http://127.0.0.1:18080", SAFE_DEPLOY)
+        self.assertIn("http://crowdrelay-api-active:8080", SAFE_DEPLOY)
         self.assertIn("CONTROL_PLANE_CROSS_GATE=PASS", SAFE_DEPLOY)
         self.assertIn("CROWDRELAY_SAFE_DEPLOY=PASS", SAFE_DEPLOY)
 

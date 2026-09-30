@@ -183,7 +183,11 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                  AND provenance.event_kind = 'conversion'
                  AND provenance.attribution_method = 'last_tracked_click'
                 WHERE action.workspace_id = source.workspace_id
-                  AND lower(action.payload->>'source_id') = source.id::text
+                  -- The draft payload shape nests the source id one level
+                  -- down; flat-only reads silently lose those conversions.
+                  AND lower(COALESCE(action.payload->>'source_id',
+                                     action.payload->'draft'->>'source_id'))
+                      = source.id::text
                   AND provenance.occurred_at >= source.occurred_at
             ) ELSE 0 END AS post_acquired_fans,
             -- How the post landed at home (weighted engagement the sync

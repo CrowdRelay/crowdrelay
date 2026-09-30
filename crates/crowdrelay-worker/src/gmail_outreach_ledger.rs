@@ -425,6 +425,10 @@ impl GmailContactsSyncWorker {
             next_batch(addresses, &last, RECONCILE_BATCH)
         };
         let mut report = ReconcileReport::default();
+        // One unreadable message must not abort the contacts behind it — a
+        // persistent failure would otherwise starve every later target in the
+        // batch. First error is kept and reported once everything else ran.
+        let mut first_error: Option<String> = None;
         for (target_id, address) in batch {
             let query = format!("from:{address} OR to:{address} OR cc:{address} newer_than:365d");
             let listed: MessageList = self
@@ -466,7 +470,16 @@ impl GmailContactsSyncWorker {
                     Ok(read) => read,
                     // A message deleted between the search and the read.
                     Err(error) if error.ends_with("status=404") => continue,
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error, message_id = %message.id,
+                            "ledger reconcile: message read failed; continuing"
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    }
                 };
                 report.messages_read += 1;
                 let headers = read.payload.and_then(|p| p.headers).unwrap_or_default();
@@ -508,9 +521,22 @@ impl GmailContactsSyncWorker {
         )
         .await
         .map_err(|error| format!("unbodied replies read failed: {error}"))?;
+        // One unreadable reply must not starve the ones behind it — the list
+        // is oldest-first, so a failing message would head-of-line block the
+        // whole backfill forever.
         for (message_id, target, occurred_at) in unbodied {
-            self.capture_reply_body(connection_id, &message_id, &[target], occurred_at)
-                .await?;
+            if let Err(error) = self
+                .capture_reply_body(connection_id, &message_id, &[target], occurred_at)
+                .await
+            {
+                tracing::warn!(%error, %message_id, "reply-body backfill: message failed; continuing");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(report)
     }

@@ -55,6 +55,11 @@ struct RawWebhookEndpointSpec {
     timeout_ms: u32,
     max_attempts: u16,
     active: bool,
+    /// Event types the endpoint accepts. Absent means the whole fire hose;
+    /// the n8n bridge carries its route map's keys so an event with no
+    /// route never materializes a dead delivery.
+    #[serde(default)]
+    event_types: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -326,4 +331,5 @@ struct WebhookEndpointSpec {
     timeout_ms: u32,
     max_attempts: u16,
     active: bool,
+    event_types: Option<Vec<String>>,
 }

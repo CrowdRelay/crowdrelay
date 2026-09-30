@@ -254,6 +254,7 @@ struct OutreachRow {
     lifetime_outbound: i32,
     target_ever_replied: bool,
     last_reply_disposition: String,
+    last_declined_at: Option<OffsetDateTime>,
     in_flight: bool,
     wave_only: bool,
     thread_followup: bool,
@@ -333,6 +334,16 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
                   AND interaction.phase = 'reply'
                 ORDER BY interaction.occurred_at DESC, interaction.id DESC LIMIT 1
             ), 'none') AS last_reply_disposition,
+            -- When the newest decline arrived, target-wide: the cooldown
+            -- counts from the "no", not the pitch it answered.
+            (SELECT max(interaction.occurred_at)
+             FROM outreach_interactions AS interaction
+             WHERE interaction.workspace_id = opportunity.workspace_id
+               AND interaction.target_id = target.id
+               AND interaction.direction = 'inbound'
+               AND interaction.phase = 'reply'
+               AND interaction.disposition = 'declined'
+            ) AS last_declined_at,
             EXISTS (
                 SELECT 1
                 FROM autopilot_actions AS action
@@ -382,6 +393,7 @@ fn outreach_row_to_snapshot(row: OutreachRow) -> Result<OutreachSnapshot, Reposi
             .map_err(|_| RepositoryError::Unexpected)?,
         target_ever_replied: row.target_ever_replied,
         last_reply: parse_outreach_reply(&row.last_reply_disposition)?,
+        last_declined_at: row.last_declined_at,
         in_flight: row.in_flight,
         wave_only: row.wave_only,
         thread_followup: row.thread_followup,

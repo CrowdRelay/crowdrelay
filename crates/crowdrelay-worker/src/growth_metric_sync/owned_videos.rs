@@ -53,9 +53,10 @@ impl GrowthMetricSyncWorker {
             // and channel sweeps take toward a missing credential.
             None => return Ok(()),
         };
-        // Each row carries its newest point's timestamp; due-ness is decided
-        // in Rust by `owned_video_interval` so the cadence rule lives in one
-        // testable place rather than inside a SQL CASE.
+        // Each row carries its newest point's timestamp; the due predicate
+        // belongs to the query — LIMIT ahead of it let the fifty freshest
+        // videos permanently starve every stale one. The age rule mirrors
+        // `owned_video_interval`; the Rust check below stays as the guard.
         let sources = sqlx::query_as::<
             _,
             (
@@ -83,12 +84,19 @@ impl GrowthMetricSyncWorker {
               AND cs.source_kind = 'video'
               AND cs.source_key LIKE 'youtube:%'
               AND cs.occurred_at > now() - ($1::bigint * interval '1 second')
-            ORDER BY cs.occurred_at DESC
+              AND (latest.captured_at IS NULL
+                   OR latest.captured_at <= now() - (
+                       CASE WHEN cs.occurred_at > now() - ($3::bigint * interval '1 second')
+                            THEN $4 ELSE $5 END * interval '1 second'))
+            ORDER BY latest.captured_at ASC NULLS FIRST, cs.occurred_at DESC
             LIMIT $2
             "#,
         )
         .bind(OWNED_VIDEO_WINDOW.as_secs() as i64)
         .bind(MAX_OWNED_VIDEOS_PER_CYCLE)
+        .bind(FRESH_VIDEO_AGE.as_secs() as i64)
+        .bind(FRESH_VIDEO_INTERVAL.as_secs() as i64)
+        .bind(SETTLED_VIDEO_INTERVAL.as_secs() as i64)
         .fetch_all(&self.pool)
         .await?;
 

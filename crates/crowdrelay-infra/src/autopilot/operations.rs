@@ -13,7 +13,7 @@ use crowdrelay_domain::{
     campaign_lifecycle::{EventCampaignHistory, EventCampaignSnapshot},
     content_supply::{
         CommunityRelayTarget, ContentArtifactKind, ContentSourceKind, ContentSupplySnapshot,
-        SocialPostFact,
+        RelayLaneFailure, SocialPostFact,
     },
     experimentation::{ExperimentMetric, ExperimentSnapshot, ExperimentVariantSnapshot},
     merch_bundle::MerchBundleSnapshot,
