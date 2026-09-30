@@ -541,11 +541,11 @@ mod tests_booking {
         Ok(())
     }
 
-    /// Adaptive autonomy: when the tenant is visibly booking, partner outreach
-    /// stays per-action and human-led. When that activity is sparse, the same
-    /// explicit show-ladder approval becomes the bounded backstop.
+    /// The generic show-growth ladder skips relationship stages but keeps
+    /// moving into owned organic growth. Partner/scene contact is produced by
+    /// the named Beacon/booking loops; fan ambassadors remain this loop's job.
     #[test]
-    fn show_ladder_partner_autonomy_tracks_tenant_booking_activity()
+    fn relationship_stages_do_not_block_owned_show_growth()
     -> Result<(), Box<dyn std::error::Error>> {
         use crowdrelay_domain::show_growth::{
             ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy, ShowGrowthSnapshot,
@@ -563,11 +563,11 @@ mod tests_booking {
             guardrail_reason: None,
         };
         let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
-        let snapshot = |approved: bool, human_booking_targets_30d: u32| ShowGrowthSnapshot {
+        let snapshot = ShowGrowthSnapshot {
             event_id: EventId::new(),
             published: true,
             communication_enabled: true,
-            starts_at: now + time::Duration::days(40),
+            starts_at: now + time::Duration::days(30),
             capacity: 100,
             paid_tickets: 8,
             paid_buyers: 6,
@@ -575,12 +575,12 @@ mod tests_booking {
             interested_fans: 30,
             city_signal_fans: 20,
             qualified_referrers_in_city: 4,
-            beacon_partners: 0,
-            human_booking_targets_30d,
+            beacon_partners: 2,
+            human_booking_targets_30d: 0,
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
-            ladder_approved: approved,
+            ladder_approved: false,
             history: ShowGrowthHistory {
                 canonical_link_setup_requested: true,
                 free_listing_sweep_requested: true,
@@ -589,40 +589,24 @@ mod tests_booking {
             },
         };
 
-        let parked = show_growth::show_growth_candidates(snapshot(false, 0), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
-        assert_eq!(parked.len(), 1);
-        assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
-        assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
-
-        // Three distinct tenant-side targets in 30 days means there is a real
-        // booking cadence to work with: CrowdRelay assists but does not consume
-        // the relationship on a broad campaign approval.
-        let active = show_growth::show_growth_candidates(snapshot(true, 3), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].disposition, PolicyDisposition::RequireApproval);
-        assert_eq!(active[0].policy_snapshot.get("ladder_authorized"), None);
-
-        // Sparse tenant activity flips the same ladder into backstop mode.
-        // The disposition remains honest, while persistence can honour the
-        // explicit ladder authorization without asking again.
-        let quiet = show_growth::show_growth_candidates(snapshot(true, 1), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
-        assert_eq!(quiet.len(), 1);
-        assert_eq!(quiet[0].disposition, PolicyDisposition::RequireApproval);
-        assert_eq!(
-            quiet[0].policy_snapshot.get("ladder_authorized"),
-            Some(&serde_json::Value::Bool(true))
-        );
-        assert_eq!(
-            quiet[0].policy_snapshot.get("relationship_backstop_authorized"),
-            Some(&serde_json::Value::Bool(true))
-        );
+        let candidates = show_growth::show_growth_candidates(
+            snapshot,
+            &policy,
+            ContextEvidence::measured(EvidenceCount(RATE_FLOOR)),
+            &std::collections::HashMap::new(),
+            true,
+            &std::collections::HashMap::new(),
+            now,
+        )?;
+        assert_eq!(candidates.len(), 1);
         assert!(matches!(
-            quiet[0].action,
+            candidates[0].action,
             AutopilotActionPayload::RequestShowGrowth {
-                lever: ShowGrowthLever::PartnerCrossPromo,
+                lever: ShowGrowthLever::FanAmbassadors,
                 ..
             }
         ));
         Ok(())
     }
+
 }
