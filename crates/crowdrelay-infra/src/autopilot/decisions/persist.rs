@@ -45,20 +45,18 @@ async fn persist_decision_and_action_tx(
     trace: &TraceContext,
 ) -> Result<DecisionActionOutcome, RepositoryError> {
     // ── Executor check ──
-    // Work that no live executor can perform is recorded as a
-    // recommendation, not asked for and not queued. Asking cost a person
-    // their attention and queuing cost the week's outward budget, and both
-    // bought an action the dispatcher parks and the stale sweep cancels a day
-    // later. On 2026-09-25 seven approved `beacon.outreach` actions sat
-    // parked (no executor has ever advertised it) and held seven of the ten
-    // weekly third-party touches, so no outreach wave could open for a show
-    // three weeks out.
+    // Work no live executor can perform is recorded as a recommendation, not
+    // asked for and not queued — asking cost a person attention and queuing
+    // cost the week's outward budget, and both bought an action the
+    // dispatcher parks and the stale sweep cancels. On 2026-09-25 seven
+    // approved `beacon.outreach` actions sat parked (no executor has ever
+    // advertised it) and held seven of the ten weekly third-party touches,
+    // so no outreach wave could open for a show three weeks out.
     //
-    // The decision row still records the finding, and because a later cycle
-    // re-evaluates the same key, the action is minted the first cycle after
-    // an executor advertises the capability. Fail-open on an empty registry,
-    // like every other executor gate: nothing registered is not "everything
-    // is blocked".
+    // The decision row still records the finding: a later cycle re-evaluates
+    // the same key, so the action is minted the first cycle after an
+    // executor advertises the capability. Fail-open on an empty registry —
+    // nothing registered is not "everything is blocked".
     let withheld;
     let candidate = match executor_capability_for_payload(&candidate.action) {
         Some(capability)
@@ -70,13 +68,11 @@ async fn persist_decision_and_action_tx(
                     .await? =>
         {
             // Debug, not warn: this is the steady state for a capability no
-            // executor has ever advertised, and it fires every cycle for
-            // every such candidate — 308 of the worker's 388 warnings in
-            // three hours on 2026-09-27, all `beacon.outreach` and
-            // `beacon.discovery`, burying the ones that meant something.
-            // The decision row keeps the finding in its policy snapshot
-            // (`held_by: no_executor:<capability>`); that row, not a log line
-            // repeated every five minutes, is where the gap is read.
+            // executor has ever advertised and it fires every cycle — 308 of
+            // the worker's 388 warnings in three hours on 2026-09-27, all
+            // `beacon.outreach`/`beacon.discovery`. The decision row keeps
+            // the finding (`held_by: no_executor:<capability>`); that row,
+            // not a repeated log line, is where the gap is read.
             tracing::debug!(
                 action_kind = candidate.action.action_kind(),
                 capability,
