@@ -179,6 +179,160 @@ async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observe
         .expect("complete");
 }
 
+/// Multiply must measure the fan who brought somebody, not the fan who was
+/// brought, and only after the referral is a qualified fan-growth outcome.
+///
+/// The lifecycle learner feeds every message template, including
+/// `crowdrelay.fan.referral_invite.v1`. An incoming referral to the message
+/// recipient is somebody else's success; a pending attribution is not a new
+/// fan yet; and a reversed referral must stop teaching the invite that it
+/// worked.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let subject = uuid::Uuid::now_v7();
+    let other_referrer = uuid::Uuid::now_v7();
+    let outbound = uuid::Uuid::now_v7();
+    let anchor = f.now - time::Duration::days(7);
+
+    for (fan_id, email) in [
+        (subject, "subject@referral-measurement.test"),
+        (other_referrer, "other@referral-measurement.test"),
+        (outbound, "outbound@referral-measurement.test"),
+    ] {
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at) \
+             VALUES ($1,$2,$3,'active',$4)",
+        )
+        .bind(fan_id)
+        .bind(workspace)
+        .bind(email)
+        .bind(anchor - time::Duration::days(30))
+        .execute(&f.pool)
+        .await
+        .expect("fan");
+    }
+
+    let subject_code = uuid::Uuid::now_v7();
+    let other_code = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO referral_codes (id, workspace_id, fan_id, code) \
+         VALUES ($1,$2,$3,$4),($5,$2,$6,$7)",
+    )
+    .bind(subject_code)
+    .bind(workspace)
+    .bind(subject)
+    .bind(format!("SUBJECT{}", &subject.simple().to_string()[..12]))
+    .bind(other_code)
+    .bind(other_referrer)
+    .bind(format!("OTHER{}", &other_referrer.simple().to_string()[..12]))
+    .execute(&f.pool)
+    .await
+    .expect("referral codes");
+
+    // Somebody else refers the lifecycle recipient inside the measurement
+    // window. This was the old query's false positive: referred_fan_id=$subject.
+    sqlx::query(
+        r#"INSERT INTO referral_attributions
+           (workspace_id, referrer_fan_id, referred_fan_id, referral_code_id,
+            accepted_at, status, qualification_reason, qualified_at)
+           VALUES ($1,$2,$3,$4,$5,'qualified','confirmed_fan_signup',$5)"#,
+    )
+    .bind(workspace)
+    .bind(other_referrer)
+    .bind(subject)
+    .bind(other_code)
+    .bind(anchor + time::Duration::days(1))
+    .execute(&f.pool)
+    .await
+    .expect("incoming qualified referral");
+
+    let claim = ClaimedAutopilotMeasurement {
+        id: AutopilotMeasurementId::from(uuid::Uuid::now_v7()),
+        action_id: AutopilotActionId::from(uuid::Uuid::now_v7()),
+        kind: AutopilotMeasurementKind::FanLifecycleEngagement7d,
+        subject_id: subject,
+        baseline_value: 0.0,
+        action_finished_at: anchor,
+        due_at: f.now,
+        attempt_number: 1,
+    };
+
+    let observe = || async {
+        f.repository
+            .observe_measurement(f.workspace_id, &claim, f.now)
+            .await
+            .expect("lifecycle engagement observation")
+    };
+
+    assert_eq!(
+        observe().await, 0.0,
+        "being referred by somebody else is not the recipient responding to a referral invite"
+    );
+
+    // The recipient now sends their own code, but the new fan has not
+    // qualified yet. accepted_at alone is not a durable growth outcome.
+    sqlx::query(
+        r#"INSERT INTO referral_attributions
+           (workspace_id, referrer_fan_id, referred_fan_id, referral_code_id,
+            accepted_at, status)
+           VALUES ($1,$2,$3,$4,$5,'pending')"#,
+    )
+    .bind(workspace)
+    .bind(subject)
+    .bind(outbound)
+    .bind(subject_code)
+    .bind(anchor + time::Duration::days(2))
+    .execute(&f.pool)
+    .await
+    .expect("pending outbound referral");
+
+    assert_eq!(
+        observe().await, 0.0,
+        "pending attribution must not teach the learner that multiply succeeded"
+    );
+
+    sqlx::query(
+        r#"UPDATE referral_attributions
+           SET status='qualified',
+               qualification_reason='confirmed_fan_signup',
+               qualified_at=$4
+           WHERE workspace_id=$1 AND referrer_fan_id=$2 AND referred_fan_id=$3"#,
+    )
+    .bind(workspace)
+    .bind(subject)
+    .bind(outbound)
+    .bind(anchor + time::Duration::days(3))
+    .execute(&f.pool)
+    .await
+    .expect("qualify outbound referral");
+
+    assert_eq!(
+        observe().await, 1.0,
+        "a qualified fan brought by the lifecycle recipient is the multiply outcome"
+    );
+
+    sqlx::query(
+        r#"UPDATE referral_attributions
+           SET status='reversed', reversed_at=$4
+           WHERE workspace_id=$1 AND referrer_fan_id=$2 AND referred_fan_id=$3"#,
+    )
+    .bind(workspace)
+    .bind(subject)
+    .bind(outbound)
+    .bind(anchor + time::Duration::days(4))
+    .execute(&f.pool)
+    .await
+    .expect("reverse outbound referral");
+
+    assert_eq!(
+        observe().await, 0.0,
+        "a reversed referral must stop contributing positive learning evidence"
+    );
+}
+
 /// H: a measured outcome with no typed column still reaches the evidence row.
 ///
 /// Ticket revenue, clicks, replies and friends used to resolve into
