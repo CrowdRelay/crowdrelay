@@ -777,7 +777,7 @@ mod tests {
             },
         };
         let now = OffsetDateTime::now_utc();
-        let snapshot = |hours_old: i64, engagement: i64| ContentSupplySnapshot {
+        let snapshot = |hours_old: i64, engagement: i64, acquired_fans: u32| ContentSupplySnapshot {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 1,
@@ -807,7 +807,7 @@ mod tests {
                 media_id: None,
                 media_type: None,
                 thumbnail_url: None,
-                acquired_fans: 0,
+                acquired_fans,
                 resonance: Some(PostResonance {
                     engagement,
                     peer_median: Some(40),
@@ -836,7 +836,7 @@ mod tests {
         }];
         // Five hours old: doing well, but too early to tell.
         let fresh = content_candidates(
-            &snapshot(5, 90),
+            &snapshot(5, 90, 0),
             &policy,
             &communities,
             None,
@@ -845,7 +845,7 @@ mod tests {
         )?;
         // Settled, below the account's own median.
         let weak = content_candidates(
-            &snapshot(40, 10),
+            &snapshot(40, 10, 0),
             &policy,
             &communities,
             None,
@@ -859,6 +859,26 @@ mod tests {
                 AutopilotActionPayload::RequestSignalPush { .. }
             ));
         }
+
+        // Same weak engagement, but one real fan conversion: the post has
+        // proved it can move a stranger into the fan graph, so organic
+        // community distribution is now worth doing.
+        let converting = content_candidates(
+            &snapshot(40, 10, 1),
+            &policy,
+            &communities,
+            None,
+            ContextEvidence::UNPROVEN,
+            now,
+        )?;
+        assert_eq!(converting.len(), 2, "owned push plus one community relay");
+        assert!(
+            converting.iter().any(|candidate| matches!(
+                candidate.action,
+                AutopilotActionPayload::RequestCommunityEngagement { .. }
+            )),
+            "a fan-converting post must earn the community relay"
+        );
         Ok(())
     }
 
