@@ -174,6 +174,7 @@ async fn scorecards_for(
 
     let metrics = latest_metrics(pool, ws, &source_ids).await?;
     let clicks = click_ledgers(pool, ws, &source_ids).await?;
+    let acquired_fans = acquired_fans(pool, ws, &source_ids).await?;
     let posts = post_ledgers(pool, ws, &source_ids).await?;
     let plans = release_plans(pool, ws, &source_ids).await?;
     let plan_keys: Vec<String> = plans
@@ -241,6 +242,17 @@ async fn scorecards_for(
 
         let age = now - video.occurred_at;
         let lane_clicks = clicks.get(&video.id).cloned().unwrap_or_default();
+        let acquired_fans = acquired_fans.get(&video.id).copied().unwrap_or(0);
+        let fan_conversion_basis_points = if lane_clicks.total == 0 {
+            None
+        } else {
+            let bps = acquired_fans
+                .saturating_mul(10_000)
+                .checked_div(lane_clicks.total)
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX));
+            Some(bps as u32)
+        };
         let lane_posts = posts.get(&video.id).cloned().unwrap_or_default();
         let plan = plans.get(&video.id);
         let press_ledger = plan_key.as_ref().and_then(|key| press.get(key)).cloned();
@@ -282,6 +294,8 @@ async fn scorecards_for(
             analytics_through,
             pace: video_scorecard::pace(attributed, lane_clicks.total, age),
             tracked_clicks: lane_clicks,
+            acquired_fans,
+            fan_conversion_basis_points,
             sends: VideoSendsLedger {
                 community: lane_posts.community,
                 telegram: lane_posts.telegram,
@@ -342,12 +356,12 @@ async fn latest_metrics(
 /// not count again.
 const VIDEO_LINKS_CTE: &str = r#"
     WITH videos AS (
-        SELECT id, source_key, substring(source_key from 9) AS video_id
+        SELECT id, source_key, substring(source_key from 9) AS video_id, occurred_at
         FROM content_sources
         WHERE workspace_id = $1 AND id = ANY($2)
     ),
     direct AS (
-        SELECT link.id, link.slug, videos.id AS source_id
+        SELECT link.id, link.slug, videos.id AS source_id, videos.occurred_at
         FROM smart_links link
         JOIN videos ON videos.source_key LIKE 'youtube:%'
           AND length(videos.video_id) >= 6
@@ -355,9 +369,9 @@ const VIDEO_LINKS_CTE: &str = r#"
         WHERE link.workspace_id = $1
     ),
     video_links AS (
-        SELECT id, slug, source_id FROM direct
+        SELECT id, slug, source_id, occurred_at FROM direct
         UNION
-        SELECT link.id, link.slug, direct.source_id
+        SELECT link.id, link.slug, direct.source_id, direct.occurred_at
         FROM smart_links link
         JOIN direct ON link.destination_url LIKE '%/l/' || direct.slug
         WHERE link.workspace_id = $1
@@ -372,6 +386,47 @@ const VIDEO_LINKS_CTE: &str = r#"
         )
     )
 "#;
+
+/// Distinct owned fans acquired after clicking one of the video's tracked
+/// links inside the 14-day scorecard window.
+///
+/// Attribution follows the same first-hop link set as the click ledger, then
+/// binds anonymous visitor identity from the click to the acquisition event.
+/// That prevents both redirect-chain double counting and workspace-wide fan
+/// growth from being credited to a video that did not cause it.
+async fn acquired_fans(
+    pool: &PgPool,
+    ws: Uuid,
+    source_ids: &[Uuid],
+) -> Result<HashMap<Uuid, u64>, RepositoryError> {
+    let rows = sqlx::query_as::<_, (Uuid, i64)>(&format!(
+        "{VIDEO_LINKS_CTE}
+         SELECT v.source_id, COUNT(DISTINCT acquisition.fan_id)::bigint
+         FROM video_links v
+         JOIN click_events click
+           ON click.workspace_id = $1
+          AND click.smart_link_id = v.id
+         JOIN fan_acquisition_events acquisition
+           ON acquisition.workspace_id = click.workspace_id
+          AND acquisition.anonymous_visitor_id = click.anonymous_visitor_id
+          AND acquisition.occurred_at >= click.occurred_at
+          AND acquisition.occurred_at < v.occurred_at + INTERVAL '14 days'
+         WHERE v.id NOT IN (SELECT id FROM inner_hops)
+           AND click.anonymous_visitor_id IS NOT NULL
+           AND click.occurred_at >= v.occurred_at
+           AND click.occurred_at < v.occurred_at + INTERVAL '14 days'
+         GROUP BY v.source_id"
+    ))
+    .bind(ws)
+    .bind(source_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|(source_id, fans)| (source_id, fans.max(0) as u64))
+        .collect())
+}
 
 /// Clicks on each video's tracked links, split by the lane the post went out
 /// on. Click membership is the link alone — a post carrying a video's link
