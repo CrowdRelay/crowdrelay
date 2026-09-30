@@ -146,7 +146,15 @@ impl PlatformGrowth {
 /// `None` and keep their position from the strategy's order.
 #[must_use]
 pub fn template_platform(template: &str) -> Option<&'static str> {
-    template_growth_platforms(template).first().copied()
+    match template {
+        // Reddit records its metrics under the `social` coverage bucket
+        // because `MetricPlatform` has no Reddit variant.
+        "reddit-scanner" | "community-engager" => Some("social"),
+        "telegram-scanner" | "telegram-poster" => Some("telegram"),
+        "bandcamp-scanner" => Some("bandcamp"),
+        "signal-inviter" => Some("signal"),
+        _ => None,
+    }
 }
 
 /// Growth-metric platforms a template can directly compound.
@@ -160,14 +168,14 @@ pub fn template_platform(template: &str) -> Option<&'static str> {
 #[must_use]
 pub fn template_growth_platforms(template: &str) -> &'static [&'static str] {
     match template {
-        // Reddit records its audience metrics under the legacy `social`
-        // coverage bucket because `MetricPlatform` has no Reddit variant.
-        "reddit-scanner" | "community-engager" => &["social"],
-        "telegram-scanner" | "telegram-poster" => &["telegram"],
-        "bandcamp-scanner" => &["bandcamp"],
-        "signal-inviter" => &["signal"],
         "social-post" => &["instagram", "facebook", "x"],
-        _ => &[],
+        _ => match template_platform(template) {
+            Some("social") => &["social"],
+            Some("telegram") => &["telegram"],
+            Some("bandcamp") => &["bandcamp"],
+            Some("signal") => &["signal"],
+            _ => &[],
+        },
     }
 }
 
