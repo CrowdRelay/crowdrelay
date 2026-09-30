@@ -17,6 +17,7 @@ MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/growth_metrics.rs"
 WORKER = ROOT / "crates/crowdrelay-worker/src/autopilot.rs"
 RETENTION = ROOT / "crates/crowdrelay-worker/src/retention/steps.rs"
+ACTIVATION_RESET = ROOT / "migrations/0381_reset_activated_fan_metric_history.sql"
 
 
 def read(path: Path) -> str:
@@ -163,6 +164,43 @@ class GrowthMetricsContract(unittest.TestCase):
         infra = read(INFRA)
         self.assertIn("SET active = false", infra)
         self.assertIn("sync_event_ticketing_series", infra)
+
+    def test_activated_fan_series_uses_the_canonical_kpi_definition(self) -> None:
+        # The default North Star has one definition. Workspace history reads
+        # the KPI view directly; the city partition repeats exactly the
+        # activation-cohort predicates rather than substituting "active lately".
+        infra = read(INFRA)
+        city = infra.split("let city_points", 1)[1].split(
+            "let workspace_points", 1
+        )[0]
+        workspace = infra.split("let workspace_points", 1)[1].split(
+            "transaction.commit", 1
+        )[0]
+
+        self.assertIn("FROM fan_activation_kpi", workspace)
+        self.assertNotIn("fan_last_meaningful_action", workspace)
+
+        self.assertIn(
+            "fan.created_at >= $2 - INTERVAL '30 days'",
+            city,
+        )
+        self.assertIn(
+            "fan.last_activity_at <= fan.created_at + INTERVAL '30 days'",
+            city,
+        )
+        self.assertIn(
+            "ORDER BY consent.recorded_at DESC, consent.id DESC",
+            city,
+        )
+        self.assertNotIn("fan_last_meaningful_action", city)
+
+    def test_drifted_activated_fan_history_is_reset_deliberately(self) -> None:
+        # Old points used a different population. Keeping them would make the
+        # definition fix look like real growth/decline for up to 90 days.
+        reset = read(ACTIVATION_RESET)
+        self.assertIn("DELETE FROM growth_metric_points", reset)
+        self.assertIn("series.platform = 'signal'", reset)
+        self.assertIn("series.metric_key = 'activated_fans_30d'", reset)
 
     def test_observations_are_recorded_before_the_evaluator_runs(self) -> None:
         worker = read(WORKER)
