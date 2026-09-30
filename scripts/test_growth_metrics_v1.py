@@ -17,7 +17,7 @@ MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 INFRA = ROOT / "crates/crowdrelay-infra/src/autopilot/growth_metrics.rs"
 WORKER = ROOT / "crates/crowdrelay-worker/src/autopilot.rs"
 RETENTION = ROOT / "crates/crowdrelay-worker/src/retention/steps.rs"
-ACTIVATION_RESET = ROOT / "migrations/0381_reset_activated_fan_metric_history.sql"
+ACTIVATION_RESET = ROOT / "migrations/0382_activation_retention_integrity.sql"
 
 
 def read(path: Path) -> str:
@@ -184,15 +184,19 @@ class GrowthMetricsContract(unittest.TestCase):
             "fan.created_at >= $2 - INTERVAL '30 days'",
             city,
         )
+        self.assertIn("fan.status = 'active'", city)
+        self.assertIn("fan_last_meaningful_action", city)
+        self.assertIn("activity.last_action_at >= fan.created_at", city)
+        self.assertIn("activity.last_action_at <= $2", city)
         self.assertIn(
-            "fan.last_activity_at <= fan.created_at + INTERVAL '30 days'",
+            "activity.last_action_at <= fan.created_at + INTERVAL '30 days'",
             city,
         )
         self.assertIn(
             "ORDER BY consent.recorded_at DESC, consent.id DESC",
             city,
         )
-        self.assertNotIn("fan_last_meaningful_action", city)
+        self.assertNotIn("fan.last_activity_at <=", city)
 
     def test_drifted_activated_fan_history_is_reset_deliberately(self) -> None:
         # Old points used a different population. Keeping them would make the

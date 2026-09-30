@@ -13,7 +13,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/fan_activation.rs"
-MIGRATION = ROOT / "migrations/0078_fan_last_meaningful_action.sql"
+MIGRATION = ROOT / "migrations/0382_activation_retention_integrity.sql"
+INDEX_MIGRATIONS = (
+    ROOT / "migrations/0003_phase2_referrals_rewards.sql",
+    ROOT / "migrations/0078_fan_last_meaningful_action.sql",
+)
 METRICS = ROOT / "crates/crowdrelay-infra/src/autopilot/growth_metrics.rs"
 
 
@@ -29,6 +33,7 @@ class FanActivationContract(unittest.TestCase):
     def setUp(self) -> None:
         self.domain = read(DOMAIN)
         self.migration = read(MIGRATION)
+        self.index_migrations = "\n".join(read(path) for path in INDEX_MIGRATIONS)
         self.metrics = read(METRICS)
 
     def test_the_sql_function_covers_exactly_the_domain_actions(self) -> None:
@@ -103,10 +108,26 @@ class FanActivationContract(unittest.TestCase):
         # touches needs to be cheap or the metric cycle degrades as fans grow.
         for index in (
             "merch_order_facts_fan_confirmed_idx",
-            "referral_attributions_referrer_accepted_idx",
+            "referral_attributions_referrer_status_idx",
             "fan_sessions_fan_last_seen_idx",
         ):
-            self.assertIn(index, self.migration)
+            self.assertIn(index, self.index_migrations)
+
+    def test_qualified_referral_means_an_actual_qualified_fan(self) -> None:
+        self.assertIn("status = 'qualified'", self.migration)
+        self.assertIn("max(qualified_at)", self.migration)
+        qualified_branch = self.migration.split("-- qualified_referral:", 1)[1].split(
+            "-- event_interest:", 1
+        )[0]
+        self.assertNotIn("accepted_at", qualified_branch)
+
+    def test_canonical_activation_requires_an_open_account_and_real_action(self) -> None:
+        view = self.migration.split("CREATE OR REPLACE VIEW fan_activation_kpi", 1)[1]
+        activated = view.split("AS activated_30d", 1)[0]
+        self.assertIn("fan.status = 'active'", activated)
+        self.assertIn("fan_last_meaningful_action", view)
+        self.assertIn("activity.last_action_at >= fan.created_at", activated)
+        self.assertIn("activity.last_action_at <= now()", activated)
 
     def test_activation_is_measured_per_city_because_the_loop_is_geographic(
         self,

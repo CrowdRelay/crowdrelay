@@ -231,6 +231,33 @@ async fn activated_fans_north_star_reads_the_activation_kpi()
     .await?;
 
     let now = OffsetDateTime::now_utc();
+
+    async fn session(
+        pool: &sqlx::PgPool,
+        workspace_id: WorkspaceId,
+        fan_id: Uuid,
+        created_at: OffsetDateTime,
+        last_seen_at: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut token_hash = fan_id.as_bytes().to_vec();
+        token_hash.extend_from_slice(fan_id.as_bytes());
+        sqlx::query(
+            "INSERT INTO fan_sessions
+               (workspace_id, fan_id, session_token_hash, created_at, last_seen_at, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(token_hash)
+        .bind(created_at)
+        .bind(last_seen_at)
+        .bind(now + time::Duration::days(30))
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     let consent = |fan_id: Uuid, granted: bool| {
         format!(
             "INSERT INTO fan_consents
@@ -245,18 +272,27 @@ async fn activated_fans_north_star_reads_the_activation_kpi()
     // Two activated fans: recent signup, consent, meaningful activity.
     for index in 0..2 {
         let fan_id = Uuid::now_v7();
+        let created_at = now - time::Duration::days(1);
         sqlx::query(
-            "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at, last_activity_at)
-             VALUES ($1, $2, $3, 'active', $4, $5)",
+            "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+             VALUES ($1, $2, $3, 'active', $4)",
         )
         .bind(fan_id)
         .bind(workspace_id.into_uuid())
         .bind(format!("activated-{index}-{suffix}@north-star.test"))
-        .bind(now - time::Duration::days(1))
-        .bind(now - time::Duration::hours(1))
+        .bind(created_at)
         .execute(&pool)
         .await?;
         sqlx::query(&consent(fan_id, true)).execute(&pool).await?;
+        session(
+            &pool,
+            workspace_id,
+            fan_id,
+            created_at,
+            now - time::Duration::hours(1),
+            now,
+        )
+        .await?;
     }
     // Consented but never did anything: signed up, reachable, not activated.
     let idle = Uuid::now_v7();
@@ -273,18 +309,53 @@ async fn activated_fans_north_star_reads_the_activation_kpi()
     sqlx::query(&consent(idle, true)).execute(&pool).await?;
     // Consented and active, but signed up 40 days ago: outside the window.
     let old = Uuid::now_v7();
+    let old_created_at = now - time::Duration::days(40);
     sqlx::query(
-        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at, last_activity_at)
-         VALUES ($1, $2, $3, 'active', $4, $5)",
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1, $2, $3, 'active', $4)",
     )
     .bind(old)
     .bind(workspace_id.into_uuid())
     .bind(format!("old-{suffix}@north-star.test"))
-    .bind(now - time::Duration::days(40))
-    .bind(now - time::Duration::hours(1))
+    .bind(old_created_at)
     .execute(&pool)
     .await?;
     sqlx::query(&consent(old, true)).execute(&pool).await?;
+    session(
+        &pool,
+        workspace_id,
+        old,
+        old_created_at,
+        now - time::Duration::hours(1),
+        now,
+    )
+    .await?;
+
+    // A recent, consented person with a real action but a closed account is
+    // not an activated fan. The domain activation_state rule requires the
+    // account to be open; the canonical SQL must agree.
+    let closed = Uuid::now_v7();
+    let closed_created_at = now - time::Duration::days(1);
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1, $2, $3, 'unsubscribed', $4)",
+    )
+    .bind(closed)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("closed-{suffix}@north-star.test"))
+    .bind(closed_created_at)
+    .execute(&pool)
+    .await?;
+    sqlx::query(&consent(closed, true)).execute(&pool).await?;
+    session(
+        &pool,
+        workspace_id,
+        closed,
+        closed_created_at,
+        now - time::Duration::hours(1),
+        now,
+    )
+    .await?;
 
     let database = DatabaseConfig {
         url: database_url,
@@ -305,7 +376,7 @@ async fn activated_fans_north_star_reads_the_activation_kpi()
 
     assert_eq!(
         world.north_star_current, 2,
-        "only consented recent signups with activity are activated fans"
+        "only open, consented recent signups with a real first-party action are activated fans"
     );
     assert_eq!(
         world.north_star_this_month, 0,

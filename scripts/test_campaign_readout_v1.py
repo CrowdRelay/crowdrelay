@@ -51,13 +51,14 @@ class FunnelActivationContract(unittest.TestCase):
 
 class RetentionContract(unittest.TestCase):
     def setUp(self) -> None:
-        self.migration = read(MIGRATIONS / "0121_activation_kpi_retention.sql")
+        self.migration = read(MIGRATIONS / "0382_activation_retention_integrity.sql")
         self.control = read(APPLICATION / "autopilot/control.rs")
         self.infra = read(INFRA / "autopilot/operations/acquisition_channels.rs")
 
     def test_migration_adds_retained_30d(self) -> None:
         self.assertIn("retained_30d", self.migration)
-        self.assertIn("CREATE OR REPLACE VIEW viryaos_fan_activation_kpi", self.migration)
+        self.assertIn("CREATE OR REPLACE VIEW fan_activation_kpi", self.migration)
+        self.assertIn("fan_has_meaningful_action_between", self.migration)
 
     def test_control_struct_has_retained_30d(self) -> None:
         self.assertIn("retained_30d", self.control)

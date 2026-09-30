@@ -825,15 +825,23 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                         ORDER BY consent.recorded_at DESC, consent.id DESC
                         LIMIT 1
                     ) AS consent ON true
+                    LEFT JOIN LATERAL (
+                        SELECT fan_last_meaningful_action(
+                            fan.workspace_id, fan.id, fan.normalized_email
+                        ) AS last_action_at
+                    ) AS activity ON true
                     WHERE interest.workspace_id = $1
                       -- Keep this predicate identical to
                       -- fan_activation_kpi.activated_30d. City is only a
                       -- partition of the North Star, never a second
                       -- definition of an activated fan.
+                      AND fan.status = 'active'
                       AND consent.granted
                       AND fan.created_at >= $2 - INTERVAL '30 days'
-                      AND fan.last_activity_at IS NOT NULL
-                      AND fan.last_activity_at <= fan.created_at + INTERVAL '30 days'
+                      AND activity.last_action_at IS NOT NULL
+                      AND activity.last_action_at >= fan.created_at
+                      AND activity.last_action_at <= $2
+                      AND activity.last_action_at <= fan.created_at + INTERVAL '30 days'
                     GROUP BY interest.city_id
                 ), recorded AS (
                     INSERT INTO growth_metric_points (
