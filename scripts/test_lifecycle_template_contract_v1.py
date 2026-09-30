@@ -34,6 +34,7 @@ CANDIDATES = ROOT / "crates" / "crowdrelay-application" / "src" / "autopilot" / 
 CONTRACT = ROOT / "n8n" / "crowdrelay-executor-contract.md"
 EXECUTION = ROOT / "crates" / "crowdrelay-infra" / "src" / "autopilot" / "actions_execution.rs"
 TENANT_SETTINGS = ROOT / "crates" / "crowdrelay-infra" / "src" / "tenant_settings.rs"
+WORKFLOW = ROOT / "n8n" / "examples" / "autopilot-fan-lifecycle.example.json"
 
 
 def emitted_keys() -> set[str]:
@@ -126,6 +127,14 @@ class TheVocabularyIsPublished(unittest.TestCase):
         self.assertIn("pub fn referral_url(&self, code: &str)", settings)
         self.assertNotIn("https://virya.music/r/", section)
         self.assertIn("never construct a hostname", section)
+
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("referral_url", workflow)
+        self.assertIn("brand.wordmark", workflow)
+        self.assertNotIn("https://virya.music/r/", workflow)
+        self.assertNotIn("'- VIRYA'", workflow)
+        self.assertNotIn("'Witamy w VIRYA'", workflow)
+        self.assertIn("crowdrelay_workspace_wordmark", execution)
 
 
 if __name__ == "__main__":
