@@ -243,6 +243,18 @@ impl ShowGrowthLever {
         )
     }
 
+    /// Third-party show promotion spends relationship capital: a promoter,
+    /// venue, creator or scene node may remember a clumsy ask long after the
+    /// campaign ends. A broad show-ladder approval therefore never stands in
+    /// for the booker's judgement on these levers.
+    #[must_use]
+    pub const fn requires_relationship_approval(self) -> bool {
+        matches!(
+            self,
+            Self::PartnerCrossPromo | Self::GrassrootsSceneRelay | Self::SocialProofRelay
+        )
+    }
+
     /// The reach class the autopilot persists on the action. Single source:
     /// `AutopilotActionPayload::RequestShowGrowth::action_class` delegates here
     /// so the dispatch site and the classifier can never disagree.
