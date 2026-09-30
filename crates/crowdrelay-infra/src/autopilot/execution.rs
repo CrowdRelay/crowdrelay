@@ -808,12 +808,17 @@ pub(super) async fn schedule_effect_measurement(
                 .and_then(|u| u.as_str())
                 .is_some_and(|u| !u.trim().is_empty());
             if linkable_platform && has_cta {
-                plans.push((
+                for kind in [
                     AutopilotMeasurementKind::ContentLinkClicks7d,
-                    action_id.into_uuid(),
-                    0.0,
-                    now + time::Duration::days(7),
-                ));
+                    AutopilotMeasurementKind::ContentFanAcquisition7d,
+                ] {
+                    plans.push((
+                        kind,
+                        action_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(7),
+                    ));
+                }
             }
             // No AgentRunOutcomeQuality1h here either: the drafting task's
             // outcome links to the action that requested the draft, not to
@@ -827,12 +832,17 @@ pub(super) async fn schedule_effect_measurement(
         // Signups surface on the briefing line instead of a measurement row.
         AutopilotActionPayload::PublishJoinAsk { platform, .. } => {
             if matches!(platform.as_str(), "instagram" | "facebook" | "x" | "telegram") {
-                plans.push((
+                for kind in [
                     AutopilotMeasurementKind::ContentLinkClicks7d,
-                    action_id.into_uuid(),
-                    0.0,
-                    now + time::Duration::days(7),
-                ));
+                    AutopilotMeasurementKind::ContentFanAcquisition7d,
+                ] {
+                    plans.push((
+                        kind,
+                        action_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(7),
+                    ));
+                }
             }
         }
     }
