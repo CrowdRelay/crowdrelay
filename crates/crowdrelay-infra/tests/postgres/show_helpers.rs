@@ -163,13 +163,12 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .bind(format!("helper-yield-{}", link_id.simple()))
     .execute(pool)
     .await?;
-    let link_slug: String = sqlx::query_scalar(
-        "SELECT slug FROM smart_links WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(act)
-    .bind(link_id)
-    .fetch_one(pool)
-    .await?;
+    let link_slug: String =
+        sqlx::query_scalar("SELECT slug FROM smart_links WHERE workspace_id=$1 AND id=$2")
+            .bind(act)
+            .bind(link_id)
+            .fetch_one(pool)
+            .await?;
     sqlx::query(
         "INSERT INTO community_posts
             (workspace_id, action_id, target_id, subreddit, title, body,
