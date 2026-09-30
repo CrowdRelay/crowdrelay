@@ -126,6 +126,17 @@ pub struct CommunityCandidate {
     /// because communities carry no city and pretending they do would
     /// misreport the granularity.
     pub country: String,
+    /// Posts in this community during the last 90 days that carried a tracked
+    /// CrowdRelay link. Zero means unmeasured here, so the yield fields below
+    /// are `None` rather than fabricated zeroes.
+    pub measured_posts_90d: u32,
+    /// First-hop tracked clicks from those posts. `None` when the tenant has
+    /// not run a measurable post here in the window.
+    pub tracked_clicks_90d: Option<u64>,
+    /// Distinct owned fans who joined within seven days of those tracked
+    /// clicks. This is the North-Star evidence the booker can use without the
+    /// system taking the relationship decision away from them.
+    pub fans_acquired_90d: Option<u64>,
 }
 
 /// A room the shared registry knows in this city that this tenant has never
@@ -655,12 +666,46 @@ pub async fn who_can_help(
     // granularity, since a community carries a `country_code` and nothing
     // finer. `country` is the field name in the response so nobody mistakes
     // the match for city-local.
-    match sqlx::query_as::<_, (Uuid, String, String, String, String, String)>(
+    match sqlx::query_as::<_, (Uuid, String, String, String, String, String, i64, i64, i64)>(
         r#"
-        SELECT id, community_name, platform, url, self_promo_policy, country_code
-        FROM community_outreach_targets
-        WHERE workspace_id = $1 AND country_code = $2 AND active
-        ORDER BY priority DESC, community_name
+        SELECT target.id, target.community_name, target.platform, target.url,
+               target.self_promo_policy, target.country_code,
+               COALESCE(yield.measured_posts, 0)::bigint,
+               COALESCE(yield.tracked_clicks, 0)::bigint,
+               COALESCE(yield.fans_acquired, 0)::bigint
+        FROM community_outreach_targets AS target
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(DISTINCT post.id)::bigint AS measured_posts,
+                COUNT(DISTINCT click.id)::bigint AS tracked_clicks,
+                COUNT(DISTINCT acquisition.fan_id)::bigint AS fans_acquired
+            FROM community_posts AS post
+            JOIN smart_links AS link
+              ON link.workspace_id = post.workspace_id
+             AND post.smart_link = '/l/' || link.slug
+            LEFT JOIN click_events AS click
+              ON click.workspace_id = link.workspace_id
+             AND click.smart_link_id = link.id
+             AND click.occurred_at >= post.posted_at
+             AND click.occurred_at >= now() - INTERVAL '90 days'
+            LEFT JOIN fan_acquisition_events AS acquisition
+              ON acquisition.workspace_id = click.workspace_id
+             AND acquisition.anonymous_visitor_id = click.anonymous_visitor_id
+             AND acquisition.occurred_at >= click.occurred_at
+             AND acquisition.occurred_at < click.occurred_at + INTERVAL '7 days'
+            WHERE post.workspace_id = target.workspace_id
+              AND post.target_id = target.id
+              AND post.status = 'posted'
+              AND post.posted_at >= now() - INTERVAL '90 days'
+        ) AS yield ON true
+        WHERE target.workspace_id = $1
+          AND target.country_code = $2
+          AND target.active
+        ORDER BY
+            COALESCE(yield.fans_acquired, 0) DESC,
+            COALESCE(yield.tracked_clicks, 0) DESC,
+            target.priority DESC,
+            target.community_name
         LIMIT $3
         "#,
     )
@@ -678,7 +723,18 @@ pub async fn who_can_help(
             communities = rows
                 .into_iter()
                 .map(
-                    |(id, community_name, platform, url, self_promo_policy, country)| {
+                    |(
+                        id,
+                        community_name,
+                        platform,
+                        url,
+                        self_promo_policy,
+                        country,
+                        measured_posts,
+                        tracked_clicks,
+                        fans_acquired,
+                    )| {
+                        let measured_posts_90d = u32::try_from(measured_posts).unwrap_or(u32::MAX);
                         CommunityCandidate {
                             id,
                             community_name,
@@ -686,6 +742,11 @@ pub async fn who_can_help(
                             url,
                             self_promo_policy,
                             country,
+                            measured_posts_90d,
+                            tracked_clicks_90d: (measured_posts_90d > 0)
+                                .then_some(tracked_clicks.max(0) as u64),
+                            fans_acquired_90d: (measured_posts_90d > 0)
+                                .then_some(fans_acquired.max(0) as u64),
                         }
                     },
                 )
