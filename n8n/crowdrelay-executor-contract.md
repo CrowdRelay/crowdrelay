@@ -14,6 +14,12 @@ The last three were missing from this list while CrowdRelay routed by them, and 
 
 Do not advertise a capability merely because code for it exists in an export. The workflow must be active, reachable from the verified ingress/claim bridge and have a working provider credential/configuration.
 
+### Verified subworkflow ingress
+
+Every workflow entered through `n8n-nodes-base.executeWorkflowTrigger` must declare `parameters.inputSource = "passthrough"`. The verified ingress has already authenticated and normalized the canonical event; the subworkflow's first job is to receive that event unchanged. An empty trigger configuration is not an equivalent shorthand on the deployed n8n version: it is rejected as an incomplete node and the executor never reaches its validation, claim, provider action or outcome report.
+
+`scripts/test_n8n_execute_workflow_trigger_contract_v1.py` scans every JSON workflow under `n8n/examples` and fails when a subworkflow trigger loses this setting. New executors therefore inherit the same ingress contract as the existing working outreach executors instead of rediscovering the production failure one workflow at a time.
+
 ### Attendance-growth execution
 
 `show.growth` is deliberately an **external-lever capability**, not a second promotion policy engine. CrowdRelay chooses the event, lever, timing and safety contract. The executor may: publish/submit the canonical event to free or owned listings, ask an already verified venue/bill/scene Beacon for the supplied cross-promotion action, or format a factual social-proof packet for the requested channel.
