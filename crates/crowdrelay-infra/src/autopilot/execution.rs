@@ -758,6 +758,23 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::days(3),
             ));
+            // Fast, action-bound funnel signal. Community posts carry their
+            // own tracked smart link, so seven days is enough to learn which
+            // rooms drive traffic and actual owned-fan acquisition while the
+            // causal Y14/Y30 estimands are still maturing. Both observers fail
+            // closed with `no_tracked_link` when the post never lands with a
+            // measurable link — absence of instrumentation is not a zero.
+            for kind in [
+                AutopilotMeasurementKind::ContentLinkClicks7d,
+                AutopilotMeasurementKind::ContentFanAcquisition7d,
+            ] {
+                plans.push((
+                    kind,
+                    action_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
             // No AgentRunOutcomeQuality1h here: that measure links through
             // `agent_service_tasks.metadata->>'action_id'`, and community
             // engagement creates no task row — the community_posts row is
