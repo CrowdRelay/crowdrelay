@@ -775,7 +775,7 @@ mod tests {
                 ("result", "Needs application package"),
             ],
         );
-        let report = extract_outreach_log(&vec![header.clone(), sent.clone(), replied, draft])
+        let report = extract_outreach_log(&[header.clone(), sent.clone(), replied, draft])
             .expect("SCOUT outreach log is claimed");
         assert_eq!(report.book, OutreachBook::Scout);
         assert_eq!(report.entries.len(), 3);
@@ -794,7 +794,7 @@ mod tests {
             .expect("result column");
         refreshed[result_index] = "Still waiting".to_owned();
         let refreshed_report =
-            extract_outreach_log(&vec![header, refreshed]).expect("SCOUT row re-parses");
+            extract_outreach_log(&[header, refreshed]).expect("SCOUT row re-parses");
         assert_eq!(
             first_id, refreshed_report.entries[0].outreach_id,
             "status/result edits must refresh the same interaction identity"
