@@ -13,9 +13,7 @@
   "active": false,
   "nodes": [
     {
-      "parameters": {
-        "inputSource": "passthrough"
-      },
+      "parameters": {"inputSource": "passthrough"},
       "id": "ps-trigger",
       "name": "Called by verified ingress",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
