@@ -60,24 +60,46 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
-                    // The referral invite template needs the fan's active
-                    // referral code so the executor can build the referral
-                    // link. The code is created at signup, so it always
-                    // exists by day 3 (referral_invite_after_days). Other
-                    // templates leave this null — the field is additive.
-                    let referral_code = if template_key == "crowdrelay.fan.referral_invite.v1" {
-                        sqlx::query_scalar::<_, Option<String>>(
-                            "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
-                        )
-                        .bind(workspace_id.into_uuid())
-                        .bind(fan_id.into_uuid())
-                        .fetch_optional(&mut *transaction)
-                        .await
-                        .map_err(map_sqlx)?
-                        .flatten()
-                    } else {
-                        None
-                    };
+                    let wordmark = sqlx::query_scalar::<_, String>(
+                        "SELECT crowdrelay_workspace_wordmark($1)",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
+                    // The referral invite is the fan→fan growth loop: the
+                    // executor receives a complete first-party URL rather
+                    // than reconstructing one from the code, and a missing
+                    // code or site is terminal for this message.
+                    let (referral_code, referral_url) =
+                        if template_key == "crowdrelay.fan.referral_invite.v1" {
+                            let code = sqlx::query_scalar::<_, Option<String>>(
+                                "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
+                            )
+                            .bind(workspace_id.into_uuid())
+                            .bind(fan_id.into_uuid())
+                            .fetch_optional(&mut *transaction)
+                            .await
+                            .map_err(map_sqlx)?
+                            .flatten()
+                            .ok_or(RepositoryError::ConflictBecause(
+                                "referral invite refused: fan has no active referral code",
+                            ))?;
+                            let brand = crate::tenant_settings::TenantSettingsRepository::new(
+                                self.pool.clone(),
+                            )
+                            .brand_settings(workspace_id.into_uuid())
+                            .await
+                            .map_err(map_sqlx)?;
+                            let url = brand.referral_url(&code).ok_or(
+                                RepositoryError::ConflictBecause(
+                                    "referral invite refused: tenant has no member site URL",
+                                ),
+                            )?;
+                            (Some(code), Some(url))
+                        } else {
+                            (None, None)
+                        };
                     emit_outward_action(
                         &mut transaction,
                         workspace_id,
@@ -91,11 +113,15 @@ impl PostgresAutopilotRepository {
                             "action_id": action.id,
                             "fan_id": fan_id,
                             "template_key": template_key,
+                            "brand": {
+                                "wordmark": wordmark,
+                            },
                             "fan": {
                                 "email": fan.0,
                                 "display_name": fan.1,
                                 "locale": fan.2,
                                 "referral_code": referral_code,
+                                "referral_url": referral_url,
                             },
                         }),
                     )
@@ -257,14 +283,12 @@ impl PostgresAutopilotRepository {
                         *target_version,
                     )
                     .await?;
-                    // A show opportunity's letter must be the show letter. Until
-                    // #322 every one composed the catalogue pitch instead —
-                    // "we would love to submit {album} for coverage" — and on
-                    // 2026-09-27 thirty-five of those were still waiting for a
-                    // wave approval that would have sent them as written.
-                    // Fresh show letters carry the opportunity's own template
-                    // key; anything else under an `event.*` opportunity is a
-                    // stale draft and is refused, never re-composed here.
+                    // A show opportunity's letter must be the show letter —
+                    // until #322 every one composed the catalogue pitch
+                    // instead. Fresh show letters carry the opportunity's own
+                    // template key; anything else under an `event.*`
+                    // opportunity is a stale draft and is refused, never
+                    // re-composed here.
                     if crate::autopilot::outreach_supply::stale_show_letter(&target.2, template_key) {
                         return Err(RepositoryError::ConflictBecause(
                             "outreach refused: this show's letter was composed as an album pitch before show letters existed — it names no show",
@@ -606,11 +630,11 @@ impl PostgresAutopilotRepository {
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
                     // The bill is already known data: every non-sibling act on
-                    // it is a named entity the executor should resolve a public
-                    // contact for before it goes scouting blind. Siblings keep
-                    // the roster path; the venue's own channels seed as a
-                    // `venue` beacon. `counterparty_email` is private and never
-                    // enters this payload — the venue is resolved by name.
+                    // it is a named entity the executor resolves a public
+                    // contact for. Siblings keep the roster path; the venue's
+                    // own channels seed as a `venue` beacon.
+                    // `counterparty_email` stays private — the venue is
+                    // resolved by name.
                     let seed_acts = sqlx::query_scalar::<_, String>(
                         r#"
                         SELECT act.act_name
@@ -819,14 +843,12 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::RaiseGrowthOpportunity { .. } => {
-                    // Deliberately no side effect. The finding is the work: the
-                    // durable action row carries the evidence, the recommended
-                    // class of response and the authority it was raised under,
-                    // and the operator queue reads it from there. Emitting a
-                    // provider call would mean assuming a capability the
-                    // platform was never declared to have, and inventing a
-                    // first-party mutation would fabricate state the evidence
-                    // does not support.
+                    // Deliberately no side effect: the finding is the work,
+                    // the durable action row carries the evidence and the
+                    // operator queue reads it from there. A provider call
+                    // would assume a capability the platform never declared,
+                    // and a first-party mutation would fabricate state the
+                    // evidence does not support.
                 }
                 AutopilotActionPayload::RaiseDeclineAdvisory {
                     place_id,
@@ -835,12 +857,9 @@ impl PostgresAutopilotRepository {
                     ..
                 } => {
                     // Approving is the park: the place flips to `not_a_fit`,
-                    // which is the same switch the console's block control
-                    // uses, so `load_community_targets` drops the room on the
-                    // next cycle and the engager stops spending there.
-                    // Flipping the state back un-parks it — reversible by
-                    // design. A target with no place row parked nothing;
-                    // the advisory still carried its evidence.
+                    // the same switch the console's block control uses, so
+                    // `load_community_targets` drops the room next cycle.
+                    // Flipping back un-parks it — reversible by design.
                     if let Some(place_id) = place_id {
                         sqlx::query(
                             r#"UPDATE discovery_places
@@ -886,10 +905,9 @@ impl PostgresAutopilotRepository {
                 }
                 AutopilotActionPayload::RaiseGrowthDebt { .. } => {
                     // Deliberately no side effect, for the same reason as the
-                    // raised growth opportunity: the finding is the work. What
-                    // to do about neglected work is an operator's call, and
-                    // auto-sending an outreach message here would move paid,
-                    // outward-facing work behind an observation quota.
+                    // raised growth opportunity: the finding is the work, and
+                    // auto-sending outreach here would move paid work behind
+                    // an observation quota.
                 }
                 AutopilotActionPayload::RunArchivePromoteWave {
                     limit, reason, ..
@@ -1227,24 +1245,17 @@ impl PostgresAutopilotRepository {
                     recipient_name,
                     recipient_target_id,
                 } => {
-                    // The recipient travels with the event. A channel draft has
-                    // none — its executor claims it by template and posts to a
-                    // channel — but a press pitch is an email, and this event
-                    // is the only thing the mailer sees. Emitting a pitch
-                    // without an address published a draft to nobody, which is
-                    // how every press pitch in production ended.
-                    //
-                    // The address the payload froze at approval time is not
-                    // trusted on its own: when the pitch names a registry
-                    // target, that row is re-pinned here — the producer's own
-                    // guards run again under the lock, because a contact can
-                    // be marked do-not-contact, deactivated, or re-addressed
-                    // between the click and the claim. The approved email is
-                    // the pin — a row carrying a different one is a different
-                    // recipient than the operator approved. The contact
-                    // window is reserved in the same transaction, so the
-                    // pitch spends against the same cooldown and org budget
-                    // every other outbound send answers to.
+                    // The recipient travels with the event: a press pitch is
+                    // an email and this event is the only thing the mailer
+                    // sees. The payload-frozen address is not trusted on its
+                    // own — a registry target is re-pinned here under the lock
+                    // because a contact can be marked do-not-contact,
+                    // deactivated, or re-addressed between the click and the
+                    // claim, and a row carrying a different address is a
+                    // different recipient than the operator approved. The
+                    // contact window is reserved in the same transaction, so
+                    // the pitch spends against the same cooldown and org
+                    // budget every other outbound send answers to.
                     // A drop-surge draft is composed by the brain, not a
                     // model — `draft.drop_surge` marks it, and execution
                     // owes it two things the model path gets for free: the
@@ -1343,23 +1354,15 @@ impl PostgresAutopilotRepository {
                     ..
                 } => {
                     // Internal DB operation: promote the outreach target from
-                    // `proposed` to `promoted` in the staging table. No
-                    // external executor is involved.
-                    //
-                    // Matched on the row's own identity -- the
-                    // `(workspace_id, display_name, target_kind)` unique key the
-                    // proposal conflicts on -- rather than on `source_task_id`.
-                    // A re-proposal of the same target keeps the original task
-                    // on the row, because that DO UPDATE does not touch
-                    // `source_task_id`, while the approval action carries the
-                    // task that proposed it most recently. Keyed on the task,
-                    // approving a target anyone had proposed before promoted
-                    // nothing at all.
-                    //
-                    // `promoted` is accepted so a replayed execution is a
-                    // no-op rather than a conflict; `discarded` is deliberately
-                    // not, because the proposal path preserves that decision
-                    // and an approval must not quietly overturn it.
+                    // `proposed` to `promoted` in the staging table. Matched
+                    // on the row's own `(workspace_id, display_name,
+                    // target_kind)` key rather than `source_task_id` — a
+                    // re-proposal keeps the original task on the row, so
+                    // task-keyed matching promoted nothing. `promoted` is
+                    // accepted so a replayed execution is a no-op rather than
+                    // a conflict; `discarded` is deliberately not, because the
+                    // proposal path preserves that decision and an approval
+                    // must not quietly overturn it.
                     let promoted = sqlx::query(
                         r#"
                         UPDATE agent_outreach_targets

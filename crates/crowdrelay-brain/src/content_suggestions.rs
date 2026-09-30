@@ -71,20 +71,22 @@ pub const ARC_LIFT: f64 = 1.4;
 pub const CONFIRMED_TREND_LIFT: f64 = 1.5;
 pub const EMERGING_TREND_LIFT: f64 = 1.125;
 
-/// 5.6 — shared learning. A format the roster's same-style sibling acts
-/// actually produced at least this many times is the label's experience
-/// arguing for it: a modest lift on expected fans, weaker than the band's
-/// own approved arc and much weaker than a confirmed trend. One production
-/// is an anecdote, not a pattern — the term stays inert below two.
+/// 5.6 — shared learning. Cross-roster evidence stays deliberately weak:
+/// it only starts after two mature pieces and is capped tightly around 1.0.
+/// The band's own measured yield below can move fourfold; a labelmate prior
+/// may move the expectation only -10%/+25%. Similar acts inform, never decide.
 pub const SIBLING_PROOF_MIN: u32 = 2;
-pub const SIBLING_PROOF_LIFT: f64 = 1.15;
+pub const SIBLING_YIELD_PRIOR_WEIGHT: f64 = 4.0;
+pub const SIBLING_YIELD_MIN: f64 = 0.90;
+pub const SIBLING_YIELD_MAX: f64 = 1.25;
 
-/// One outcome's report of what a production earned — `new_fans` from the
-/// suggestion's `results` payload — decays at this rate per older report.
-/// The most recent measured outcome is half the answer; the one before it
-/// a quarter. Two or three reports are all a format usually has, so the
-/// weighting stays shallow enough that a single viral outlier cannot pin
-/// the yield.
+/// One produced piece's measured fan yield decays at this rate per older
+/// sample. In normal operation the repository derives that sample from
+/// first-party conversion provenance; legacy/uninstrumented formats may still
+/// contribute an operator-reported `results.new_fans` fallback. The most
+/// recent measured piece is half the answer; the one before it a quarter.
+/// Two or three samples are all a format usually has, so one viral outlier
+/// cannot pin the yield.
 pub const YIELD_EMA_ALPHA: f64 = 0.5;
 /// Measured yield shrinks toward the purpose prior rather than replacing
 /// it: a format's first report moves expected fans by a third, and the
@@ -95,11 +97,11 @@ pub const YIELD_PRIOR_WEIGHT: f64 = 2.0;
 pub const YIELD_MIN: f64 = 0.25;
 pub const YIELD_MAX: f64 = 4.0;
 
-/// What the band's own resolved outcomes measured for one format: the
-/// exponentially-weighted mean of reported `new_fans` (recent reports
-/// weigh more), and how many outcomes carried a real measurement.
-/// `measured` counts only outcomes that reported — `done` without a
-/// `new_fans` figure teaches the stale rule, not the yield.
+/// What the band's own measured productions earned for one format: the
+/// exponentially-weighted mean of new fans per mature content piece (recent
+/// pieces weigh more), and how many pieces carried a real measurement.
+/// Published zero-conversion pieces count as evidence; fresh/uninstrumented
+/// pieces do not.
 #[derive(Clone, Copy, Debug)]
 pub struct FormatYield {
     pub measured_fans_ema: f64,
@@ -331,20 +333,20 @@ pub struct RankingInputs<'a> {
     pub arc_format_keys: &'a BTreeMap<String, Uuid>,
     /// Outcome count per format key — what the band has already tried.
     pub outcome_counts: &'a BTreeMap<String, u32>,
-    /// Measured new-fan yield per format key, learned from the resolved
-    /// outcomes' `results` payloads — the answer to "what did this format
-    /// actually earn when this band made it". Absent entries mean no
-    /// measurement exists and the purpose prior stands unmodified.
+    /// Measured new-fan yield per format key — normally first-party
+    /// source→post→conversion provenance, with legacy self-report only as a
+    /// fallback. This is the answer to "what did this format actually earn
+    /// when this band made it". Absent entries mean no measurement exists and
+    /// the purpose prior stands unmodified.
     pub format_yield: &'a BTreeMap<String, FormatYield>,
     /// Suggestion count per format key — novelty decays as the engine
     /// repeats itself.
     pub suggestion_counts: &'a BTreeMap<String, u32>,
-    /// 5.6 — productions of each format pooled across the roster's
-    /// same-style sibling acts. A shared prior, not a verdict: it can only
-    /// lift a format that already cleared every gate of this act's own —
-    /// a declined or capability-gated concept never reaches this code. The
-    /// act's own taste stays absolute; the label's experience only argues.
-    pub sibling_produced: &'a BTreeMap<String, u32>,
+    /// 5.6 — first-party fan yield pooled from mature content made by
+    /// same-style sibling acts in the same organisation. This is a weak prior,
+    /// not a verdict: it only reaches formats that already cleared this act's
+    /// own capability, taste and arc gates.
+    pub sibling_format_yield: &'a BTreeMap<String, FormatYield>,
     pub reach: &'a ReachSnapshot,
     pub weights: EfeWeights,
     /// The cycle's date — coverage only counts events ahead of it.
@@ -425,20 +427,6 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
         if arc_hit {
             lift *= ARC_LIFT;
         }
-        // Shared learning (5.6): the roster's same-style siblings already
-        // made this format work — a prior from the label's own ledger.
-        // It arrives after every gate, so it reorders the queue but can
-        // never put back what this act's own taste or capability removed.
-        let sibling_produced = inputs
-            .sibling_produced
-            .get(&entry.key)
-            .copied()
-            .unwrap_or(0);
-        let sibling_proof = sibling_produced >= SIBLING_PROOF_MIN;
-        if sibling_proof {
-            lift *= SIBLING_PROOF_LIFT;
-        }
-
         let promise = assemble_promise(&entry.distribution, inputs.reach);
         if distribution_promise_is_empty(&promise) {
             // A suggestion that reaches nobody is a chore, not a plan.
@@ -466,7 +454,22 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
                     / (YIELD_PRIOR_WEIGHT + measured);
                 shrunk.clamp(YIELD_MIN, YIELD_MAX)
             });
-        let expected_fans = base_fans * lift * yield_multiplier;
+        // Shared learning uses the same unit — fans per mature content piece —
+        // but with much stronger shrinkage and narrow bounds. Two sibling
+        // pieces are the minimum before the roster gets a vote at all.
+        let sibling_yield = inputs
+            .sibling_format_yield
+            .get(&entry.key)
+            .copied()
+            .filter(|yield_| yield_.measured >= SIBLING_PROOF_MIN);
+        let sibling_multiplier = sibling_yield.map_or(1.0, |yield_| {
+            let measured = f64::from(yield_.measured);
+            let relative_yield = yield_.measured_fans_ema / base_fans;
+            let shrunk = (SIBLING_YIELD_PRIOR_WEIGHT + measured * relative_yield)
+                / (SIBLING_YIELD_PRIOR_WEIGHT + measured);
+            shrunk.clamp(SIBLING_YIELD_MIN, SIBLING_YIELD_MAX)
+        });
+        let expected_fans = base_fans * lift * yield_multiplier * sibling_multiplier;
         let gain = information_gain(outcomes, PREDICT_STD_PRIOR);
         // Novelty decays as the same format keeps being offered — the
         // first playthrough suggestion is news, the fifth is nagging.
@@ -488,7 +491,7 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
                 covered,
                 trend_lift > 1.0,
                 arc_hit,
-                sibling_produced,
+                sibling_yield,
                 &promise,
                 inputs.reach.communities.len(),
             ),
@@ -500,7 +503,9 @@ pub fn rank_suggestions(inputs: &RankingInputs<'_>) -> Vec<ScoredSuggestion> {
                     .map(|event| event.id.clone())
                     .collect::<Vec<_>>(),
                 "arc_format_key_hit": arc_hit,
-                "sibling_productions": sibling_produced,
+                "sibling_measured_pieces": sibling_yield.map_or(0, |yield_| yield_.measured),
+                "sibling_fans_per_piece": sibling_yield.map(|yield_| yield_.measured_fans_ema),
+                "sibling_yield_multiplier": sibling_multiplier,
                 "efe_score": efe,
                 "lift": lift,
                 "format_yield": yield_multiplier,
@@ -529,7 +534,7 @@ fn reason_for(
     covered: bool,
     trend_lifted: bool,
     arc_hit: bool,
-    sibling_produced: u32,
+    sibling_yield: Option<FormatYield>,
     promise: &JsonValue,
     community_total: usize,
 ) -> String {
@@ -549,9 +554,10 @@ fn reason_for(
     if arc_hit {
         clauses.push("it is a beat in the approved arc".to_owned());
     }
-    if sibling_produced >= SIBLING_PROOF_MIN {
+    if let Some(yield_) = sibling_yield {
         clauses.push(format!(
-            "same-style acts on the roster made it {sibling_produced} times"
+            "same-style acts measured {:.1} fans/piece across {} mature pieces",
+            yield_.measured_fans_ema, yield_.measured
         ));
     }
     if let Some(map) = promise.as_object() {

@@ -12,6 +12,12 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{EventId, autonomy::Confidence};
 
+/// Distinct booking targets touched manually in the last 30 days that count as
+/// evidence of a real tenant-side booking process. Below this, an explicitly
+/// approved show ladder may act as a bounded backstop for relationship-sensitive
+/// promotion instead of waiting on a process that is barely moving.
+pub const ACTIVE_BOOKING_TOUCHES_30D: u32 = 3;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ShowGrowthHistory {
     pub canonical_link_setup_requested: bool,
@@ -68,6 +74,10 @@ pub struct ShowGrowthSnapshot {
     pub city_signal_fans: u32,
     pub qualified_referrers_in_city: u32,
     pub beacon_partners: u16,
+    /// Distinct booking targets touched through tenant-side Gmail/sheet activity
+    /// in the last 30 days. Autopilot-originated interactions are excluded so
+    /// the machine cannot manufacture evidence that the tenant is already active.
+    pub human_booking_targets_30d: u32,
     pub attendees: u32,
     /// Local-morning send time for the night's one post-show contact, computed
     /// from the event timezone by the snapshot loader: the first 10:00 after
@@ -241,6 +251,25 @@ impl ShowGrowthLever {
                 | Self::PostShowRecap
                 | Self::PostShowFollowAsk
         )
+    }
+
+    /// Third-party show promotion spends relationship capital: a promoter,
+    /// venue, creator or scene node may remember a clumsy ask long after the
+    /// campaign ends.
+    #[must_use]
+    pub const fn is_relationship_sensitive(self) -> bool {
+        matches!(
+            self,
+            Self::PartnerCrossPromo | Self::GrassrootsSceneRelay | Self::SocialProofRelay
+        )
+    }
+
+    /// Adaptive autonomy: an active tenant-side booking process keeps these
+    /// moves per-action and human-led. When the tenant is barely booking, a
+    /// live show-ladder approval is allowed to act as a bounded backstop.
+    #[must_use]
+    pub const fn ladder_may_pre_authorize(self, human_booking_targets_30d: u32) -> bool {
+        !self.is_relationship_sensitive() || human_booking_targets_30d < ACTIVE_BOOKING_TOUCHES_30D
     }
 
     /// The reach class the autopilot persists on the action. Single source:
@@ -667,6 +696,7 @@ mod tests {
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
             ladder_approved: false,
+            human_booking_targets_30d: 0,
             history: ShowGrowthHistory {
                 // Every test below describes a show already mid-campaign; the
                 // tracked link is set up once, before anything is shared.

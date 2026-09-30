@@ -81,13 +81,14 @@ impl PlayAnchorKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlayKind {
-    /// Ask the fans around a show to follow the band where new dates are
-    /// announced, timed to the announce and to the day after the show.
+    /// Ask the fans around an announced show to follow the band where new
+    /// dates are published.
     ///
-    /// The most under-used free lever the band has: a fan who tracks the artist
-    /// is told about every future date without the band paying for reach, and
-    /// the two moments a fan is most willing to press that button are when a
-    /// date near them is announced and the morning after they enjoyed one.
+    /// Post-show contact deliberately belongs to Show Growth now: that context
+    /// has observed attendance, the recap/merch/follow cadence and campaign
+    /// receipts. Keeping a second T+ ask here would let two contexts contact the
+    /// same room independently. Legacy persisted post-show steps still parse
+    /// and can run as a fallback when Show Growth is disabled.
     TrackUsAsk,
     /// Make sure every published upcoming show has a complete free listing
     /// before anybody is asked to look at it.
@@ -171,8 +172,8 @@ impl PlayKind {
     pub const fn hypothesis(self) -> &'static str {
         match self {
             Self::TrackUsAsk => {
-                "fans reached around a show will follow the band where future dates are announced, \
-                 raising the tracker count that future announcements reach for free"
+                "fans reached when a nearby show is announced will follow the band where future \
+                 dates are published, raising the tracker count future announcements reach for free"
             }
             Self::ListingCompletenessSweep => {
                 "a show that is listed completely, with a working ticket link, is found by people \
@@ -254,24 +255,19 @@ pub struct PlayStepSpec {
     pub window_hours: u32,
 }
 
-const TRACK_US_ASK_STEPS: [PlayStepSpec; 2] = [
+const TRACK_US_ASK_STEPS: [PlayStepSpec; 1] = [
     // Fourteen days out: late enough that the date is real and near enough that
     // a fan reading it is thinking about this show rather than a hypothetical.
+    //
+    // The post-show rung used to live here too. Show Growth now owns that
+    // moment because it can distinguish observed attendance from a ticket
+    // purchase and coordinates recap → merch → follow ask as one cadence.
     PlayStepSpec {
         index: 0,
         kind: PlayStepKind::AnnounceAsk,
         class: PlayStepKind::AnnounceAsk.action_class(),
         offset_hours: -14 * 24,
         window_hours: 7 * 24,
-    },
-    // The morning after. The single highest-intent moment the band gets, and
-    // the one it currently does nothing with.
-    PlayStepSpec {
-        index: 1,
-        kind: PlayStepKind::PostShowAsk,
-        class: PlayStepKind::PostShowAsk.action_class(),
-        offset_hours: 18,
-        window_hours: 3 * 24,
     },
 ];
 
@@ -492,8 +488,8 @@ impl PlayStepKind {
                  willing to follow the band where future dates appear"
             }
             Self::PostShowAsk => {
-                "the fan was at the show yesterday, the highest-intent moment the band gets and the \
-                 one it currently does nothing with"
+                "legacy fallback: the fan was observably at the show and Show Growth is disabled, \
+                 so this play owns the otherwise-unserved post-show follow ask"
             }
             Self::ListingSweep => {
                 "a published show three weeks out is worth checking is listed completely, because \
@@ -1124,12 +1120,16 @@ mod tests {
     }
 
     fn running() -> PlaySnapshot {
+        running_of(PlayKind::TrackUsAsk)
+    }
+
+    fn running_of(kind: PlayKind) -> PlaySnapshot {
         PlaySnapshot {
             play_id: PlayId::new(),
-            kind: PlayKind::TrackUsAsk,
+            kind,
             anchor_at: anchor(),
             anchor_active: true,
-            steps: PlayKind::TrackUsAsk
+            steps: kind
                 .steps()
                 .iter()
                 .enumerate()
@@ -1193,15 +1193,16 @@ mod tests {
     #[test]
     fn a_skipped_step_does_not_block_the_one_behind_it() {
         // A gated step nobody approved must not stall the play. Settling step
-        // zero leaves step one to run on its own schedule.
-        let mut snapshot = running();
+        // zero leaves step one to run on its own schedule; the now single-step
+        // track-us play can't carry the property, so dormant revival does.
+        let mut snapshot = running_of(PlayKind::DormantRevival);
         snapshot.steps[0].settled = true;
         let due = snapshot.steps[1].due_at + Duration::hours(1);
         assert!(matches!(
             evaluate_play(&snapshot, PlayPolicy::default(), due),
             PlayDecision::RunStep {
                 index: 1,
-                kind: PlayStepKind::PostShowAsk,
+                kind: PlayStepKind::DormantRevivalFinal,
                 ..
             }
         ));
@@ -1333,9 +1334,10 @@ mod tests {
             10 * 24,
             policy
         ));
-        // The track-us ask still has its post-show step at that distance, which
-        // is why one lead time for every play would be wrong for one of them.
-        assert!(play_is_worth_starting(
+        // The track-us ask lost its post-show rung to Show Growth — a show
+        // three days away is eleven days past its only window, so it too is a
+        // campaign that would exist only to record its own skip.
+        assert!(!play_is_worth_starting(
             PlayKind::TrackUsAsk,
             true,
             3 * 24,
@@ -1571,10 +1573,11 @@ mod tests {
     }
 
     #[test]
-    fn the_announce_step_lands_before_the_show_and_the_thanks_after_it() {
+    fn the_announce_step_lands_before_the_show_and_closes_before_it() {
+        // The post-show thanks lives in Show Growth now; what remains here is
+        // the announce ask, which must both open and close before the date.
         let steps = PlayKind::TrackUsAsk.steps();
         let (announce_due, announce_expiry) = step_schedule(steps[0], anchor());
-        let (post_due, _) = step_schedule(steps[1], anchor());
         assert!(
             announce_due < anchor(),
             "the announce ask precedes the show"
@@ -1583,7 +1586,6 @@ mod tests {
             announce_expiry < anchor(),
             "and closes before it, so it is never sent as a reminder about a show already played"
         );
-        assert!(post_due > anchor(), "the thanks follows the show");
     }
 
     #[test]

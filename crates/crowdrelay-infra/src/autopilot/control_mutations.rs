@@ -1009,6 +1009,28 @@ impl PostgresAutopilotRepository {
                 WHERE workspace_id=$1 AND context='show_growth'
                   AND subject_kind='event' AND subject_id=$2
                   AND status='awaiting_approval'
+                  -- Relationship-sensitive rungs stay human-led while the
+                  -- tenant has a real booking cadence. When manual Gmail/sheet
+                  -- evidence is sparse, the explicit ladder approval becomes
+                  -- the bounded backstop and may release them too.
+                  AND (
+                      COALESCE(payload ->> 'lever', '') NOT IN (
+                          'partner_cross_promo',
+                          'grassroots_scene_relay',
+                          'social_proof_relay'
+                      )
+                      OR (
+                          SELECT COUNT(DISTINCT interaction.target_id)
+                          FROM booking_interactions AS interaction
+                          WHERE interaction.workspace_id=$1
+                            AND interaction.occurred_at >= $3 - INTERVAL '30 days'
+                            AND (
+                                interaction.source_key LIKE 'gmail:%'
+                                OR interaction.source_key LIKE 'master:%'
+                                OR interaction.source_key LIKE 'promo:%'
+                            )
+                      ) < $5
+                  )
                   AND (approval_expires_at IS NULL OR approval_expires_at > $3)
                 RETURNING id
                 "#,
@@ -1017,6 +1039,9 @@ impl PostgresAutopilotRepository {
             .bind(event_id.into_uuid())
             .bind(now)
             .bind(OUTWARD_HOLD_SECONDS)
+            .bind(i64::from(
+                crowdrelay_domain::show_growth::ACTIVE_BOOKING_TOUCHES_30D,
+            ))
             .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;

@@ -11,6 +11,9 @@
 //! - **Send** an approved reply with the channel owner's grant (connection
 //!   platform `youtube_account`, scope `youtube.force-ssl`), under the same
 //!   owned-channel publish gate, cap and spacing as Instagram and Facebook.
+//! - **Capture** a fan from a fresh upload with one first-party comment carrying
+//!   the tenant's own join-ask words and a source-attributed `/signal` link.
+//!   Videos whose description already has a Signal CTA are left alone.
 //!
 //! Without an API key the worker never starts; without a grant it harvests
 //! and drafts, and approved replies wait with a reason instead of failing.
@@ -30,6 +33,8 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::google_oauth::resolve_google_access_token;
+
+mod fan_capture;
 
 const API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 const CYCLE: Duration = Duration::from_secs(30 * 60);
@@ -242,6 +247,11 @@ impl YoutubeRepliesWorker {
                         Ok(count) if count > 0 => tracing::info!(count, "youtube comments harvested"),
                         Ok(_) => {}
                         Err(error) => tracing::warn!(%error, "youtube comment harvest failed"),
+                    }
+                    match self.seed_fan_capture_comment().await {
+                        Ok(count) if count > 0 => tracing::info!(count, "youtube fan-capture comment posted"),
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(%error, "youtube fan-capture comment failed"),
                     }
                     if let Err(error) = self.send_due().await {
                         tracing::warn!(%error, "youtube reply send failed");

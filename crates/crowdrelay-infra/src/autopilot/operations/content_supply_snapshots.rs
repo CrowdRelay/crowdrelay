@@ -25,6 +25,7 @@ struct ContentRow {
     post_media_id: Option<String>,
     post_media_type: Option<String>,
     post_thumbnail_url: Option<String>,
+    post_acquired_fans: i64,
     post_engagement: Option<i64>,
     peer_median: Option<i64>,
     peer_count: i64,
@@ -169,6 +170,22 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                  THEN source.metadata->>'media_type' END AS post_media_type,
             CASE WHEN source.source_kind = 'social_post'
                  THEN source.metadata->>'thumbnail_url' END AS post_thumbnail_url,
+            -- The strongest possible resonance signal: real fans whose
+            -- tracked conversion was attributed to a posting/relay action
+            -- carrying this exact content source. Distinct fan ids prevent a
+            -- multi-rung spread from counting one person twice.
+            CASE WHEN source.source_kind = 'social_post' THEN (
+                SELECT count(DISTINCT provenance.fan_id)::bigint
+                FROM autopilot_actions AS action
+                JOIN fan_provenance_events AS provenance
+                  ON provenance.workspace_id = action.workspace_id
+                 AND provenance.action_id = action.id
+                 AND provenance.event_kind = 'conversion'
+                 AND provenance.attribution_method = 'last_tracked_click'
+                WHERE action.workspace_id = source.workspace_id
+                  AND lower(action.payload->>'source_id') = source.id::text
+                  AND provenance.occurred_at >= source.occurred_at
+            ) ELSE 0 END AS post_acquired_fans,
             -- How the post landed at home (weighted engagement the sync
             -- stores), against the median of the same account's earlier posts.
             CASE WHEN source.source_kind = 'social_post'
@@ -514,6 +531,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                         media_id: row.post_media_id.clone(),
                         media_type: row.post_media_type.clone(),
                         thumbnail_url: row.post_thumbnail_url.clone(),
+                        acquired_fans: u32::try_from(row.post_acquired_fans).unwrap_or(u32::MAX),
                         resonance: row.post_engagement.map(|engagement| PostResonance {
                             engagement,
                             peer_median: row.peer_median,

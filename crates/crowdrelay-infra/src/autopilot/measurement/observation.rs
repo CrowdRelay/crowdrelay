@@ -526,6 +526,11 @@ pub(super) async fn observe(
             AutopilotMeasurementKind::ContentLinkClicks7d => {
                 content_synergy::content_link_clicks(pool, workspace_id, measurement).await?
             }
+            // Fans who arrived through that exact tracked link — the content
+            // North-Star outcome rather than its click proxy.
+            AutopilotMeasurementKind::ContentFanAcquisition7d => {
+                content_synergy::content_fan_acquisitions(pool, workspace_id, measurement).await?
+            }
             // Posts filed against the artifact's content source in the week
             // after production — produced-and-never-posted is the real zero
             // this arm reports.

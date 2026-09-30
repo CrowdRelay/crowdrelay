@@ -27,6 +27,7 @@ mod video_tests {
             total_views: Some(1200),
             ads_views: Some(50),
             analytics_through: Some(OffsetDateTime::now_utc()),
+            fans_captured: Some(3),
             pace: Pace::OnTrack,
             tracked_clicks: Default::default(),
             sends: Default::default(),

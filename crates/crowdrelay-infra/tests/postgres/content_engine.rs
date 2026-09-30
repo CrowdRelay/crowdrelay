@@ -753,6 +753,110 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
     .execute(&pool)
     .await?;
 
+    // First-party learning fixture: one mature playthrough has been live for
+    // three weeks and forty distinct fans converted through posting actions
+    // that name it. No suggestion outcome reports `new_fans` — the ranker
+    // has to learn this yield from conversion provenance alone.
+    let source_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO content_sources
+             (id, workspace_id, source_kind, source_key, title, occurred_at,
+              expires_at, format_key)
+         VALUES ($1,$2,'video',$3,'Measured playthrough',
+                 now() - interval '30 days', now() + interval '30 days',
+                 'playthrough')",
+    )
+    .bind(source_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("yield-playthrough-{suffix}"))
+    .execute(&pool)
+    .await?;
+
+    let decision_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO autopilot_decisions
+             (id, workspace_id, decision_key, context, subject_kind, subject_id,
+              decision_kind, confidence_basis_points, disposition, reason,
+              input_snapshot, policy_snapshot, recommendation, evaluated_at,
+              trace_id)
+         VALUES ($1,$2,$3,'content_supply','content_source',$4,
+                 'seed.format_yield',9000,'auto_execute','yield fixture',
+                 '{}','{}','{}',now(),$5)
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("yield-decision-{suffix}"))
+    .bind(source_id)
+    .bind(Uuid::now_v7())
+    .fetch_one(&pool)
+    .await?;
+    let action_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO autopilot_actions
+             (id, workspace_id, decision_id, context, action_kind, subject_kind,
+              subject_id, idempotency_key, payload, status, finished_at)
+         VALUES ($1,$2,$3,'content_supply','community.engage.request',
+                 'content_source',$4,$5,$6,'succeeded',
+                 now() - interval '21 days')
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(source_id)
+    .bind(format!("yield-action-{suffix}"))
+    .bind(json!({
+        "kind": "request_community_engagement",
+        "source_id": source_id.to_string(),
+        "platform": "reddit",
+        "title": "measured playthrough",
+        "body": "fixture",
+    }))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO community_posts
+             (id, workspace_id, action_id, subreddit, title, body, status,
+              posted_at)
+         VALUES ($1,$2,$3,'r/Metal','measured playthrough','fixture','posted',
+                 now() - interval '21 days')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        WITH seeded AS (
+            INSERT INTO fans (
+                workspace_id, normalized_email, status, created_at, updated_at
+            )
+            SELECT $1,
+                   'yield-' || $2 || '-' || n::text || '@example.test',
+                   'active',
+                   now() - interval '20 days',
+                   now() - interval '20 days'
+            FROM generate_series(1, 40) AS n
+            RETURNING id
+        )
+        INSERT INTO fan_provenance_events (
+            workspace_id, fan_id, event_kind, channel, source_target,
+            action_id, attribution_method, attribution_confidence, occurred_at,
+            format_key
+        )
+        SELECT $1, id, 'conversion', 'reddit', 'fixture',
+               $3, 'last_tracked_click', 1.0,
+               now() - interval '20 days', 'playthrough'
+        FROM seeded
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&suffix)
+    .bind(action_id)
+    .execute(&pool)
+    .await?;
+
     let today = time::OffsetDateTime::now_utc().date();
     let raised = repo.refresh_suggestions(workspace_id, today).await?;
     assert!(
@@ -760,6 +864,20 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
         "the engine ranks then cuts to the vital few: {}",
         raised.len()
     );
+    let playthrough = raised
+        .iter()
+        .find(|suggestion| suggestion.format_key.as_deref() == Some("playthrough"))
+        .expect(
+            "observed first-party fan yield should lift the mature playthrough into the vital few",
+        );
+    let learned_multiplier = playthrough.evidence["format_yield"]
+        .as_f64()
+        .expect("format-yield multiplier is auditable evidence");
+    assert!(
+        learned_multiplier > 1.0,
+        "forty observed fans must lift the playthrough above its prior: {learned_multiplier}"
+    );
+
     for suggestion in &raised {
         assert_eq!(suggestion.status.as_str(), "raised");
         assert!(

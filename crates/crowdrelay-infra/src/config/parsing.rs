@@ -327,6 +327,26 @@ fn parse_public_api_origin(
     bare_origin(value, PUBLIC_API_ORIGIN_KEY, production).map(Some)
 }
 
+/// The fan-capture origin redirects may land on. Unlike the site base URL it
+/// must be `https` in every environment — a capture link leaves the trusted
+/// redirect path, so its target never travels in plaintext. Same bare-origin
+/// shape otherwise.
+fn parse_watch_page_origin(value: Option<&String>) -> Result<Option<Url>, ConfigError> {
+    let Some(value) = value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let parsed = bare_origin(value, WATCH_PAGE_ORIGIN_KEY, false)?;
+    if parsed.scheme() != "https" {
+        return Err(ConfigError::InsecureProductionSiteUrl {
+            name: WATCH_PAGE_ORIGIN_KEY,
+        });
+    }
+    Ok(Some(parsed))
+}
+
 fn bare_origin(
     value: &str,
     name: &'static str,

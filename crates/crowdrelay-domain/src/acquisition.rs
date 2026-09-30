@@ -25,10 +25,13 @@ pub struct ResolvedSmartLink {
     slug: SmartLinkSlug,
     destination_url: DestinationUrl,
     version: u64,
+    channel_source: Option<String>,
+    channel_community: Option<String>,
 }
 
 impl ResolvedSmartLink {
     /// Creates a resolved smart-link, rejecting a zero version.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: SmartLinkId,
         workspace_id: WorkspaceId,
@@ -36,6 +39,8 @@ impl ResolvedSmartLink {
         slug: SmartLinkSlug,
         destination_url: DestinationUrl,
         version: u64,
+        channel_source: Option<String>,
+        channel_community: Option<String>,
     ) -> Result<Self, ResolvedSmartLinkError> {
         if version == 0 {
             return Err(ResolvedSmartLinkError::InvalidVersion);
@@ -47,6 +52,8 @@ impl ResolvedSmartLink {
             slug,
             destination_url,
             version,
+            channel_source,
+            channel_community,
         })
     }
 
@@ -84,6 +91,18 @@ impl ResolvedSmartLink {
     #[must_use]
     pub const fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Returns the channel this link was minted for, when it was.
+    #[must_use]
+    pub fn channel_source(&self) -> Option<&str> {
+        self.channel_source.as_deref()
+    }
+
+    /// Returns the community this link was minted for, when it was.
+    #[must_use]
+    pub fn channel_community(&self) -> Option<&str> {
+        self.channel_community.as_deref()
     }
 }
 
@@ -684,6 +703,8 @@ mod tests {
             SmartLinkSlug::parse("tour-2026")?,
             DestinationUrl::parse("https://virya.music/join")?,
             1,
+            None,
+            None,
         )?)
     }
 
@@ -699,6 +720,8 @@ mod tests {
                 link.slug().clone(),
                 link.destination_url().clone(),
                 0,
+                None,
+                None,
             )
             .is_err()
         );

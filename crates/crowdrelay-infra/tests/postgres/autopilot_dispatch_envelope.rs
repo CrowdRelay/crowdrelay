@@ -209,8 +209,9 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
         "the dispatch envelope is an expectation, not an outcome: {evidence:?}"
     );
 
-    // The measurements the engagement schedule owns: reception plus the
-    // incremental fan-growth counterfactuals.
+    // The measurements the engagement schedule owns: reception, fast
+    // action-bound click/fan yield, plus the slower fan-growth
+    // counterfactuals.
     let kinds = sqlx::query_scalar::<_, String>(
         "SELECT measurement_kind FROM autopilot_measurements \
          WHERE workspace_id = $1 AND action_id = $2 ORDER BY measurement_kind",
@@ -221,6 +222,8 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
     .await?;
     for expected in [
         "agent_run_community_engagement_7d",
+        "content_link_clicks_7d",
+        "content_fan_acquisition_7d",
         "incremental_fan_growth_14d",
         "incremental_fan_growth_3d",
     ] {

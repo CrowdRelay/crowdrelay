@@ -176,6 +176,8 @@ async fn record_click(
         SmartLinkSlug::parse(slug)?,
         DestinationUrl::parse("https://example.test")?,
         1,
+        None,
+        None,
     )?;
     let click = ClickEvent::from_link(
         &link,

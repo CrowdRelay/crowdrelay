@@ -80,6 +80,13 @@ mod tests {
             // No campaign delivery has been claimed and abandoned.
             deliveries_stuck_claimed: 0,
             abandoned_claims_24h: 0,
+            // A fan joined just now and no drafts are parked, so both
+            // acquisition conditions stay quiet unless a test asks for them.
+            last_fan_at: Some(time::OffsetDateTime::now_utc()),
+            clicks_7d: 0,
+            clicks_7d_by_channel: None,
+            parked_manual_posts: None,
+            social_autopost_platforms_setting: None,
             // No videos to score: both video conditions stay quiet.
             video_cards: Json(Vec::new()),
         }

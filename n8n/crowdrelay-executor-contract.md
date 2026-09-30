@@ -78,6 +78,12 @@ them may fall back to the key only while its copy predates this contract.
 consented fan, with the fan's contact details and a `template_key` naming
 which message it is. CrowdRelay has already decided that this fan should hear
 from us, that consent is current, and that the marketing cooldown allows it.
+
+The payload also carries `brand.wordmark`, resolved by CrowdRelay from the
+workspace's own brand identity, and the fan's locale. Render the tenant's name
+from `brand.wordmark`; never compile a band name into the executor. When a
+referral URL is present, send `fan.referral_url` verbatim — hostname and route
+construction belong to CrowdRelay.
 The executor renders the named template and sends it.
 
 Seven keys exist. An executor that handles some by name and lets the rest fall
@@ -94,7 +100,7 @@ loop the product has.
 | `crowdrelay.fan.first_ticket_thanks.v1` | Bought their first ticket. The single best moment to turn a buyer into a fan. |
 | `crowdrelay.fan.returning_thanks.v1` | Bought enough shows to count as a returning fan. |
 | `crowdrelay.fan.referral_thanks.v1` | A referral they made converted. |
-| `crowdrelay.fan.referral_invite.v1` | Has referred nobody; asks them to. Carries `fan.referral_code`, and only this key does — build the link as `https://virya.music/r/{code}`. |
+| `crowdrelay.fan.referral_invite.v1` | Has referred nobody; asks them to. Carries `fan.referral_code` **and the complete tenant-native `fan.referral_url`**. Send `fan.referral_url` verbatim; never construct a hostname or referral path in the executor. |
 
 **Fail on a key you do not know.** A default branch sends the wrong message,
 which is worse than sending none: it is indistinguishable from working, and the

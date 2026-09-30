@@ -52,6 +52,11 @@ const RANDOM_DRAWS_ENABLED_KEY: &str = "CROWDRELAY_RANDOM_DRAWS_ENABLED";
 const WORKSPACE_SLUG_KEY: &str = "CROWDRELAY_WORKSPACE_SLUG";
 const PUBLIC_SITE_BASE_URL_KEY: &str = "CROWDRELAY_PUBLIC_SITE_BASE_URL";
 const PUBLIC_API_ORIGIN_KEY: &str = "CROWDRELAY_PUBLIC_API_ORIGIN";
+/// The fan-capture page smart links may land on instead of their destination.
+/// Optional: unset means every click redirects straight to the destination,
+/// exactly as before. A bare `https://` origin — `https://virya.music`, no
+/// path — because a click's context must never cross a plaintext hop.
+const WATCH_PAGE_ORIGIN_KEY: &str = "CROWDRELAY_WATCH_PAGE_ORIGIN";
 const DEFAULT_COUNTRY_CODE_KEY: &str = "CROWDRELAY_DEFAULT_COUNTRY_CODE";
 const REDIRECT_REFRESH_INTERVAL_MS_KEY: &str = "CROWDRELAY_REDIRECT_REFRESH_INTERVAL_MS";
 const CLICK_CHANNEL_CAPACITY_KEY: &str = "CROWDRELAY_CLICK_CHANNEL_CAPACITY";
@@ -166,6 +171,7 @@ const KNOWN_KEYS: &[&str] = &[
     WORKSPACE_SLUG_KEY,
     PUBLIC_SITE_BASE_URL_KEY,
     PUBLIC_API_ORIGIN_KEY,
+    WATCH_PAGE_ORIGIN_KEY,
     DEFAULT_COUNTRY_CODE_KEY,
     REDIRECT_REFRESH_INTERVAL_MS_KEY,
     CLICK_CHANNEL_CAPACITY_KEY,
@@ -307,6 +313,11 @@ pub struct Config {
     /// actually answers on. Optional: unset means crew e-mails carry no
     /// one-click links rather than links aimed at a host that 404s them.
     pub public_api_origin: Option<Url>,
+    /// The tenant's fan-capture origin (`{origin}/watch/{youtubeId}`). When
+    /// set, a smart link on a capture channel that points at an owned video
+    /// lands there instead of redirecting straight to YouTube. Optional:
+    /// unset preserves the plain destination redirect byte for byte.
+    pub watch_page_origin: Option<Url>,
     /// Optional immediately preceding AEAD key used during bounded rotation.
     pub previous_response_encryption_key: Option<SensitiveResponseKey>,
     /// Derived AEAD key for the workspace-secrets store (tenant-configured
@@ -525,6 +536,7 @@ impl Config {
             values.get(PUBLIC_API_ORIGIN_KEY),
             environment.is_production(),
         )?;
+        let watch_page_origin = parse_watch_page_origin(values.get(WATCH_PAGE_ORIGIN_KEY))?;
         let previous_response_encryption_key = parse_previous_response_encryption_key(
             values.get(PREVIOUS_RESPONSE_ENCRYPTION_SECRET_KEY),
             environment.is_production(),
@@ -582,6 +594,7 @@ impl Config {
             attestation_signing_key,
             team_approval_key,
             public_api_origin,
+            watch_page_origin,
             previous_response_encryption_key,
             workspace_secrets_key,
             previous_workspace_secrets_key,

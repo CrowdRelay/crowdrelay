@@ -119,8 +119,13 @@ impl LoadSmartLinks {
             .load_active_smart_links()
             .await
             .map_err(LoadSmartLinksError::Repository)?;
+        let context = self
+            .repository
+            .load_redirect_context()
+            .await
+            .map_err(LoadSmartLinksError::Repository)?;
         self.cache
-            .replace(links)
+            .replace(links, context.into_iter().collect())
             .map_err(LoadSmartLinksError::Cache)
     }
 }

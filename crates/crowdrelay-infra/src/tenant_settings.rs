@@ -215,6 +215,21 @@ impl TenantBrandSettings {
         (!root.is_empty()).then_some(root)
     }
 
+    /// Absolute first-party referral route for this tenant.
+    ///
+    /// Referral links are growth identity, not copy. Building this URL in an
+    /// executor would make the first tenant's domain part of the wire contract
+    /// and send another band's fans to the wrong signup page. An unconfigured
+    /// tenant has no URL and the caller must fail closed.
+    #[must_use]
+    pub fn referral_url(&self, code: &str) -> Option<String> {
+        let code = code.trim();
+        if code.is_empty() {
+            return None;
+        }
+        Some(format!("{}/r/{code}", self.site_root()?))
+    }
+
     /// The member-area landing page, e.g. `https://virya.music/pl/latarnik`.
     #[must_use]
     pub fn member_area_url(&self) -> Option<String> {

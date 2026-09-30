@@ -69,7 +69,9 @@ impl PostgresAcquisitionRepository {
                 smart_links.campaign_id,
                 smart_links.slug,
                 smart_links.destination_url,
-                smart_links.version
+                smart_links.version,
+                smart_links.channel_source,
+                smart_links.channel_community
             FROM smart_links
             INNER JOIN workspaces
                 ON workspaces.id = smart_links.workspace_id
@@ -93,6 +95,63 @@ impl PostgresAcquisitionRepository {
         rows.into_iter()
             .map(|row| ResolvedSmartLink::try_from(row).map_err(|_| StoreError::Unexpected))
             .collect()
+    }
+
+    /// The workspace's owned video ids and the subreddits whose verified
+    /// rules allow an off-site landing page — one read for the redirect
+    /// snapshot, on the same refresh as the links it rides with.
+    async fn load_redirect_context_inner(
+        &self,
+    ) -> Result<Option<RedirectContext>, StoreError> {
+        let workspace_id = self.trusted_workspace_id_inner().await?;
+        let owned_video_ids = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT substring(source_key from 9)
+            FROM content_sources
+            WHERE workspace_id = $1
+              AND source_kind = 'video'
+              AND source_key LIKE 'youtube:%'
+              AND active
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from_sqlx)?
+        .into_iter()
+        .collect();
+
+        // A community's rules decide whether its links may land off-site:
+        // only a verified rules summary that names none of the forbidden
+        // link words earns a place in the set.
+        let rule_rows = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT t.subreddit, r.rules_summary
+            FROM agent_outreach_targets t
+            JOIN discovery_place_rules r ON r.place_id = t.place_id
+            WHERE t.workspace_id = $1
+              AND coalesce(nullif(t.platform, ''), 'reddit') = 'reddit'
+              AND t.subreddit IS NOT NULL
+              AND r.verified_at IS NOT NULL
+              AND r.rules_summary IS NOT NULL
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::from_sqlx)?;
+
+        let reddit_offsite_ok = rule_rows
+            .into_iter()
+            .filter(|(_, rules)| reddit_rules_allow_offsite(rules))
+            .map(|(subreddit, _)| normalize_community(&subreddit))
+            .collect();
+
+        Ok(Some(RedirectContext {
+            workspace_id,
+            owned_video_ids,
+            reddit_offsite_ok,
+        }))
     }
 
     async fn persist_click_batch_inner(&self, clicks: &[ClickEvent]) -> Result<(), StoreError> {

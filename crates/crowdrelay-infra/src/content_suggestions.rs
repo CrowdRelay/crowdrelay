@@ -46,6 +46,27 @@ struct OpenSuggestionKeyRow {
 /// enough that a genuinely changed band can be argued back by evidence.
 pub(crate) const TASTE_COOLDOWN_DAYS: i64 = 42;
 
+/// A content piece gets a full fortnight to convert before its observed fan
+/// yield becomes a training sample. Fresh posts are unknown, not zero.
+const FORMAT_YIELD_WINDOW_DAYS: i32 = 14;
+
+fn fold_format_yield_sample(
+    yields: &mut BTreeMap<String, FormatYield>,
+    format_key: String,
+    new_fans: f64,
+) {
+    let entry = yields.entry(format_key).or_insert(FormatYield {
+        measured_fans_ema: new_fans,
+        measured: 0,
+    });
+    entry.measured_fans_ema = if entry.measured == 0 {
+        new_fans
+    } else {
+        YIELD_EMA_ALPHA * new_fans + (1.0 - YIELD_EMA_ALPHA) * entry.measured_fans_ema
+    };
+    entry.measured = entry.measured.saturating_add(1);
+}
+
 #[derive(Debug, FromRow)]
 struct HistoryRow {
     format_key: String,
@@ -204,24 +225,111 @@ impl PostgresContentEngineRepository {
         Ok((suggestions, outcomes, produced))
     }
 
-    /// What the band's own resolved outcomes measured per format — an EMA
-    /// of reported `results.new_fans` ordered by `resolved_at`, so recent
-    /// reports outweigh early ones, alongside how many outcomes reported a
-    /// figure at all. Only outcomes where the band actually made something
-    /// count — a `declined` or `expired` row cannot carry a real
-    /// measurement, and crediting one would teach the yield a production
-    /// that never happened.
-    pub(crate) async fn format_yields<'e, E>(
+    /// What this band's produced formats actually earned in new fans.
+    ///
+    /// First-party provenance is authoritative whenever the format has at
+    /// least one mature, published source: each source becomes one sample
+    /// after a fourteen-day conversion window, including an explicit zero
+    /// when it acquired nobody. The path is fully observed:
+    ///
+    /// content source -> posting action -> tracked click -> conversion
+    /// provenance -> fan.
+    ///
+    /// A fresh piece is not a zero — it stays out until the full window has
+    /// elapsed. Manual `suggestion_outcomes.results.new_fans` survives as a
+    /// legacy/uninstrumented fallback only for formats with no first-party
+    /// samples. Once CrowdRelay can measure a format itself, self-report never
+    /// double-counts or overrides the observed truth.
+    pub(crate) async fn format_yields(
         &self,
-        executor: E,
         workspace_id: WorkspaceId,
-    ) -> Result<BTreeMap<String, FormatYield>>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        // `jsonb_typeof` guards the cast — a string "12" or a stray object
-        // in `results` cannot abort the pass.
-        let rows = sqlx::query_as::<_, (String, f64)>(
+    ) -> Result<BTreeMap<String, FormatYield>> {
+        let ws = workspace_id.into_uuid();
+
+        // One row per mature content source. A LEFT JOIN is load-bearing:
+        // published content that converted zero fans is a real training sample,
+        // unlike fresh/unpublished content, which never enters this CTE.
+        let observed_rows = sqlx::query_as::<_, (String, f64)>(
+            r#"
+            WITH post_receipts AS (
+                SELECT workspace_id, action_id, posted_at
+                FROM community_posts
+                WHERE workspace_id = $1 AND posted_at IS NOT NULL
+                UNION ALL
+                SELECT workspace_id, action_id, posted_at
+                FROM social_posts
+                WHERE workspace_id = $1 AND posted_at IS NOT NULL
+                UNION ALL
+                SELECT workspace_id, action_id, posted_at
+                FROM telegram_posts
+                WHERE workspace_id = $1 AND posted_at IS NOT NULL
+                UNION ALL
+                SELECT workspace_id, action_id, posted_at
+                FROM discord_posts
+                WHERE workspace_id = $1 AND posted_at IS NOT NULL
+            ),
+            published_sources AS (
+                SELECT source.id AS source_id,
+                       source.format_key,
+                       min(post.posted_at) AS published_at
+                FROM content_sources AS source
+                JOIN autopilot_actions AS action
+                  ON action.workspace_id = source.workspace_id
+                 AND lower(action.payload->>'source_id') = source.id::text
+                JOIN post_receipts AS post
+                  ON post.workspace_id = action.workspace_id
+                 AND post.action_id = action.id
+                WHERE source.workspace_id = $1
+                  AND source.format_key IS NOT NULL
+                GROUP BY source.id, source.format_key
+            ),
+            source_actions AS (
+                SELECT source.source_id,
+                       source.format_key,
+                       source.published_at,
+                       action.id AS action_id
+                FROM published_sources AS source
+                JOIN autopilot_actions AS action
+                  ON action.workspace_id = $1
+                 AND lower(action.payload->>'source_id') = source.source_id::text
+                WHERE source.published_at <=
+                      now() - make_interval(days => $2)
+            )
+            SELECT source.format_key,
+                   count(DISTINCT provenance.fan_id)::double precision AS new_fans
+            FROM source_actions AS source
+            LEFT JOIN fan_provenance_events AS provenance
+              ON provenance.workspace_id = $1
+             AND provenance.action_id = source.action_id
+             AND provenance.event_kind = 'conversion'
+             AND provenance.attribution_method = 'last_tracked_click'
+             AND provenance.format_key = source.format_key
+             AND provenance.occurred_at >= source.published_at
+             AND provenance.occurred_at <
+                 source.published_at + make_interval(days => $2)
+            GROUP BY source.source_id, source.format_key, source.published_at
+            ORDER BY source.format_key, source.published_at, source.source_id
+            "#,
+        )
+        .bind(ws)
+        .bind(FORMAT_YIELD_WINDOW_DAYS)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let first_party_formats: BTreeSet<String> = observed_rows
+            .iter()
+            .map(|(format_key, _)| format_key.clone())
+            .collect();
+        let mut format_yield: BTreeMap<String, FormatYield> = BTreeMap::new();
+        for (format_key, new_fans) in observed_rows {
+            fold_format_yield_sample(&mut format_yield, format_key, new_fans);
+        }
+
+        // Backward-compatible fallback for content that predates source-level
+        // instrumentation or was honestly filed without a trackable source.
+        // `jsonb_typeof` guards the cast: malformed operator JSON cannot
+        // abort the whole ranking pass.
+        let reported_rows = sqlx::query_as::<_, (String, f64)>(
             r#"
             SELECT s.format_key,
                    (o.results->>'new_fans')::double precision AS new_fans
@@ -235,48 +343,32 @@ impl PostgresContentEngineRepository {
             ORDER BY s.format_key, o.resolved_at, o.id
             "#,
         )
-        .bind(workspace_id.into_uuid())
-        .fetch_all(executor)
+        .bind(ws)
+        .fetch_all(&self.pool)
         .await?;
-        let mut format_yield: BTreeMap<String, FormatYield> = BTreeMap::new();
-        for (format_key, new_fans) in rows {
-            let entry = format_yield.entry(format_key).or_insert(FormatYield {
-                measured_fans_ema: new_fans,
-                measured: 0,
-            });
-            entry.measured_fans_ema = if entry.measured == 0 {
-                new_fans
-            } else {
-                YIELD_EMA_ALPHA * new_fans + (1.0 - YIELD_EMA_ALPHA) * entry.measured_fans_ema
-            };
-            entry.measured += 1;
+        for (format_key, new_fans) in reported_rows {
+            if !first_party_formats.contains(&format_key) {
+                fold_format_yield_sample(&mut format_yield, format_key, new_fans);
+            }
         }
+
         Ok(format_yield)
     }
 
-    /// 5.6 — shared learning, respecting per-band taste. Productions of each
-    /// format pooled across the act's same-style siblings in the same
-    /// organisation: the label's own ledger arguing for a format its other
-    /// bands of the same shape already made work.
+    /// 5.6 — shared learning, respecting per-band taste.
     ///
-    /// Two absences are honest zeros:
+    /// Same-organisation acts only pool when their declared `act_style`
+    /// normalises to the target act's style. The evidence is first-party fan
+    /// yield per mature content source — not "another band made this", but
+    /// "another similar band made this and here is how many fans it earned".
     ///
-    /// * **No organisation or no declared `act_style`** — nothing to match
-    ///   on, so nothing pools. A band that never said what it sounds like
-    ///   cannot claim taste-kinship, and guessing it would be exactly the
-    ///   inference 5.21 refused.
-    /// * **No same-style sibling produced it** — the map simply lacks the
-    ///   key; the ranker's floor (`SIBLING_PROOF_MIN`) turns one anecdote
-    ///   into no lift.
-    ///
-    /// The taste gate is normalised equality on the declared descriptor —
-    /// lowercase, whitespace-folded. Only `done`/`done_differently` count:
-    /// the same production rule the stale check credits, so a sibling's
-    /// declined or lapsed attempt teaches nothing.
-    async fn sibling_produced_counts(
+    /// Zero-conversion mature pieces remain samples. Fresh pieces do not.
+    /// No organisation or no declared style returns an empty prior rather
+    /// than guessing similarity from genre, name, audience or embeddings.
+    async fn sibling_format_yields(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<BTreeMap<String, u32>> {
+    ) -> Result<BTreeMap<String, FormatYield>> {
         let ws = workspace_id.into_uuid();
         let (organization_id,): (Option<Uuid>,) =
             sqlx::query_as("SELECT organization_id FROM workspaces WHERE id = $1")
@@ -320,25 +412,82 @@ impl PostgresContentEngineRepository {
             return Ok(BTreeMap::new());
         }
 
-        let rows = sqlx::query_as::<_, (String, i64)>(
+        let rows = sqlx::query_as::<_, (String, f64)>(
             r#"
-            SELECT s.format_key, count(o.id) AS produced
-            FROM content_suggestions AS s
-            JOIN suggestion_outcomes AS o
-              ON o.workspace_id = s.workspace_id AND o.suggestion_id = s.id
-            WHERE s.workspace_id = ANY($1)
-              AND s.format_key IS NOT NULL
-              AND o.outcome IN ('done', 'done_differently')
-            GROUP BY s.format_key
+            WITH post_receipts AS (
+                SELECT workspace_id, action_id, posted_at
+                FROM community_posts
+                WHERE workspace_id = ANY($1) AND posted_at IS NOT NULL
+                UNION ALL
+                SELECT workspace_id, action_id, posted_at
+                FROM social_posts
+                WHERE workspace_id = ANY($1) AND posted_at IS NOT NULL
+                UNION ALL
+                SELECT workspace_id, action_id, posted_at
+                FROM telegram_posts
+                WHERE workspace_id = ANY($1) AND posted_at IS NOT NULL
+                UNION ALL
+                SELECT workspace_id, action_id, posted_at
+                FROM discord_posts
+                WHERE workspace_id = ANY($1) AND posted_at IS NOT NULL
+            ),
+            published_sources AS (
+                SELECT source.workspace_id,
+                       source.id AS source_id,
+                       source.format_key,
+                       min(post.posted_at) AS published_at
+                FROM content_sources AS source
+                JOIN autopilot_actions AS action
+                  ON action.workspace_id = source.workspace_id
+                 AND lower(action.payload->>'source_id') = source.id::text
+                JOIN post_receipts AS post
+                  ON post.workspace_id = action.workspace_id
+                 AND post.action_id = action.id
+                WHERE source.workspace_id = ANY($1)
+                  AND source.format_key IS NOT NULL
+                GROUP BY source.workspace_id, source.id, source.format_key
+            ),
+            source_actions AS (
+                SELECT source.workspace_id,
+                       source.source_id,
+                       source.format_key,
+                       source.published_at,
+                       action.id AS action_id
+                FROM published_sources AS source
+                JOIN autopilot_actions AS action
+                  ON action.workspace_id = source.workspace_id
+                 AND lower(action.payload->>'source_id') = source.source_id::text
+                WHERE source.published_at <=
+                      now() - make_interval(days => $2)
+            )
+            SELECT source.format_key,
+                   count(DISTINCT provenance.fan_id)::double precision AS new_fans
+            FROM source_actions AS source
+            LEFT JOIN fan_provenance_events AS provenance
+              ON provenance.workspace_id = source.workspace_id
+             AND provenance.action_id = source.action_id
+             AND provenance.event_kind = 'conversion'
+             AND provenance.attribution_method = 'last_tracked_click'
+             AND provenance.format_key = source.format_key
+             AND provenance.occurred_at >= source.published_at
+             AND provenance.occurred_at <
+                 source.published_at + make_interval(days => $2)
+            GROUP BY source.workspace_id, source.source_id,
+                     source.format_key, source.published_at
+            ORDER BY source.format_key, source.published_at,
+                     source.workspace_id, source.source_id
             "#,
         )
         .bind(&sibling_ids)
+        .bind(FORMAT_YIELD_WINDOW_DAYS)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(key, produced)| (key, u32::try_from(produced).unwrap_or(u32::MAX)))
-            .collect())
+
+        let mut yields = BTreeMap::new();
+        for (format_key, new_fans) in rows {
+            fold_format_yield_sample(&mut yields, format_key, new_fans);
+        }
+        Ok(yields)
     }
 
     /// One ranking pass: gather inputs, rank, persist the survivors as
@@ -399,8 +548,8 @@ impl PostgresContentEngineRepository {
         let arc_keys = self.arc_format_keys(workspace_id).await?;
         let (suggestion_counts, outcome_counts, produced_counts) =
             self.format_history(&self.pool, workspace_id).await?;
-        let format_yield = self.format_yields(&self.pool, workspace_id).await?;
-        let sibling_produced = self.sibling_produced_counts(workspace_id).await?;
+        let format_yield = self.format_yields(workspace_id).await?;
+        let sibling_format_yield = self.sibling_format_yields(workspace_id).await?;
 
         // §4b-4 — a concept that has been offered STALE_ATTEMPT_LIMIT
         // times and never produced has had its chances: it retires on its
@@ -520,7 +669,7 @@ impl PostgresContentEngineRepository {
             outcome_counts: &outcome_counts,
             format_yield: &format_yield,
             suggestion_counts: &suggestion_counts,
-            sibling_produced: &sibling_produced,
+            sibling_format_yield: &sibling_format_yield,
             reach: &reach,
             weights: Default::default(),
             today,

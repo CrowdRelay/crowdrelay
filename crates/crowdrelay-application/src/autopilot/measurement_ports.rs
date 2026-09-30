@@ -172,6 +172,12 @@ pub enum AutopilotMeasurementKind {
     /// named a link to track; a post that published without one reports
     /// `no_tracked_link` rather than a zero it never earned.
     ContentLinkClicks7d,
+    /// Fans acquired through the tracked link this content action carried,
+    /// inside the same seven-day window. Attribution is exact: the action's
+    /// own smart link -> click visitor -> fan acquisition event. This is the
+    /// content growth signal the North Star needs; clicks alone only say the
+    /// post attracted attention, not that it created a fan.
+    ContentFanAcquisition7d,
     /// Posts filed against the artifact's content source in the seven days
     /// after the executor confirmed production. Scheduled at the success
     /// receipt — production is already a fact by the time the measurement
@@ -217,6 +223,7 @@ impl AutopilotMeasurementKind {
             Self::CampaignTicketConversion14d => "campaign_ticket_conversion_14d",
             Self::CampaignUnsubscribe7d => "campaign_unsubscribe_7d",
             Self::ContentLinkClicks7d => "content_link_clicks_7d",
+            Self::ContentFanAcquisition7d => "content_fan_acquisition_7d",
             Self::ArtifactOutcome7d => "artifact_outcome_7d",
         }
     }
@@ -271,6 +278,7 @@ impl AutopilotMeasurementKind {
             Self::CampaignTicketConversion14d => Some("campaign_ticket_conversions"),
             Self::CampaignUnsubscribe7d => Some("campaign_unsubscribe_rate"),
             Self::ContentLinkClicks7d => Some("content_link_clicks"),
+            Self::ContentFanAcquisition7d => Some("content_fan_acquisitions"),
             Self::ArtifactOutcome7d => Some("artifact_posts"),
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),

@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -21,7 +22,8 @@ mod tests {
         ConfirmFanCommand, CreateEventCommand, CreatedEvent, EventCache, EventRepository,
         FanLifecycleRepository, IssueAdmissionPass,
         ListCities, ListFanEventInterests, LoadAdmissionPass, LoadReferralProgress,
-        RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, ReferralRepository,
+        RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, RedirectContext,
+        ReferralRepository,
         RegisterEventInterest, RegisterEventInterestCommand, ReplaceEventActs, RepositoryError,
         ResolveReferralCode, RevokeAdmissionPass, SetEventCounterparty, SignupFan, SignupFanCommand,
         UnsubscribeFan,
@@ -65,6 +67,7 @@ mod tests {
             redirect_cache,
             click_submitter,
             event_state(workspace_id),
+            None,
         )
     }
 
@@ -74,6 +77,7 @@ mod tests {
         redirect_cache: Arc<RedirectCache>,
         click_submitter: ClickSubmitter,
         events: EventState,
+        watch_origin: Option<Url>,
     ) -> Result<AppState, Box<dyn std::error::Error>> {
         let database = PgPoolOptions::new()
             .max_connections(1)
@@ -101,7 +105,13 @@ mod tests {
         Ok(AppState::new(
             database,
             Duration::from_millis(50),
-            acquisition_state(repository, workspace_id, redirect_cache, click_submitter)?,
+            acquisition_state(
+                repository,
+                workspace_id,
+                redirect_cache,
+                click_submitter,
+                watch_origin,
+            )?,
             referral_state(workspace_id)?,
             events,
             admission_state(workspace_id),
@@ -322,9 +332,11 @@ mod tests {
             SmartLinkSlug::parse("tour-2026")?,
             DestinationUrl::parse("https://virya.music/join")?,
             1,
+            None,
+            None,
         )?;
         let cache = Arc::new(RedirectCache::new());
-        cache.replace([link.clone()])?;
+        cache.replace([link.clone()], Vec::new())?;
         let clicks = Arc::new(Mutex::new(Vec::new()));
         let click_capture = Arc::clone(&clicks);
         let repository: Arc<dyn AcquisitionRepository> = Arc::new(TestRepository::unavailable());
@@ -364,6 +376,55 @@ mod tests {
         assert_eq!(clicks[0].campaign_id(), Some(campaign_id));
         assert_eq!(clicks[0].referrer_host(), Some("social.example"));
         assert!(clicks[0].visitor_id().is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn redirect_lands_on_the_watch_page_for_a_capture_channel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_id = WorkspaceId::new();
+        let link = ResolvedSmartLink::new(
+            SmartLinkId::new(),
+            workspace_id,
+            None,
+            SmartLinkSlug::parse("latest-video")?,
+            DestinationUrl::parse("https://www.youtube.com/watch?v=abc123XYZ_-")?,
+            1,
+            Some("telegram".to_owned()),
+            None,
+        )?;
+        let cache = Arc::new(RedirectCache::new());
+        cache.replace(
+            [link],
+            vec![RedirectContext {
+                workspace_id,
+                owned_video_ids: ["abc123XYZ_-".to_owned()].into_iter().collect(),
+                reddit_offsite_ok: HashSet::new(),
+            }],
+        )?;
+        let repository: Arc<dyn AcquisitionRepository> = Arc::new(TestRepository::unavailable());
+        let app = test_router_with_state(state_with_event_state(
+            repository,
+            workspace_id,
+            cache,
+            Arc::new(|_event| {}),
+            event_state(workspace_id),
+            Some(Url::parse("https://virya.music")?),
+        )?)?;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/go/latest-video")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers()[LOCATION],
+            "https://virya.music/watch/abc123XYZ_-/?utm_source=telegram&utm_medium=watch"
+        );
         Ok(())
     }
 
@@ -1166,6 +1227,7 @@ mod tests {
             Arc::new(RedirectCache::new()),
             Arc::new(|_event| {}),
             events,
+            None,
         )?)?;
 
         // An act with its own tagged link redirects there, attributed.

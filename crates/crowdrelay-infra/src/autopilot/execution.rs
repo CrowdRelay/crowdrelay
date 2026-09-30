@@ -758,6 +758,23 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::days(3),
             ));
+            // Fast, action-bound funnel signal. Community posts carry their
+            // own tracked smart link, so seven days is enough to learn which
+            // rooms drive traffic and actual owned-fan acquisition while the
+            // causal Y14/Y30 estimands are still maturing. Both observers fail
+            // closed with `no_tracked_link` when the post never lands with a
+            // measurable link — absence of instrumentation is not a zero.
+            for kind in [
+                AutopilotMeasurementKind::ContentLinkClicks7d,
+                AutopilotMeasurementKind::ContentFanAcquisition7d,
+            ] {
+                plans.push((
+                    kind,
+                    action_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(7),
+                ));
+            }
             // No AgentRunOutcomeQuality1h here: that measure links through
             // `agent_service_tasks.metadata->>'action_id'`, and community
             // engagement creates no task row — the community_posts row is
@@ -808,12 +825,17 @@ pub(super) async fn schedule_effect_measurement(
                 .and_then(|u| u.as_str())
                 .is_some_and(|u| !u.trim().is_empty());
             if linkable_platform && has_cta {
-                plans.push((
+                for kind in [
                     AutopilotMeasurementKind::ContentLinkClicks7d,
-                    action_id.into_uuid(),
-                    0.0,
-                    now + time::Duration::days(7),
-                ));
+                    AutopilotMeasurementKind::ContentFanAcquisition7d,
+                ] {
+                    plans.push((
+                        kind,
+                        action_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(7),
+                    ));
+                }
             }
             // No AgentRunOutcomeQuality1h here either: the drafting task's
             // outcome links to the action that requested the draft, not to
@@ -827,12 +849,17 @@ pub(super) async fn schedule_effect_measurement(
         // Signups surface on the briefing line instead of a measurement row.
         AutopilotActionPayload::PublishJoinAsk { platform, .. } => {
             if matches!(platform.as_str(), "instagram" | "facebook" | "x" | "telegram") {
-                plans.push((
+                for kind in [
                     AutopilotMeasurementKind::ContentLinkClicks7d,
-                    action_id.into_uuid(),
-                    0.0,
-                    now + time::Duration::days(7),
-                ));
+                    AutopilotMeasurementKind::ContentFanAcquisition7d,
+                ] {
+                    plans.push((
+                        kind,
+                        action_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(7),
+                    ));
+                }
             }
         }
     }

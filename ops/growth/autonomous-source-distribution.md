@@ -2,7 +2,7 @@
 
 ## Checkpoint base
 
-This draft checkpoint is based on `3041f153`. Before opening the pull request, a fetch found that `main` had advanced to `d2e102d7`. Newer main already contains the migration-number repair, a SCOUT send guard, and updates to the consent and schema-marker contracts. The verification below describes this checkpoint, not the newer main tree. Rebase, reconcile overlapping changes, and rerun the gates before marking the pull request ready. In particular, do not apply this checkpoint's migration rename to current main: the promotion migration there is now `0384_source_owned_promotion_metadata.sql`.
+The original draft checkpoint was based on `3041f153`. This revision merges main at `7d6730b2` without rewriting published branch history. It keeps main's canonical promotion migration at `0384_source_owned_promotion_metadata.sql` and removes the checkpoint's obsolete rename to `0383`. The shared unsent-state predicate preserves main's SCOUT send guard and applies the same refusal to contradictory reply fields. The content-supply snapshot retains main's acquired-fan resonance signal alongside the checkpoint's failed-task receipts.
 
 ## Goal
 
@@ -33,9 +33,9 @@ No external publication, email, push, deployment, or production data mutation is
 
 ## Migration prerequisite found during verification
 
-The merged tree contained two migrations numbered `0382`. A fresh PostgreSQL run fails with `_sqlx_migrations_pkey`, and subsequent starts fail with `VersionMismatch(382)`. The existing uniqueness gate also fails. Keep the earlier activation migration at `0382` and move the later promotion migration to `0383`, without changing either SQL body.
+The original checkpoint found two migrations numbered `0382`: a fresh PostgreSQL run failed with `_sqlx_migrations_pkey`, and subsequent starts failed with `VersionMismatch(382)`. Main has since repaired that sequence. The merged branch keeps activation integrity at `0382`, attendance at `0383`, promotion metadata at `0384`, and content acquisition at `0385`. No migration SQL body changes or additional migration are introduced by this PR relative to main.
 
-Before deployment, inspect the target's `_sqlx_migrations` description and checksum for version `382`. An installation that already applied the promotion branch as `382` needs a separately reviewed ledger reconciliation; do not edit its migration ledger or force this rollout. A database through `380`, or one with the activation migration at `382`, follows the normal forward path. This is a forward-only numbering repair. Do not assume an older image can start after `0383` is recorded: SQLx validates the embedded migration set. Rollback requires a reviewed compatible image or the repository's verified database restoration procedure. No schema contraction, production migration, or rollback is performed here.
+Before deployment, inspect the target's `_sqlx_migrations` description and checksum if it may have applied the old promotion branch as `382`. Such an installation needs a separately reviewed ledger reconciliation; do not edit its migration ledger or force this rollout. SQLx validates the embedded migration set, so rollback requires a reviewed compatible image or the repository's verified database restoration procedure. No schema contraction, production migration, or rollback is performed here.
 
 ## Operation history prerequisite
 
@@ -45,7 +45,7 @@ The full workspace test gate exposed another existing bug: SCOUT's `Date` cell m
 
 The focused unit tests pass. Disposable PostgreSQL tests prove audience rotation before post creation, task-failure receipt handling, tenant isolation, retry deduplication, and the missing-agent-schema path. Mutation runs fail when rotation, receipt classification, destination isolation, or retry delays regress. The new PostgreSQL tests are included in `autopilot_relay_loader`, which the existing local and CI recipes already select.
 
-Checkpoint verification:
+Original checkpoint verification, before merging main:
 
 - Formatting, strict workspace clippy, and workspace Rust tests pass within `just ci`.
 - `just test-postgres` passes on the final code.
@@ -53,7 +53,17 @@ Checkpoint verification:
 - `just ci` fails in contract tests: local `CLAUDE.md` counts have drifted, and the fan-consent contract still asserts `max(latest.recorded_at)` against the current metrics implementation.
 - `just policy-checks` passes the SQL and architecture ratchets, then fails because the staff-device contract requires the literal marker `SCHEMA_VERSION: u32 = 383`. Recipes after that failure do not run.
 
-These failing gates remain unchanged. The slice is implemented and has focused runtime proof, but release verification is not complete. This checkpoint is submitted as a draft pull request so the implementation and release blockers can be reviewed together. No deployment, tenant publication, human outreach, or historical data repair is performed.
+The original failing gates were not relaxed. Main now contains the consent and schema-marker contract updates.
+
+Fresh verification after merging main at `7d6730b2`:
+
+- `just check` passes: formatting, strict workspace clippy, and workspace Rust tests.
+- `just test-postgres` passes against disposable databases, including the new rotation and task-receipt proofs.
+- Migration uniqueness, fan-activation contracts, source-size and workspace-scope ratchets, SQL identifiers, and SQL typed-parameter checks pass.
+- The resolved merge and the PR diff both pass whitespace checks. No unmerged index entries remain.
+- Full `just ci` is not rerun locally for this conflict-resolution task. The PR remains a draft pending full release verification.
+
+No deployment, tenant publication, human outreach, or historical data repair is performed.
 
 ## Follow-up slices, not implemented here
 

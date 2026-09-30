@@ -435,6 +435,7 @@ fn fact(resonance: Option<PostResonance>) -> SocialPostFact {
         media_id: None,
         media_type: None,
         thumbnail_url: None,
+        acquired_fans: 0,
         resonance,
     }
 }
@@ -471,8 +472,21 @@ fn only_posts_that_landed_at_home_go_to_communities() {
         posted,
         posted + Duration::hours(6)
     ));
-    // Never read: fail closed.
+    // Never read and no conversion: fail closed.
     assert!(!resonates_for_communities(&fact(None), posted, settled));
+    // A quiet post that created a real fan has stronger evidence than likes.
+    let converting = SocialPostFact {
+        acquired_fans: 1,
+        ..fact(None)
+    };
+    assert!(resonates_for_communities(&converting, posted, settled));
+    // Even conversion evidence waits for the same settle window; the system
+    // must not stampede a fresh post before its normal home-audience read.
+    assert!(!resonates_for_communities(
+        &converting,
+        posted,
+        posted + Duration::hours(6)
+    ));
     // A new account with no history: any real engagement is enough, none is not.
     let first = PostResonance {
         engagement: 4,
@@ -535,7 +549,7 @@ fn reach_and_watch_time_decide_when_the_platform_reports_them() {
 #[test]
 fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
     let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
-    let snapshot = |resonance: PostResonance| ContentSupplySnapshot {
+    let snapshot = |resonance: PostResonance, acquired_fans: u32| ContentSupplySnapshot {
         promotion_excluded_platforms: Vec::new(),
         source_id: crate::ContentSourceId::new(),
         source_kind: ContentSourceKind::SocialPost,
@@ -548,7 +562,10 @@ fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
-        social_post: Some(fact(Some(resonance))),
+        social_post: Some(SocialPostFact {
+            acquired_fans,
+            ..fact(Some(resonance))
+        }),
         source_key: String::new(),
         title: String::new(),
         source_url: None,
@@ -572,11 +589,15 @@ fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
     assert!(!is_outlier(&ordinary));
     let policy = ContentSupplyPolicy::default();
     assert!(matches!(
-        evaluate_content_supply(&snapshot(outlier), policy, now),
+        evaluate_content_supply(&snapshot(outlier, 0), policy, now),
         ContentSupplyDecision::Relay { .. }
     ));
     assert_eq!(
-        evaluate_content_supply(&snapshot(ordinary), policy, now),
+        evaluate_content_supply(&snapshot(ordinary, 0), policy, now),
         ContentSupplyDecision::Hold(ContentSupplyHoldReason::Complete)
     );
+    assert!(matches!(
+        evaluate_content_supply(&snapshot(ordinary, 1), policy, now),
+        ContentSupplyDecision::Relay { .. }
+    ));
 }

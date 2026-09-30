@@ -12,13 +12,14 @@ use std::{
 
 use async_trait::async_trait;
 use crowdrelay_application::{
-    AcquisitionRepository, RepositoryError, SignupFanCommand, UpsertSmartLinkCommand,
-    UpsertedSmartLink,
+    AcquisitionRepository, RedirectContext, RepositoryError, SignupFanCommand,
+    UpsertSmartLinkCommand, UpsertedSmartLink,
 };
 use crowdrelay_domain::{
     CampaignId, CityId, CitySignal, CitySlug, ClickEvent, CountryCode, DestinationUrl,
     FanActionToken, FanId, FanSignup, FanSignupEmailKind, FanSignupResult, FanStatus, ReferralCode,
     ResolvedSmartLink, SmartLinkId, SmartLinkSlug, WorkspaceId, WorkspaceSlug,
+    fan_landing::{normalize_community, reddit_rules_allow_offsite},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -90,6 +91,12 @@ impl AcquisitionRepository for PostgresAcquisitionRepository {
 
     async fn load_active_smart_links(&self) -> Result<Vec<ResolvedSmartLink>, RepositoryError> {
         self.bounded(self.load_active_smart_links_inner())
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn load_redirect_context(&self) -> Result<Option<RedirectContext>, RepositoryError> {
+        self.bounded(self.load_redirect_context_inner())
             .await
             .map_err(Into::into)
     }
@@ -526,6 +533,8 @@ struct SmartLinkRow {
     slug: String,
     destination_url: String,
     version: i64,
+    channel_source: Option<String>,
+    channel_community: Option<String>,
 }
 
 impl TryFrom<SmartLinkRow> for ResolvedSmartLink {
@@ -540,6 +549,8 @@ impl TryFrom<SmartLinkRow> for ResolvedSmartLink {
             SmartLinkSlug::parse(row.slug).map_err(|_| InvalidStoredData)?,
             DestinationUrl::parse(row.destination_url).map_err(|_| InvalidStoredData)?,
             version,
+            row.channel_source,
+            row.channel_community,
         )
         .map_err(|_| InvalidStoredData)
     }
@@ -762,6 +773,10 @@ mod tests {
             unreachable!("not used by click buffer tests")
         }
 
+        async fn load_redirect_context(&self) -> Result<Option<RedirectContext>, RepositoryError> {
+            unreachable!("not used by click buffer tests")
+        }
+
         async fn persist_click_batch(&self, clicks: &[ClickEvent]) -> Result<(), RepositoryError> {
             self.persisted
                 .lock()
@@ -816,6 +831,8 @@ mod tests {
             SmartLinkSlug::parse("tour")?,
             DestinationUrl::parse("https://virya.music/join")?,
             1,
+            None,
+            None,
         )?;
         Ok(ClickEvent::from_link(
             &link,
@@ -834,6 +851,8 @@ mod tests {
             slug: "safe-link".to_owned(),
             destination_url: "javascript:alert(1)".to_owned(),
             version: 1,
+            channel_source: None,
+            channel_community: None,
         };
 
         assert!(ResolvedSmartLink::try_from(row).is_err());

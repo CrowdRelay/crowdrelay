@@ -22,6 +22,7 @@ fn snapshot(days: i64) -> ShowGrowthSnapshot {
         city_signal_fans: 20,
         qualified_referrers_in_city: 4,
         beacon_partners: 0,
+        human_booking_targets_30d: 0,
         attendees: 0,
         morning_after_send_at: None,
         unreciprocated_crossbill_edge: false,
