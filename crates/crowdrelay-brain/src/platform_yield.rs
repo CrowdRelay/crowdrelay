@@ -245,8 +245,13 @@ pub fn template_channels(template: &str) -> &'static [&'static str] {
 /// cannot see. See [`PlatformGrowth::rank_key`].
 type RankKey = Option<(u32, u32)>;
 
-/// One template's position in the prior, its name, and what it ranks on.
-type RankedTemplate = (usize, &'static str, RankKey);
+/// One template's position in the prior, its name, how many durable fans its
+/// attributed channel retained, and the weaker platform/channel evidence.
+///
+/// Durable fans are a direct observation of the default North Star. They sort
+/// before proxy evidence; the existing RankKey decides only when neither side
+/// has earned that stronger signal.
+type RankedTemplate = (usize, &'static str, u32, RankKey);
 
 /// Reorders a strategy's template list by measured platform yield and by the
 /// attributed fan yield of the channel each template posts on.
@@ -260,13 +265,19 @@ type RankedTemplate = (usize, &'static str, RankKey);
 /// a platform compounding on followers is not demoted for conversions the
 /// ledger has not seen yet.
 ///
-/// The asymmetry that matters: growth evidence can carry a trustworthy
-/// *rate* while yield evidence is absolute-only. A platform above the
-/// evidence floor keeps the rate-led ordering — sustained machinery still
-/// outranks an early trickle, which is the right answer at scale. Where this
-/// change bites is exactly the regime it was written for: below every floor,
-/// where the only honest difference between channels is which one a real
-/// fan arrived through.
+/// Evidence is ordered by how directly it answers the North Star:
+///
+/// 1. **durable attributed fans** — direct evidence that a channel produced
+///    people who stayed; this outranks follower-growth proxies;
+/// 2. **trusted platform growth / fresh attributed yield** — useful leading
+///    evidence while retention has not matured yet;
+/// 3. **the strategy prior** — preserved where measurement is absent or tied.
+///
+/// Fresh conversions and clicks deliberately do *not* jump a trustworthy
+/// platform-growth rate: they have not survived the retention window yet.
+/// Once `durable_90d` is non-zero, the evidence has matured into the thing the
+/// default North Star actually optimizes, so continuing to put follower rate
+/// first would make source ROI informational rather than controlling.
 ///
 /// Stable: templates with no evidence on either axis keep their relative
 /// position, and ties are broken by the prior order. The returned list
@@ -278,14 +289,27 @@ pub fn rank_templates(
     growth: &[PlatformGrowth],
     channel_yield: &[ChannelYield],
 ) -> Vec<&'static str> {
-    let score_for = |template: &str| -> RankKey {
+    let score_for = |template: &str| -> (u32, RankKey) {
         let growth_key = template_platform(template).and_then(|platform| {
             growth
                 .iter()
                 .find(|entry| entry.platform == platform)
                 .and_then(PlatformGrowth::rank_key)
         });
-        let yield_key = template_channels(template)
+
+        let channels = template_channels(template);
+        let durable = channels
+            .iter()
+            .filter_map(|channel| {
+                channel_yield
+                    .iter()
+                    .find(|entry| entry.channel == *channel)
+                    .map(|entry| entry.durable_90d)
+            })
+            .max()
+            .unwrap_or(0);
+
+        let yield_key = channels
             .iter()
             .filter_map(|channel| {
                 channel_yield
@@ -294,33 +318,35 @@ pub fn rank_templates(
                     .and_then(ChannelYield::rank_key)
             })
             .max();
-        // The better of the two evidences, not the sum: summing would let a
-        // mediocre platform mask a channel that is actually converting, and
-        // the tuple's rate-first ordering already says which kind of
-        // evidence leads when both are strong.
-        growth_key.max(yield_key)
+
+        // Fresh attribution remains comparable with follower-growth evidence;
+        // only matured retention gets the stronger, North-Star-direct tier.
+        (durable, growth_key.max(yield_key))
     };
 
     let mut ranked: Vec<RankedTemplate> = prior
         .iter()
         .enumerate()
-        .map(|(index, template)| (index, *template, score_for(template)))
+        .map(|(index, template)| {
+            let (durable, evidence) = score_for(template);
+            (index, *template, durable, evidence)
+        })
         .collect();
 
     ranked.sort_by(|left, right| {
-        // Measured platforms sort ahead of unmeasured ones, best first. The key
-        // is (trustworthy rate, absolute weighted gain), compared in that order,
-        // so a rate still decides between two platforms with real audience and
-        // the gain only breaks a tie the rate cannot see. Two unmeasured
-        // templates — or two with an identical key — fall back to the strategy's
-        // own order, so the prior survives wherever evidence does not
-        // contradict it.
-        right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0))
+        // A durable attributed fan is direct evidence for the default North
+        // Star, so it outranks proxy growth. Within the same maturity tier the
+        // existing evidence key and, finally, the strategy prior still decide.
+        right
+            .2
+            .cmp(&left.2)
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.0.cmp(&right.0))
     });
 
     ranked
         .into_iter()
-        .map(|(_, template, _)| template)
+        .map(|(_, template, _, _)| template)
         .collect()
 }
 
@@ -580,6 +606,40 @@ mod tests {
             ranked.first(),
             Some(&"reddit-scanner"),
             "a measured rate outranks an absolute-only channel yield"
+        );
+    }
+
+    #[test]
+    fn durable_fans_outrank_follower_growth_proxy() {
+        // Reddit has healthy follower growth, but Telegram has already proved
+        // that one of its attributed arrivals survived the full retention
+        // window. The latter is direct evidence for activated/durable fans,
+        // which is the default North Star.
+        let measured = [growth("social", 5_000, 250)];
+        let mut telegram = yielded("telegram", 1, 0);
+        telegram.durable_90d = 1;
+
+        let ranked = rank_templates(PRIOR, &measured, &[telegram]);
+
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-scanner"),
+            "a retained attributed fan must outrank follower-growth proxy evidence"
+        );
+    }
+
+    #[test]
+    fn fresh_conversion_does_not_prematurely_overrule_trusted_growth() {
+        // The maturity boundary is deliberate: a signup that has not had time
+        // to survive the retention window is useful evidence, but it is not yet
+        // a durable fan. Existing platform-growth behaviour must remain intact.
+        let measured = [growth("social", 5_000, 250)];
+        let ranked = rank_templates(PRIOR, &measured, &[yielded("telegram", 4, 0)]);
+
+        assert_eq!(
+            ranked.first(),
+            Some(&"reddit-scanner"),
+            "fresh conversions should not impersonate retained-fan evidence"
         );
     }
 
