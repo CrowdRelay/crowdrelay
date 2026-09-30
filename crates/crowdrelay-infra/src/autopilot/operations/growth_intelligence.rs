@@ -29,6 +29,7 @@
 
 use super::*;
 
+mod baseline;
 mod channel_yield;
 mod community_targets;
 mod evidence_replay;
@@ -684,43 +685,13 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             .map_err(map_sqlx)?
             .unwrap_or(0);
 
-            let baseline: i64 = sqlx::query_scalar(
-                r#"
-            WITH readings AS (
-                SELECT started_at, north_star_value::bigint AS value
-                FROM autopilot_cycle_runs
-                WHERE workspace_id = $1
-                  AND north_star_metric = 'activated_fans_30d'
-                  AND north_star_value IS NOT NULL
-                  AND started_at <= $2
-            ),
-            before_month AS (
-                SELECT value
-                FROM readings
-                WHERE started_at < date_trunc('month', $2::timestamptz)
-                ORDER BY started_at DESC
-                LIMIT 1
-            ),
-            first_in_month AS (
-                SELECT value
-                FROM readings
-                WHERE started_at >= date_trunc('month', $2::timestamptz)
-                ORDER BY started_at ASC
-                LIMIT 1
-            )
-            SELECT COALESCE(
-                (SELECT value FROM before_month),
-                (SELECT value FROM first_in_month),
-                $3::bigint
-            )::bigint
-            "#,
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .bind(activated)
-            .fetch_one(pool)
-            .await
-            .map_err(map_sqlx)?;
+            let baseline: i64 = sqlx::query_scalar(baseline::ACTIVATED_FAN_MONTH_BASELINE_SQL)
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(activated)
+                .fetch_one(pool)
+                .await
+                .map_err(map_sqlx)?;
 
             let current = activated.max(0);
             let this_month = current.saturating_sub(baseline.max(0));

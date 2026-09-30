@@ -20,11 +20,11 @@ type HookRow = (
     Option<String>,
     Option<String>,
     OffsetDateTime,
-    Option<i64>,
-    Option<i64>,
-    Option<i64>,
-    Option<i64>,
-    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
     i64,
     i64,
 );
@@ -33,7 +33,12 @@ pub async fn content_hooks(State(state): State<crate::AppState>, headers: Header
     let request_id_value = request_id(&headers);
     let workspace_id = state.ops.workspace_id().into_uuid();
     match load_content_hooks(&state.ops.pool, workspace_id, OffsetDateTime::now_utc()).await {
-        Ok(body) => (StatusCode::OK, [(CACHE_CONTROL, PRIVATE_NO_STORE)], Json(body)).into_response(),
+        Ok(body) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(body),
+        )
+            .into_response(),
         Err(error) => {
             tracing::warn!(%error, "content hooks read failed");
             Problem::service_unavailable(request_id_value)
@@ -48,7 +53,7 @@ async fn load_content_hooks(
     workspace_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<Value, sqlx::Error> {
-    use crowdrelay_domain::hook_scorecard::{HookPost, score_hooks};
+    use crowdrelay_domain::hook_scorecard::{HookPost, parse_social_count, score_hooks};
 
     // Metadata numbers are written by the social-post sync and its insights
     // refresh; a key that was never written reads as NULL, never as zero.
@@ -60,13 +65,13 @@ async fn load_content_hooks(
                source.metadata->>'body',
                source.metadata->>'url',
                source.occurred_at,
-               (source.metadata->>'reach')::bigint,
-               (source.metadata->>'avg_watch_ms')::bigint,
-               (source.metadata->>'saves')::bigint,
-               (source.metadata->>'shares')::bigint,
-               (source.metadata->>'views')::bigint,
-               COALESCE(outcome.fans_acquired, 0)::bigint,
-               COALESCE(outcome.fans_activated_within_30d, 0)::bigint
+               source.metadata->>'reach',
+               source.metadata->>'avg_watch_ms',
+               source.metadata->>'saves',
+               source.metadata->>'shares',
+               source.metadata->>'views',
+               COALESCE(outcome.fans_acquired, 0)::bigint AS fans_acquired,
+               COALESCE(outcome.fans_activated_within_30d, 0)::bigint AS fans_activated_within_30d
         FROM content_sources AS source
         LEFT JOIN LATERAL (
             SELECT
@@ -74,10 +79,11 @@ async fn load_content_hooks(
                 count(DISTINCT provenance.fan_id) FILTER (
                     WHERE fan.status = 'active'
                       AND consent.granted
-                      AND activity.last_action_at IS NOT NULL
-                      AND activity.last_action_at >= fan.created_at
-                      AND activity.last_action_at <= $2
-                      AND activity.last_action_at <= fan.created_at + interval '30 days'
+                      AND fan_has_meaningful_action_between(
+                          fan.workspace_id, fan.id, fan.normalized_email,
+                          fan.created_at,
+                          LEAST($2, fan.created_at + interval '30 days')
+                      )
                 )::bigint AS fans_activated_within_30d
             FROM autopilot_actions AS action
             JOIN fan_provenance_events AS provenance
@@ -94,28 +100,25 @@ async fn load_content_hooks(
                 WHERE latest.workspace_id = fan.workspace_id
                   AND latest.fan_id = fan.id
                   AND latest.purpose = 'marketing'
+                  AND latest.recorded_at <= $2
                 ORDER BY latest.recorded_at DESC, latest.id DESC
                 LIMIT 1
             ) AS consent ON true
-            LEFT JOIN LATERAL (
-                SELECT fan_last_meaningful_action(
-                    fan.workspace_id,
-                    fan.id,
-                    fan.normalized_email
-                ) AS last_action_at
-            ) AS activity ON true
             WHERE action.workspace_id = source.workspace_id
               AND (
                   lower(action.payload->>'source_id') = source.id::text
                   OR lower(action.payload->'draft'->>'source_id') = source.id::text
               )
               AND provenance.occurred_at >= source.occurred_at
+              AND provenance.occurred_at >= $2 - interval '60 days'
+              AND provenance.occurred_at <= $2
               AND provenance.occurred_at <
                   source.occurred_at + interval '14 days'
         ) AS outcome ON true
         WHERE source.workspace_id = $1
           AND source.source_kind = 'social_post'
           AND source.occurred_at >= $2 - make_interval(days => $3::int)
+          AND source.occurred_at <= $2
         ORDER BY source.occurred_at DESC
         LIMIT $4
         "#,
@@ -130,11 +133,14 @@ async fn load_content_hooks(
     let inputs: Vec<HookPost> = rows
         .iter()
         .map(|row| HookPost {
-            is_video: row.2.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("video")),
-            reach: row.6,
-            avg_watch_ms: row.7,
-            saves: row.8,
-            shares: row.9,
+            is_video: row
+                .2
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("video")),
+            reach: parse_social_count(row.6.as_deref()),
+            avg_watch_ms: parse_social_count(row.7.as_deref()),
+            saves: parse_social_count(row.8.as_deref()),
+            shares: parse_social_count(row.9.as_deref()),
         })
         .collect();
     let scores = score_hooks(&inputs);
@@ -149,11 +155,11 @@ async fn load_content_hooks(
                 .as_deref()
                 .and_then(|body| body.lines().find(|line| !line.trim().is_empty()))
                 .map(|line| line.chars().take(160).collect::<String>());
-            let fan_conversion_per_1000_reach = row.6
+            let reach = parse_social_count(row.6.as_deref());
+            let fan_conversion_per_1000_reach = reach
                 .filter(|reach| *reach > 0)
                 .map(|reach| row.11.saturating_mul(1_000) / reach);
-            let fan_activation_bps = (row.11 > 0)
-                .then(|| row.12.saturating_mul(10_000) / row.11);
+            let fan_activation_bps = (row.11 > 0).then(|| row.12.saturating_mul(10_000) / row.11);
             json!({
                 "id": row.0,
                 "platform": row.1,
@@ -161,11 +167,11 @@ async fn load_content_hooks(
                 "opening": opening,
                 "url": row.4,
                 "posted_at": row.5,
-                "reach": row.6,
-                "avg_watch_ms": row.7,
-                "saves": row.8,
-                "shares": row.9,
-                "views": row.10,
+                "reach": reach,
+                "avg_watch_ms": parse_social_count(row.7.as_deref()),
+                "saves": parse_social_count(row.8.as_deref()),
+                "shares": parse_social_count(row.9.as_deref()),
+                "views": parse_social_count(row.10.as_deref()),
                 "fans_acquired": row.11,
                 "fans_activated_within_30d": row.12,
                 "fan_conversion_per_1000_reach": fan_conversion_per_1000_reach,
@@ -287,7 +293,10 @@ mod hooks_postgres_tests {
         let now = OffsetDateTime::now_utc();
         // Four ordinary reels and one watched half again as long.
         let mut source_ids = Vec::new();
-        for (index, watch_ms) in [4_000_i64, 4_000, 4_000, 4_000, 6_000].into_iter().enumerate() {
+        for (index, watch_ms) in [4_000_i64, 4_000, 4_000, 4_000, 6_000]
+            .into_iter()
+            .enumerate()
+        {
             let source_id = Uuid::now_v7();
             sqlx::query(
                 r#"INSERT INTO content_sources
@@ -315,6 +324,13 @@ mod hooks_postgres_tests {
         // session inside 30 days of signup; the other only signed up. The
         // scorecard must keep attention and fan outcome as separate facts.
         let held_source_id = source_ids[4];
+        sqlx::query("UPDATE content_sources SET occurred_at=$2 WHERE id=$1 AND workspace_id=$3")
+            .bind(held_source_id)
+            .bind(now - time::Duration::days(35))
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("older cohort");
         let decision_id = Uuid::now_v7();
         let action_id = Uuid::now_v7();
         sqlx::query(
@@ -358,7 +374,7 @@ mod hooks_postgres_tests {
 
         for index in 0..2 {
             let fan_id = Uuid::now_v7();
-            let created_at = now - time::Duration::days(4);
+            let created_at = now - time::Duration::days(34);
             sqlx::query(
                 r#"INSERT INTO fans
                    (id, workspace_id, normalized_email, status, created_at, updated_at)
@@ -366,7 +382,10 @@ mod hooks_postgres_tests {
             )
             .bind(fan_id)
             .bind(workspace_id)
-            .bind(format!("hook-fan-{index}-{}@example.test", workspace_id.simple()))
+            .bind(format!(
+                "hook-fan-{index}-{}@example.test",
+                workspace_id.simple()
+            ))
             .bind(created_at)
             .execute(&pool)
             .await
@@ -410,15 +429,36 @@ mod hooks_postgres_tests {
                 .bind(fan_id)
                 .bind(session_hash)
                 .bind(created_at)
-                .bind(now - time::Duration::days(2))
+                .bind(now - time::Duration::days(32))
                 .bind(now + time::Duration::days(30))
                 .execute(&pool)
                 .await
                 .expect("session");
+                // A return after day 30 must not erase the earlier activation.
+                let mut later_hash = fan_id.as_bytes().to_vec();
+                later_hash.extend_from_slice(fan_id.as_bytes());
+                later_hash[0] ^= 1;
+                sqlx::query(
+                    r#"INSERT INTO fan_sessions
+                       (workspace_id, fan_id, session_token_hash, created_at,
+                        last_seen_at, expires_at)
+                       VALUES ($1,$2,$3,$4,$5,$6)"#,
+                )
+                .bind(workspace_id)
+                .bind(fan_id)
+                .bind(later_hash)
+                .bind(created_at)
+                .bind(now - time::Duration::days(2))
+                .bind(now + time::Duration::days(30))
+                .execute(&pool)
+                .await
+                .expect("later return");
             }
         }
 
-        let body = load_content_hooks(&pool, workspace_id, now).await.expect("hooks");
+        let body = load_content_hooks(&pool, workspace_id, now)
+            .await
+            .expect("hooks");
         let posts = body["posts"].as_array().expect("posts");
         assert_eq!(posts.len(), 5);
         let held = posts
@@ -427,11 +467,37 @@ mod hooks_postgres_tests {
             .expect("the long-watched reel is named");
         assert_eq!(held["avg_watch_ms"], 6_000);
         assert_eq!(held["watch_index_bps"], 15_000);
-        assert_eq!(held["opening"], "Opening line 4", "the first non-empty line");
+        assert_eq!(
+            held["opening"], "Opening line 4",
+            "the first non-empty line"
+        );
         assert_eq!(held["fans_acquired"], 2);
         assert_eq!(held["fans_activated_within_30d"], 1);
         assert_eq!(held["fan_conversion_per_1000_reach"], 2);
         assert_eq!(held["fan_activation_bps"], 5_000);
+
+        sqlx::query(
+            "UPDATE content_sources SET metadata = metadata || $2 WHERE id=$1 AND workspace_id=$3",
+        )
+        .bind(held_source_id)
+        .bind(json!({"reach": "unknown", "views": "9223372036854775808"}))
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("invalid optional metrics");
+        let malformed = load_content_hooks(&pool, workspace_id, now)
+            .await
+            .expect("bad metrics do not break hooks");
+        let malformed_post = malformed["posts"]
+            .as_array()
+            .expect("posts")
+            .iter()
+            .find(|post| post["id"] == held["id"])
+            .expect("same source");
+        assert!(malformed_post["reach"].is_null());
+        assert!(malformed_post["views"].is_null());
+        assert!(malformed_post["fan_conversion_per_1000_reach"].is_null());
+        assert_eq!(malformed_post["fans_activated_within_30d"], 1);
         assert!(
             posts
                 .iter()
