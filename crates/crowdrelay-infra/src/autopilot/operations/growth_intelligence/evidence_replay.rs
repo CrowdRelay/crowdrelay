@@ -651,152 +651,16 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
     }
 }
 
-/// Whether the strategy posterior is being extended or rebuilt.
-///
-/// The distinction is the whole difference between the two call sites and it
-/// used to be carried only by a comment. The checkpoint path replays the
-/// evidence written since the checkpoint, so it must accumulate onto what is
-/// stored. The full-replay path replays *all* evidence, so accumulating onto
-/// stored state counts every observation twice — once from the stored posterior
-/// and once from the row it was built from — and each full replay does it
-/// again. The call site said "from scratch" and the function it called loaded
-/// the saved posterior first.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum PosteriorReplay {
-    /// Extend the stored posterior with evidence it has not seen.
-    Delta,
-    /// Rebuild from a skeptical prior; the caller is passing all evidence.
-    FromScratch,
-}
-
-/// Applies evidence to the state-conditioned strategy posterior in brain state.
-///
-/// Called alongside `apply_evidence_to_model` during the causal model load so
-/// the strategy posterior stays in sync with the causal model's evidence
-/// replay. This is the **only** writer of the `strategy_posterior` brain-state
-/// key — see [`apply_evidence_to_strategy_posterior`] for why that matters.
-pub(super) async fn apply_evidence_to_stored_strategy_posterior(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-    evidence: &[crowdrelay_brain::GrowthEvidence],
-    replay: PosteriorReplay,
-    checkpoint: Option<OffsetDateTime>,
-) {
-    use crowdrelay_brain::StateConditionedStrategyPosterior;
-
-    // `FromScratch` replays every row the workspace has, so no horizon can be
-    // stale relative to a cursor the caller is not using. Carrying a
-    // checkpoint into it would silence horizons the rebuild has to include.
-    debug_assert!(
-        replay == PosteriorReplay::Delta || checkpoint.is_none(),
-        "a full rebuild must not be gated by a delta cursor"
-    );
-
-    // What is stored right now, whichever replay mode this is.
-    //
-    // The delta path starts its arithmetic here. The full-replay path
-    // deliberately does not — it rebuilds from a skeptical prior, and starting
-    // from the stored posterior would count every observation twice. But both
-    // paths must *diff* against what was stored, because that is what the
-    // ledger claims to describe: what changed in the belief the brain was
-    // holding. A full replay diffed against its own empty starting point
-    // reports every cell as new evidence on every replay, and the ledger grows
-    // a duplicate of the same revision forever while nothing was learned.
-    let stored =
-        match super::evidence::load_brain_state(repo, workspace_id, "strategy_posterior").await {
-            Ok(None) => Some(StateConditionedStrategyPosterior::default()),
-            Ok(Some((state, _ts))) => {
-                match serde_json::from_value::<StateConditionedStrategyPosterior>(state) {
-                    Ok(posterior) => Some(posterior),
-                    Err(error) => {
-                        tracing::error!(
-                            error = %error,
-                            workspace_id = %workspace_id.into_uuid(),
-                            "stored strategy posterior could not be deserialized"
-                        );
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    workspace_id = %workspace_id.into_uuid(),
-                    "could not read the stored strategy posterior"
-                );
-                None
-            }
-        };
-
-    let mut posterior = match replay {
-        PosteriorReplay::FromScratch => StateConditionedStrategyPosterior::default(),
-        PosteriorReplay::Delta => match stored.clone() {
-            Some(posterior) => posterior,
-            // Everything the posterior has learned is in that row. Starting
-            // from a default here and saving the result below would overwrite
-            // it with a delta's worth of evidence and call that the whole
-            // history. A row we cannot read is not an empty row.
-            None => {
-                tracing::error!(
-                    workspace_id = %workspace_id.into_uuid(),
-                    "skipping the delta rather than overwriting learned state \
-                     with a default"
-                );
-                return;
-            }
-        },
-    };
-
-    apply_evidence_to_strategy_posterior(&mut posterior, evidence, checkpoint);
-
-    match serde_json::to_value(&posterior) {
-        Ok(state) => {
-            if let Err(error) =
-                super::evidence::save_brain_state(repo, workspace_id, "strategy_posterior", &state)
-                    .await
-            {
-                // The ledger describes a change that happened. If the save
-                // failed, it did not happen — recording it here would tell an
-                // operator the brain learned something it then discarded.
-                // Best-effort, but not silent: the next cycle will re-derive
-                // this from a checkpoint that has already moved past the
-                // evidence, so a dropped save is lost learning, not a retry.
-                tracing::warn!(
-                    error = %error,
-                    workspace_id = %workspace_id.into_uuid(),
-                    "failed to save the strategy posterior; this cycle's strategy \
-                     learning is lost"
-                );
-                return;
-            }
-            // Diffed against what was stored before this call, never against
-            // this call's own starting point — see `stored` above for what a
-            // full replay does otherwise.
-            if let Some(before) = stored.as_ref() {
-                record_strategy_posterior_revisions(
-                    repo,
-                    workspace_id,
-                    before,
-                    &posterior,
-                    evidence,
-                    checkpoint,
-                )
-                .await;
-            }
-        }
-        Err(error) => tracing::warn!(
-            error = %error,
-            "failed to serialize the strategy posterior"
-        ),
-    }
-}
+pub(super) use super::strategy_checkpoint::{
+    PosteriorReplay, apply_evidence_to_stored_strategy_posterior,
+};
 
 /// Records what this batch of outcomes moved in the strategy posterior.
 ///
 /// Runs after the posterior has been saved, so the ledger can only ever
 /// describe a change that survived. Best-effort in the same sense the
 /// checkpoint is: the operator loses an explanation, the brain loses nothing.
-async fn record_strategy_posterior_revisions(
+pub(super) async fn record_strategy_posterior_revisions(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
     before: &crowdrelay_brain::StateConditionedStrategyPosterior,

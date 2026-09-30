@@ -53,6 +53,7 @@ mod discovery;
 mod discovery_import;
 pub(in crate::autopilot) mod drop_surge;
 pub(in crate::autopilot) mod evidence;
+mod evidence_query;
 mod execution;
 pub(in crate::autopilot) mod experiment_assignments;
 mod gig_outreach_execution;

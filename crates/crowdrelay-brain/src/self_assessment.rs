@@ -47,6 +47,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod checkpoint;
+
 /// The fewest distinct days needed before a trend is claimed at all.
 ///
 /// Six lets three be compared with three. Below that the brain says
@@ -285,10 +287,18 @@ impl MetacognitionMonitor {
     pub fn observe(&mut self, state: BrainState) {
         if state == self.state {
             match state {
-                BrainState::Learning => self.learning_cycles += 1,
-                BrainState::Stagnant => self.stagnant_cycles += 1,
-                BrainState::Regressing => self.regressing_cycles += 1,
-                BrainState::Improving => self.improving_cycles_total += 1,
+                BrainState::Learning => {
+                    self.learning_cycles = self.learning_cycles.saturating_add(1)
+                }
+                BrainState::Stagnant => {
+                    self.stagnant_cycles = self.stagnant_cycles.saturating_add(1)
+                }
+                BrainState::Regressing => {
+                    self.regressing_cycles = self.regressing_cycles.saturating_add(1)
+                }
+                BrainState::Improving => {
+                    self.improving_cycles_total = self.improving_cycles_total.saturating_add(1)
+                }
                 BrainState::Initializing => {}
             }
         } else {
@@ -304,7 +314,9 @@ impl MetacognitionMonitor {
                 BrainState::Learning => self.learning_cycles = 1,
                 BrainState::Stagnant => self.stagnant_cycles = 1,
                 BrainState::Regressing => self.regressing_cycles = 1,
-                BrainState::Improving => self.improving_cycles_total += 1,
+                BrainState::Improving => {
+                    self.improving_cycles_total = self.improving_cycles_total.saturating_add(1)
+                }
                 BrainState::Initializing => {}
             }
         }

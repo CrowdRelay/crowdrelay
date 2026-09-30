@@ -363,6 +363,12 @@ jobs:
             an_anchor_is_one_room_whoever_claims_it \
             lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient \
             channel_yield_waits_for_full_retention_window \
+            metacognition_continuity_is_idempotent_and_previews_are_read_only \
+            unreadable_and_contended_continuity_preserves_history \
+            spotify_growth_reaches_assessment_while_signal_is_flat \
+            strategy_learning_retries_independently_of_a_newer_causal_checkpoint \
+            causal_checkpoint_does_not_consume_an_unread_measurement \
+            a_busy_strategy_writer_does_not_block_the_growth_learner \
             two_acts_arrivals_become_one_sample \
             video_promotion \
             autopilot_relay_loader \
@@ -446,3 +452,4 @@ jobs:
             fi
           done
           echo "OK"
+
