@@ -2,17 +2,12 @@
   "name": "CrowdRelay — example signed event branch",
   "nodes": [
     {
-      "parameters": {
-        "inputSource": "passthrough"
-      },
+      "parameters": {"inputSource": "passthrough"},
       "id": "11111111-1111-4111-8111-111111111111",
       "name": "Called by verified ingress",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
-      "position": [
-        0,
-        0
-      ]
+      "position": [0, 0]
     },
     {
       "parameters": {
@@ -22,10 +17,7 @@
       "name": "Validate and build generic action",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        260,
-        0
-      ]
+      "position": [260, 0]
     },
     {
       "parameters": {
@@ -56,34 +48,23 @@
       "name": "Deliver through configured adapter",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        540,
-        0
-      ]
+      "position": [540, 0]
     }
   ],
   "connections": {
     "Called by verified ingress": {
-      "main": [
-        [
-          {
-            "node": "Validate and build generic action",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{
+        "node": "Validate and build generic action",
+        "type": "main",
+        "index": 0
+      }]]
     },
     "Validate and build generic action": {
-      "main": [
-        [
-          {
-            "node": "Deliver through configured adapter",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{
+        "node": "Deliver through configured adapter",
+        "type": "main",
+        "index": 0
+      }]]
     }
   },
   "active": false,
