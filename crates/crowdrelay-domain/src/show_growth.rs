@@ -696,6 +696,7 @@ mod tests {
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
             ladder_approved: false,
+            human_booking_targets_30d: 0,
             history: ShowGrowthHistory {
                 // Every test below describes a show already mid-campaign; the
                 // tracked link is set up once, before anything is shared.
