@@ -33,6 +33,7 @@ use crowdrelay_domain::{
     CampaignId, CitySlug, ClickEvent, FanId, FanSessionToken, FanSignup, FanSignupEmailKind,
     FanSignupInput, FanStatus, MarketingConsent, NormalizedEmail, ReferralCode, SmartLinkSlug,
     VisitorId, WorkspaceId,
+    fan_landing::{LandingInputs, landing_for},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -91,6 +92,9 @@ pub struct AcquisitionStateArgs {
     pub public_site_base_url: Url,
     pub secure_cookies: bool,
     pub acquisition_repository: Arc<dyn AcquisitionRepository>,
+    /// The fan-capture origin (`{origin}/watch/{youtubeId}`). `None` keeps
+    /// every redirect pointed straight at the smart link's destination.
+    pub watch_origin: Option<Url>,
 }
 
 /// Dependencies and trusted tenant context used by public acquisition routes.
@@ -107,6 +111,7 @@ pub struct AcquisitionState {
     public_site_base_url: Url,
     secure_cookies: bool,
     acquisition_repository: Arc<dyn AcquisitionRepository>,
+    watch_origin: Option<Url>,
 }
 
 impl AcquisitionState {
@@ -125,6 +130,7 @@ impl AcquisitionState {
             public_site_base_url: args.public_site_base_url,
             secure_cookies: args.secure_cookies,
             acquisition_repository: args.acquisition_repository,
+            watch_origin: args.watch_origin,
         }
     }
 
@@ -276,72 +282,7 @@ enum RenderCitiesError {
     Serialization,
 }
 
-/// Resolves a smart link, records non-critical attribution, and redirects immediately.
-pub async fn redirect_smart_link(
-    State(state): State<crate::AppState>,
-    Path(raw_slug): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let Ok(slug) = SmartLinkSlug::parse(&raw_slug) else {
-        return Problem::not_found(request_id(&headers))
-            .private()
-            .into_response();
-    };
-    // The snapshot Arc is held for the whole handler, so the redirect reads one
-    // consistent view without copying the smart-link on every request.
-    let snapshot = state.acquisition.redirect_cache.snapshot();
-    let Some(link) = snapshot.resolve(state.acquisition.workspace_id, &slug) else {
-        return Problem::not_found(request_id(&headers))
-            .private()
-            .into_response();
-    };
-
-    let visitor_id = attribution_visitor(&headers).unwrap_or_default();
-    let referrer_host = referrer_host(&headers);
-    match ClickEvent::from_link(
-        link,
-        Some(visitor_id),
-        referrer_host,
-        OffsetDateTime::now_utc(),
-    ) {
-        Ok(event) => (state.acquisition.click_submitter)(event),
-        Err(error) => {
-            // Analytics is explicitly best effort. A malformed referrer must
-            // never delay or break the redirect path.
-            tracing::debug!(%error, "discarded invalid click referrer metadata");
-        }
-    }
-
-    let Ok(location) = HeaderValue::from_str(link.destination_url().as_str()) else {
-        tracing::error!(
-            smart_link_id = %link.id(),
-            "validated smart-link destination could not be encoded as a response header"
-        );
-        return Problem::internal(request_id(&headers))
-            .private()
-            .into_response();
-    };
-    let Ok(cookie) = HeaderValue::from_str(&attribution_cookie(
-        visitor_id,
-        state.acquisition.secure_cookies,
-    )) else {
-        tracing::error!("attribution cookie could not be encoded as a response header");
-        return Problem::internal(request_id(&headers))
-            .private()
-            .into_response();
-    };
-
-    (
-        StatusCode::FOUND,
-        [
-            (LOCATION, location),
-            (SET_COOKIE, cookie),
-            (CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE)),
-            (REFERRER_POLICY, HeaderValue::from_static("no-referrer")),
-        ],
-    )
-        .into_response()
-}
+include!("acquisition/redirect.rs");
 
 /// JSON body accepted by the fan signup endpoint.
 #[derive(Deserialize)]
@@ -880,238 +821,7 @@ fn etag_matches(candidate: Option<&HeaderValue>, expected: &str) -> bool {
 // reason. The third prerequisite is "give the nineteen a referral code each":
 // referral codes are generated on signup, but the nineteen signed up before
 // the referral ledger existed, and there is no endpoint to backfill them.
-//
-// All SQL writes go through `AcquisitionRepository` — the API layer holds no
-// sqlx call sites, per the architecture ratchet.
-// ---------------------------------------------------------------------------
-
-/// Request body for `POST /v1/admin/smart-links`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CreateSmartLinkRequest {
-    slug: String,
-    destination_url: String,
-    /// Broad channel: 'reddit', 'facebook', 'discord', 'linkedin', etc.
-    /// Free text — inventing a channel is a Tuesday afternoon decision, and a
-    /// constraint here would mean a migration every time somebody tries a new
-    /// place (migration 0079).
-    channel_source: Option<String>,
-    /// The specific place inside that channel: which subreddit, which group.
-    channel_community: Option<String>,
-    /// Which post, image or wording. Two links to the same community with
-    /// different creatives is how a test gets run without a testing framework.
-    channel_creative: Option<String>,
-    /// Optional campaign to associate the link with.
-    campaign_id: Option<CampaignId>,
-}
-
-#[derive(Serialize)]
-struct CreateSmartLinkResponse {
-    id: Uuid,
-    slug: String,
-    destination_url: String,
-    channel_source: Option<String>,
-    channel_community: Option<String>,
-    channel_creative: Option<String>,
-    campaign_id: Option<CampaignId>,
-    active: bool,
-}
-
-/// Creates a tracked smart link for a campaign channel. Idempotent on slug:
-/// re-posting the same slug updates the destination and channel fields rather
-/// than failing, so an operator can correct a URL without a delete + recreate.
-pub async fn admin_create_smart_link(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-    payload: Result<Json<CreateSmartLinkRequest>, JsonRejection>,
-) -> Response {
-    let request_id_value = request_id(&headers);
-    let Json(payload) = match payload {
-        Ok(value) => value,
-        Err(_) => return Problem::bad_request(request_id_value).into_response(),
-    };
-
-    let slug = match SmartLinkSlug::parse(&payload.slug) {
-        Ok(value) => value,
-        Err(_) => return Problem::bad_request(request_id_value).into_response(),
-    };
-
-    let destination = payload.destination_url.trim();
-    if !destination.starts_with("https://") {
-        return Problem::bad_request(request_id_value).into_response();
-    }
-
-    let channel_source = payload
-        .channel_source
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let channel_community = payload
-        .channel_community
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let channel_creative = payload
-        .channel_creative
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let workspace_id = state.acquisition.workspace_id();
-    let command = UpsertSmartLinkCommand {
-        workspace_id,
-        slug: &slug,
-        destination_url: destination,
-        channel_source,
-        channel_community,
-        channel_creative,
-        campaign_id: payload.campaign_id,
-    };
-    let result = state
-        .acquisition
-        .acquisition_repository()
-        .upsert_smart_link(&command)
-        .await;
-
-    let link = match result {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "admin smart-link creation failed");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-
-    (
-        StatusCode::CREATED,
-        [(CACHE_CONTROL, HeaderValue::from_static("private, no-store"))],
-        Json(CreateSmartLinkResponse {
-            id: link.id,
-            slug: link.slug.into_inner(),
-            destination_url: link.destination_url,
-            channel_source: link.channel_source,
-            channel_community: link.channel_community,
-            channel_creative: link.channel_creative,
-            campaign_id: link.campaign_id,
-            active: link.active,
-        }),
-    )
-        .into_response()
-}
-
-/// Lists all smart links for the workspace, with channel attribution. The
-/// operator's campaign preparation view: which links exist, which channels
-/// they serve, and where the gaps are.
-pub async fn admin_list_smart_links(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-) -> Response {
-    let request_id_value = request_id(&headers);
-    let workspace_id = state.acquisition.workspace_id();
-    let result = state
-        .acquisition
-        .acquisition_repository()
-        .list_smart_links(workspace_id)
-        .await;
-
-    let items = match result {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "admin smart-link listing failed");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-
-    let items: Vec<SmartLinkView> = items
-        .into_iter()
-        .map(|link| SmartLinkView {
-            id: link.id,
-            slug: link.slug.into_inner(),
-            destination_url: link.destination_url,
-            active: link.active,
-            channel_source: link.channel_source,
-            channel_community: link.channel_community,
-            channel_creative: link.channel_creative,
-            campaign_id: link.campaign_id,
-        })
-        .collect();
-
-    (
-        StatusCode::OK,
-        [(CACHE_CONTROL, HeaderValue::from_static("private, no-store"))],
-        Json(SmartLinkListResponse { items }),
-    )
-        .into_response()
-}
-
-#[derive(Serialize)]
-struct SmartLinkView {
-    id: Uuid,
-    slug: String,
-    destination_url: String,
-    active: bool,
-    channel_source: Option<String>,
-    channel_community: Option<String>,
-    channel_creative: Option<String>,
-    campaign_id: Option<CampaignId>,
-}
-
-#[derive(Serialize)]
-struct SmartLinkListResponse {
-    items: Vec<SmartLinkView>,
-}
-
-/// Creates a referral code for a fan who does not have one yet. Idempotent:
-/// if the fan already has an active code, it is returned unchanged. The
-/// nineteen fans who signed up before the referral ledger existed are the
-/// reason this endpoint exists.
-pub async fn admin_create_fan_referral_code(
-    State(state): State<crate::AppState>,
-    Path(fan_id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Response {
-    let request_id_value = request_id(&headers);
-    let workspace_id = state.acquisition.workspace_id();
-    let result = state
-        .acquisition
-        .acquisition_repository()
-        .load_or_create_fan_referral_code(workspace_id, FanId::from_uuid(fan_id))
-        .await;
-
-    let code = match result {
-        Ok(value) => value,
-        Err(RepositoryError::NotFound) => {
-            return Problem::not_found(request_id_value)
-                .private()
-                .into_response();
-        }
-        Err(error) => {
-            tracing::warn!(%error, %fan_id, "admin referral-code creation failed");
-            return Problem::service_unavailable(request_id_value)
-                .private()
-                .into_response();
-        }
-    };
-
-    (
-        StatusCode::CREATED,
-        [(CACHE_CONTROL, HeaderValue::from_static("private, no-store"))],
-        Json(ReferralCodeResponse {
-            fan_id,
-            code: code.into_inner(),
-        }),
-    )
-        .into_response()
-}
-
-#[derive(Serialize)]
-struct ReferralCodeResponse {
-    fan_id: Uuid,
-    code: String,
-}
+include!("acquisition/admin_links.rs");
 
 #[cfg(test)]
 mod tests {

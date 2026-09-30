@@ -62,6 +62,8 @@ async fn assert_click_batches_are_all_or_nothing(
         SmartLinkSlug::parse("infra-test")?,
         DestinationUrl::parse("https://example.test/destination")?,
         1,
+        None,
+        None,
     )?;
     let valid_click = ClickEvent::from_link(
         &valid_link,
@@ -80,6 +82,8 @@ async fn assert_click_batches_are_all_or_nothing(
         SmartLinkSlug::parse("infra-test")?,
         DestinationUrl::parse("https://example.test/destination")?,
         1,
+        None,
+        None,
     )?;
     let inconsistent_click =
         ClickEvent::from_link(&inconsistent_link, None, None, OffsetDateTime::now_utc())?;

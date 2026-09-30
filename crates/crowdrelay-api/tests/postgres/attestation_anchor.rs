@@ -83,6 +83,11 @@ impl AcquisitionRepository for StubAcquisition {
     async fn load_active_smart_links(&self) -> Result<Vec<ResolvedSmartLink>, RepositoryError> {
         Ok(Vec::new())
     }
+    async fn load_redirect_context(
+        &self,
+    ) -> Result<Option<crowdrelay_application::RedirectContext>, RepositoryError> {
+        Ok(None)
+    }
     async fn persist_click_batch(&self, _clicks: &[ClickEvent]) -> Result<(), RepositoryError> {
         Ok(())
     }
@@ -280,6 +285,7 @@ pub(crate) fn app_state(
         public_site_base_url: Url::parse("http://localhost:4321")?,
         secure_cookies: false,
         acquisition_repository,
+        watch_origin: None,
     });
     let referrals = ReferralState::new(
         workspace_id,

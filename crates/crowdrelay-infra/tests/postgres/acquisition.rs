@@ -282,6 +282,8 @@ async fn community_conversion_occurred_at_uses_fan_created_at()
         SmartLinkSlug::parse("infra-test")?,
         DestinationUrl::parse("https://example.test/destination")?,
         1,
+        None,
+        None,
     )?;
     let click = ClickEvent::from_link(
         &link,
@@ -478,6 +480,8 @@ async fn community_conversion_stamps_the_promoted_sources_format()
         SmartLinkSlug::parse("infra-test")?,
         DestinationUrl::parse("https://example.test/destination")?,
         1,
+        None,
+        None,
     )?;
     let click = ClickEvent::from_link(
         &link,
@@ -585,6 +589,8 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
         SmartLinkSlug::parse("infra-test")?,
         DestinationUrl::parse("https://example.test/destination")?,
         1,
+        None,
+        None,
     )?;
     let click = ClickEvent::from_link(
         &link,
@@ -709,6 +715,191 @@ async fn community_conversion_does_not_write_when_fan_is_missing()
     .await?;
     assert_eq!(count, 0, "no conversion row must exist for a phantom fan");
 
+    Ok(())
+}
+
+/// The redirect context is the tenant's own ground truth: only this
+/// workspace's owned videos and only communities whose verified rules allow
+/// an off-site landing make the snapshot. A neighbor tenant's video, an
+/// unverified ruleset, a ruleset that forbids off-site links and a
+/// non-Reddit community all stay out.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn redirect_context_is_scoped_to_verified_communities_and_owned_videos()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) = common::test_pool_with_url(TEST_DATABASE_URL_KEY).await?;
+    let database_config = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(5),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(2),
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!("infra-{suffix}"))?;
+    let other_workspace_id = WorkspaceId::new();
+
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Infra test')")
+        .bind(workspace_id.into_uuid())
+        .bind(workspace_slug.as_str())
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Infra test')")
+        .bind(other_workspace_id.into_uuid())
+        .bind(format!("infra-other-{suffix}"))
+        .execute(&pool)
+        .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let insert_video = |workspace: WorkspaceId, source_key: &'static str, active: bool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                r#"INSERT INTO content_sources
+                   (id, workspace_id, source_kind, source_key, title, occurred_at,
+                    expires_at, metadata, active)
+                   VALUES ($1,$2,'video',$3,$4,$5,$6,'{}', $7)"#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace.into_uuid())
+            .bind(source_key)
+            .bind(source_key)
+            .bind(now - Duration::from_secs(86400))
+            .bind(now + Duration::from_secs(86400))
+            .bind(active)
+            .execute(&pool)
+            .await
+        }
+    };
+    // The tenant's own upload, and one the neighbor owns — only the first
+    // may ever decide where this tenant's links land.
+    insert_video(workspace_id, "youtube:ownedvid01a", true).await?;
+    insert_video(other_workspace_id, "youtube:neighbors01", true).await?;
+
+    // Community targets with rules in various states of trust.
+    let community = |workspace: WorkspaceId,
+                     subreddit: &'static str,
+                     platform: Option<&'static str>,
+                     rules: Option<&'static str>,
+                     verified: bool| {
+        let pool = pool.clone();
+        async move {
+            let place_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO discovery_places
+                   (id, workspace_id, place_kind, platform, name, url)
+                 VALUES ($1, $2, 'subreddit', 'reddit', $3, $4)",
+            )
+            .bind(place_id)
+            .bind(workspace.into_uuid())
+            .bind(format!("r/{subreddit}"))
+            .bind(format!("https://www.reddit.com/r/{subreddit}"))
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO discovery_place_rules (place_id, rules_summary, verified_at)
+                 VALUES ($1, $2, CASE WHEN $3 THEN now() ELSE NULL END)",
+            )
+            .bind(place_id)
+            .bind(rules)
+            .bind(verified)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO agent_outreach_targets
+                   (id, workspace_id, target_kind, display_name, status,
+                    subreddit, place_id, platform)
+                 VALUES ($1, $2, 'community', $3, 'promoted', $4, $5, $6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(workspace.into_uuid())
+            .bind(format!("r/{subreddit}"))
+            .bind(subreddit)
+            .bind(place_id)
+            .bind(platform)
+            .execute(&pool)
+            .await
+        }
+    };
+    // Verified rules that allow off-site links — mixed case and an r/
+    // prefix both normalize to the bare name.
+    community(
+        workspace_id,
+        "r/MetalFriendly",
+        Some("reddit"),
+        Some("Standardize titles for song posts || Songs should be melodic death metal"),
+        true,
+    )
+    .await?;
+    // Verified rules that forbid off-site links.
+    community(
+        workspace_id,
+        "forbidding",
+        Some("reddit"),
+        Some("No youtube links/promoting other sites or platforms"),
+        true,
+    )
+    .await?;
+    // Unverified rules carry no authority.
+    community(
+        workspace_id,
+        "unverified",
+        Some("reddit"),
+        Some("Standardize titles for song posts"),
+        false,
+    )
+    .await?;
+    // A Discord community is never a Reddit off-site verdict.
+    community(
+        workspace_id,
+        "discordroom",
+        Some("discord"),
+        Some("Standardize titles for song posts"),
+        true,
+    )
+    .await?;
+    // A neighbor's verified community is not this tenant's permission.
+    community(
+        other_workspace_id,
+        "neighborsub",
+        Some("reddit"),
+        Some("Standardize titles for song posts"),
+        true,
+    )
+    .await?;
+
+    let repository = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        CountryCode::parse("PL")?,
+        &database_config,
+        false,
+        test_sensitive_response_codec(),
+    );
+
+    let context = repository
+        .load_redirect_context()
+        .await?
+        .expect("the configured workspace always has a context");
+
+    assert_eq!(context.workspace_id, workspace_id);
+    assert!(context.owned_video_ids.contains("ownedvid01a"));
+    assert!(
+        !context.owned_video_ids.contains("neighbors01"),
+        "another tenant's video must not enter this snapshot"
+    );
+    assert!(
+        context.reddit_offsite_ok.contains("metalfriendly"),
+        "verified, permissive rules normalize into the allow set"
+    );
+    for denied in ["forbidding", "unverified", "discordroom", "neighborsub"] {
+        assert!(
+            !context.reddit_offsite_ok.contains(denied),
+            "{denied} must not be an off-site-allowed community"
+        );
+    }
     Ok(())
 }
 

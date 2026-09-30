@@ -61,6 +61,12 @@
             Err(RepositoryError::Unavailable)
         }
 
+        async fn load_redirect_context(
+            &self,
+        ) -> Result<Option<crowdrelay_application::RedirectContext>, RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
+
         async fn persist_click_batch(&self, _clicks: &[ClickEvent]) -> Result<(), RepositoryError> {
             Err(RepositoryError::Unavailable)
         }
@@ -343,6 +349,7 @@
         workspace_id: WorkspaceId,
         redirect_cache: Arc<RedirectCache>,
         click_submitter: ClickSubmitter,
+        watch_origin: Option<Url>,
     ) -> Result<AcquisitionState, Box<dyn std::error::Error>> {
         Ok(AcquisitionState::new(acquisition::AcquisitionStateArgs {
             workspace_id,
@@ -354,6 +361,7 @@
             public_site_base_url: Url::parse("http://localhost:4321")?,
             secure_cookies: false,
             acquisition_repository: repository,
+            watch_origin,
         }))
     }
 

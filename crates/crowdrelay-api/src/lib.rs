@@ -104,6 +104,7 @@ mod ops_summary;
 mod organization_settings_http;
 mod portfolio;
 mod proofs;
+mod public_videos;
 mod push;
 mod rate_limit;
 mod referrals;

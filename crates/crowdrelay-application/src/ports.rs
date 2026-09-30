@@ -218,6 +218,14 @@ pub trait AcquisitionRepository: Send + Sync {
     /// return only its configured trusted workspace.
     async fn load_active_smart_links(&self) -> Result<Vec<ResolvedSmartLink>, RepositoryError>;
 
+    /// Loads the redirect-time landing context — the workspace's owned video
+    /// ids and the subreddits whose verified rules allow an off-site landing.
+    /// Refreshed on the same cadence as the links so the cache snapshot stays
+    /// one consistent read.
+    async fn load_redirect_context(
+        &self,
+    ) -> Result<Option<crate::cache::RedirectContext>, RepositoryError>;
+
     /// Persists a best-effort analytics batch. Callers may drop clicks before
     /// this port under bounded-channel overload.
     async fn persist_click_batch(&self, clicks: &[ClickEvent]) -> Result<(), RepositoryError>;
