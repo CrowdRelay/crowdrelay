@@ -27,7 +27,8 @@
 use crowdrelay_brain::{
     AgentTier, CausalModel, DispatchContext, DispatchPrediction, EfeWeights,
     GrowthIntelligencePolicy, GrowthIntelligenceSnapshot, GrowthOpportunity, GrowthStrategy,
-    RecentInsight, effective_agent_cooldown, effective_agent_tier, information_gain,
+    RecentInsight, SocialContentPerformance, effective_agent_cooldown, effective_agent_tier,
+    information_gain,
 };
 use time::OffsetDateTime;
 
@@ -102,6 +103,46 @@ fn insights_block(insights: &[RecentInsight]) -> String {
             insight.kind, insight.headline, insight.detail, action_suffix
         ));
     }
+    lines.join("\n")
+}
+
+/// Formats the owned-social examples that actually created first-party fans.
+///
+/// These are evidence for structure, not copy. The explicit no-copy sentence
+/// is part of the contract: a learning loop should transfer the pattern that
+/// worked without turning the band's feed into near-duplicate content.
+fn social_content_performance_block(history: &[SocialContentPerformance]) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::with_capacity(history.len() + 3);
+    lines.push("Recent owned-social posts that actually created fans:".to_owned());
+    for post in history {
+        let medium = post.media_type.as_deref().unwrap_or("post");
+        let opening = post
+            .opening
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!(" — opening: \"{value}\""))
+            .unwrap_or_default();
+        let conversion = post
+            .fan_conversion_per_1000_reach
+            .map(|value| format!(", {value} fans / 1k reach"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- {} · {}: {} acquired fan(s), {} activated within 30d{}{}",
+            post.platform,
+            medium,
+            post.fans_acquired,
+            post.fans_activated_within_30d,
+            conversion,
+            opening,
+        ));
+    }
+    lines.push(
+        "Use these as evidence for what to repeat structurally: hook shape, format and value exchange. Prioritize patterns that created fans over vanity engagement. Write fresh copy for the current context; do NOT copy or closely paraphrase the old wording."
+            .to_owned(),
+    );
     lines.join("\n")
 }
 
@@ -689,6 +730,11 @@ pub fn evaluate_growth_intelligence(
     // Rule 3: Draft social content on a 2-day cadence.
     if snapshot.template_id == "social-post" && effective_hours >= social_post_cd && retry_ready {
         let mut prompt = "Create social media content for the band. Reference upcoming events, recent releases, or fan milestones. Write in Polish for the primary audience. Include suggested hashtags.".to_owned();
+        let fan_yield_history = social_content_performance_block(&snapshot.social_content_history);
+        if !fan_yield_history.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&fan_yield_history);
+        }
         if !insights.is_empty() {
             prompt.push_str("\n\n");
             prompt.push_str(&insights);
