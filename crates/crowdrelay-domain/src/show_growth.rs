@@ -253,6 +253,15 @@ impl ShowGrowthLever {
         )
     }
 
+    /// These levers are relationship discovery/outreach. The show-growth
+    /// ladder may decide they are due, but the actual outbound action belongs
+    /// to the Beacon subsystem because only it carries a concrete verified
+    /// beacon_id, suppression state and relationship phase.
+    #[must_use]
+    pub const fn is_beacon_outreach(self) -> bool {
+        matches!(self, Self::PartnerCrossPromo | Self::GrassrootsSceneRelay)
+    }
+
     /// Third-party show promotion spends relationship capital: a promoter,
     /// venue, creator or scene node may remember a clumsy ask long after the
     /// campaign ends.
