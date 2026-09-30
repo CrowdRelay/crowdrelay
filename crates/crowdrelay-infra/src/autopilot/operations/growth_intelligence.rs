@@ -1243,6 +1243,11 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         } else {
             Vec::new()
         };
+        let social_history = if *template_id == "social-post" {
+            social_content_history.clone()
+        } else {
+            Vec::new()
+        };
 
         snapshots.push(GrowthIntelligenceSnapshot {
             template_id: (*template_id).to_owned(),
@@ -1255,6 +1260,7 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             unengaged_targets: targets,
             recent_insights: template_insights,
             community_engagement_history: history,
+            social_content_history: social_history,
             // The measured standing from past dispatch outcomes. Workers
             // with no measured outcomes are untested (run at base cadence).
             // Standings are keyed `action_kind:identity` — agent templates
