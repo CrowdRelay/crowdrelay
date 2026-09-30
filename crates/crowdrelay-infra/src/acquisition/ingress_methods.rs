@@ -111,6 +111,7 @@ impl PostgresAcquisitionRepository {
             WHERE workspace_id = $1
               AND source_kind = 'video'
               AND source_key LIKE 'youtube:%'
+              AND active
             "#,
         )
         .bind(workspace_id.into_uuid())

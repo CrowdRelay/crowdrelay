@@ -777,6 +777,7 @@ async fn redirect_context_is_scoped_to_verified_communities_and_owned_videos()
     // may ever decide where this tenant's links land.
     insert_video(workspace_id, "youtube:ownedvid01a", true).await?;
     insert_video(other_workspace_id, "youtube:neighbors01", true).await?;
+    insert_video(workspace_id, "youtube:retiredv01a", false).await?;
 
     // Community targets with rules in various states of trust.
     let community = |workspace: WorkspaceId,
@@ -889,6 +890,10 @@ async fn redirect_context_is_scoped_to_verified_communities_and_owned_videos()
     assert!(
         !context.owned_video_ids.contains("neighbors01"),
         "another tenant's video must not enter this snapshot"
+    );
+    assert!(
+        !context.owned_video_ids.contains("retiredv01a"),
+        "a retired video's watch page redirects back to YouTube, so it must not enter the snapshot"
     );
     assert!(
         context.reddit_offsite_ok.contains("metalfriendly"),
