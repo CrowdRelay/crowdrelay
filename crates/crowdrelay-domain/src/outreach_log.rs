@@ -35,6 +35,7 @@
 //!
 //! Parse-only like its sibling readers: no IO, no clock, no writes.
 
+use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Iso8601, macros::format_description};
 
 use crate::outreach::OutreachReplyDisposition;
@@ -117,6 +118,11 @@ pub enum OutreachBook {
     Master,
     /// `PROMO` shape — `Nazwa`, `Kontakt`, `Wynik`, `Response_Type`.
     Promo,
+    /// Human `SCOUT.OUTREACH_LOG` shape — a compact history table with
+    /// recipient, public email, subject/thread, date, action, result/status
+    /// and reason/next-step. It has no explicit row id, so the parser derives
+    /// a deterministic one from the stable message identity fields.
+    Scout,
 }
 
 impl OutreachBook {
@@ -126,6 +132,7 @@ impl OutreachBook {
         match self {
             Self::Master => "master",
             Self::Promo => "promo",
+            Self::Scout => "scout",
         }
     }
 }
@@ -332,10 +339,22 @@ pub fn is_outreach_log(header: &[String]) -> bool {
             .iter()
             .any(|cell| canonical_column(cell) == Some(name))
     };
-    has(columns::OUTREACH_ID)
+    let durable_book = has(columns::OUTREACH_ID)
         && has(columns::SENT_AT)
         && has(columns::REPLY_AT)
-        && (has(columns::RESULT) || has(columns::REPLY_TYPE))
+        && (has(columns::RESULT) || has(columns::REPLY_TYPE));
+    // SCOUT intentionally keeps a compact operator-facing history table.
+    // Its seven fields are specific enough to claim without mistaking an
+    // ordinary contact list for sent history.
+    let scout_book = !has(columns::OUTREACH_ID)
+        && has(columns::NAME)
+        && has(columns::CONTACT)
+        && has(columns::SUBJECT)
+        && has(columns::SENT_AT)
+        && has(columns::STATUS)
+        && has(columns::RESULT)
+        && has(columns::NEXT_STEP);
+    durable_book || scout_book
 }
 
 /// The column this header cell names, in the shared vocabulary.
@@ -347,28 +366,34 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
     let cell = cell
         .trim()
         .to_lowercase()
-        .replace([' ', '-'], "_")
-        .replace("__", "_");
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
     match cell.as_str() {
         "outreach_id" | "outreach" => Some(columns::OUTREACH_ID),
         "entity_id" | "lead_id" => Some(columns::ENTITY_REF),
-        "nazwa" | "display_name" => Some(columns::NAME),
+        "nazwa" | "display_name" | "recipient_organization" => Some(columns::NAME),
         // `Recipient` on master holds the address — it is this sheet's
         // contact column, not its name column.
-        "recipient" | "kontakt" | "contact_email" | "email" => Some(columns::CONTACT),
+        "recipient" | "kontakt" | "contact_email" | "email" | "public_email" => {
+            Some(columns::CONTACT)
+        },
         "channel" | "kanał" | "kanal" => Some(columns::CHANNEL),
         "purpose" | "cel" => Some(columns::PURPOSE),
-        "subject" | "temat" => Some(columns::SUBJECT),
-        "sent_at" | "data_wysłania" | "data_wyslania" | "wysłano" | "wyslano" => {
+        "subject" | "temat" | "subject_thread" => Some(columns::SUBJECT),
+        "sent_at" | "data_wysłania" | "data_wyslania" | "wysłano" | "wyslano" | "date" => {
             Some(columns::SENT_AT)
         }
-        "status" => Some(columns::STATUS),
+        "status" | "action" => Some(columns::STATUS),
         "reply_at" | "data_odpowiedzi" | "answered_at" => Some(columns::REPLY_AT),
         "reply_type" => Some(columns::REPLY_TYPE),
         "response_type" => Some(columns::RESPONSE_TYPE),
-        "result" | "wynik" | "outcome" => Some(columns::RESULT),
+        "result" | "wynik" | "outcome" | "result_status" => Some(columns::RESULT),
         "followup_due" | "follow_up_due" => Some(columns::FOLLOWUP_DUE),
-        "next_step" | "następny_krok" | "nastepny_krok" => Some(columns::NEXT_STEP),
+        "next_step" | "następny_krok" | "nastepny_krok" | "reason_next_step" => {
+            Some(columns::NEXT_STEP)
+        },
         "notes" | "uwagi" | "note" => Some(columns::NOTES),
         "gmail_message_id" | "message_id" => Some(columns::GMAIL_MESSAGE_ID),
         "gmail_thread_id" | "thread_id" => Some(columns::GMAIL_THREAD_ID),
@@ -379,6 +404,62 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
         "send_guard_key" | "guard_key" => Some(columns::SEND_GUARD_KEY),
         _ => None,
     }
+}
+
+fn scout_outreach_id(
+    index: &std::collections::BTreeMap<&str, usize>,
+    row: &[String],
+) -> Option<String> {
+    let value = |name: &str| {
+        index
+            .get(name)
+            .and_then(|cell| row.get(*cell))
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_lowercase()
+    };
+    let identity = [
+        value(columns::NAME),
+        value(columns::CONTACT),
+        value(columns::SUBJECT),
+        value(columns::SENT_AT),
+    ]
+    .join("\0");
+    if identity.chars().all(|character| character == '\0') {
+        return None;
+    }
+    let digest = Sha256::digest(identity.as_bytes());
+    Some(
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
+}
+
+fn scout_status(action: Option<&str>, result: Option<&str>) -> Option<String> {
+    let action = action?.trim();
+    if action.is_empty() {
+        return None;
+    }
+    let lower = action.to_lowercase();
+    let result = result.unwrap_or("").trim().to_lowercase();
+    if lower.contains("not sent") {
+        return Some("DRAFT".to_owned());
+    }
+    if lower.contains("positive reply")
+        || lower.contains("warm contact")
+        || lower.contains("accepted")
+        || result.contains("accepted")
+        || result.contains("positive reply")
+    {
+        return Some("REPLIED".to_owned());
+    }
+    if lower.contains("already sent") {
+        return Some("SENT".to_owned());
+    }
+    Some(action.to_owned())
 }
 
 /// Reads one whole grid as an outreach log, or declines it.
@@ -400,7 +481,17 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             .iter()
             .any(|cell| canonical_column(cell) == Some(name))
     };
-    let book = if has(columns::RESPONSE_TYPE) || has(columns::NAME) {
+    let scout_shape = !has(columns::OUTREACH_ID)
+        && has(columns::NAME)
+        && has(columns::CONTACT)
+        && has(columns::SUBJECT)
+        && has(columns::SENT_AT)
+        && has(columns::STATUS)
+        && has(columns::RESULT)
+        && has(columns::NEXT_STEP);
+    let book = if scout_shape {
+        OutreachBook::Scout
+    } else if has(columns::RESPONSE_TYPE) || has(columns::NAME) {
         OutreachBook::Promo
     } else {
         OutreachBook::Master
@@ -444,16 +535,37 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
         }
         report.rows_read += 1;
         let row_number = offset + 2;
-        let Some(outreach_id) = clean(cell_at(&index, row, columns::OUTREACH_ID)) else {
-            report
-                .refusals
-                .push((row_number, OutreachLogRefusal::MissingId));
-            continue;
+        let outreach_id = match clean(cell_at(&index, row, columns::OUTREACH_ID)) {
+            Some(id) => id,
+            None if book == OutreachBook::Scout => {
+                let Some(id) = scout_outreach_id(&index, row) else {
+                    report
+                        .refusals
+                        .push((row_number, OutreachLogRefusal::MissingId));
+                    continue;
+                };
+                id
+            }
+            None => {
+                report
+                    .refusals
+                    .push((row_number, OutreachLogRefusal::MissingId));
+                continue;
+            }
         };
         // An address-shaped cell is the contact route; anything else
         // (a name, a note) asserts nothing about where the letter went.
         let contact = clean(cell_at(&index, row, columns::CONTACT))
             .filter(|cell| cell.contains('@') && cell.len() <= 320);
+        let result = capped(clean(cell_at(&index, row, columns::RESULT)), 200);
+        let status = if book == OutreachBook::Scout {
+            scout_status(
+                cell_at(&index, row, columns::STATUS),
+                result.as_deref(),
+            )
+        } else {
+            capped(clean(cell_at(&index, row, columns::STATUS)), 60)
+        };
         report.entries.push(OutreachLogEntry {
             outreach_id,
             entity_ref: capped(clean(cell_at(&index, row, columns::ENTITY_REF)), 96),
@@ -463,10 +575,10 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             purpose: capped(clean(cell_at(&index, row, columns::PURPOSE)), 500),
             subject: capped(clean(cell_at(&index, row, columns::SUBJECT)), 500),
             sent_at_raw: capped(clean(cell_at(&index, row, columns::SENT_AT)), 60),
-            status: capped(clean(cell_at(&index, row, columns::STATUS)), 60),
+            status,
             reply_at_raw: capped(clean(cell_at(&index, row, columns::REPLY_AT)), 60),
             reply_type: capped(clean(cell_at(&index, row, columns::REPLY_TYPE)), 60),
-            result: capped(clean(cell_at(&index, row, columns::RESULT)), 200),
+            result,
             response_type: capped(clean(cell_at(&index, row, columns::RESPONSE_TYPE)), 200),
             followup_due_raw: capped(clean(cell_at(&index, row, columns::FOLLOWUP_DUE)), 60),
             next_step: capped(clean(cell_at(&index, row, columns::NEXT_STEP)), 500),
@@ -474,7 +586,11 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             gmail_message_id: capped(clean(cell_at(&index, row, columns::GMAIL_MESSAGE_ID)), 120),
             gmail_thread_id: capped(clean(cell_at(&index, row, columns::GMAIL_THREAD_ID)), 120),
             segment: capped(clean(cell_at(&index, row, columns::SEGMENT)), 120),
-            source_system: capped(clean(cell_at(&index, row, columns::SOURCE_SYSTEM)), 60),
+            source_system: if book == OutreachBook::Scout {
+                Some("scout".to_owned())
+            } else {
+                capped(clean(cell_at(&index, row, columns::SOURCE_SYSTEM)), 60)
+            },
             source_id: capped(clean(cell_at(&index, row, columns::SOURCE_ID)), 160),
             created_at_raw: capped(clean(cell_at(&index, row, columns::CREATED_AT)), 60),
             send_guard_key: capped(clean(cell_at(&index, row, columns::SEND_GUARD_KEY)), 200),
@@ -580,6 +696,21 @@ mod tests {
         .collect()
     }
 
+    fn scout_header() -> Vec<String> {
+        [
+            "Recipient / Organization",
+            "Public Email",
+            "Subject / Thread",
+            "Date",
+            "Action",
+            "Result / Status",
+            "Reason / Next Step",
+        ]
+        .iter()
+        .map(|header| header.to_string())
+        .collect()
+    }
+
     fn row(header: &[String], values: &[(&str, &str)]) -> Vec<String> {
         header
             .iter()
@@ -602,6 +733,76 @@ mod tests {
     #[test]
     fn the_promo_header_is_claimed() {
         assert!(is_outreach_log(&promo_header()));
+    }
+
+    #[test]
+    fn the_scout_header_is_claimed() {
+        assert!(is_outreach_log(&scout_header()));
+    }
+
+    #[test]
+    fn scout_history_derives_stable_ids_and_send_semantics() {
+        let header = scout_header();
+        let sent = row(
+            &header,
+            &[
+                ("name", "Metal Forever"),
+                ("contact", "redakce@metalforever.info"),
+                ("subject", "VIRYA / concert news"),
+                ("sent_at", "2026-08-10"),
+                ("status", "Already sent before this run"),
+                ("result", "Czeka na odpowiedź"),
+                ("next_step", "Dedupe from Gmail."),
+            ],
+        );
+        let replied = row(
+            &header,
+            &[
+                ("name", "Metal Gentleman Promotion"),
+                ("contact", "promotion@metalgentleman.com"),
+                ("subject", "Virya - Metalgentleman submission"),
+                ("sent_at", "2026-08-08"),
+                ("status", "Existing positive reply"),
+                ("result", "Accepted / coverage promised"),
+                ("next_step", "Do not cold-pitch duplicate."),
+            ],
+        );
+        let draft = row(
+            &header,
+            &[
+                ("name", "Euroblast Festival"),
+                ("contact", "su@euroblast.net"),
+                ("subject", "Band application"),
+                ("sent_at", "2026-08-11"),
+                ("status", "NOT SENT"),
+                ("result", "Needs application package"),
+            ],
+        );
+        let report =
+            extract_outreach_log(&vec![header.clone(), sent.clone(), replied, draft])
+                .expect("SCOUT outreach log is claimed");
+        assert_eq!(report.book, OutreachBook::Scout);
+        assert_eq!(report.entries.len(), 3);
+        assert!(report.entries[0].was_sent());
+        assert!(!report.entries[0].was_replied());
+        assert!(report.entries[1].was_sent());
+        assert!(report.entries[1].was_replied());
+        assert!(!report.entries[2].was_sent());
+        assert_eq!(report.entries[0].source_system.as_deref(), Some("scout"));
+
+        let first_id = report.entries[0].outreach_id.clone();
+        let mut refreshed = sent;
+        let result_index = header
+            .iter()
+            .position(|cell| canonical_column(cell) == Some(columns::RESULT))
+            .expect("result column");
+        refreshed[result_index] = "Still waiting".to_owned();
+        let refreshed_report =
+            extract_outreach_log(&vec![header, refreshed]).expect("SCOUT row re-parses");
+        assert_eq!(
+            first_id, refreshed_report.entries[0].outreach_id,
+            "status/result edits must refresh the same interaction identity"
+        );
     }
 
     #[test]
