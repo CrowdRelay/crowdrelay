@@ -324,29 +324,61 @@ eligible AS (
     WHERE fan.workspace_id = $1
       AND fan.status = 'active'
       AND (
-          -- A paid ticket is the closest thing the database holds to
-          -- attendance, and it is the only qualification the post-show ask
-          -- accepts: thanking somebody for coming who did not come is a worse
-          -- message than sending nothing.
-          EXISTS (
-              SELECT 1
-              FROM ticket_orders AS ticket_order
-              JOIN ticket_sales AS sale
-                ON sale.workspace_id = ticket_order.workspace_id
-               AND sale.id = ticket_order.ticket_sale_id
-              WHERE ticket_order.workspace_id = fan.workspace_id
-                AND ticket_order.buyer_email = fan.normalized_email
-                AND ticket_order.status IN ('paid', 'partially_refunded')
-                AND sale.event_id = $3
+          (
+              open_step.step_kind = 'announce_ask'
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM ticket_orders AS ticket_order
+                      JOIN ticket_sales AS sale
+                        ON sale.workspace_id = ticket_order.workspace_id
+                       AND sale.id = ticket_order.ticket_sale_id
+                      WHERE ticket_order.workspace_id = fan.workspace_id
+                        AND ticket_order.buyer_email = fan.normalized_email
+                        AND ticket_order.status IN ('paid', 'partially_refunded')
+                        AND sale.event_id = $3
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM event_interests AS interest
+                      WHERE interest.workspace_id = fan.workspace_id
+                        AND interest.fan_id = fan.id
+                        AND interest.event_id = $3
+                  )
+              )
           )
           OR (
-              open_step.step_kind = 'announce_ask'
-              AND EXISTS (
+              -- Compatibility only: new TrackUsAsk plays no longer create this
+              -- rung. If an old persisted play reaches it, attendance must be
+              -- observed rather than inferred from a purchase.
+              open_step.step_kind = 'post_show_ask'
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM concert_checkins AS checkin
+                      WHERE checkin.workspace_id = fan.workspace_id
+                        AND checkin.fan_id = fan.id
+                        AND checkin.event_id = $3
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM admission_passes AS pass
+                      WHERE pass.workspace_id = fan.workspace_id
+                        AND pass.fan_id = fan.id
+                        AND pass.event_id = $3
+                        AND pass.status = 'redeemed'
+                  )
+              )
+              -- Show Growth owns the observed room whenever it is enabled:
+              -- recap, merch and follow ask share one cadence there. Leaving
+              -- this legacy rung live in parallel would create a second owner
+              -- of the same T+ moment.
+              AND NOT EXISTS (
                   SELECT 1
-                  FROM event_interests AS interest
-                  WHERE interest.workspace_id = fan.workspace_id
-                    AND interest.fan_id = fan.id
-                    AND interest.event_id = $3
+                  FROM autopilot_policies AS policy
+                  WHERE policy.workspace_id = fan.workspace_id
+                    AND policy.context = 'show_growth'
+                    AND policy.enabled
               )
           )
       )
