@@ -40,6 +40,10 @@ pub enum MeaningfulAction {
     MerchPurchase,
     /// Referred somebody who actually converted.
     QualifiedReferral,
+    /// Was physically observed at a show: a concert QR check-in or redeemed
+    /// admission pass. Attendance is first-party behaviour, not a purchase
+    /// proxy.
+    Attendance,
     /// Said they are coming to a show.
     EventInterest,
     /// Finished a Synesthesia run — a real session, not a synthetic one.
@@ -55,6 +59,7 @@ impl MeaningfulAction {
             Self::TicketPurchase => "ticket_purchase",
             Self::MerchPurchase => "merch_purchase",
             Self::QualifiedReferral => "qualified_referral",
+            Self::Attendance => "attendance",
             Self::EventInterest => "event_interest",
             Self::SynesthesiaRun => "synesthesia_run",
             Self::SignalSession => "signal_session",
@@ -67,6 +72,7 @@ impl MeaningfulAction {
             "ticket_purchase" => Some(Self::TicketPurchase),
             "merch_purchase" => Some(Self::MerchPurchase),
             "qualified_referral" => Some(Self::QualifiedReferral),
+            "attendance" => Some(Self::Attendance),
             "event_interest" => Some(Self::EventInterest),
             "synesthesia_run" => Some(Self::SynesthesiaRun),
             "signal_session" => Some(Self::SignalSession),
@@ -75,11 +81,12 @@ impl MeaningfulAction {
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 7] {
         [
             Self::TicketPurchase,
             Self::MerchPurchase,
             Self::QualifiedReferral,
+            Self::Attendance,
             Self::EventInterest,
             Self::SynesthesiaRun,
             Self::SignalSession,
@@ -96,7 +103,10 @@ impl MeaningfulAction {
     pub const fn is_downstream(self) -> bool {
         matches!(
             self,
-            Self::TicketPurchase | Self::MerchPurchase | Self::QualifiedReferral
+            Self::TicketPurchase
+                | Self::MerchPurchase
+                | Self::QualifiedReferral
+                | Self::Attendance
         )
     }
 }
@@ -292,6 +302,7 @@ mod tests {
             MeaningfulAction::TicketPurchase,
             MeaningfulAction::MerchPurchase,
             MeaningfulAction::QualifiedReferral,
+            MeaningfulAction::Attendance,
         ] {
             assert!(action.is_downstream());
         }
