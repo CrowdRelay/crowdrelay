@@ -2,7 +2,7 @@
   "name": "CrowdRelay — CrowdRelay booking discovery executor",
   "nodes": [
     {
-      "parameters": {},
+      "parameters": {"inputSource": "passthrough"},
       "id": "bd-trigger",
       "name": "Called by verified ingress",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
