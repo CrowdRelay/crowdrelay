@@ -347,7 +347,7 @@ fn signup_command_with_key(
         workspace_id,
         email: NormalizedEmail::parse(format!("fan-{identity_suffix}@example.test"))?,
         display_name: Some("Test fan".to_owned()),
-        city_slug: CitySlug::parse("wroclaw")?,
+        city_slug: Some(CitySlug::parse("wroclaw")?),
         locale: Some("pl-PL".to_owned()),
         campaign_id: None,
         visitor_id: None,

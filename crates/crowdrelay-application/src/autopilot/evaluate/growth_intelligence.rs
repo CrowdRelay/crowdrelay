@@ -138,9 +138,24 @@ fn social_content_performance_block(history: &[SocialContentPerformance]) -> Str
             conversion,
             opening,
         ));
+        let retention_rate = post
+            .retained_fans_per_1000_reach()
+            .map(|rate| format!("{rate} retained fans / 1k reach"))
+            .unwrap_or_else(|| "retention rate unmeasured: window or sample incomplete".to_owned());
+        lines.push(format!(
+            "  D30: {} retained fan(s), {} observed cohort fan(s); {}. Window {}.",
+            post.fans_retained_30d,
+            post.fans_observed_30d,
+            retention_rate,
+            if post.retention_window_complete {
+                "complete"
+            } else {
+                "incomplete"
+            },
+        ));
     }
     lines.push(
-        "Use these as evidence for what to repeat structurally: hook shape, format and value exchange. Prioritize patterns that created fans over vanity engagement. Write fresh copy for the current context; do NOT copy or closely paraphrase the old wording."
+        "Use these as evidence for what to repeat structurally: hook shape, format and value exchange. Prioritize patterns that created fans over vanity engagement. Proven retained fans outrank raw acquisition volume. Incomplete windows and small samples are not evidence of failure or reliable rates. Write fresh copy for the current context; do NOT copy or closely paraphrase the old wording."
             .to_owned(),
     );
     lines.join("\n")
@@ -1151,31 +1166,4 @@ fn community_novelty_bps(history: &[crowdrelay_brain::CommunityEngagementSummary
 }
 
 #[cfg(test)]
-mod social_content_performance_tests {
-    use super::*;
-
-    #[test]
-    fn fan_creating_posts_become_fresh_copy_evidence_not_copy_instructions() {
-        let block = social_content_performance_block(&[SocialContentPerformance {
-            platform: "instagram".to_owned(),
-            media_type: Some("REEL".to_owned()),
-            opening: Some("riff first, talk later".to_owned()),
-            reach: Some(2_000),
-            fans_acquired: 6,
-            fans_activated_within_30d: 4,
-            fan_conversion_per_1000_reach: Some(3),
-        }]);
-
-        assert!(block.contains("6 acquired fan(s)"));
-        assert!(block.contains("4 activated within 30d"));
-        assert!(block.contains("3 fans / 1k reach"));
-        assert!(block.contains("riff first, talk later"));
-        assert!(block.contains("Prioritize patterns that created fans over vanity engagement"));
-        assert!(block.contains("do NOT copy or closely paraphrase"));
-    }
-
-    #[test]
-    fn no_fan_yield_history_adds_no_fake_guidance() {
-        assert!(social_content_performance_block(&[]).is_empty());
-    }
-}
+mod social_content_performance_tests;

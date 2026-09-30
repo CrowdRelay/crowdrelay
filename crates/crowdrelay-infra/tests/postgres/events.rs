@@ -684,7 +684,7 @@ fn signup_command(
         workspace_id,
         email: NormalizedEmail::parse("event-fan@example.test")?,
         display_name: Some("Event Fan".to_owned()),
-        city_slug: CitySlug::parse("wroclaw")?,
+        city_slug: Some(CitySlug::parse("wroclaw")?),
         locale: Some("pl-PL".to_owned()),
         campaign_id: None,
         visitor_id: None,

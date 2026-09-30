@@ -308,7 +308,7 @@ pub struct FanSignupInput {
     pub workspace_id: WorkspaceId,
     pub email: NormalizedEmail,
     pub display_name: Option<String>,
-    pub city_slug: CitySlug,
+    pub city_slug: Option<CitySlug>,
     pub locale: Option<String>,
     pub campaign_id: Option<CampaignId>,
     pub visitor_id: Option<VisitorId>,
@@ -316,7 +316,7 @@ pub struct FanSignupInput {
     pub consent: MarketingConsent,
 }
 
-/// A validated fan signup with consent, city interest, and optional referral.
+/// A validated fan signup with consent, optional city interest, and referral.
 ///
 /// `Debug` is deliberately redacted to prevent leaking personal data.
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -324,7 +324,7 @@ pub struct FanSignup {
     workspace_id: WorkspaceId,
     email: NormalizedEmail,
     display_name: Option<String>,
-    city_slug: CitySlug,
+    city_slug: Option<CitySlug>,
     locale: Option<String>,
     campaign_id: Option<CampaignId>,
     visitor_id: Option<VisitorId>,
@@ -380,10 +380,10 @@ impl FanSignup {
         self.display_name.as_deref()
     }
 
-    /// Returns the fan's city of interest.
+    /// Returns the fan's city of interest when they supplied one.
     #[must_use]
-    pub fn city_slug(&self) -> &CitySlug {
-        &self.city_slug
+    pub fn city_slug(&self) -> Option<&CitySlug> {
+        self.city_slug.as_ref()
     }
 
     /// Returns the optional locale tag.
@@ -752,7 +752,7 @@ mod tests {
             workspace_id: WorkspaceId::new(),
             email: NormalizedEmail::parse("private@example.com")?,
             display_name: Some("Private Name".to_owned()),
-            city_slug: CitySlug::parse("wroclaw")?,
+            city_slug: Some(CitySlug::parse("wroclaw")?),
             locale: Some("pl-PL".to_owned()),
             campaign_id: Some(CampaignId::new()),
             visitor_id: Some(VisitorId::new()),
@@ -773,7 +773,7 @@ mod tests {
             workspace_id: WorkspaceId::new(),
             email: NormalizedEmail::parse("fan@example.com")?,
             display_name: Some("  Virya Fan  ".to_owned()),
-            city_slug: CitySlug::parse("warszawa")?,
+            city_slug: Some(CitySlug::parse("warszawa")?),
             locale: Some("  pl-PL ".to_owned()),
             campaign_id: None,
             visitor_id: None,
@@ -792,7 +792,7 @@ mod tests {
             workspace_id: WorkspaceId::new(),
             email: NormalizedEmail::parse("fan@example.com")?,
             display_name: None,
-            city_slug: CitySlug::parse("warszawa")?,
+            city_slug: None,
             locale: None,
             campaign_id: None,
             visitor_id: None,

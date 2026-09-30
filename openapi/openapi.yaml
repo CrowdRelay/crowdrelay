@@ -16321,7 +16321,6 @@ components:
       additionalProperties: false
       required:
       - email
-      - city_slug
       - consent
       properties:
         email:
@@ -16332,6 +16331,7 @@ components:
           maxLength: 120
         city_slug:
           type: string
+          description: Optional city preference. Omit for email-first signup; no city is inferred. Supplied cities retain normal validation.
           maxLength: 128
           pattern: ^[a-z0-9][a-z0-9_-]*$
         locale:

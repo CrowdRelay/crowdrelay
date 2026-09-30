@@ -167,6 +167,8 @@ test-postgres-env:
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test postgres -- --ignored --test-threads=1 \
       click_writes_interaction_and_signup_links_it_to_the_fan \
       fan_arrival_writes_provenance_not_only_acquisition \
+      email_first_capture_confirms_without_a_city_and_preserves_attribution \
+      each_workspace_sees_its_own_candidates_and_the_shared_cold_rooms \
       single_action_attribution_is_exact \
       unlabelled_link_records_interaction_but_never_converts \
       what_left_and_what_never_did \
@@ -208,6 +210,8 @@ test-postgres-env:
       a_mailed_link_renders_then_decides_the_ask \
       material_counts_expired_sources_as_aged_out_and_folds_song_copies \
       a_city_night_nobody_measured_reads_null_not_zero
+    {{CARGO}} test --locked --all-features --package crowdrelay-infra --lib -- --ignored --test-threads=1 \
+      social_performance_keeps_mature_retention_separate_from_new_arrivals
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --lib -- --ignored --test-threads=1 \
       postgres_outbox_round_trip \
       community_preflight_checks_membership_rules_and_credentials_without_sending

@@ -290,7 +290,7 @@ include!("acquisition/redirect.rs");
 pub struct FanSignupRequest {
     email: String,
     display_name: Option<String>,
-    city_slug: String,
+    city_slug: Option<String>,
     locale: Option<String>,
     referral_code: Option<String>,
     campaign_id: Option<CampaignId>,
@@ -450,35 +450,37 @@ pub async fn signup_fan(
         Ok(result) => result,
         Err(error) => return signup_error(error, request_id_value).into_response(),
     };
-    let mobile_fan = crowdrelay_infra::mobile_fan::PostgresMobileFanRepository::new(
-        state.ticketing.pool().clone(),
-        state.acquisition.workspace_id,
-        state.ticketing.operation_timeout(),
-    );
-    match mobile_fan
-        .upsert_fan_location_preference(
-            result.fan_id,
-            &requested_city_slug,
-            nearby_enabled,
-            nearby_radius_km,
-        )
-        .await
-    {
-        Ok(true) => {}
-        // The write is conditional on the fan already holding an interest in
-        // this city, and a repeat signup for a pending or active address does
-        // not create one. Silence here meant a fan opted into nearby shows,
-        // saw it accepted, and was never reachable by that loop.
-        Ok(false) => tracing::warn!(
-            fan_id = %result.fan_id,
-            city_slug = %requested_city_slug,
-            "fan signup completed but no city interest matched, so the nearby preference was not stored"
-        ),
-        Err(error) => tracing::warn!(
-            %error,
-            fan_id = %result.fan_id,
-            "fan signup completed but nearby preference could not be persisted"
-        ),
+    if let Some(requested_city_slug) = requested_city_slug {
+        let mobile_fan = crowdrelay_infra::mobile_fan::PostgresMobileFanRepository::new(
+            state.ticketing.pool().clone(),
+            state.acquisition.workspace_id,
+            state.ticketing.operation_timeout(),
+        );
+        match mobile_fan
+            .upsert_fan_location_preference(
+                result.fan_id,
+                &requested_city_slug,
+                nearby_enabled,
+                nearby_radius_km,
+            )
+            .await
+        {
+            Ok(true) => {}
+            // The write is conditional on the fan already holding an interest in
+            // this city, and a repeat signup for a pending or active address does
+            // not create one. Silence here meant a fan opted into nearby shows,
+            // saw it accepted, and was never reachable by that loop.
+            Ok(false) => tracing::warn!(
+                fan_id = %result.fan_id,
+                city_slug = %requested_city_slug,
+                "fan signup completed but no city interest matched, so the nearby preference was not stored"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                fan_id = %result.fan_id,
+                "fan signup completed but nearby preference could not be persisted"
+            ),
+        }
     }
     if let Err(error) = crowdrelay_infra::acquisition::persist_fan_ad_attribution(
         state.ticketing.pool(),
@@ -564,7 +566,11 @@ fn build_signup(
     payload: FanSignupRequest,
 ) -> Result<FanSignup, SignupPayloadError> {
     let email = NormalizedEmail::parse(payload.email).map_err(|_| SignupPayloadError::Email)?;
-    let city_slug = CitySlug::parse(payload.city_slug).map_err(|_| SignupPayloadError::City)?;
+    let city_slug = payload
+        .city_slug
+        .map(CitySlug::parse)
+        .transpose()
+        .map_err(|_| SignupPayloadError::City)?;
     let claimed_referral_code = payload
         .referral_code
         .map(ReferralCode::parse)
@@ -826,6 +832,43 @@ include!("acquisition/admin_links.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn email_first_signup_preserves_consent_and_optional_city_validation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = |city: Option<&str>, consent: bool| {
+            let mut value = serde_json::json!({
+                "email": "new-fan@example.test",
+                "consent": {"marketing": consent, "policy_version": "v1"},
+                "referral_code": "Ref_123"
+            });
+            if let Some(city) = city {
+                value["city_slug"] = serde_json::json!(city);
+            }
+            serde_json::from_value::<FanSignupRequest>(value)
+        };
+        let workspace = WorkspaceId::new();
+        let visitor = VisitorId::new();
+        let signup = build_signup(workspace, Some(visitor), None, payload(None, true)?)
+            .map_err(|_| "email-first signup rejected")?;
+        assert!(signup.city_slug().is_none());
+        assert_eq!(signup.visitor_id(), Some(visitor));
+        assert_eq!(
+            signup.claimed_referral_code().map(ReferralCode::as_str),
+            Some("Ref_123")
+        );
+        assert!(build_signup(workspace, None, None, payload(None, false)?).is_err());
+        assert!(build_signup(workspace, None, None, payload(Some(""), true)?).is_err());
+        assert!(build_signup(workspace, None, None, payload(Some("bad city"), true)?).is_err());
+        assert_eq!(
+            build_signup(workspace, None, None, payload(Some("wroclaw"), true)?)
+                .map_err(|_| "city signup rejected")?
+                .city_slug()
+                .map(CitySlug::as_str),
+            Some("wroclaw")
+        );
+        Ok(())
+    }
 
     #[test]
     fn attribution_cookie_has_required_security_attributes() {

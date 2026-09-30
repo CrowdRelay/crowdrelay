@@ -1,0 +1,930 @@
+From 6051a99f4dc65d51b0f7c098558c05a1eadc86cc Mon Sep 17 00:00:00 2001
+From: wojciechbator <wojciech.jan.bator@gmail.com>
+Date: Wed, 30 Sep 2026 22:27:32 +0200
+Subject: [PATCH] feat(signal): capture consented fans without mandatory city
+ enrichment
+
+---
+ src/client/areaExperience.ts                 |  21 ++-
+ src/components/AreaExperience.astro          |   4 +
+ src/components/preact/signal/EventDetail.tsx |  27 ++-
+ src/components/preact/signal/SignalHub.tsx   | 143 +++-------------
+ src/components/preact/signal/WatchJoin.tsx   |  26 +--
+ src/data/signalCopy.ts                       |   8 +-
+ src/lib/crowdrelay-client.ts                 |   2 +-
+ src/lib/signalSignup.ts                      |  67 ++++++++
+ src/pages/api/signal-preregister.ts          | 166 -------------------
+ tests/designTokens.contract.test.ts          |  13 +-
+ tests/signalSignup.test.ts                   | 105 ++++++++++++
+ 11 files changed, 247 insertions(+), 335 deletions(-)
+ create mode 100644 src/lib/signalSignup.ts
+ delete mode 100644 src/pages/api/signal-preregister.ts
+ create mode 100644 tests/signalSignup.test.ts
+
+diff --git a/src/client/areaExperience.ts b/src/client/areaExperience.ts
+index f67a896..796a4b1 100644
+--- a/src/client/areaExperience.ts
++++ b/src/client/areaExperience.ts
+@@ -1,4 +1,7 @@
+ import { createAreaCollectionRenderer, type AreaLatestClaim } from "./areaCollectionRenderer"
++import { crowdrelay, campaignIdFromLocation, referralCodeFromLocation } from "../lib/crowdrelay"
++import { createSignalSignupSubmitter, signalSignupInput } from "../lib/signalSignup"
++import { signupAttribution } from "../lib/signupAttribution"
+ 
+ // Browser runtime for AreaExperience.astro. Keep private coordinates server-side.
+ type DropInfo = {
+@@ -158,6 +161,7 @@ const initAreaExperience = () => {
+     const claimAuthRequired = root.querySelector<HTMLElement>("[data-claim-auth-required]")
+     const claimAuthText = root.querySelector<HTMLElement>("[data-claim-auth-text]")
+     const claimAuthLink = root.querySelector<HTMLElement>("[data-claim-auth-link]")
++    const submitSignup = createSignalSignupSubmitter(crowdrelay)
+     const claimInlineForm = root.querySelector<HTMLFormElement>("[data-claim-inline-signup]")
+     const claimInlineEmail = root.querySelector<HTMLInputElement>("[data-claim-inline-email]")
+     const claimInlineButton = root.querySelector<HTMLButtonElement>("[data-claim-inline-button]")
+@@ -252,15 +256,16 @@ const initAreaExperience = () => {
+           claimInlineStatus.textContent = copy.claimInlineSending
+         }
+         try {
+-          const response = await fetch("/api/signal-preregister", {
+-            method: "POST",
+-            signal: AbortSignal.timeout(12_000),
+-            headers: { "Content-Type": "application/json" },
+-            body: JSON.stringify({ email, locale: lang }),
+-          })
+-          if (!response.ok) throw new Error("preregister failed")
++          const consent = new FormData(claimInlineForm).get("consent") === "on"
++          const result = await submitSignup(signalSignupInput(email, lang, consent, {
++            campaign_id: campaignIdFromLocation(),
++            referral_code: referralCodeFromLocation(),
++            ad_attribution: signupAttribution(),
++          }))
+           if (claimInlineStatus) {
+-            claimInlineStatus.textContent = copy.claimInlineSent
++            claimInlineStatus.textContent = result.email_queued === false
++              ? (lang === "pl" ? "Użyj poprzedniego linku ze skrzynki. Nowa wiadomość nie została wysłana." : "Use the previous inbox link. No new email was sent.")
++              : copy.claimInlineSent
+           }
+           if (claimInlineForm) {
+             // Disable the form after successful submit
+diff --git a/src/components/AreaExperience.astro b/src/components/AreaExperience.astro
+index 173c708..5af1d6f 100644
+--- a/src/components/AreaExperience.astro
++++ b/src/components/AreaExperience.astro
+@@ -410,6 +410,10 @@ const safeClientCopy = JSON.stringify(clientCopy).replace(/</g, "\\u003c")
+                       {copy.claim.inlineSignupSubmit}
+                     </button>
+                   </div>
++                  <label class="flex items-start gap-2 text-xs leading-relaxed text-zinc-300">
++                    <input name="consent" type="checkbox" required class="mt-1 accent-amber-400" />
++                    <span>{signalCopy.form.consent}</span>
++                  </label>
+                   <p data-claim-inline-status class="hidden text-zinc-400"></p>
+                 </form>
+                 <a href="#area-profile" class="mt-3 inline-flex min-h-[44px] items-center font-black uppercase tracking-widest text-amber-400 hover:text-amber-300" data-claim-auth-link>
+diff --git a/src/components/preact/signal/EventDetail.tsx b/src/components/preact/signal/EventDetail.tsx
+index e318d60..d877aa2 100644
+--- a/src/components/preact/signal/EventDetail.tsx
++++ b/src/components/preact/signal/EventDetail.tsx
+@@ -9,6 +9,8 @@ import type {
+ } from "../../../lib/crowdrelay-client"
+ import { CrowdRelayError } from "../../../lib/crowdrelay-client"
+ import { normalizeTicketInventory } from "../../../lib/ticketInventory"
++import { createSignalSignupSubmitter, signalSignupInput } from "../../../lib/signalSignup"
++import { signupAttribution } from "../../../lib/signupAttribution"
+ import TicketInventoryBar from "../tickets/TicketInventoryBar"
+ import {
+   bestEffort,
+@@ -17,6 +19,7 @@ import {
+   clearPendingConcertCheckin,
+   crowdrelay,
+   getPendingConcertCheckin,
++  referralCodeFromLocation,
+ } from "../../../lib/crowdrelay"
+ 
+ interface Props {
+@@ -617,7 +620,9 @@ function CheckinPanel({
+   onRetry: () => void
+ }) {
+   const copy = SIGNAL_COPY[lang].event
++  const submitSignup = useMemo(() => createSignalSignupSubmitter(crowdrelay), [])
+   const [inlineEmail, setInlineEmail] = useState("")
++  const [inlineMessage, setInlineMessage] = useState("")
+   const [inlineState, setInlineState] = useState<"idle" | "sending" | "sent" | "error">("idle")
+   const success = state === "success" || state === "duplicate"
+   const body =
+@@ -641,13 +646,15 @@ function CheckinPanel({
+     if (!email || inlineState === "sending") return
+     setInlineState("sending")
+     try {
+-      const response = await fetch("/api/signal-preregister", {
+-        method: "POST",
+-        signal: AbortSignal.timeout(12_000),
+-        headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({ email, locale: lang }),
+-      })
+-      if (!response.ok) throw new Error("preregister failed")
++      const consent = new FormData(event.currentTarget as HTMLFormElement).get("consent") === "on"
++      const result = await submitSignup(signalSignupInput(email, lang, consent, {
++        campaign_id: campaignIdFromLocation(),
++        referral_code: referralCodeFromLocation(),
++        ad_attribution: signupAttribution(),
++      }))
++      setInlineMessage(result.email_queued === false
++        ? SIGNAL_COPY[lang].form.cooldownBody(Math.max(1, Math.ceil((result.retry_after_seconds ?? 900) / 60)))
++        : copy.checkinInlineSent)
+       setInlineState("sent")
+     } catch {
+       setInlineState("error")
+@@ -684,7 +691,7 @@ function CheckinPanel({
+           </p>
+           {state === "login" && inlineState === "sent" ? (
+             <p class="mt-3 border-l-2 border-emerald-400 bg-emerald-400/[.04] p-3 text-xs font-semibold text-emerald-200">
+-              {copy.checkinInlineSent}
++              {inlineMessage}
+             </p>
+           ) : state === "login" ? (
+             <form onSubmit={submitInlineSignup} class="mt-4 grid gap-3 sm:max-w-md">
+@@ -711,6 +718,10 @@ function CheckinPanel({
+                   {inlineState === "sending" ? copy.checkinInlineSending : copy.checkinInlineSubmit}
+                 </button>
+               </div>
++              <label class="flex items-start gap-2 text-xs leading-relaxed text-zinc-300">
++                <input name="consent" type="checkbox" required class="mt-1 accent-amber-400" />
++                <span>{SIGNAL_COPY[lang].form.consent}</span>
++              </label>
+               {inlineState === "error" && (
+                 <p class="text-xs text-rose-300">{copy.checkinInlineError}</p>
+               )}
+diff --git a/src/components/preact/signal/SignalHub.tsx b/src/components/preact/signal/SignalHub.tsx
+index 1c498eb..65b5876 100644
+--- a/src/components/preact/signal/SignalHub.tsx
++++ b/src/components/preact/signal/SignalHub.tsx
+@@ -4,6 +4,7 @@ import type { Lang } from "../../../i18n/t"
+ import type { CitySignal, PublicEvent } from "../../../lib/crowdrelay-client"
+ import { CrowdRelayError } from "../../../lib/crowdrelay-client"
+ import { loadLiveEvents, upcomingLiveEvents } from "../../../lib/liveEvents"
++import { createSignalSignupSubmitter, signalSignupInput, signalOfferFromSearch, signalOfferCopy } from "../../../lib/signalSignup"
+ import {
+   rememberLandingAttribution,
+   signupAttribution,
+@@ -28,8 +29,6 @@ interface Props {
+ 
+ type SubmitState = "idle" | "saving" | "pending" | "saved" | "error"
+ type HandoffState = "idle" | "linking" | "linked" | "login" | "retry" | "error"
+-type FormStage = "email" | "enrichment"
+-type PreregisterState = "idle" | "sending" | "sent" | "error"
+ 
+ type CacheEntry<T> = {
+   storedAt: number
+@@ -53,10 +52,8 @@ export default function SignalHub({ lang }: Props) {
+   const [submitMessage, setSubmitMessage] = useState("")
+   const [referralUrl, setReferralUrl] = useState<string | null>(null)
+   const [copied, setCopied] = useState(false)
+-  const [formStage, setFormStage] = useState<FormStage>("email")
+-  const [preregisterState, setPreregisterState] = useState<PreregisterState>("idle")
+-  const [preregisteredEmail, setPreregisteredEmail] = useState("")
+-  const [displayName, setDisplayName] = useState("")
++  const submitSignup = useMemo(() => createSignalSignupSubmitter(crowdrelay), [])
++  const [offer, setOffer] = useState<"shows" | "releases" | undefined>()
+   const [reloadKey, setReloadKey] = useState(0)
+   const [handoffState, setHandoffState] = useState<HandoffState>("idle")
+   const [handoffRetryKey, setHandoffRetryKey] = useState(0)
+@@ -64,6 +61,7 @@ export default function SignalHub({ lang }: Props) {
+ 
+   useEffect(() => {
+     rememberLandingAttribution()
++    setOffer(signalOfferFromSearch(window.location.search))
+   }, [])
+ 
+   useEffect(() => {
+@@ -166,53 +164,16 @@ export default function SignalHub({ lang }: Props) {
+     [events],
+   )
+ 
+-  async function preRegister(event: Event) {
+-    event.preventDefault()
+-    const form = event.currentTarget as HTMLFormElement
+-    const data = new FormData(form)
+-    const email = String(data.get("email") ?? "").trim()
+-    const name = String(data.get("display_name") ?? "").trim()
+-
+-    if (!email) {
+-      setPreregisterState("error")
+-      return
+-    }
+-
+-    setPreregisterState("sending")
+-    setPreregisteredEmail(email)
+-    setDisplayName(name)
+-
+-    try {
+-      const campaignId = campaignIdFromLocation()
+-      const referralCode = referralCodeFromLocation()
+-      const response = await fetch("/api/signal-preregister", {
+-        method: "POST",
+-        signal: AbortSignal.timeout(12_000),
+-        headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({
+-          email,
+-          locale: lang,
+-          ...(campaignId ? { campaign_id: campaignId } : {}),
+-          ...(referralCode ? { referral_code: referralCode } : {}),
+-        }),
+-      })
+-      if (!response.ok) throw new Error("preregister failed")
+-      setPreregisterState("sent")
+-      setFormStage("enrichment")
+-    } catch {
+-      setPreregisterState("error")
+-    }
+-  }
+-
+   async function completeSignup(event: SubmitEvent) {
+     event.preventDefault()
+     const form = event.currentTarget as HTMLFormElement
+     const data = new FormData(form)
+-    const email = preregisteredEmail || String(data.get("email") ?? "").trim()
++    const email = String(data.get("email") ?? "").trim()
++    const displayName = String(data.get("display_name") ?? "").trim()
+     const citySlug = String(data.get("city") ?? "").trim()
+     const consent = data.get("consent") === "on"
+ 
+-    if (!email || !citySlug || !consent) {
++    if (!email || !consent) {
+       setSubmitState("error")
+       setSubmitMessage(copy.form.validationError)
+       return
+@@ -227,19 +188,13 @@ export default function SignalHub({ lang }: Props) {
+       const campaignId = campaignIdFromLocation()
+       const referralCode = referralCodeFromLocation()
+       const attribution = signupAttribution()
+-      const result = await crowdrelay.signupFan({
+-        email,
+-        city_slug: citySlug,
++      const result = await submitSignup(signalSignupInput(email, locale, consent, {
++        ...(citySlug ? { city_slug: citySlug } : {}),
+         ...(displayName ? { display_name: displayName } : {}),
+         ...(campaignId ? { campaign_id: campaignId } : {}),
+         ...(referralCode ? { referral_code: referralCode } : {}),
+         ...(attribution ? { ad_attribution: attribution } : {}),
+-        locale,
+-        consent: {
+-          marketing: true,
+-          policy_version: "virya-signal-v1",
+-        },
+-      })
++      }))
+ 
+       rememberSignalCity(citySlug)
+       setSelectedCity(citySlug)
+@@ -372,7 +327,7 @@ export default function SignalHub({ lang }: Props) {
+           <div>
+             <p class="virya-eyebrow">{copy.form.eyebrow}</p>
+             <h2 class="virya-heading mt-4">{copy.form.heading}</h2>
+-            <p class="virya-copy mt-6 text-zinc-300">{copy.form.body}</p>
++            <p class="virya-copy mt-6 text-zinc-300">{offer ? signalOfferCopy(offer, lang) : copy.form.body}</p>
+             <div class="mt-8 grid gap-px border border-zinc-800 bg-zinc-800 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
+               {copy.teaser.chips.slice(0, 3).map((chip, index) => (
+                 <div class="bg-zinc-950 p-4" key={chip}>
+@@ -388,9 +343,7 @@ export default function SignalHub({ lang }: Props) {
+           </div>
+ 
+           <div class="virya-panel p-5 shadow-2xl sm:p-7 lg:p-8">
+-            {/* Stage 1: Email-first capture */}
+-            {formStage === "email" && (
+-              <form onSubmit={preRegister} noValidate class="grid gap-5">
++              <form onSubmit={completeSignup} class="grid gap-5">
+                 <div class="rounded border border-amber-400/25 bg-amber-400/[.035] p-4 text-xs leading-relaxed text-zinc-300">
+                   <strong class="block text-sm uppercase text-white">
+                     {lang === "pl" ? "Po co to jest?" : "What is this for?"}
+@@ -423,73 +376,20 @@ export default function SignalHub({ lang }: Props) {
+                     name="display_name"
+                     type="text"
+                     autoComplete="nickname"
+-                    maxLength={160}
++                    maxLength={120}
+                     class="virya-input mt-2 min-h-[50px] bg-zinc-900 px-4 text-sm"
+                   />
+                 </label>
+-                {preregisterState === "error" && (
+-                  <p class="border-l-2 border-red-400 bg-red-400/[.035] p-3 text-xs text-red-200" role="alert">
+-                    {copy.form.preregisterError}
+-                  </p>
+-                )}
+-                <button
+-                  type="submit"
+-                  disabled={preregisterState === "sending"}
+-                  class="virya-button virya-button--primary min-h-[50px] px-6 disabled:cursor-wait"
+-                >
+-                  {preregisterState === "sending"
+-                    ? copy.form.preregisterSaving
+-                    : copy.form.preregisterSubmit}
+-                </button>
+-                <p class="text-[9px] leading-relaxed text-zinc-500">
+-                  {copy.form.privacy}
+-                </p>
+-              </form>
+-            )}
+-
+-            {/* Stage 2: Enrichment (city + consent) — optional */}
+-            {formStage === "enrichment" && (
+-              <div class="grid gap-5">
+-                {preregisterState === "sent" && (
+-                  <div
+-                    class="border border-amber-400/40 bg-amber-400/[.04] p-5"
+-                    role="status"
+-                    aria-live="polite"
+-                  >
+-                    <p class="text-xs font-black uppercase tracking-widest text-white">
+-                      {copy.form.preregisterTitle}
+-                    </p>
+-                    <p class="mt-2 text-xs leading-relaxed text-zinc-300">
+-                      {copy.form.preregisterBody}
+-                    </p>
+-                    <a
+-                      href={pagePath(lang, "/my-signal/")}
+-                      class="mt-4 inline-flex min-h-[44px] items-center text-[9px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300"
+-                    >
+-                      {copy.form.skipEnrichment} →
+-                    </a>
+-                  </div>
+-                )}
+-
+-                <div class="border-t border-zinc-800 pt-5">
+-                  <p class="text-[9px] font-black uppercase tracking-[.24em] text-amber-400">
+-                    {copy.form.enrichmentHeading}
+-                  </p>
+-                  <p class="mt-2 text-xs leading-relaxed text-zinc-400">
+-                    {copy.form.enrichmentBody}
+-                  </p>
+-                </div>
+-
+-                <form onSubmit={completeSignup} noValidate class="grid gap-5">
+-                  <input type="hidden" name="email" value={preregisteredEmail} />
+-                  <input type="hidden" name="display_name" value={displayName} />
++                <details class="grid gap-3">
++                  <summary class="min-h-[44px] cursor-pointer text-xs text-amber-400">
++                    {lang === "pl" ? "Dodaj miasto do alertów (opcjonalnie)" : "Add your city for show alerts (optional)"}
++                  </summary>
+                   <label class="block">
+                     <span class="text-[9px] font-black uppercase tracking-[.24em] text-zinc-400">
+                       {copy.form.city}
+                     </span>
+                     <select
+                       name="city"
+-                      required
+                       value={selectedCity}
+                       onChange={event =>
+                         setSelectedCity(
+@@ -528,6 +428,7 @@ export default function SignalHub({ lang }: Props) {
+                       ? "Miasto służy do alertów o koncertach. Nie publikujemy małych liczników fanów."
+                       : "Your city is used for nearby show alerts. We do not publish small fan counters."}
+                   </p>
++                </details>
+                   <label class="flex cursor-pointer items-start gap-3 border-l-2 border-amber-400/50 bg-amber-400/[.035] p-4">
+                     <input
+                       name="consent"
+@@ -544,12 +445,12 @@ export default function SignalHub({ lang }: Props) {
+                   </p>
+                   <button
+                     type="submit"
+-                    disabled={cities === null || submitState === "saving"}
++                    disabled={submitState === "saving"}
+                     class="virya-button virya-button--primary min-h-[48px] px-4 disabled:cursor-wait"
+                   >
+                     {submitState === "saving"
+-                      ? copy.form.enrichmentSaving
+-                      : copy.form.enrichmentSubmit}
++                      ? copy.form.saving
++                      : copy.form.submit}
+                   </button>
+                 </form>
+ 
+@@ -594,8 +495,6 @@ export default function SignalHub({ lang }: Props) {
+                     )}
+                   </div>
+                 )}
+-              </div>
+-            )}
+           </div>
+         </div>
+       </section>
+diff --git a/src/components/preact/signal/WatchJoin.tsx b/src/components/preact/signal/WatchJoin.tsx
+index f7586c1..ff54961 100644
+--- a/src/components/preact/signal/WatchJoin.tsx
++++ b/src/components/preact/signal/WatchJoin.tsx
+@@ -1,4 +1,5 @@
+-import { useEffect, useState } from "preact/hooks"
++import { useEffect, useMemo, useState } from "preact/hooks"
++import { createSignalSignupSubmitter, signalSignupInput } from "../../../lib/signalSignup"
+ import { SIGNAL_COPY } from "../../../data/signalCopy"
+ import type { Lang } from "../../../i18n/t"
+ import { t } from "../../../i18n/t"
+@@ -21,10 +22,7 @@ interface Props {
+ 
+ type SubmitState = "idle" | "saving" | "pending" | "saved" | "error"
+ 
+-// The single-field capture form under the watch-page embed: the fan just
+-// watched (or is about to watch) a video after clicking a tracked link, so
+-// the ask is one email, a city and consent — the same signupFan call
+-// SignalHub's enrichment stage makes, minus the pre-registration step.
++// Capture a consented email under the video. City enrichment never blocks signup.
+ export default function WatchJoin({ lang }: Props) {
+   const copy = SIGNAL_COPY[lang]
+   const locale = lang === "pl" ? "pl-PL" : "en-GB"
+@@ -36,6 +34,7 @@ export default function WatchJoin({ lang }: Props) {
+   const [referralUrl, setReferralUrl] = useState<string | null>(null)
+   const [copied, setCopied] = useState(false)
+   const [reloadKey, setReloadKey] = useState(0)
++  const submitSignup = useMemo(() => createSignalSignupSubmitter(crowdrelay), [])
+ 
+   useEffect(() => {
+     rememberLandingAttribution()
+@@ -71,7 +70,7 @@ export default function WatchJoin({ lang }: Props) {
+     const citySlug = String(data.get("city") ?? "").trim()
+     const consent = data.get("consent") === "on"
+ 
+-    if (!email || !citySlug || !consent) {
++    if (!email || !consent) {
+       setSubmitState("error")
+       setSubmitMessage(copy.form.validationError)
+       return
+@@ -86,18 +85,12 @@ export default function WatchJoin({ lang }: Props) {
+       const campaignId = campaignIdFromLocation()
+       const referralCode = referralCodeFromLocation()
+       const attribution = signupAttribution()
+-      const result = await crowdrelay.signupFan({
+-        email,
++      const result = await submitSignup(signalSignupInput(email, locale, consent, {
+         city_slug: citySlug,
+         ...(campaignId ? { campaign_id: campaignId } : {}),
+         ...(referralCode ? { referral_code: referralCode } : {}),
+         ...(attribution ? { ad_attribution: attribution } : {}),
+-        locale,
+-        consent: {
+-          marketing: true,
+-          policy_version: "virya-signal-v1",
+-        },
+-      })
++      }))
+ 
+       rememberSignalCity(citySlug)
+       setSelectedCity(citySlug)
+@@ -177,11 +170,10 @@ export default function WatchJoin({ lang }: Props) {
+         </label>
+         <label class="block">
+           <span class="text-[9px] font-black uppercase tracking-[.24em] text-zinc-400">
+-            {copy.form.city}
++            {copy.form.city} ({lang === "pl" ? "opcjonalnie" : "optional"})
+           </span>
+           <select
+             name="city"
+-            required
+             value={selectedCity}
+             onChange={event =>
+               setSelectedCity((event.currentTarget as HTMLSelectElement).value)
+@@ -229,7 +221,7 @@ export default function WatchJoin({ lang }: Props) {
+         </p>
+         <button
+           type="submit"
+-          disabled={cities === null || submitState === "saving"}
++          disabled={submitState === "saving"}
+           class="virya-button virya-button--primary min-h-[48px] px-4 disabled:cursor-wait"
+         >
+           {submitState === "saving"
+diff --git a/src/data/signalCopy.ts b/src/data/signalCopy.ts
+index 1ce33db..3004f93 100644
+--- a/src/data/signalCopy.ts
++++ b/src/data/signalCopy.ts
+@@ -268,7 +268,7 @@ export const SIGNAL_COPY: Record<Lang, SignalCopy> = {
+       eyebrow: "Activate",
+       heading: "Start your Virya Signal",
+       body:
+-        "Enter your email and we'll send you a link to activate Signal. Add your city and consent now or later — your call.",
++        "Get Virya music and show updates directly from the band. Enter your email, choose whether to hear from us, and confirm the inbox link. Your city is optional.",
+       email: "Email",
+       nickname: "Name or nickname (optional)",
+       city: "Your city",
+@@ -280,7 +280,7 @@ export const SIGNAL_COPY: Record<Lang, SignalCopy> = {
+       saving: "Activating…",
+       loadingCities: "Loading cities…",
+       loadError: "Cities are temporarily unavailable. Try again in a moment.",
+-      validationError: "Enter an email, choose a city and accept the consent.",
++      validationError: "Enter a valid email and accept the consent. Your city is optional.",
+       saveError: "We could not activate the signal. Check the data and try again.",
+       pendingTitle: "Check your inbox",
+       pendingBody:
+@@ -548,7 +548,7 @@ export const SIGNAL_COPY: Record<Lang, SignalCopy> = {
+       eyebrow: "Aktywacja",
+       heading: "Dołącz do Sygnału Virya",
+       body:
+-        "Podaj e-mail, a wyślemy Ci link do aktywacji. Miasto i zgodę możesz dodać od razu albo później — jak Ci wygodniej.",
++        "Dostawaj wiadomości o muzyce i koncertach Viryi bezpośrednio od zespołu. Podaj e-mail, zaakceptuj zgodę i potwierdź link ze skrzynki. Miasto jest opcjonalne.",
+       email: "E-mail",
+       nickname: "Imię lub nick (opcjonalnie)",
+       city: "Twoje miasto",
+@@ -560,7 +560,7 @@ export const SIGNAL_COPY: Record<Lang, SignalCopy> = {
+       saving: "Aktywuję…",
+       loadingCities: "Ładuję miasta…",
+       loadError: "Lista miast jest chwilowo niedostępna. Spróbuj ponownie za moment.",
+-      validationError: "Podaj e-mail, wybierz miasto i zaakceptuj zgodę.",
++      validationError: "Podaj poprawny e-mail i zaakceptuj zgodę. Miasto jest opcjonalne.",
+       saveError: "Nie udało się aktywować sygnału. Sprawdź dane i spróbuj ponownie.",
+       pendingTitle: "Sprawdź skrzynkę",
+       pendingBody:
+diff --git a/src/lib/crowdrelay-client.ts b/src/lib/crowdrelay-client.ts
+index 7652b16..20f5e25 100644
+--- a/src/lib/crowdrelay-client.ts
++++ b/src/lib/crowdrelay-client.ts
+@@ -242,7 +242,7 @@ export interface ConsentInput {
+ 
+ export interface FanSignupInput {
+   email: string
+-  city_slug: string
++  city_slug?: string
+   display_name?: string
+   locale?: string
+   referral_code?: string
+diff --git a/src/lib/signalSignup.ts b/src/lib/signalSignup.ts
+new file mode 100644
+index 0000000..5f53661
+--- /dev/null
++++ b/src/lib/signalSignup.ts
+@@ -0,0 +1,67 @@
++import type { FanSignupInput, FanSignupResult } from "./crowdrelay-client.ts"
++
++export type SignalSignupContext = Pick<
++  FanSignupInput,
++  "city_slug" | "display_name" | "campaign_id" | "referral_code" | "ad_attribution"
++>
++
++/** Capture only explicit opt-in. City enriches a signup; it never gates one. */
++export function signalSignupInput(
++  email: string,
++  locale: string,
++  consent: boolean,
++  context: SignalSignupContext = {},
++): FanSignupInput {
++  const address = email.trim()
++  if (!consent) throw new Error("Explicit marketing consent is required")
++  if (address.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) {
++    throw new Error("Invalid email")
++  }
++  const { city_slug, display_name, ...attribution } = context
++  const city = city_slug?.trim()
++  const name = display_name?.trim()
++  return {
++    ...attribution,
++    email: address,
++    locale,
++    ...(city ? { city_slug: city } : {}),
++    ...(name ? { display_name: name } : {}),
++    consent: { marketing: true, policy_version: "virya-signal-v1" },
++  }
++}
++
++/** Keep the same key after a timeout so a retry replays the durable write. */
++export function createSignalSignupSubmitter(
++  client: { signupFan(input: FanSignupInput, key: string): Promise<FanSignupResult> },
++  newKey: () => string = () => crypto.randomUUID(),
++): (input: FanSignupInput) => Promise<FanSignupResult> {
++  let previousBody: string | undefined
++  let key: string
++  return async input => {
++    const body = JSON.stringify(input)
++    if (body !== previousBody) {
++      key = newKey()
++      previousBody = body
++    }
++    return client.signupFan(input, key)
++  }
++}
++
++export type SignalOffer = "shows" | "releases"
++
++/** Only known offers can select copy; URL text is never rendered as copy. */
++export function signalOfferFromSearch(search: string): SignalOffer | undefined {
++  const offer = new URLSearchParams(search).get("offer")
++  return offer === "shows" || offer === "releases" ? offer : undefined
++}
++
++export function signalOfferCopy(offer: SignalOffer, lang: "en" | "pl"): string {
++  if (offer === "shows") {
++    return lang === "pl"
++      ? "Dowiaduj się o koncertach Viryi. Dodaj miasto, jeśli chcesz alerty o koncertach w pobliżu."
++      : "Hear about Virya shows. Add your city if you want nearby show alerts."
++  }
++  return lang === "pl"
++    ? "Dostawaj wiadomości od Viryi o nowej muzyce i materiałach zespołu, bez polegania na zasięgach social mediów."
++    : "Get updates from Virya about new music and band material, without relying on the social feed."
++}
+diff --git a/src/pages/api/signal-preregister.ts b/src/pages/api/signal-preregister.ts
+deleted file mode 100644
+index d6de954..0000000
+--- a/src/pages/api/signal-preregister.ts
++++ /dev/null
+@@ -1,166 +0,0 @@
+-import type { APIRoute } from "astro"
+-import { randomUUID } from "node:crypto"
+-import { readServerEnv } from "../../server/runtimeEnv.ts"
+-import { BodyTooLargeError, readLimitedText } from "../../server/readLimitedBody"
+-import { consumePublicFormRateLimit, publicRequestNetwork } from "../../server/publicFormRate"
+-import { sendMetaEvent } from "../../server/metaCapi"
+-
+-export const prerender = false
+-
+-// Email-first Signal pre-registration: captures the email (and fires the Meta
+-// CAPI Lead beacon) before the fan picks a city or consents. The fan receives
+-// a session access link via CrowdRelay's fans/access endpoint; if they already
+-// have a Signal profile, this recovers their session. If they complete the
+-// enrichment step (city + consent) on the page, the client calls signupFan
+-// directly. This route exists so a fan who hesitates on city selection is
+-// still captured for ad optimisation and session recovery.
+-const MAX_BODY_BYTES = 2 * 1024
+-const MAX_EMAIL_LENGTH = 254
+-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+-const CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f]/
+-const UUID_PATTERN =
+-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+-const CAMPAIGN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+-const LOCALE_PATTERN = /^(pl|en)$/
+-
+-const json = (payload: Record<string, unknown>, status = 200) =>
+-  new Response(JSON.stringify(payload), {
+-    status,
+-    headers: {
+-      "Content-Type": "application/json; charset=utf-8",
+-      "Cache-Control": "no-store",
+-      "X-Content-Type-Options": "nosniff",
+-      "Referrer-Policy": "no-referrer",
+-    },
+-  })
+-
+-const rateSecret = () => {
+-  const dedicated = readServerEnv("CONTACT_RATE_SECRET", import.meta.env.CONTACT_RATE_SECRET)
+-  if (typeof dedicated === "string" && dedicated.length >= 32) return dedicated
+-  const existing = readServerEnv("AREA_AUTH_SECRET", import.meta.env.AREA_AUTH_SECRET)
+-  return typeof existing === "string" && existing.length >= 32 ? existing : null
+-}
+-
+-const crowdRelayBaseUrl = () => {
+-  const configured = readServerEnv(
+-    "PUBLIC_CROWDRELAY_API_URL",
+-    import.meta.env.PUBLIC_CROWDRELAY_API_URL,
+-  )
+-  const value =
+-    typeof configured === "string" && configured.trim()
+-      ? configured.trim()
+-      : "https://signal-api.virya.music/v1/"
+-  const url = new URL(value)
+-  const localHttp = import.meta.env.DEV && url.protocol === "http:"
+-  if (
+-    (url.protocol !== "https:" && !localHttp) ||
+-    url.username ||
+-    url.password
+-  ) {
+-    throw new Error("Invalid CrowdRelay base URL")
+-  }
+-  url.hash = ""
+-  url.search = ""
+-  url.pathname = `${url.pathname.replace(/\/+$/, "")}/`
+-  return url
+-}
+-
+-export const POST: APIRoute = async ({ request }) => {
+-  try {
+-    const origin = request.headers.get("origin")?.trim().toLowerCase()
+-    const ownOrigin = new URL(request.url).origin.toLowerCase()
+-    if (origin && origin !== ownOrigin) return json({ error: "Forbidden origin" }, 403)
+-
+-    const contentType = request.headers
+-      .get("content-type")
+-      ?.split(";", 1)[0]
+-      .trim()
+-      .toLowerCase()
+-    if (contentType !== "application/json") {
+-      return json({ error: "Unsupported content type" }, 415)
+-    }
+-
+-    let rawBody: string
+-    try {
+-      rawBody = await readLimitedText(request, MAX_BODY_BYTES)
+-    } catch (error) {
+-      if (error instanceof BodyTooLargeError) return json({ error: "Request too large" }, 413)
+-      throw error
+-    }
+-
+-    let body: Record<string, unknown>
+-    try {
+-      const parsed = JSON.parse(rawBody)
+-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+-        return json({ error: "Invalid request" }, 400)
+-      }
+-      body = parsed as Record<string, unknown>
+-    } catch {
+-      return json({ error: "Invalid request" }, 400)
+-    }
+-
+-    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : ""
+-    const locale = typeof body.locale === "string" && LOCALE_PATTERN.test(body.locale) ? body.locale : "pl"
+-    const campaignId = typeof body.campaign_id === "string" ? body.campaign_id.trim() : ""
+-
+-    if (
+-      !email ||
+-      email.length > MAX_EMAIL_LENGTH ||
+-      CONTROL_CHAR_PATTERN.test(email) ||
+-      !EMAIL_PATTERN.test(email)
+-    ) {
+-      return json({ error: "Invalid email" }, 400)
+-    }
+-
+-    const secret = rateSecret()
+-    if (!secret) return json({ error: "Signal unavailable" }, 503)
+-    try {
+-      const allowed = await consumePublicFormRateLimit(
+-        "signal-preregister",
+-        publicRequestNetwork(request),
+-        secret,
+-        10,
+-        60 * 60 * 1_000,
+-      )
+-      if (!allowed) return json({ error: "Too many requests" }, 429)
+-    } catch {
+-      console.error("[signal-preregister] rate limiter unavailable")
+-      return json({ error: "Signal unavailable" }, 503)
+-    }
+-
+-    // Fire the Meta CAPI Lead beacon so ad platforms can optimise towards
+-    // real signups, not link clicks. The email is hashed before it leaves
+-    // the server; the raw address stays inside CrowdRelay.
+-    await sendMetaEvent({
+-      eventName: "Lead",
+-      eventId: `lead-${randomUUID()}`,
+-      email,
+-      ...(CAMPAIGN_PATTERN.test(campaignId) && UUID_PATTERN.test(campaignId) ? { campaignId } : {}),
+-    }).catch(() => undefined)
+-
+-    // Request a session access link from CrowdRelay. For existing fans this
+-    // sends a recovery email; for new fans it may create a pending entry.
+-    // The response is intentionally neutral to prevent account enumeration.
+-    const accessUrl = new URL("fans/access", crowdRelayBaseUrl())
+-    try {
+-      await fetch(accessUrl, {
+-        method: "POST",
+-        headers: {
+-          "Content-Type": "application/json",
+-          "Idempotency-Key": `signal-preregister-${randomUUID()}`,
+-        },
+-        body: JSON.stringify({ email, locale }),
+-        signal: AbortSignal.timeout(5_000),
+-      })
+-    } catch (error) {
+-      // The access request is best-effort: the CAPI beacon already captured
+-      // the lead. A transient CrowdRelay failure must not block the response.
+-      console.error("[signal-preregister] access request failed:", error instanceof Error ? error.message : error)
+-    }
+-
+-    return json({ accepted: true })
+-  } catch (err) {
+-    console.error("[signal-preregister]", err)
+-    return json({ error: "Server error" }, 500)
+-  }
+-}
+diff --git a/tests/designTokens.contract.test.ts b/tests/designTokens.contract.test.ts
+index 3462eeb..139ec03 100644
+--- a/tests/designTokens.contract.test.ts
++++ b/tests/designTokens.contract.test.ts
+@@ -104,15 +104,10 @@ test("design-token ratchet — markup stays inside the counted scales", () => {
+   }
+ 
+   ratchet("radiusVariants", radii.size, 7)
+-  // +5 since 338: the watch-capture form (WatchJoin) reuses SignalHub's
+-  // micro-label convention verbatim — text-[9px] field labels, privacy note
+-  // and referral title — and WatchPage carries one text-[10px] "watch on
+-  // YouTube" link. Same utilities, same non-scale micro sizes.
+-  ratchet("textPxArbitrary", textPx, 343)
+-  // +10 since 497: the five text-[Npx] micro-labels above count here too,
+-  // plus five min-h-[NNpx] touch-targets (50px inputs, 48/44px buttons,
+-  // 42px retry) copied from the SignalHub form.
+-  ratchet("arbitraryPxTotal", arbitraryPx, 507)
++  // The consented single-step Signal form removes three micro-labels and
++  // four arbitrary utilities from the obsolete preregistration stage.
++  ratchet("textPxArbitrary", textPx, 340)
++  ratchet("arbitraryPxTotal", arbitraryPx, 503)
+   ratchet("hexOutsideExempt", hex, 12)
+   ratchet("buttonsMissingType", buttonsMissingType, 0)
+   ratchet("shadowUtilities", shadows, 17)
+diff --git a/tests/signalSignup.test.ts b/tests/signalSignup.test.ts
+new file mode 100644
+index 0000000..b273f3e
+--- /dev/null
++++ b/tests/signalSignup.test.ts
+@@ -0,0 +1,105 @@
++import assert from "node:assert/strict"
++import { readFileSync, existsSync } from "node:fs"
++import test from "node:test"
++import { CrowdRelayClient } from "../src/lib/crowdrelay-client.ts"
++import { createSignalSignupSubmitter, signalSignupInput, signalOfferFromSearch, signalOfferCopy } from "../src/lib/signalSignup.ts"
++
++const result = {
++  fan_id: "fan-id",
++  status: "pending" as const,
++  referral_url: null,
++  confirmation_required: true,
++  email_kind: "confirmation" as const,
++  email_queued: true,
++}
++
++test("minimal signup needs explicit consent, not a city or nickname", () => {
++  assert.throws(() => signalSignupInput("fan@example.test", "en", false), /consent/)
++  assert.throws(() => signalSignupInput("not-an-email", "en", true), /email/)
++  const input = signalSignupInput(" fan@example.test ", "pl", true, { city_slug: " ", display_name: " " })
++  assert.equal(input.email, "fan@example.test")
++  assert.equal("city_slug" in input, false)
++  assert.equal("display_name" in input, false)
++  assert.deepEqual(input.consent, { marketing: true, policy_version: "virya-signal-v1" })
++})
++
++test("source, referral, campaign and an explicit city survive capture", () => {
++  const context = {
++    city_slug: "wroclaw",
++    referral_code: "Ref_123",
++    campaign_id: "01990000-0000-7000-8000-000000000001",
++    ad_attribution: { utm_source: "instagram", utm_content: "shows" },
++  }
++  const input = signalSignupInput("fan@example.test", "en", true, context)
++  for (const key of Object.keys(context) as (keyof typeof context)[]) {
++    assert.deepEqual(input[key], context[key])
++  }
++})
++
++test("a timed-out signup retries the same durable operation; edited input gets a new key", async () => {
++  const calls: string[] = []
++  let attempts = 0
++  let sequence = 0
++  const submit = createSignalSignupSubmitter({
++    async signupFan(_input, key) {
++      calls.push(key)
++      if (++attempts === 1) throw new Error("timeout after commit")
++      return result
++    },
++  }, () => `key-${++sequence}`)
++  const input = signalSignupInput("fan@example.test", "en", true)
++  await assert.rejects(submit(input), /timeout/)
++  assert.deepEqual(await submit(input), result)
++  await submit(signalSignupInput("other@example.test", "en", true))
++  assert.deepEqual(calls, ["key-1", "key-1", "key-2"])
++})
++
++test("real browser client calls durable signup with credentials and no city", async () => {
++  const client = new CrowdRelayClient({
++    baseUrl: "https://signal-api.virya.music/v1/",
++    fetch: async (url, options) => {
++      assert.equal(String(url), "https://signal-api.virya.music/v1/fans")
++      assert.equal(options?.credentials, "include")
++      assert.equal(new Headers(options?.headers).get("Idempotency-Key"), "capture-key")
++      const body = JSON.parse(String(options?.body))
++      assert.equal("city_slug" in body, false)
++      assert.equal(body.referral_code, "Ref_123")
++      assert.equal(body.consent.marketing, true)
++      return Response.json(result, { status: 202 })
++    },
++  })
++  const submit = createSignalSignupSubmitter(client, () => "capture-key")
++  assert.deepEqual(await submit(signalSignupInput("fan@example.test", "en", true, { referral_code: "Ref_123" })), result)
++})
++
++test("landing offers are truthful, bilingual and selected only from known values", () => {
++  assert.equal(signalOfferFromSearch("?offer=shows"), "shows")
++  assert.equal(signalOfferFromSearch("?offer=releases"), "releases")
++  assert.equal(signalOfferFromSearch("?offer=<script>"), undefined)
++  assert.match(signalOfferCopy("shows", "en"), /nearby show alerts/)
++  assert.match(signalOfferCopy("releases", "pl"), /nowej muzyce/)
++})
++
++test("all signup surfaces require consent and the pre-consent Meta relay is retired", () => {
++  const root = new URL("../", import.meta.url)
++  assert.equal(existsSync(new URL("src/pages/api/signal-preregister.ts", root)), false)
++  for (const path of [
++    "src/components/preact/signal/SignalHub.tsx",
++    "src/components/preact/signal/WatchJoin.tsx",
++    "src/components/preact/signal/EventDetail.tsx",
++    "src/client/areaExperience.ts",
++  ]) {
++    const source = readFileSync(new URL(path, root), "utf8")
++    assert.match(source, /signalSignupInput/)
++    assert.match(source, /createSignalSignupSubmitter/)
++    assert.doesNotMatch(source, /signal-preregister|sendMetaEvent/)
++  }
++  for (const path of [
++    "src/components/preact/signal/SignalHub.tsx",
++    "src/components/preact/signal/WatchJoin.tsx",
++    "src/components/preact/signal/EventDetail.tsx",
++    "src/components/AreaExperience.astro",
++  ]) {
++    assert.match(readFileSync(new URL(path, root), "utf8"), /name="consent"/)
++  }
++})
+-- 
+2.50.1 (Apple Git-155)
+
