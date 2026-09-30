@@ -232,7 +232,10 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
             None,
         )
         .await?;
-    assert_eq!(mutation.status, "approved:1", "only the owned rung released");
+    assert_eq!(
+        mutation.status, "approved:1",
+        "only the owned rung released"
+    );
 
     // The live approval row is what future snapshots read.
     let live: bool = sqlx::query_scalar(
@@ -485,7 +488,10 @@ async fn ladder_flag_cannot_pre_authorize_relationship_sensitive_partner_action(
     .await?;
 
     assert_eq!(status, "awaiting_approval");
-    assert!(approved_by.is_none(), "the booker must still approve this ask");
+    assert!(
+        approved_by.is_none(),
+        "the booker must still approve this ask"
+    );
 
     Ok(())
 }
