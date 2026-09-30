@@ -9,6 +9,10 @@ PARENT_MAX = 1000
 CHUNK_MAX = 1000
 
 CONTRACT = {
+    "crates/crowdrelay-api/src/acquisition.rs": [
+        "acquisition/redirect.rs",
+        "acquisition/admin_links.rs",
+    ],
     "crates/crowdrelay-infra/tests/postgres/acquisition.rs": [
         "acquisition/helpers.rs",
         "acquisition/attribution.rs",

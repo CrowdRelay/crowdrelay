@@ -76,7 +76,7 @@ pub use beacon_signal::{
     RecordEngagementCommand, RecordEngagementResult, SubmitCoverageCommand, SubmitCoverageResult,
     UpdatePreferencesCommand,
 };
-pub use cache::{RedirectCache, RedirectCacheError, RedirectSnapshot};
+pub use cache::{RedirectCache, RedirectCacheError, RedirectContext, RedirectSnapshot};
 pub use commerce_inventory::{
     CommerceInventoryError, CommerceInventoryRepository, InventoryActivationState,
     MarkInventoryReadyCommand, MarkInventoryReadyResult, StocktakeCommand, StocktakeItemInput,

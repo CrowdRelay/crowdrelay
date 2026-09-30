@@ -78,9 +78,12 @@ class FanActivationContract(unittest.TestCase):
         self.assertIn("fan_last_meaningful_action", totals)
 
     def test_only_the_latest_consent_decision_counts(self) -> None:
-        # A fan who granted and then withdrew has withdrawn.
-        totals = self.metrics.split("AS activated_fans_30d", 1)[0]
-        self.assertIn("max(latest.recorded_at)", totals)
+        # A fan who granted and then withdrew has withdrawn. The KPI now reads
+        # the fan_activation_kpi view, whose LATERAL consent join orders by
+        # recorded_at DESC and takes one row — the latest decision.
+        self.assertIn("FROM fan_activation_kpi", self.metrics)
+        self.assertIn("ORDER BY consent.recorded_at DESC", self.migration)
+        self.assertIn("LIMIT 1", self.migration)
 
     def test_the_window_is_one_constant_rather_than_a_scattered_number(self) -> None:
         self.assertIn("ACTIVITY_WINDOW_DAYS: i64 = 30", shipped(self.domain))

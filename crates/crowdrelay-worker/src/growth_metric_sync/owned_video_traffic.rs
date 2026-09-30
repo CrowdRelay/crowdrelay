@@ -302,6 +302,19 @@ impl GrowthMetricSyncWorker {
                 token,
             )
             .await?;
+        // Embedded playback names the host page rather than a referrer — the
+        // watch page's views show up here, keyed `embed:{domain}`.
+        let embed_report = self
+            .analytics_report(
+                &format!(
+                    "{ANALYTICS_ENDPOINT}?ids=channel==MINE&startDate={start}&endDate={end}\
+                     &metrics=views&dimensions=insightPlaybackLocationDetail\
+                     &filters=video=={video_id};insightPlaybackLocationType==EMBEDDED\
+                     &sort=-views&maxResults=25"
+                ),
+                token,
+            )
+            .await?;
 
         let observed_at = OffsetDateTime::now_utc();
         for (kind, views) in traffic_type_rows(&types_report) {
@@ -327,6 +340,27 @@ impl GrowthMetricSyncWorker {
                 continue;
             };
             let key = format!("ext:{domain}");
+            if key.chars().count() > MAX_METRIC_KEY {
+                continue;
+            }
+            record_subject_metric_point(
+                &self.pool,
+                workspace_id,
+                "youtube",
+                &key,
+                "content_source",
+                source_id,
+                &display_name(&key, title),
+                views,
+                observed_at,
+            )
+            .await?;
+        }
+        for (detail, views) in traffic_detail_rows(&embed_report) {
+            let Some(domain) = ext_domain(&detail) else {
+                continue;
+            };
+            let key = format!("embed:{domain}");
             if key.chars().count() > MAX_METRIC_KEY {
                 continue;
             }
@@ -451,6 +485,35 @@ mod tests {
         assert_eq!(ext_domain(&rows[0].0).as_deref(), Some("reddit.com"));
         assert_eq!(ext_domain(&rows[1].0).as_deref(), Some("t.me"));
         assert_eq!(ext_domain(&rows[2].0).as_deref(), Some("discord.com"));
+    }
+
+    /// The embedded-playback detail report has the same `[domain, views]`
+    /// row shape — its dimensions name the page that embedded the player.
+    #[test]
+    fn embed_detail_report_reads_embed_hosts() {
+        let report: AnalyticsReport = serde_json::from_str(
+            r#"{
+                "columnHeaders": [
+                    {"name": "insightPlaybackLocationDetail", "columnType": "DIMENSION"},
+                    {"name": "views", "columnType": "METRIC"}
+                ],
+                "rows": [
+                    ["virya.music", 87],
+                    ["https://www.reddit.com/", 12]
+                ]
+            }"#,
+        )
+        .unwrap();
+        let rows = traffic_detail_rows(&report);
+        assert_eq!(
+            rows,
+            vec![
+                ("virya.music".to_string(), 87),
+                ("https://www.reddit.com/".to_string(), 12),
+            ]
+        );
+        assert_eq!(ext_domain(&rows[0].0).as_deref(), Some("virya.music"));
+        assert_eq!(ext_domain(&rows[1].0).as_deref(), Some("reddit.com"));
     }
 
     /// Scheme, credentials, port, path and a leading www. all fold to the

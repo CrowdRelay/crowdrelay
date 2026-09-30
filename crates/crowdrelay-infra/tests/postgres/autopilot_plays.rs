@@ -116,14 +116,21 @@ async fn a_new_track_us_play_has_one_announce_step_and_finishes_cleanly()
             .collect(),
         measurement_window_end: anchor_at + time::Duration::days(14),
     };
-    assert_eq!(start.steps.len(), 1, "new track-us plays have one owner before the show");
+    assert_eq!(
+        start.steps.len(),
+        1,
+        "new track-us plays have one owner before the show"
+    );
     assert_eq!(start.steps[0].kind, PlayStepKind::AnnounceAsk);
     assert!(repository.start_play(workspace_id, &start).await?);
 
     let play = one_play(&repository, workspace_id, now, event_id).await?;
     assert_eq!(
         play.audience,
-        PlayAudience::Next { fan_id, remaining: 1 },
+        PlayAudience::Next {
+            fan_id,
+            remaining: 1
+        },
         "interest is enough for the pre-show follow ask"
     );
     let play_id = play.play_id;
@@ -315,7 +322,10 @@ async fn a_legacy_post_show_step_uses_observed_attendance_only_when_show_growth_
     let play = one_play(&repository, workspace_id, now, event_id).await?;
     assert_eq!(
         play.audience,
-        PlayAudience::Next { fan_id, remaining: 1 },
+        PlayAudience::Next {
+            fan_id,
+            remaining: 1
+        },
         "a persisted legacy rung remains a safe fallback when Show Growth is disabled"
     );
 

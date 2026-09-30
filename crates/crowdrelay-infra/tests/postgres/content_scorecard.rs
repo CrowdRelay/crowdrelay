@@ -608,3 +608,91 @@ async fn a_marked_curator_send_counts_in_the_card() {
         "a sent handle is not a missing reason"
     );
 }
+
+/// `fans_captured` is visitor continuity, not clicks: the same visitor
+/// joining within seven days of a click on the video's link counts once;
+/// day eight is outside the window, and a video with no links at all reads
+/// `None` — "no links minted" is a different story than "captured nobody".
+#[tokio::test]
+#[ignore = "postgres"]
+async fn fans_captured_counts_visitor_continuity_within_a_week() {
+    let f = setup().await.expect("fixture");
+
+    async fn click_with_visitor(f: &Fixture, link_id: Uuid, visitor: Uuid, days_ago: i64) {
+        sqlx::query(
+            "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(f.ws())
+        .bind(link_id)
+        .bind(visitor)
+        .bind(f.now - time::Duration::days(days_ago))
+        .execute(&f.pool)
+        .await
+        .expect("visitor click");
+    }
+    async fn fan_joined(f: &Fixture, email: &str, visitor: Uuid, days_ago: i64) {
+        let fan = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,$3,'active')",
+        )
+        .bind(fan)
+        .bind(f.ws())
+        .bind(email)
+        .execute(&f.pool)
+        .await
+        .expect("fan");
+        sqlx::query(
+            "INSERT INTO fan_acquisition_events (id, workspace_id, fan_id, anonymous_visitor_id, source, request_id, occurred_at) VALUES ($1,$2,$3,$4,'test','req',$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.ws())
+        .bind(fan)
+        .bind(visitor)
+        .bind(f.now - time::Duration::days(days_ago))
+        .execute(&f.pool)
+        .await
+        .expect("acquisition event");
+    }
+
+    // A click, then the same visitor joins one day later — captured.
+    let video = f.video("youtube:captured001", "Captured", 3).await;
+    let link = f
+        .smart_link(
+            "capture-link",
+            "https://www.youtube.com/watch?v=captured001",
+        )
+        .await;
+    let visitor = Uuid::now_v7();
+    click_with_visitor(&f, link, visitor, 2).await;
+    fan_joined(&f, "captured-a@example.test", visitor, 1).await;
+
+    // The same shape eight days apart — outside the attribution window.
+    let late_video = f.video("youtube:captured002", "Late join", 3).await;
+    let late_link = f
+        .smart_link("late-link", "https://www.youtube.com/watch?v=captured002")
+        .await;
+    let late_visitor = Uuid::now_v7();
+    click_with_visitor(&f, late_link, late_visitor, 9).await;
+    fan_joined(&f, "captured-b@example.test", late_visitor, 1).await;
+
+    // A video with no tracked links at all.
+    let unlinked = f.video("youtube:captured003", "Unlinked", 3).await;
+
+    let card = video_scorecard(&f.pool, f.workspace_id, video)
+        .await
+        .expect("card")
+        .expect("present");
+    assert_eq!(card.fans_captured, Some(1));
+
+    let late = video_scorecard(&f.pool, f.workspace_id, late_video)
+        .await
+        .expect("card")
+        .expect("present");
+    assert_eq!(late.fans_captured, Some(0));
+
+    let none = video_scorecard(&f.pool, f.workspace_id, unlinked)
+        .await
+        .expect("card")
+        .expect("present");
+    assert_eq!(none.fans_captured, None);
+}

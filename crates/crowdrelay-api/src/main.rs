@@ -206,6 +206,7 @@ async fn main() -> Result<()> {
         public_site_base_url: config.public_site_base_url.clone(),
         secure_cookies: config.environment.is_production(),
         acquisition_repository: Arc::clone(&repository),
+        watch_origin: config.watch_page_origin.clone(),
     });
 
     let referrals = ReferralState::new(

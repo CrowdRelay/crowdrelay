@@ -103,10 +103,7 @@ impl MeaningfulAction {
     pub const fn is_downstream(self) -> bool {
         matches!(
             self,
-            Self::TicketPurchase
-                | Self::MerchPurchase
-                | Self::QualifiedReferral
-                | Self::Attendance
+            Self::TicketPurchase | Self::MerchPurchase | Self::QualifiedReferral | Self::Attendance
         )
     }
 }

@@ -193,6 +193,10 @@ async fn scorecards_for(
     let reddit = reddit_standing(pool, ws, now).await?;
     let common_touched = common_touched_domains(pool, ws).await?;
     let plan_domains = pitched_target_domains(pool, ws, &plan_keys).await?;
+    let fans = fans_captured(pool, ws, &source_ids)
+        .await?
+        .into_iter()
+        .collect::<HashMap<Uuid, i64>>();
 
     let mut cards = Vec::with_capacity(videos.len());
     for video in videos {
@@ -219,7 +223,9 @@ async fn scorecards_for(
 
         // Attribution counts only domains we actually sent viewers through:
         // the lanes' own hosts, the redirect origin, joined forums, and the
-        // domains of the targets this video's release was pitched to.
+        // domains of the targets this video's release was pitched to. An
+        // `embed:` host — the watch page first — counts the same way: a view
+        // played on a touched domain is a view CrowdRelay drove.
         let plan_key = plans
             .get(&video.id)
             .map(|plan| format!("release:{}", plan.plan_id));
@@ -231,7 +237,11 @@ async fn scorecards_for(
             series
                 .iter()
                 .filter(|row| {
-                    row.metric_key.strip_prefix("ext:").is_some_and(|domain| {
+                    let domain = row
+                        .metric_key
+                        .strip_prefix("ext:")
+                        .or_else(|| row.metric_key.strip_prefix("embed:"));
+                    domain.is_some_and(|domain| {
                         video_scorecard::attributable_domain(domain, &touched)
                     })
                 })
@@ -280,6 +290,7 @@ async fn scorecards_for(
             total_views,
             ads_views,
             analytics_through,
+            fans_captured: fans.get(&video.id).map(|count| (*count).max(0) as u64),
             pace: video_scorecard::pace(attributed, lane_clicks.total, age),
             tracked_clicks: lane_clicks,
             sends: VideoSendsLedger {
@@ -325,7 +336,8 @@ async fn latest_metrics(
           AND s.subject_id = ANY($2)
           AND (s.metric_key = 'views'
                OR s.metric_key LIKE 'traffic:%'
-               OR s.metric_key LIKE 'ext:%')
+               OR s.metric_key LIKE 'ext:%'
+               OR s.metric_key LIKE 'embed:%')
         "#,
     )
     .bind(ws)
@@ -372,6 +384,38 @@ const VIDEO_LINKS_CTE: &str = r#"
         )
     )
 "#;
+
+/// Distinct fans captured within seven days of clicking one of the video's
+/// tracked links — the capture half of the march, measured by visitor
+/// continuity rather than post payload. A video with no tracked links gets no
+/// row, and the caller renders that as `null`: links not yet minted is a
+/// different story than links that captured no one.
+async fn fans_captured(
+    pool: &PgPool,
+    ws: Uuid,
+    source_ids: &[Uuid],
+) -> Result<Vec<(Uuid, i64)>, RepositoryError> {
+    sqlx::query_as::<_, (Uuid, i64)>(
+        &format!(
+            "{VIDEO_LINKS_CTE}
+            SELECT v.source_id, count(DISTINCT acq.fan_id) AS fans
+            FROM video_links v
+            LEFT JOIN click_events click
+              ON click.workspace_id = $1 AND click.smart_link_id = v.id AND click.anonymous_visitor_id IS NOT NULL
+            LEFT JOIN fan_acquisition_events acq
+              ON acq.workspace_id = $1 AND acq.fan_id IS NOT NULL
+             AND acq.anonymous_visitor_id = click.anonymous_visitor_id
+             AND acq.occurred_at >= click.occurred_at
+             AND acq.occurred_at < click.occurred_at + interval '7 days'
+            GROUP BY v.source_id"
+        ),
+    )
+    .bind(ws)
+    .bind(source_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx)
+}
 
 /// Clicks on each video's tracked links, split by the lane the post went out
 /// on. Click membership is the link alone — a post carrying a video's link
@@ -1064,4 +1108,42 @@ async fn reddit_standing(
             })
         }
     }
+}
+
+/// The one fact a public capture page may render: an owned video's title and
+/// publish time. Everything else about the source stays server-side.
+#[derive(Debug, FromRow)]
+pub struct PublicVideoSummary {
+    /// The video's title as the watcher last saw it.
+    pub title: String,
+    /// The publish timestamp the watcher recorded.
+    pub published_at: OffsetDateTime,
+}
+
+/// `None` when `youtube_id` names no active video source of this workspace —
+/// the same retirement flag the scorecard read applies.
+///
+/// # Errors
+///
+/// Propagates the database error, classified.
+pub async fn public_owned_video(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    youtube_id: &str,
+) -> Result<Option<PublicVideoSummary>, RepositoryError> {
+    sqlx::query_as::<_, PublicVideoSummary>(
+        r#"
+        SELECT title, occurred_at AS published_at
+        FROM content_sources
+        WHERE workspace_id = $1
+          AND source_kind = 'video'
+          AND source_key = 'youtube:' || $2
+          AND active
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(youtube_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)
 }

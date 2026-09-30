@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 27 conditions. The count and this list are
+//! The watchdog monitors 29 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -173,6 +173,15 @@
 //!   grant carries the Analytics scope, so CrowdRelay-driven views can never
 //!   be told from organic ones. Info: the cure is a reconnect, not a fix to
 //!   anything that ran.
+//! - `fans.acquisition_stalled` — no fan joined in the last week. The view
+//!   machine can deliver clicks, but a week of clicks with no joins means
+//!   the capture seam — the /watch page, the signup behind it — is where
+//!   the loss is. Warning: nothing errored, and the next join clears it.
+//! - `social.manual_posts_stale` — drafts parked `awaiting_manual_post`
+//!   past two days on a platform the tenant's `social_autopost_platforms`
+//!   setting publishes automatically. Parked on an autopost platform is an
+//!   executor failure; parked on a manual platform is the lane working as
+//!   designed, and that case never raises the alarm.
 //!
 //! # Contradictions are the one condition nothing else can find
 //!
@@ -214,7 +223,7 @@ use crate::auto_post_platforms::PublishingPosture;
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction, types::Json};
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
     sync::watch,
     time::{MissedTickBehavior, interval, timeout},
@@ -652,6 +661,23 @@ struct OpsSnapshot {
     /// Claims the lease sweep failed closed in the last day — each one a
     /// send the executor claimed and never reported an outcome for.
     abandoned_claims_24h: i64,
+    /// The last moment a non-deleted fan joined. `None` when nobody ever
+    /// has — which is the stall `fans.acquisition_stalled` reports.
+    last_fan_at: Option<OffsetDateTime>,
+    /// Every tracked click in the last week — the demand arriving at the
+    /// funnel regardless of which channel carried it.
+    clicks_7d: i64,
+    /// The same clicks split by the link's `channel_source`, lowercased —
+    /// a jsonb `channel → count` map. The capture-channel subset is summed
+    /// in the condition, where `CAPTURE_CHANNELS` lives.
+    clicks_7d_by_channel: Option<Value>,
+    /// Parked `awaiting_manual_post` drafts as a jsonb array of
+    /// `{platform, age_hours}` — the raw material `social.manual_posts_stale`
+    /// filters by the tenant's autopost lane.
+    parked_manual_posts: Option<Value>,
+    /// The tenant's `social_autopost_platforms` value as stored, absent when
+    /// unset — `parse_autopost_platforms` applies the default.
+    social_autopost_platforms_setting: Option<String>,
     /// The recent-video scorecards, read on the pool ahead of the snapshot
     /// transaction — a dozen set-queries do not belong inside the advisory
     /// lock. The SELECT hands back an empty jsonb array and the real cards
@@ -781,3 +807,5 @@ async fn mark_recovered(
 include!("ops_watchdog/tests.rs");
 
 include!("ops_watchdog/tests_video.rs");
+
+include!("ops_watchdog/tests_acquisition.rs");

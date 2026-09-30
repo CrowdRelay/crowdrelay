@@ -5,17 +5,33 @@
 //! writers build a replacement before swapping atomically.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
 use crowdrelay_domain::{ResolvedSmartLink, SmartLinkSlug, WorkspaceId};
 use thiserror::Error;
 
+/// The redirect-time landing context for one workspace: the owned YouTube
+/// video ids and the normalized subreddits whose verified rules allow an
+/// off-site landing page. Loaded on the same cadence and code path as the
+/// links so a snapshot is never half-new.
+#[derive(Debug, Default)]
+pub struct RedirectContext {
+    /// The workspace these sets describe.
+    pub workspace_id: WorkspaceId,
+    /// Owned video ids — the `youtube:{id}` source_key's id part.
+    pub owned_video_ids: HashSet<String>,
+    /// Normalized subreddit names (lowercase, trimmed, no `r/`) whose rules
+    /// permit an off-site landing page.
+    pub reddit_offsite_ok: HashSet<String>,
+}
+
 /// Immutable snapshot of smart-link definitions keyed by workspace and slug.
 #[derive(Debug, Default)]
 pub struct RedirectSnapshot {
     links: HashMap<WorkspaceId, HashMap<SmartLinkSlug, ResolvedSmartLink>>,
+    contexts: HashMap<WorkspaceId, RedirectContext>,
     len: usize,
 }
 
@@ -28,6 +44,25 @@ impl RedirectSnapshot {
         slug: &SmartLinkSlug,
     ) -> Option<&ResolvedSmartLink> {
         self.links.get(&workspace_id)?.get(slug)
+    }
+
+    /// Whether `video_id` names an owned video in this workspace — what a
+    /// `/watch` landing may capture clicks for.
+    #[must_use]
+    pub fn owns_video(&self, workspace_id: WorkspaceId, video_id: &str) -> bool {
+        self.contexts
+            .get(&workspace_id)
+            .is_some_and(|context| context.owned_video_ids.contains(video_id))
+    }
+
+    /// Whether the normalized subreddit's verified rules allow an off-site
+    /// landing page in this workspace. Absent context answers false — the
+    /// bare redirect is never wrong.
+    #[must_use]
+    pub fn reddit_offsite_allowed(&self, workspace_id: WorkspaceId, community: &str) -> bool {
+        self.contexts
+            .get(&workspace_id)
+            .is_some_and(|context| context.reddit_offsite_ok.contains(community))
     }
 
     /// Returns the total number of smart-links in the snapshot.
@@ -58,12 +93,21 @@ impl RedirectCache {
 
     /// Builds a complete replacement before taking the write lock. Duplicate
     /// tenant/slug keys reject the replacement and leave the old snapshot live.
-    pub fn replace<I>(&self, links: I) -> Result<usize, RedirectCacheError>
+    /// The landing contexts arrive with the links so a snapshot is one
+    /// consistent read of both.
+    pub fn replace<I>(
+        &self,
+        links: I,
+        contexts: Vec<RedirectContext>,
+    ) -> Result<usize, RedirectCacheError>
     where
         I: IntoIterator<Item = ResolvedSmartLink>,
     {
         let mut replacement = RedirectSnapshot::default();
 
+        for context in contexts {
+            replacement.contexts.insert(context.workspace_id, context);
+        }
         for link in links {
             let workspace_id = link.workspace_id();
             let slug = link.slug().clone();
@@ -159,6 +203,8 @@ mod tests {
             SmartLinkSlug::parse(slug)?,
             DestinationUrl::parse(destination)?,
             version,
+            None,
+            None,
         )?)
     }
 
@@ -167,10 +213,13 @@ mod tests {
         let first_workspace = WorkspaceId::new();
         let second_workspace = WorkspaceId::new();
         let cache = RedirectCache::new();
-        cache.replace([
-            link(first_workspace, "join", "https://one.example/join", 1)?,
-            link(second_workspace, "join", "https://two.example/join", 1)?,
-        ])?;
+        cache.replace(
+            [
+                link(first_workspace, "join", "https://one.example/join", 1)?,
+                link(second_workspace, "join", "https://two.example/join", 1)?,
+            ],
+            Vec::new(),
+        )?;
         let slug = SmartLinkSlug::parse("join")?;
 
         assert_eq!(
@@ -196,13 +245,19 @@ mod tests {
     fn duplicate_replacement_keeps_previous_snapshot() -> Result<(), Box<dyn std::error::Error>> {
         let workspace_id = WorkspaceId::new();
         let cache = RedirectCache::new();
-        cache.replace([link(workspace_id, "join", "https://stable.example/", 1)?])?;
+        cache.replace(
+            [link(workspace_id, "join", "https://stable.example/", 1)?],
+            Vec::new(),
+        )?;
 
         let error = cache
-            .replace([
-                link(workspace_id, "join", "https://new.example/", 2)?,
-                link(workspace_id, "join", "https://duplicate.example/", 3)?,
-            ])
+            .replace(
+                [
+                    link(workspace_id, "join", "https://new.example/", 2)?,
+                    link(workspace_id, "join", "https://duplicate.example/", 3)?,
+                ],
+                Vec::new(),
+            )
             .unwrap_err();
 
         assert!(matches!(error, RedirectCacheError::DuplicateLink { .. }));
@@ -222,7 +277,10 @@ mod tests {
         let workspace_id = WorkspaceId::new();
         let slug = SmartLinkSlug::parse("join")?;
         let cache = Arc::new(RedirectCache::new());
-        cache.replace([link(workspace_id, "join", "https://old.example/", 1)?])?;
+        cache.replace(
+            [link(workspace_id, "join", "https://old.example/", 1)?],
+            Vec::new(),
+        )?;
 
         let reader_cache = Arc::clone(&cache);
         let reader_slug = slug.clone();
@@ -238,7 +296,10 @@ mod tests {
             }
             Ok::<(), &str>(())
         });
-        cache.replace([link(workspace_id, "join", "https://new.example/", 2)?])?;
+        cache.replace(
+            [link(workspace_id, "join", "https://new.example/", 2)?],
+            Vec::new(),
+        )?;
         reader
             .join()
             .map_err(|e| format!("reader thread panicked: {e:?}"))?

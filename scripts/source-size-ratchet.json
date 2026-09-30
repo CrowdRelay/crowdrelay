@@ -28,7 +28,7 @@
     "crates/crowdrelay-infra/tests/postgres/autopilot_capture_plans.rs": 1237,
     "crates/crowdrelay-infra/tests/postgres/autopilot_experiment_integrity.rs": 4485,
     "crates/crowdrelay-infra/tests/postgres/autopilot_measurement_spine.rs": 1550,
-    "crates/crowdrelay-infra/tests/postgres/autopilot_plays.rs": 1471,
+    "crates/crowdrelay-infra/tests/postgres/autopilot_plays.rs": 1381,
     "crates/crowdrelay-infra/tests/postgres/events.rs": 1287,
     "crates/crowdrelay-infra/tests/postgres/gig_outreach.rs": 1251,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
@@ -38,6 +38,7 @@
     "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2251,
     "crates/crowdrelay-worker/src/main.rs": 1515,
     "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1630,
-    "crates/crowdrelay-worker/tests/postgres/community_relay_batch.rs": 1370
+    "crates/crowdrelay-worker/tests/postgres/community_relay_batch.rs": 1370,
+    "crates/crowdrelay-infra/tests/postgres/autopilot_world_model.rs": 1284
   }
 }
