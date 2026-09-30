@@ -547,14 +547,11 @@ mod tests_booking {
         Ok(())
     }
 
-    /// P.4: one approved ladder is the operator's yes to every rung whose own
-    /// evidence gates pass — carried as `ladder_authorized` provenance the
-    /// action insert honours, not as a disposition override. The class ceiling
-    /// and the envelope still get their say, and `Deny` is never lifted:
-    /// approving the ladder was never approving a lever the night's own facts
-    /// cannot carry.
+    /// A broad ladder approval automates the band's own repeatable promotion,
+    /// not relationship-sensitive outreach. A partner ask stays parked for the
+    /// booker even when the rest of the show ladder was pre-approved.
     #[test]
-    fn an_approved_ladder_marks_the_rungs_it_pre_authorized()
+    fn an_approved_ladder_does_not_pre_authorize_partner_outreach()
     -> Result<(), Box<dyn std::error::Error>> {
         use crowdrelay_domain::show_growth::{
             ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy, ShowGrowthSnapshot,
@@ -602,16 +599,13 @@ mod tests_booking {
         assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
 
-        // The flag rides the policy snapshot — the disposition stays honest
-        // about what the level and confidence computed; the class ceiling and
-        // the envelope run before the action insert honours the ladder.
+        // Approving the full ladder does not consume relationship capital.
+        // The candidate remains individually reviewable and carries no
+        // show-ladder pre-authorization token.
         let released = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
-        assert_eq!(
-            released[0].policy_snapshot.get("ladder_authorized"),
-            Some(&serde_json::Value::Bool(true))
-        );
+        assert_eq!(released[0].policy_snapshot.get("ladder_authorized"), None);
         assert!(matches!(
             released[0].action,
             AutopilotActionPayload::RequestShowGrowth {
