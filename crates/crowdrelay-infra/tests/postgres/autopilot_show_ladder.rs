@@ -163,13 +163,12 @@ async fn seed_human_booking_activity(
     event_id: Uuid,
     count: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let city_id: Uuid = sqlx::query_scalar(
-        "SELECT city_id FROM events WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(event_id)
-    .fetch_one(pool)
-    .await?;
+    let city_id: Uuid =
+        sqlx::query_scalar("SELECT city_id FROM events WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .fetch_one(pool)
+            .await?;
 
     for ordinal in 0..count {
         let target_id: Uuid = sqlx::query_scalar(
@@ -392,8 +391,7 @@ async fn quiet_tenant_show_ladder_releases_partner_backstop()
         .await?;
     assert_eq!(mutation.status, "approved:1");
 
-    let (status, approved_by) =
-        rung_state(&fixture.pool, fixture.workspace_id, partner).await?;
+    let (status, approved_by) = rung_state(&fixture.pool, fixture.workspace_id, partner).await?;
     assert_eq!(status, "queued", "quiet tenant gets the bounded backstop");
     assert_eq!(approved_by.as_deref(), Some("operator:show_ladder"));
     Ok(())

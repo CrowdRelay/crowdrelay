@@ -269,8 +269,7 @@ impl ShowGrowthLever {
     /// live show-ladder approval is allowed to act as a bounded backstop.
     #[must_use]
     pub const fn ladder_may_pre_authorize(self, human_booking_targets_30d: u32) -> bool {
-        !self.is_relationship_sensitive()
-            || human_booking_targets_30d < ACTIVE_BOOKING_TOUCHES_30D
+        !self.is_relationship_sensitive() || human_booking_targets_30d < ACTIVE_BOOKING_TOUCHES_30D
     }
 
     /// The reach class the autopilot persists on the action. Single source:
