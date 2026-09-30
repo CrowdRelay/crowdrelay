@@ -50,12 +50,45 @@ pub async fn load_join_ask_snapshot(
     .fetch_all(pool)
     .await?;
 
-    // Only posts this feature filed count toward cadence and rotation — a
+    // Only posts this feature filed count toward cadence and learning — a
     // `social_posts` row from an agent draft is a different ledger, and
-    // folding it in would let an LLM post delay the tenant's own ask.
-    let posts = sqlx::query_as::<_, (String, String, OffsetDateTime)>(
+    // folding it in would let unrelated content steer the tenant's own ask.
+    // The action also preserves the exact tenant-authored text, so outcomes
+    // survive settings reorder and reset honestly when the wording is edited.
+    let posts = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            OffsetDateTime,
+            String,
+            Option<OffsetDateTime>,
+            i64,
+        ),
+    >(
         r#"
-        SELECT post.platform, post.status, post.created_at
+        SELECT post.platform,
+               post.status,
+               post.created_at,
+               COALESCE(action.payload->>'text', '') AS text,
+               post.posted_at,
+               COALESCE((
+                   SELECT COUNT(DISTINCT acquisition.fan_id)::bigint
+                   FROM click_events AS click
+                   JOIN fan_acquisition_events AS acquisition
+                     ON acquisition.workspace_id = click.workspace_id
+                    AND click.anonymous_visitor_id IS NOT NULL
+                    AND acquisition.anonymous_visitor_id = click.anonymous_visitor_id
+                    AND acquisition.occurred_at >= click.occurred_at
+                    AND acquisition.occurred_at <
+                        post.posted_at + INTERVAL '7 days'
+                   WHERE post.posted_at IS NOT NULL
+                     AND post.smart_link_id IS NOT NULL
+                     AND click.workspace_id = post.workspace_id
+                     AND click.smart_link_id = post.smart_link_id
+                     AND click.occurred_at >= post.posted_at
+                     AND click.occurred_at < post.posted_at + INTERVAL '7 days'
+               ), 0)::bigint AS fans_7d
         FROM social_posts AS post
         JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id
@@ -69,11 +102,16 @@ pub async fn load_join_ask_snapshot(
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(|(platform, status, created_at)| JoinAskPostRow {
-        platform,
-        status,
-        created_at,
-    })
+    .map(
+        |(platform, status, created_at, text, posted_at, fans_7d)| JoinAskPostRow {
+            platform,
+            status,
+            created_at,
+            text,
+            posted_at,
+            fans_7d: u32::try_from(fans_7d).unwrap_or(u32::MAX),
+        },
+    )
     .collect();
 
     // Instagram has no text-only post: the executor's selector reads the
