@@ -1120,12 +1120,16 @@ mod tests {
     }
 
     fn running() -> PlaySnapshot {
+        running_of(PlayKind::TrackUsAsk)
+    }
+
+    fn running_of(kind: PlayKind) -> PlaySnapshot {
         PlaySnapshot {
             play_id: PlayId::new(),
-            kind: PlayKind::TrackUsAsk,
+            kind,
             anchor_at: anchor(),
             anchor_active: true,
-            steps: PlayKind::TrackUsAsk
+            steps: kind
                 .steps()
                 .iter()
                 .enumerate()
@@ -1189,15 +1193,17 @@ mod tests {
     #[test]
     fn a_skipped_step_does_not_block_the_one_behind_it() {
         // A gated step nobody approved must not stall the play. Settling step
-        // zero leaves step one to run on its own schedule.
-        let mut snapshot = running();
+        // zero leaves step one to run on its own schedule. The track-us play
+        // is single-step since the post-show rung moved to Show Growth, so the
+        // two-step dormant revival carries the property.
+        let mut snapshot = running_of(PlayKind::DormantRevival);
         snapshot.steps[0].settled = true;
         let due = snapshot.steps[1].due_at + Duration::hours(1);
         assert!(matches!(
             evaluate_play(&snapshot, PlayPolicy::default(), due),
             PlayDecision::RunStep {
                 index: 1,
-                kind: PlayStepKind::PostShowAsk,
+                kind: PlayStepKind::DormantRevivalFinal,
                 ..
             }
         ));
@@ -1329,9 +1335,10 @@ mod tests {
             10 * 24,
             policy
         ));
-        // The track-us ask still has its post-show step at that distance, which
-        // is why one lead time for every play would be wrong for one of them.
-        assert!(play_is_worth_starting(
+        // The track-us ask lost its post-show rung to Show Growth — a show
+        // three days away is eleven days past its only window, so it too is a
+        // campaign that would exist only to record its own skip.
+        assert!(!play_is_worth_starting(
             PlayKind::TrackUsAsk,
             true,
             3 * 24,
@@ -1567,10 +1574,11 @@ mod tests {
     }
 
     #[test]
-    fn the_announce_step_lands_before_the_show_and_the_thanks_after_it() {
+    fn the_announce_step_lands_before_the_show_and_closes_before_it() {
+        // The post-show thanks lives in Show Growth now; what remains here is
+        // the announce ask, which must both open and close before the date.
         let steps = PlayKind::TrackUsAsk.steps();
         let (announce_due, announce_expiry) = step_schedule(steps[0], anchor());
-        let (post_due, _) = step_schedule(steps[1], anchor());
         assert!(
             announce_due < anchor(),
             "the announce ask precedes the show"
@@ -1579,7 +1587,6 @@ mod tests {
             announce_expiry < anchor(),
             "and closes before it, so it is never sent as a reminder about a show already played"
         );
-        assert!(post_due > anchor(), "the thanks follows the show");
     }
 
     #[test]
