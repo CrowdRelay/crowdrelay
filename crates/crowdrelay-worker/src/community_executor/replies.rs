@@ -583,7 +583,7 @@ impl CommunityExecutorWorker {
             .map_or(reply.clone(), |link| format!("{reply}\n\n{link}"));
         let capture_added = capture_link
             .as_ref()
-            .is_some_and(|link| reply.contains(link));
+            .is_some_and(|link| reply.contains(link.as_str()));
 
         // Each channel's own pair of switches: Reddit's write switches, or
         // the owned-channel publish gate.
