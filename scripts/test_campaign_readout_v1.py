@@ -157,6 +157,9 @@ class ChannelBestActionContract(unittest.TestCase):
         self.assertIn("ticket_purchase", self.infra)
         self.assertIn("merch_purchase", self.infra)
         self.assertIn("qualified_referral", self.infra)
+        self.assertIn("attendance", self.infra)
+        self.assertIn("concert_checkins", self.infra)
+        self.assertIn("admission_passes", self.infra)
 
     def test_best_action_priority_order(self) -> None:
         # ticket_purchase must be checked before signal_session

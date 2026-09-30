@@ -437,6 +437,113 @@ async fn activated_fans_north_star_reads_the_activation_kpi()
     Ok(())
 }
 
+/// Observed attendance is itself meaningful fan behaviour.
+///
+/// This fan has no session, ticket purchase, merch purchase, referral,
+/// Synesthesia run or event-interest row. The room check-in is the only action.
+/// If it does not move the activation KPI, CrowdRelay is claiming that showing
+/// up in person is less meaningful than opening the app.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn concert_checkin_alone_can_activate_a_consented_recent_fan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, _database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,$3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("attendance-activation-{suffix}"))
+        .bind("Attendance activation")
+        .execute(&pool)
+        .await?;
+
+    let now = OffsetDateTime::now_utc();
+    let fan_id = Uuid::now_v7();
+    let created_at = now - time::Duration::days(2);
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1,$2,$3,'active',$4)",
+    )
+    .bind(fan_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("room-{suffix}@activation.test"))
+    .bind(created_at)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents
+         (id, workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+         VALUES ($1,$2,$3,'marketing',true,'v1','test',$4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(created_at)
+    .execute(&pool)
+    .await?;
+
+    let event_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,'Attendance proof',$4,'published',$5)",
+    )
+    .bind(event_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("attendance-proof-{suffix}"))
+    .bind(now - time::Duration::days(1))
+    .bind(created_at)
+    .execute(&pool)
+    .await?;
+
+    let campaign_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO concert_qr_campaigns
+         (id, workspace_id, event_id, label, valid_from, valid_until)
+         VALUES ($1,$2,$3,'door',$4,$5)",
+    )
+    .bind(campaign_id)
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .bind(now - time::Duration::days(2))
+    .bind(now + time::Duration::days(1))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO concert_checkins
+         (workspace_id, event_id, campaign_id, fan_id, checked_in_at, identity_source)
+         VALUES ($1,$2,$3,$4,$5,'email_claim')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .bind(campaign_id)
+    .bind(fan_id)
+    .bind(now - time::Duration::days(1))
+    .execute(&pool)
+    .await?;
+
+    let (activated, last_action): (i64, Option<OffsetDateTime>) = sqlx::query_as(
+        "SELECT kpi.activated_30d::bigint,
+                fan_last_meaningful_action($1,$2,$3)
+         FROM fan_activation_kpi AS kpi
+         WHERE kpi.workspace_id=$1",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(format!("room-{suffix}@activation.test"))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(activated, 1, "observed room attendance must count as real activation");
+    assert_eq!(
+        last_action,
+        Some(now - time::Duration::days(1)),
+        "the canonical action timestamp comes from the check-in"
+    );
+
+    Ok(())
+}
+
 /// A tenant whose reach is spread across platforms can name the whole
 /// portfolio as its north star.
 ///

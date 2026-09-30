@@ -134,7 +134,7 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                 count(*) FILTER (WHERE NOT stayed)::bigint AS departed,
                 -- The strongest action any fan from this channel took.
                 -- Priority: ticket_purchase > merch_purchase > qualified_referral
-                -- > event_interest > synesthesia_run > signal_session.
+                -- > attendance > event_interest > synesthesia_run > signal_session.
                 -- Uses the fan_last_meaningful_action function to find the
                 -- timestamp, then maps it to the action kind.
                 CASE
@@ -156,6 +156,20 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                           AND ref.referrer_fan_id = attributed.fan_id
                           AND ref.status = 'qualified'
                     )) THEN 'qualified_referral'
+                    WHEN bool_or(attributed.stayed AND (
+                        EXISTS (
+                            SELECT 1 FROM concert_checkins checkin
+                            WHERE checkin.workspace_id = attributed.workspace_id
+                              AND checkin.fan_id = attributed.fan_id
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM admission_passes pass
+                            WHERE pass.workspace_id = attributed.workspace_id
+                              AND pass.fan_id = attributed.fan_id
+                              AND pass.status = 'redeemed'
+                              AND pass.redeemed_at IS NOT NULL
+                        )
+                    )) THEN 'attendance'
                     WHEN bool_or(attributed.stayed AND EXISTS (
                         SELECT 1 FROM event_interests interest
                         WHERE interest.workspace_id = attributed.workspace_id
