@@ -230,7 +230,7 @@ async fn load_fan_links(
         JOIN fans AS fan
           ON fan.workspace_id = $1
          AND fan.id = converted.fan_id
-        LEFT JOIN smart_links AS link
+        JOIN smart_links AS link
           ON link.workspace_id = $1
          AND link.slug = converted.slug
         GROUP BY 1, 2, 3, 4
