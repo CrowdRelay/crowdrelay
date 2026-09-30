@@ -308,14 +308,61 @@ async fn activated_fans_north_star_reads_the_activation_kpi()
         "only consented recent signups with activity are activated fans"
     );
     assert_eq!(
-        world.north_star_this_month, 2,
-        "activated_30d is a windowed level, so the month's progress is the level"
+        world.north_star_this_month, 0,
+        "a rolling level is not monthly growth; without a historical baseline          the honest delta is zero"
+    );
+    assert_eq!(
+        world.growth_target_progress.north_star_status,
+        crowdrelay_brain::TargetStatus::Behind,
+        "two activated fans must not auto-satisfy a +5 monthly growth target"
     );
 
-    // No cleanup: `fan_consents` is append-only and its FK on workspaces is
-    // RESTRICT, so this fixture's workspace is permanent. The test database
-    // is disposable — the suite's other assertions are workspace-scoped, so
-    // leftover rows cannot leak into them.
+    // The cycle ledger is the canonical history for this North Star because
+    // every row stores the exact world-model reading and the metric name.
+    // One fan at the month boundary, two now => +1 real growth, not +2.
+    let month_start =
+        sqlx::query_scalar::<_, OffsetDateTime>("SELECT date_trunc('month', now())::timestamptz")
+            .fetch_one(&pool)
+            .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO autopilot_cycle_runs
+            (id, workspace_id, trigger, started_at, finished_at, duration_ms,
+             outcome, decisions_recorded, actions_created, north_star_value,
+             north_star_metric)
+        VALUES ($1,$2,'scheduled',$3,$3,10,'succeeded',0,0,1,'activated_fans_30d')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(month_start - time::Duration::hours(1))
+    .execute(&pool)
+    .await?;
+
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots after the baseline")?
+        .world_model;
+    assert_eq!(world.north_star_current, 2);
+    assert_eq!(
+        world.north_star_this_month, 1,
+        "monthly progress is the change in the rolling level since the month opened"
+    );
+    assert_eq!(
+        world.growth_target_progress.north_star_progress_bps, 2_000,
+        "+1 against the minimum +5 target is 20%, not 40% or 100%"
+    );
+    assert_eq!(
+        world.growth_target_progress.north_star_status,
+        crowdrelay_brain::TargetStatus::Behind
+    );
+
+    // No cleanup: `fan_consents` and cycle history are audit rows whose FKs
+    // deliberately prevent deleting the workspace. The test database is
+    // disposable and every assertion is workspace-scoped.
     Ok(())
 }
 
