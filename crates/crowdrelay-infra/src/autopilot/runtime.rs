@@ -481,6 +481,23 @@ impl AutopilotRuntimeRepository for PostgresAutopilotRepository {
     ) -> Result<ExecutionReportMutation, RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            let mut command = command;
+            if command.status == ExecutorReportStatus::Succeeded {
+                let action_kind = sqlx::query_scalar::<_, String>(
+                    "SELECT action_kind FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(command.action_id.into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
+                if action_kind.as_deref() == Some("content.artifact.request")
+                    && !crowdrelay_domain::video_promotion::artifact_delivered(&command.metadata)
+                {
+                    command.status = ExecutorReportStatus::Failed;
+                    command.error_kind = Some("artifact_delivery_missing".to_owned());
+                }
+            }
             let mut preserve_succeeded_claim = false;
             if matches!(command.status, ExecutorReportStatus::Succeeded | ExecutorReportStatus::Failed) {
                 let claim = sqlx::query_as::<_, (Uuid, String)>(

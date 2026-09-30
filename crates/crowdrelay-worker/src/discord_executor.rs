@@ -422,6 +422,18 @@ impl DiscordExecutorWorker {
     /// Processes a single claimed action: checks anti-spam guardrails,
     /// posts to Discord via the Bot API, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), DiscordExecutorError> {
+        if !crowdrelay_infra::promotion_policy::action_platform_allowed(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+            action.action_id,
+            "discord",
+        )
+        .await?
+        {
+            self.mark_failed(action.id, "platform_excluded_by_campaign")
+                .await?;
+            return Ok(());
+        }
         // The cooldown is about the channel actually posted in, so the
         // connection is resolved before anything is checked against it.
         //
@@ -1128,37 +1140,7 @@ struct DiscordMessageResponse {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_channel_id_is_a_snowflake_and_an_invite_code_is_not() {
-        // Production holds `provider_account_id = 'BBdDV6gVy'`, the invite
-        // code the member-count sync reads. It was also what this executor
-        // would have posted to. A snowflake is 17-20 digits; nothing else is
-        // a channel.
-        assert!(is_discord_snowflake("1234567890123456789"));
-        assert!(is_discord_snowflake("12345678901234567"));
-        assert!(is_discord_snowflake("12345678901234567890"));
-        assert!(is_discord_snowflake("  1234567890123456789  "));
-
-        assert!(!is_discord_snowflake("BBdDV6gVy"), "an invite code");
-        assert!(!is_discord_snowflake("general"), "a channel name");
-        assert!(!is_discord_snowflake(""), "nothing at all");
-        assert!(
-            !is_discord_snowflake("1234567890123456"),
-            "16 digits, too short"
-        );
-        assert!(
-            !is_discord_snowflake("123456789012345678901"),
-            "21 digits, too long"
-        );
-        assert!(
-            !is_discord_snowflake("12345678901234567x"),
-            "digits with a stray character"
-        );
-        assert!(
-            !is_discord_snowflake("#1234567890123456789"),
-            "a channel mention, not an id"
-        );
-    }
+    include!("discord_executor/snowflake_tests.rs");
 
     #[test]
     fn discord_bot_aad_is_deterministic() {

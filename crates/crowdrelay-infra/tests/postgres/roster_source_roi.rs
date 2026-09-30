@@ -242,6 +242,7 @@ async fn arrival(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn arrival_with_age(
     pool: &PgPool,
     workspace_id: Uuid,

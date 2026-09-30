@@ -58,7 +58,11 @@ fn lock_screen_line(text: &str, max: usize) -> String {
     let budget = max.saturating_sub(1);
     let mut out = String::new();
     for word in flat.split(' ') {
-        let next = if out.is_empty() { word.chars().count() } else { out.chars().count() + 1 + word.chars().count() };
+        let next = if out.is_empty() {
+            word.chars().count()
+        } else {
+            out.chars().count() + 1 + word.chars().count()
+        };
         if next > budget {
             break;
         }
@@ -88,7 +92,11 @@ mod relay_push_text_tests {
         assert!(!body.contains('📷'), "{body}");
         assert!(body.contains("Dzięki wszystkim"), "{body}");
         assert!(body.ends_with(url), "{body}");
-        assert!(body.chars().count() <= 200, "{} chars: {body}", body.chars().count());
+        assert!(
+            body.chars().count() <= 200,
+            "{} chars: {body}",
+            body.chars().count()
+        );
     }
 
     #[test]
@@ -149,7 +157,11 @@ fn relay_candidates(
     // `relative_day_has_passed`. The communities below still get it: their
     // drafts are rewritten from the caption's facts, not pasted.
     let stale_push = crowdrelay_domain::relay_freshness::relative_day_has_passed(
-        &format!("{} {}", post.title, post.body.as_deref().unwrap_or_default()),
+        &format!(
+            "{} {}",
+            post.title,
+            post.body.as_deref().unwrap_or_default()
+        ),
         snapshot.occurred_at,
         now,
     );
@@ -190,7 +202,12 @@ fn relay_candidates(
         decision_key: format!("decision:relay:v{}:{source}:signal_push", policy.version),
         action_idempotency_key: format!("action:relay:{source}:signal_push"),
     }];
-    if stale_push {
+    if stale_push
+        || snapshot
+            .promotion_excluded_platforms
+            .iter()
+            .any(|platform| platform == "signal_push")
+    {
         out.clear();
     }
 
@@ -221,6 +238,20 @@ fn relay_candidates(
         &[]
     };
     for target in communities {
+        if snapshot
+            .promotion_excluded_platforms
+            .contains(&target.platform)
+        {
+            continue;
+        }
+        let address = if target.platform == "reddit" {
+            format!("r/{}", target.subreddit)
+        } else {
+            target
+                .community_url
+                .clone()
+                .unwrap_or_else(|| target.subreddit.clone())
+        };
         let target_id = target.target_id.into_uuid();
         let caption_facts = post.body.as_deref().unwrap_or(post.title.as_str());
         let permalink = post.url.as_deref().unwrap_or("(none)");
@@ -238,7 +269,7 @@ fn relay_candidates(
             .filter(|l| !l.is_empty())
             .unwrap_or("(not recorded — infer it from the community's own description)");
         let prompt = format!(
-            "Draft one Reddit post carrying the band's own social post into r/{}.\n\n\
+            "Draft one community post carrying the band's own social post into {address}.\n\n\
             Source post (the ONLY facts you may use — the caption is the band's own words):\n\
             - platform: {platform}\n\
             - caption: {caption_facts}\n\
@@ -247,9 +278,10 @@ fn relay_candidates(
             - source_id: {source}\n\n\
             Target community:\n\
             - target_id: {target_id}\n\
-            - subreddit: r/{}\n\
+            - platform: {}\n\
+            - address: {address}\n\
             - language: {language}",
-            target.subreddit, target.subreddit
+            target.platform
         );
         // The drafting dispatch runs the workspace's autonomy level WITHOUT
         // the evidence floor, upgraded for internal work. The floor exists to
@@ -298,4 +330,3 @@ fn relay_candidates(
     }
     Ok(out)
 }
-

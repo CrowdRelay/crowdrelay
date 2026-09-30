@@ -37,9 +37,19 @@ TEMPLATE_CLAIMED = {
     "telegram": (WORKER / "telegram_executor.rs", "telegram-poster"),
     "discord": (WORKER / "discord_executor.rs", "discord-poster"),
 }
-# Reddit drafts are community engagement, claimed by the community executor
-# through `RequestCommunityEngagement` rather than by platform.
-COMMUNITY_PLATFORM = "reddit"
+# Targeted community drafts become RequestCommunityEngagement actions. The
+# shared sender set is bound to the community ledger's claim query.
+COMMUNITY_EXECUTOR = WORKER / "community_executor.rs"
+
+
+def community_executor_platforms() -> set[str]:
+    source = COMMUNITY_EXECUTOR.read_text()
+    match = re.search(r'const SENDABLE_PLATFORMS: &\[&str\] = &\[([^]]+)\]', source)
+    if match is None:
+        raise AssertionError("community executor sender set not found")
+    if not re.search(r'c2\.platform\s*=\s*ANY\(\$5\)', source) or '.bind(SENDABLE_PLATFORMS)' not in source:
+        raise AssertionError("community claim does not bind the verified sender set")
+    return set(re.findall(r'"([a-z0-9-]+)"', match.group(1)))
 
 
 def schema_platforms() -> set[str]:
@@ -69,8 +79,7 @@ class AgentsPlatformParity(unittest.TestCase):
             )
 
     def test_every_declarable_platform_has_an_executor(self):
-        claimed = social_executor_platforms() | set(TEMPLATE_CLAIMED)
-        claimed.add(COMMUNITY_PLATFORM)
+        claimed = social_executor_platforms() | set(TEMPLATE_CLAIMED) | community_executor_platforms()
         unclaimed = schema_platforms() - claimed
         self.assertEqual(
             unclaimed,
@@ -101,6 +110,15 @@ class AgentsPlatformParity(unittest.TestCase):
             "the social executor's claimed platforms changed; anything dropped is "
             "now an orphaned draft",
         )
+
+    def test_community_platforms_have_real_sender_dispatch(self):
+        self.assertEqual(community_executor_platforms(), {"reddit", "forum", "lemmy", "telegram"})
+        source = COMMUNITY_EXECUTOR.read_text()
+        for platform in ("lemmy", "telegram"):
+            self.assertIn(f'"{platform}" =>', source)
+        self.assertIn('"{}/forum/post"', source)
+        self.assertIn('"forum_url"', source)
+        self.assertIn('.submit_platform_post(', source)
 
     def test_the_enum_is_not_silently_empty(self):
         # If the regex stops matching, every assertion above passes vacuously.

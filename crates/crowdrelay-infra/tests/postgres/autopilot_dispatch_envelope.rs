@@ -418,7 +418,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
                 claim_token: claim.claim_token,
                 provider_reference: Some("yt:envelope-test".to_owned()),
                 error_kind: None,
-                metadata: json!({}),
+                metadata: json!({"artifact_delivery":{"url":"https://youtu.be/envelope-test"}}),
                 occurred_at: produced_at,
             },
         )

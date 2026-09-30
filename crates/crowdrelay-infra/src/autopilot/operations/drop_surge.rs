@@ -23,11 +23,12 @@ pub(in crate::autopilot) async fn ensure_drop_surge_link(
     source_id: ContentSourceId,
     lane: &str,
 ) -> Result<Option<String>, RepositoryError> {
-    let source = sqlx::query_as::<_, (String, String, Option<String>)>(
+    let source = sqlx::query_as::<_, (String, String, Option<String>, String, serde_json::Value)>(
         r#"
-        SELECT source_key, title, metadata->>'url'
+        SELECT source_key, title, COALESCE(metadata->>'url',metadata->>'listen_url'), source_kind, metadata
         FROM content_sources
-        WHERE workspace_id = $1 AND id = $2
+        WHERE workspace_id = $1 AND id = $2 AND active AND expires_at>now()
+        FOR UPDATE
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -35,9 +36,12 @@ pub(in crate::autopilot) async fn ensure_drop_surge_link(
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx)?;
-    let Some((source_key, title, url)) = source else {
-        return Ok(None);
+    let Some((source_key, _title, url, kind, metadata)) = source else {
+        return Err(RepositoryError::Conflict);
     };
+    if !crowdrelay_domain::video_promotion::platform_allowed(&kind, &metadata, lane) {
+        return Err(RepositoryError::Conflict);
+    }
     let Some(destination) = url.filter(|url| is_http_url(url)) else {
         return Ok(None);
     };
@@ -46,33 +50,14 @@ pub(in crate::autopilot) async fn ensure_drop_surge_link(
         return Ok(None);
     };
 
-    // One campaign per source keeps every lane's clicks under the drop's own
-    // name — `{title} · drop`. Find-or-create by name: campaigns has no
-    // source column, and two sources sharing a title sharing a campaign is a
-    // display grouping, not a misattribution — the links still carry
-    // per-source slugs.
-    let campaign_id = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        WITH existing AS (
-            SELECT id FROM campaigns
-            WHERE workspace_id = $1 AND name = $3 AND active
-            ORDER BY created_at
-            LIMIT 1
-        ), inserted AS (
-            INSERT INTO campaigns (workspace_id, name, active)
-            SELECT $1, $3, true
-            WHERE NOT EXISTS (SELECT 1 FROM existing)
-            RETURNING id
-        )
-        SELECT id FROM inserted UNION ALL SELECT id FROM existing LIMIT 1
-        "#,
+    let campaign_id = crate::promotion_campaign::ensure_source_campaign(
+        tx,
+        workspace_id.into_uuid(),
+        source_id.into_uuid(),
     )
-    .bind(workspace_id.into_uuid())
-    .bind(source_id.into_uuid())
-    .bind(format!("{} · drop", title.trim()))
-    .fetch_one(&mut **tx)
     .await
-    .map_err(map_sqlx)?;
+    .map_err(map_sqlx)?
+    .ok_or(RepositoryError::Conflict)?;
 
     sqlx::query(
         r#"

@@ -1,12 +1,10 @@
-//! Community engagement executor: posts approved community.engage.request
-//! actions to Reddit via the agents service browser session.
+//! Approved community delivery on Reddit, Lemmy, Telegram, and forums.
 //!
-//! The autopilot marks `RequestCommunityEngagement` actions as `succeeded`
-//! after emitting the outbox event (the outbox delivers to external webhook
-//! endpoints). This worker is the *internal executor* that actually posts
-//! to Reddit — it polls for succeeded actions that don't yet have a
-//! `community_posts` row, submits the post through the agents service's
-//! logged-in browser session, and records the result.
+//! Dispatch success is only an intent. This worker materializes ledger rows,
+//! rechecks source policy, membership, rules, and credentials, then applies
+//! the existing approval and moderation guards before using the sender.
+//! Missing capabilities park a draft for a person; a provider receipt, not
+//! an internal notification, records publication. Discord is manual-only.
 //!
 //! ## Anti-spam guardrails
 //! - One post per subreddit per 7 days (enforced via SQL check before posting)
@@ -753,7 +751,9 @@ impl CommunityExecutorWorker {
                      -- rules reject.
                      WHEN NOT (
                           COALESCE(NULLIF(t.platform, ''), 'reddit') = ANY($2)
-                          AND NOT COALESCE(rules.requires_approval, false))
+                          AND NOT COALESCE(rules.requires_approval, false)
+                          AND (COALESCE(NULLIF(t.platform, ''), 'reddit') = 'reddit'
+                               OR rules.verified_at IS NOT NULL))
                      THEN 'awaiting_manual_post'
                      ELSE 'pending' END
             FROM autopilot_actions a
@@ -1079,10 +1079,11 @@ impl CommunityExecutorWorker {
                           target.claimed_from
             )
             SELECT c.id, c.action_id, c.target_id, c.platform, c.subreddit,
-                   pl.url AS place_url, c.title, c.body, c.smart_link, c.image_url,
+                   COALESCE(NULLIF(t.community_url,''), pl.url) AS place_url, c.title, c.body, c.smart_link, c.image_url,
                    c.media_id, c.source_url, c.relay_source_id, c.claimed_from,
                    a.trace_id, a.causation_id, a.decision_id
             FROM claimed c
+            LEFT JOIN agent_outreach_targets t ON t.id=c.target_id AND t.workspace_id=$1
             LEFT JOIN discovery_places pl ON pl.id = c.place_id
             LEFT JOIN autopilot_actions a ON a.id = c.action_id
             "#,
@@ -1099,31 +1100,49 @@ impl CommunityExecutorWorker {
         Ok(rows)
     }
 
-    /// Processes a single claimed action: checks anti-spam guardrails,
-    /// posts to Reddit via the agents service browser, and records the result.
+    /// Preflights a claimed delivery before the existing publish guardrails.
+    /// Only a real provider receipt can mark the community post as posted.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), CommunityExecutorError> {
-        // The claim lane is `platform = 'reddit'`, so this should be
-        // unreachable — but a row that got here on another platform must not
-        // be submitted to Reddit under a community name that is not a
-        // subreddit. Park it for a person instead of failing it: the draft
-        // itself is fine, the lane is wrong.
-        if !SENDABLE_PLATFORMS.contains(&action.platform.as_str()) {
+        if !crowdrelay_infra::promotion_policy::action_platform_allowed(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+            action.action_id,
+            &action.platform,
+        )
+        .await?
+        {
+            self.mark_failed(action.id, "platform_excluded_by_campaign")
+                .await?;
+            return Ok(());
+        }
+        let manual_reason = if SENDABLE_PLATFORMS.contains(&action.platform.as_str()) {
+            self.preflight_community_send(action).await?
+        } else {
+            Some("community_publisher_unavailable")
+        };
+        if let Some(reason) = manual_reason {
+            if community_preflight_refused(reason) {
+                self.mark_failed(action.id, reason).await?;
+                return Ok(());
+            }
             sqlx::query(
                 "UPDATE community_posts \
                  SET status = 'awaiting_manual_post', \
-                     attempts = attempts - 1, \
+                     attempts = GREATEST(attempts - 1,0), error_message=$3, \
                      updated_at = now() \
                  WHERE id = $1 AND workspace_id = $2",
             )
             .bind(action.id)
             .bind(self.workspace_id.into_uuid())
+            .bind(reason)
             .execute(&self.pool)
             .await?;
             tracing::warn!(
                 post_id = %action.id,
                 platform = %action.platform,
                 subreddit = %action.subreddit,
-                "community delivery for a platform with no sender reached the send lane — parked for manual publication"
+                reason,
+                "community delivery requires manual work"
             );
             return Ok(());
         }
@@ -2289,4 +2308,6 @@ struct RedditPostMetrics {
     removal_visible: bool,
 }
 
+include!("community_executor/preflight.rs");
+include!("community_executor/preflight_tests.rs");
 include!("community_executor/tests.rs");

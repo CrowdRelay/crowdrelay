@@ -180,7 +180,11 @@ test-postgres-env:
       an_anchor_is_one_room_whoever_claims_it \
       lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient \
       channel_yield_waits_for_full_retention_window \
-      two_acts_arrivals_become_one_sample
+      two_acts_arrivals_become_one_sample \
+      video_promotion \
+      autopilot_relay_loader \
+      a_content_artifact_receipt_writes_the_envelope_and_growth_measurements \
+      a_failed_artifact_is_retried_under_a_new_key
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
       the_outcome_appears_in_the_timeline_it_caused \
       the_drip_claims_one_post_per_batch_per_interval \
@@ -188,7 +192,10 @@ test-postgres-env:
       a_late_executor_report_is_not_duplicated \
       a_second_pass_changes_nothing \
       the_sweep_reaches_every_workspace \
-      sheet_intake
+      sheet_intake \
+      video_promotion_links \
+      community_tracked_links \
+      source_refresh_preserves_promotion_policy_campaign_and_request
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test peer_act_seed_postgres -- --ignored --test-threads=1 \
       a_band_sheet_lands_as_attributed_peer_facts
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test team_reminder_drain_postgres -- --ignored --test-threads=1 \
@@ -202,7 +209,8 @@ test-postgres-env:
       material_counts_expired_sources_as_aged_out_and_folds_song_copies \
       a_city_night_nobody_measured_reads_null_not_zero
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --lib -- --ignored --test-threads=1 \
-      postgres_outbox_round_trip
+      postgres_outbox_round_trip \
+      community_preflight_checks_membership_rules_and_credentials_without_sending
     {{CARGO}} test --locked --all-features --package crowdrelay-api --lib -- --ignored --test-threads=1 \
       archive_confirmation_is_not_organic_growth
 

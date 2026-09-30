@@ -9,6 +9,7 @@ struct ContentRow {
     source_id: Uuid,
     source_kind: String,
     source_version: i64,
+    promotion_metadata: Value,
     occurred_at: OffsetDateTime,
     expires_at: OffsetDateTime,
     title: String,
@@ -56,6 +57,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
         SELECT
             source.id AS source_id,
             source.source_kind,
+            source.metadata AS promotion_metadata,
             source.version AS source_version,
             source.occurred_at,
             source.expires_at,
@@ -422,6 +424,11 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                     })
                     .collect(),
                 surge_requested_at: row.surge_requested_at,
+                promotion_excluded_platforms:
+                    crowdrelay_domain::video_promotion::excluded_platforms(
+                        &row.source_kind,
+                        &row.promotion_metadata,
+                    ),
                 social_post: if source_kind == ContentSourceKind::SocialPost {
                     Some(SocialPostFact {
                         title: row.title.clone(),

@@ -115,6 +115,7 @@ pub struct DropSurgeRequest {
     /// delivered keeps its dedupe key and is not re-sent, so "armed" means
     /// "evaluated for", not "sent again".
     pub lanes: Vec<String>,
+    pub excluded_platforms: Vec<String>,
 }
 
 /// The operator's "promote this drop now": stamps `surge_requested_at` on
@@ -129,34 +130,69 @@ pub async fn request_drop_surge(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     source_id: uuid::Uuid,
+    exclusions: Option<Vec<String>>,
 ) -> Result<DropSurgeRequest, RepositoryError> {
-    let source = sqlx::query_as::<_, (String, String)>(
+    if exclusions.as_ref().is_some_and(|platforms| {
+        platforms.iter().any(|platform| {
+            !crowdrelay_domain::video_promotion::PROMOTION_PLATFORMS.contains(&platform.as_str())
+        })
+    }) {
+        return Err(RepositoryError::Conflict);
+    }
+    let mut transaction = pool.begin().await.map_err(map_sqlx)?;
+    let source = sqlx::query_as::<_, (String, String, serde_json::Value)>(
         r#"
         UPDATE content_sources
-        SET metadata = jsonb_set(metadata, '{surge_requested_at}', to_jsonb(now())),
+        SET metadata = jsonb_set(
+                CASE WHEN $3::text[] IS NULL THEN metadata
+                     ELSE jsonb_set(metadata, '{promotion_excluded_platforms}', to_jsonb($3::text[])) END,
+                '{surge_requested_at}', to_jsonb(now())),
             updated_at = now()
         WHERE workspace_id = $1
           AND id = $2
           AND active
           AND source_kind IN ('video', 'release')
-        RETURNING source_kind, title
+        RETURNING source_kind, title, metadata
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(source_id)
-    .fetch_optional(pool)
+    .bind(exclusions)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
-    request_autopilot_cycle(pool, workspace_id).await?;
+    let excluded_platforms =
+        crowdrelay_domain::video_promotion::excluded_platforms(&source.0, &source.2);
+    // A release projection of the same video must not bypass its exclusions.
+    sqlx::query(
+        "UPDATE content_sources peer SET metadata=jsonb_set(peer.metadata,'{promotion_excluded_platforms}',$3::jsonb),updated_at=now() \
+         WHERE peer.workspace_id=$1 AND peer.id<>$2 AND peer.active AND peer.source_kind IN ('video','release') \
+         AND crowdrelay_promotion_video_key(peer.metadata)=crowdrelay_promotion_video_key($4::jsonb)",
+    ).bind(workspace_id.into_uuid()).bind(source_id)
+        .bind(serde_json::json!(&excluded_platforms)).bind(&source.2)
+        .execute(&mut *transaction).await.map_err(map_sqlx)?;
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(AUTOPILOT_CYCLE_CHANNEL)
+        .bind(workspace_id.into_uuid().to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+    transaction.commit().await.map_err(map_sqlx)?;
+    let community_video = source.0 == "video";
     Ok(DropSurgeRequest {
         source_id,
         source_kind: source.0,
         title: source.1,
         lanes: crowdrelay_domain::content_supply::DROP_SURGE_LANES
             .iter()
+            .filter(|lane| {
+                (community_video || **lane != "community")
+                    && !excluded_platforms.iter().any(|excluded| excluded == **lane)
+            })
             .map(|lane| (*lane).to_owned())
             .collect(),
+        excluded_platforms,
     })
 }
 

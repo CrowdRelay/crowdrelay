@@ -1,10 +1,50 @@
-// The action payload for a Reddit community-engagement outcome.
+// The action payload for an admitted community-engagement outcome.
 //
 // `include!`d into `agent_outcomes.rs` so it shares that module's scope.
 // Split out to keep the parent inside the source-size ratchet.
 
+fn pinned_community_uuid(prompt: &str, field: &str) -> Option<Uuid> {
+    let prefix = format!("{field}:");
+    prompt.lines().find_map(|line| {
+        line.trim()
+            .trim_start_matches("- ")
+            .strip_prefix(&prefix)
+            .and_then(|value| Uuid::parse_str(value.trim()).ok())
+    })
+}
+
+/// Validated source facts, never model-produced media or policy.
+#[derive(sqlx::FromRow)]
+struct CommunityPostSourceRow {
+    source_kind: String,
+    source_metadata: Value,
+    media_url: Option<String>,
+    media_id: Option<String>,
+    media_type: Option<String>,
+    thumbnail_url: Option<String>,
+    source_url: Option<String>,
+}
+
 impl AgentOutcomeWorker {
-    /// Builds the `community.engage.request` payload for an admitted Reddit
+    async fn community_producing_task(
+        &self,
+        outcome: &ValidatedOutcome,
+    ) -> Option<(String, String)> {
+        sqlx::query_as(
+            "SELECT template_id, prompt FROM agent_service_tasks WHERE workspace_id=$1 AND id=$2",
+        )
+        .bind(outcome.workspace_id)
+        .bind(outcome.task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(outcome_id=%outcome.id, %error,
+                    "could not resolve producing task; strictest source gate applies");
+            None
+        })
+    }
+
+    /// Builds the `community.engage.request` payload for an admitted community
     /// target: binds a tracked smart link for attribution, attaches media
     /// from the validated source row (never the model's payload), and
     /// carries the creative family the producing run chose so the post's
@@ -30,6 +70,18 @@ impl AgentOutcomeWorker {
         .fetch_optional(&mut **tx)
         .await?
         .unwrap_or_else(|| "reddit".to_owned());
+        if let Some(source) = community_source
+            && !crowdrelay_domain::video_promotion::platform_allowed(
+                &source.source_kind,
+                &source.source_metadata,
+                &target_platform,
+            )
+        {
+            return Err(OutcomeRejection::PlatformExcluded {
+                platform: target_platform,
+            }
+            .into());
+        }
         let subreddit = if target_platform == "reddit" {
             item.and_then(|i| i.get("subreddit"))
                 .and_then(Value::as_str)
@@ -56,10 +108,19 @@ impl AgentOutcomeWorker {
         // redirect instead of an untracked bare link. A model proposal that
         // IS the canonical URL passes the domain check for the same reason;
         // one that points elsewhere is still refused.
-        let destination = if raw_link.is_empty() {
-            source_canonical_url.unwrap_or("")
-        } else {
-            raw_link
+        // A canonical source URL wins over a model-proposed tracked link.
+        // Wrapping /l/ in another /l/ splits attribution and counts two hops.
+        let destination = source_canonical_url.unwrap_or(raw_link);
+        let campaign_id = match source_id {
+            Some(source_id) => {
+                crowdrelay_infra::promotion_campaign::ensure_source_campaign(
+                    tx,
+                    outcome.workspace_id,
+                    source_id,
+                )
+                .await?
+            }
+            None => None,
         };
         // The creative family the engager chose lives on the producing
         // run's evidence row, keyed through the task that dispatched it.
@@ -90,6 +151,7 @@ impl AgentOutcomeWorker {
                     outcome,
                     AgentSmartLinkRequest {
                         destination,
+                        campaign_id,
                         channel_source: &target_platform,
                         // `channel_community` carries a CHECK (non-blank,
                         // <=120 chars); a payload string that violates it

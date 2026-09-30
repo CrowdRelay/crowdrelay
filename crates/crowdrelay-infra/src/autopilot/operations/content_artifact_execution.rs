@@ -21,6 +21,10 @@ pub(in crate::autopilot) async fn execute_content_artifact(
     template_key: &str,
 ) -> Result<(), RepositoryError> {
     let source = load_content_source_for_execution(transaction, workspace_id, source_id).await?;
+    let exclusions = crowdrelay_domain::video_promotion::excluded_platforms(&source.0, &source.2);
+    if !crowdrelay_domain::video_promotion::artifact_allowed(artifact, &exclusions) {
+        return Err(RepositoryError::Conflict);
+    }
     // Scoped to release sources — the vocabulary is release-plan owned, and
     // the evaluator reads it under the same scope.
     if source.0 == "release" {
@@ -50,6 +54,7 @@ pub(in crate::autopilot) async fn execute_content_artifact(
             "source_kind": source.0,
             "source_title": source.1,
             "source_metadata": source.2,
+            "promotion_excluded_platforms": exclusions,
             "artifact": artifact,
             "template_key": template_key,
         }),

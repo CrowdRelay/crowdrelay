@@ -190,6 +190,7 @@ mod tests {
     fn eligibility_needs_a_fresh_linked_video() {
         let now = OffsetDateTime::now_utc();
         let snapshot = |occurred_at, url: Option<&str>| ContentSupplySnapshot {
+            promotion_excluded_platforms: Vec::new(),
             source_id: crate::ContentSourceId::new(),
             source_kind: ContentSourceKind::Video,
             source_version: 1,

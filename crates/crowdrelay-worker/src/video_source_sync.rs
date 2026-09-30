@@ -351,12 +351,12 @@ impl VideoSourceSyncWorker {
                 title = EXCLUDED.title,
                 occurred_at = EXCLUDED.occurred_at,
                 expires_at = EXCLUDED.expires_at,
-                metadata = EXCLUDED.metadata,
+                metadata = content_sources.metadata || EXCLUDED.metadata,
                 version = content_sources.version + 1
             WHERE content_sources.title IS DISTINCT FROM EXCLUDED.title
                OR content_sources.occurred_at IS DISTINCT FROM EXCLUDED.occurred_at
                OR content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
-               OR content_sources.metadata IS DISTINCT FROM EXCLUDED.metadata
+               OR content_sources.metadata IS DISTINCT FROM (content_sources.metadata || EXCLUDED.metadata)
             RETURNING id, version, (xmax = 0)
             "#,
         )

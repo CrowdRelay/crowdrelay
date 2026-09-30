@@ -11,6 +11,7 @@ fn now() -> OffsetDateTime {
 #[test]
 fn event_requests_live_listing_before_channel_specific_artifacts() {
     let snapshot = ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::Event,
         source_version: 1,
@@ -46,6 +47,7 @@ fn event_requests_live_listing_before_channel_specific_artifacts() {
 #[test]
 fn event_builds_press_hook_after_canonical_listing() {
     let snapshot = ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::Event,
         source_version: 1,
@@ -80,6 +82,7 @@ fn event_builds_press_hook_after_canonical_listing() {
 
 fn event_with_failed_listing(failures: u32, minutes_ago: i64) -> ContentSupplySnapshot {
     ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::Event,
         source_version: 1,
@@ -155,6 +158,7 @@ fn an_artifact_that_failed_every_attempt_is_skipped() {
 #[test]
 fn release_requests_artifacts_one_at_a_time_and_respects_inflight() {
     let snapshot = ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::Release,
         source_version: 1,
@@ -190,6 +194,7 @@ fn release_requests_artifacts_one_at_a_time_and_respects_inflight() {
 #[test]
 fn a_year_old_event_is_stale_but_a_year_old_video_is_share_material() {
     let old_event = ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::Event,
         source_version: 1,
@@ -238,6 +243,7 @@ fn a_year_old_event_is_stale_but_a_year_old_video_is_share_material() {
 #[test]
 fn a_finished_show_waits_out_its_material_window_before_harvesting() {
     let show = ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::ShowCompleted,
         source_version: 1,
@@ -291,6 +297,7 @@ fn a_finished_show_waits_out_its_material_window_before_harvesting() {
 
 fn release_snapshot() -> ContentSupplySnapshot {
     ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::Release,
         source_version: 1,
@@ -389,6 +396,7 @@ fn a_synced_social_post_without_facts_cannot_relay() {
     // relay cannot invent a title or link, so it holds rather than send
     // an empty share.
     let snapshot = ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: ContentSourceId::new(),
         source_kind: ContentSourceKind::SocialPost,
         source_version: 1,
@@ -528,6 +536,7 @@ fn reach_and_watch_time_decide_when_the_platform_reports_them() {
 fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
     let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
     let snapshot = |resonance: PostResonance| ContentSupplySnapshot {
+        promotion_excluded_platforms: Vec::new(),
         source_id: crate::ContentSourceId::new(),
         source_kind: ContentSourceKind::SocialPost,
         source_version: 1,

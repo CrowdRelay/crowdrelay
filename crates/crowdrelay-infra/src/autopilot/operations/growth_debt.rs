@@ -899,6 +899,7 @@ mod tests {
             site_origin: None,
             drop_surge_failures: Vec::new(),
             surge_requested_at: None,
+            promotion_excluded_platforms: Vec::new(),
         }
     }
 
