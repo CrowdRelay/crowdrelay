@@ -70,6 +70,16 @@ pub(in crate::autopilot) async fn execute_show_growth(
         return ensure_canonical_show_link(tx, workspace_id, event_id, &event).await;
     }
 
+    // Legacy/stale generic relationship actions fail closed. They do not name
+    // a counterparty, while the Beacon and booking actions do. An executor
+    // must never turn "partner cross-promo" into permission to choose a venue,
+    // promoter, creator or scene contact on CrowdRelay's behalf.
+    if lever.is_relationship_sensitive() {
+        return Err(RepositoryError::ConflictBecause(
+            "relationship-sensitive show growth requires a named Beacon or booking target",
+        ));
+    }
+
     // A post-show lever only exists because the night is over: whichever one
     // executes first registers the show as harvestable material in the same
     // transaction. The harvest itself still waits out the material window in
