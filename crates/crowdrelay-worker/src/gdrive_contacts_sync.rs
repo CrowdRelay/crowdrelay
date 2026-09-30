@@ -105,6 +105,9 @@ struct CycleCounts {
     files_considered: usize,
     files_scanned: usize,
     files_skipped_unchanged: usize,
+    /// Unchanged versions previously refused by Drive's export limit.
+    /// These also count as skipped, but never as a successful import.
+    files_refused: usize,
     files_failed: usize,
     contacts_upserted: u64,
     /// Booking agents whose `active` flag this file's verdict rows flipped.
@@ -153,6 +156,12 @@ struct CycleCounts {
     outreach_replies_recorded: u64,
     outreach_unmatched: u64,
     outreach_failed: u64,
+    festival_sheets: usize,
+    festival_editions_seeded: u64,
+    festival_editions_refreshed: u64,
+    festival_rows_skipped: usize,
+    festival_unmatched: usize,
+    festival_failed: u64,
     /// Scout `OPPORTUNITIES` sheets claimed and their `team_opportunities`
     /// writes — new, refreshed, refused by the parser, failed to write.
     opportunity_sheets: usize,
@@ -163,6 +172,28 @@ struct CycleCounts {
     /// Sheets carrying the human scout's `META_TARGETS` tab; their rows
     /// land in the beacon counters above.
     scout_meta_sheets: usize,
+}
+
+impl CycleCounts {
+    /// A successful provider listing is not proof that its files imported.
+    /// Keep partial scans visible on the connection until every write succeeds
+    /// and the operator fixes any version Drive refuses to export.
+    fn scan_result(&self) -> Result<(), String> {
+        let row_failures = self.venues_failed
+            + self.peer_acts_failed
+            + self.agents_failed
+            + self.beacons_failed
+            + self.outreach_failed
+            + self.festival_failed
+            + self.opportunities_failed;
+        if self.files_failed == 0 && self.files_refused == 0 && row_failures == 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "Drive intake incomplete: {} file failures, {} refused file versions, {} row write failures; check scan logs and split or trim refused workbooks",
+            self.files_failed, self.files_refused, row_failures
+        ))
+    }
 }
 
 impl GDriveContactsSyncWorker {
@@ -308,6 +339,7 @@ impl GDriveContactsSyncWorker {
                 Ok(file_counts) => {
                     counts.files_scanned += file_counts.files_scanned;
                     counts.files_skipped_unchanged += file_counts.files_skipped_unchanged;
+                    counts.files_refused += file_counts.files_refused;
                     counts.contacts_upserted += file_counts.contacts_upserted;
                     counts.agents_resolved += file_counts.agents_resolved;
                     counts.rows_without_email += file_counts.rows_without_email;
@@ -336,6 +368,12 @@ impl GDriveContactsSyncWorker {
                     counts.outreach_replies_recorded += file_counts.outreach_replies_recorded;
                     counts.outreach_unmatched += file_counts.outreach_unmatched;
                     counts.outreach_failed += file_counts.outreach_failed;
+                    counts.festival_sheets += file_counts.festival_sheets;
+                    counts.festival_editions_seeded += file_counts.festival_editions_seeded;
+                    counts.festival_editions_refreshed += file_counts.festival_editions_refreshed;
+                    counts.festival_rows_skipped += file_counts.festival_rows_skipped;
+                    counts.festival_unmatched += file_counts.festival_unmatched;
+                    counts.festival_failed += file_counts.festival_failed;
                     counts.opportunity_sheets += file_counts.opportunity_sheets;
                     counts.opportunities_seeded += file_counts.opportunities_seeded;
                     counts.opportunities_refreshed += file_counts.opportunities_refreshed;
@@ -350,14 +388,11 @@ impl GDriveContactsSyncWorker {
             }
         }
 
-        self.repo
-            .mark_sync_ok(self.workspace_id, connection_id)
-            .await
-            .map_err(|e| e.to_string())?;
         tracing::info!(
             files_considered = counts.files_considered,
             files_scanned = counts.files_scanned,
             files_skipped_unchanged = counts.files_skipped_unchanged,
+            files_refused = counts.files_refused,
             files_failed = counts.files_failed,
             contacts_upserted = counts.contacts_upserted,
             agents_resolved = counts.agents_resolved,
@@ -387,6 +422,12 @@ impl GDriveContactsSyncWorker {
             outreach_replies = counts.outreach_replies_recorded,
             outreach_unmatched = counts.outreach_unmatched,
             outreach_failed = counts.outreach_failed,
+            festival_sheets = counts.festival_sheets,
+            festival_editions_seeded = counts.festival_editions_seeded,
+            festival_editions_refreshed = counts.festival_editions_refreshed,
+            festival_rows_skipped = counts.festival_rows_skipped,
+            festival_unmatched = counts.festival_unmatched,
+            festival_failed = counts.festival_failed,
             opportunity_sheets = counts.opportunity_sheets,
             opportunities_seeded = counts.opportunities_seeded,
             opportunities_refreshed = counts.opportunities_refreshed,
@@ -395,6 +436,11 @@ impl GDriveContactsSyncWorker {
             scout_meta_sheets = counts.scout_meta_sheets,
             "gdrive contacts sync cycle complete"
         );
+        counts.scan_result()?;
+        self.repo
+            .mark_sync_ok(self.workspace_id, connection_id)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -614,6 +660,8 @@ impl GDriveContactsSyncWorker {
                 || recorded.as_deref() == Some(refused_marker.as_str())
             {
                 counts.files_skipped_unchanged = 1;
+                counts.files_refused =
+                    usize::from(recorded.as_deref() == Some(refused_marker.as_str()));
                 return Ok(counts);
             }
         }
@@ -685,6 +733,12 @@ impl GDriveContactsSyncWorker {
         counts.outreach_replies_recorded += harvest.outreach_replies_recorded;
         counts.outreach_unmatched += harvest.outreach_unmatched;
         counts.outreach_failed += harvest.outreach_failed;
+        counts.festival_sheets += harvest.festival_sheets;
+        counts.festival_editions_seeded += harvest.festival_editions_seeded;
+        counts.festival_editions_refreshed += harvest.festival_editions_refreshed;
+        counts.festival_rows_skipped += harvest.festival_rows_skipped;
+        counts.festival_unmatched += harvest.festival_unmatched;
+        counts.festival_failed += harvest.festival_failed;
         counts.opportunity_sheets += harvest.opportunity_sheets;
         counts.opportunities_seeded += harvest.opportunities_seeded;
         counts.opportunities_refreshed += harvest.opportunities_refreshed;
@@ -703,6 +757,7 @@ impl GDriveContactsSyncWorker {
             + harvest.agents_failed
             + harvest.beacons_failed
             + harvest.outreach_failed
+            + harvest.festival_failed
             + harvest.opportunities_failed;
 
         if !harvest.saw_email_column {
@@ -960,7 +1015,80 @@ fn google_error_reason(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod download_refusal_tests {
-    use super::google_error_reason;
+    use super::{CycleCounts, google_error_reason};
+
+    #[test]
+    fn an_empty_or_unchanged_successful_scan_is_clean() {
+        assert!(CycleCounts::default().scan_result().is_ok());
+        let counts = CycleCounts {
+            files_considered: 38,
+            files_skipped_unchanged: 38,
+            // Parser refusals and unmatched history need review, not retries.
+            opportunity_refusals: 2,
+            outreach_unmatched: 60,
+            ..CycleCounts::default()
+        };
+        assert!(counts.scan_result().is_ok());
+    }
+
+    #[test]
+    fn a_partial_scan_cannot_clear_the_connection_error() {
+        let counts = CycleCounts {
+            files_scanned: 37,
+            files_failed: 1,
+            ..CycleCounts::default()
+        };
+        let error = counts.scan_result().expect_err("a file failed to import");
+        assert!(error.contains("1 file failures"));
+    }
+
+    #[test]
+    fn an_unchanged_refused_version_stays_visible_without_downloading_again() {
+        let counts = CycleCounts {
+            files_skipped_unchanged: 38,
+            files_refused: 1,
+            ..CycleCounts::default()
+        };
+        let error = counts.scan_result().expect_err("a workbook remains unread");
+        assert!(error.contains("1 refused file versions"));
+    }
+
+    #[test]
+    fn every_registry_write_failure_keeps_the_scan_incomplete() {
+        for counts in [
+            CycleCounts {
+                venues_failed: 1,
+                ..CycleCounts::default()
+            },
+            CycleCounts {
+                peer_acts_failed: 1,
+                ..CycleCounts::default()
+            },
+            CycleCounts {
+                agents_failed: 1,
+                ..CycleCounts::default()
+            },
+            CycleCounts {
+                beacons_failed: 1,
+                ..CycleCounts::default()
+            },
+            CycleCounts {
+                outreach_failed: 1,
+                ..CycleCounts::default()
+            },
+            CycleCounts {
+                opportunities_failed: 1,
+                ..CycleCounts::default()
+            },
+            CycleCounts {
+                festival_failed: 1,
+                ..CycleCounts::default()
+            },
+        ] {
+            let error = counts.scan_result().expect_err("a registry write failed");
+            assert!(error.contains("1 row write failures"));
+        }
+    }
 
     #[test]
     fn the_reason_google_gave_is_kept() {

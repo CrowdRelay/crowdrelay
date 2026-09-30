@@ -184,7 +184,8 @@ test-postgres-env:
       signed_http_delivery_is_exact_and_durable \
       a_late_executor_report_is_not_duplicated \
       a_second_pass_changes_nothing \
-      the_sweep_reaches_every_workspace
+      the_sweep_reaches_every_workspace \
+      sheet_intake
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test peer_act_seed_postgres -- --ignored --test-threads=1 \
       a_band_sheet_lands_as_attributed_peer_facts
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test team_reminder_drain_postgres -- --ignored --test-threads=1 \
