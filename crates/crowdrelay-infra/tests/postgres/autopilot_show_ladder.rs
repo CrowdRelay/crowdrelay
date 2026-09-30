@@ -179,15 +179,25 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("ladder").await?;
 
-    // One rung parked on the event, one parked on a foreign event, and one
-    // already queued by a person's own approval — the rows the ladder must
-    // tell apart.
+    // One owned rung parked on the event, one relationship-sensitive partner
+    // rung parked beside it, one foreign rung, and one already queued by a
+    // person's own approval — the ladder must tell all four apart.
     let parked = seed_rung(
         &fixture.pool,
         fixture.workspace_id,
         fixture.event_id,
-        "partner_cross_promo",
+        "fan_ambassadors",
         "show.growth.request",
+        "awaiting_approval",
+        None,
+    )
+    .await?;
+    let partner = seed_rung(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.event_id,
+        "partner_cross_promo",
+        "show.growth.request.partner",
         "awaiting_approval",
         None,
     )
@@ -222,7 +232,7 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
             None,
         )
         .await?;
-    assert_eq!(mutation.status, "approved:1", "the parked rung released");
+    assert_eq!(mutation.status, "approved:1", "only the owned rung released");
 
     // The live approval row is what future snapshots read.
     let live: bool = sqlx::query_scalar(
@@ -238,13 +248,21 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
     let (status, approved_by) = rung_state(&fixture.pool, fixture.workspace_id, parked).await?;
     assert_eq!(status, "queued");
     assert_eq!(approved_by.as_deref(), Some("operator:show_ladder"));
+    let (partner_status, partner_approved_by) =
+        rung_state(&fixture.pool, fixture.workspace_id, partner).await?;
+    assert_eq!(
+        partner_status, "awaiting_approval",
+        "partner outreach stays with the booker"
+    );
+    assert!(partner_approved_by.is_none());
     let (foreign_status, _) = rung_state(&fixture.pool, fixture.other_workspace, foreign).await?;
     assert_eq!(
         foreign_status, "awaiting_approval",
         "another workspace's rung stays parked"
     );
 
-    // Revoke: the ladder's own release cancels; the individual approval stands.
+    // Revoke: the ladder's own release cancels; the individual approval and
+    // the still-human-owned partner rung stand.
     let mutation = fixture
         .repository
         .revoke_show_ladder(
@@ -264,6 +282,8 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
     let (status, approved_by) = rung_state(&fixture.pool, fixture.workspace_id, individual).await?;
     assert_eq!(status, "queued");
     assert_eq!(approved_by.as_deref(), Some("operator:admin_api_key"));
+    let (partner_status, _) = rung_state(&fixture.pool, fixture.workspace_id, partner).await?;
+    assert_eq!(partner_status, "awaiting_approval");
 
     // The same revoke key replays instead of double-cancelling.
     let replay = fixture
@@ -399,6 +419,73 @@ async fn ladder_authorized_candidates_queue_with_operator_provenance()
         result.is_err(),
         "approve on a missing event must not orphan"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn ladder_flag_cannot_pre_authorize_relationship_sensitive_partner_action()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("ladder-partner-persist").await?;
+
+    fixture
+        .repository
+        .approve_show_ladder(
+            fixture.workspace_id,
+            crowdrelay_domain::EventId::from_uuid(fixture.event_id),
+            &IdempotencyKey::parse("ladder-approve-partner-persist")?,
+            None,
+        )
+        .await?;
+
+    // Deliberately forge the stale/legacy shape: even if some upstream caller
+    // still carries ladder_authorized=true, persistence owns the final safety
+    // boundary for relationship-sensitive promotion.
+    let candidate = crowdrelay_application::autopilot::DecisionCandidate {
+        context: crowdrelay_application::autopilot::AutopilotContext::ShowGrowth,
+        subject: crowdrelay_application::autopilot::ActionSubject::Event(
+            crowdrelay_domain::EventId::from_uuid(fixture.event_id),
+        ),
+        decision_kind: "activate_show_growth_lever",
+        confidence: crowdrelay_domain::autonomy::Confidence::from_basis_points(9_000)?,
+        disposition: crowdrelay_domain::autonomy::PolicyDisposition::RequireApproval,
+        reason: "relationship-sensitive show promotion",
+        input_snapshot: serde_json::json!({}),
+        policy_snapshot: serde_json::json!({"ladder_authorized": true}),
+        action: crowdrelay_application::autopilot::AutopilotActionPayload::RequestShowGrowth {
+            event_id: crowdrelay_domain::EventId::from_uuid(fixture.event_id),
+            lever: crowdrelay_domain::show_growth::ShowGrowthLever::PartnerCrossPromo,
+            template_key: "partner_cross_promo".to_owned(),
+            send_at: None,
+        },
+        decision_key: format!("decision:test-ladder-partner:{}", Uuid::now_v7()),
+        action_idempotency_key: format!("action:test-ladder-partner:{}", Uuid::now_v7()),
+    };
+
+    let persisted = fixture
+        .repository
+        .persist_candidate(
+            fixture.workspace_id,
+            &candidate,
+            &crowdrelay_domain::TraceContext::root(fixture.workspace_id),
+        )
+        .await?;
+    assert!(persisted.action_created);
+
+    let (status, approved_by): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, approved_by FROM autopilot_actions \
+         WHERE workspace_id=$1 AND subject_id=$2 \
+           AND idempotency_key=$3",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.event_id)
+    .bind(&candidate.action_idempotency_key)
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(status, "awaiting_approval");
+    assert!(approved_by.is_none(), "the booker must still approve this ask");
 
     Ok(())
 }

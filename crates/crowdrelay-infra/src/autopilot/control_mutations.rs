@@ -1009,6 +1009,15 @@ impl PostgresAutopilotRepository {
                 WHERE workspace_id=$1 AND context='show_growth'
                   AND subject_kind='event' AND subject_id=$2
                   AND status='awaiting_approval'
+                  -- A broad show-ladder approval automates repeatable owned
+                  -- promotion, not relationship capital. Historical partner
+                  -- rungs may already be parked before the safer evaluator
+                  -- existed, so enforce the same boundary at release time.
+                  AND COALESCE(payload ->> 'lever', '') NOT IN (
+                      'partner_cross_promo',
+                      'grassroots_scene_relay',
+                      'social_proof_relay'
+                  )
                   AND (approval_expires_at IS NULL OR approval_expires_at > $3)
                 RETURNING id
                 "#,

@@ -136,14 +136,15 @@ fn request_candidate(
         RATE_FLOOR,
     );
     let mut policy_snapshot = policy_evidence(policy, domain_policy)?;
-    // P.4: a live ladder approval is the operator's one "yes" over the whole
-    // announce-to-recap sequence, carried as provenance rather than a
-    // disposition override — the class ceiling and the envelope still get
-    // their say first, and `Deny` is never lifted: approving the ladder was
-    // never approving a lever the night's own facts cannot carry. The action
-    // insert reads the flag and records `operator:show_ladder` as the rung's
-    // approver, so a later revoke cancels exactly what the ladder released.
+    // P.4: a live ladder approval is the operator's one "yes" over the
+    // repeatable first-party/owned sequence, carried as provenance rather than
+    // a disposition override. Relationship-sensitive third-party promotion is
+    // intentionally excluded: a broad campaign approval must never spend the
+    // booker's relationship capital with a venue, promoter, creator or scene
+    // partner. Those asks remain individually reviewable. `Deny` is never
+    // lifted in either case.
     if snapshot.ladder_approved
+        && !lever.requires_relationship_approval()
         && let Some(map) = policy_snapshot.as_object_mut()
     {
         map.insert(
