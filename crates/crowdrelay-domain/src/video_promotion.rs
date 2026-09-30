@@ -55,7 +55,10 @@ pub fn youtube_video_id(metadata: &Value) -> Option<String> {
 /// An explicit empty list permits Meta; malformed stored policy fails closed.
 pub fn excluded_platforms(kind: &str, metadata: &Value) -> Vec<String> {
     if !metadata.is_object() {
-        return PROMOTION_PLATFORMS.iter().map(|platform| (*platform).to_owned()).collect();
+        return PROMOTION_PLATFORMS
+            .iter()
+            .map(|platform| (*platform).to_owned())
+            .collect();
     }
     match metadata.get("promotion_excluded_platforms") {
         None if kind == "video" || (kind == "release" && youtube_video_id(metadata).is_some()) => {
