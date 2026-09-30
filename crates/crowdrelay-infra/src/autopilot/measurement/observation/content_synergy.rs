@@ -101,7 +101,6 @@ pub(super) async fn content_link_clicks(
     .map_err(map_sqlx)
 }
 
-
 /// Fans acquired through this action's tracked content link.
 ///
 /// The join is deliberately visitor-bound: a click on the action's smart link
