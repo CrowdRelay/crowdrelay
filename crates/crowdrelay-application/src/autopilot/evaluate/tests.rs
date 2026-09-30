@@ -558,6 +558,7 @@ mod tests {
                 media_id: Some("1790".to_owned()),
                 media_type: Some("IMAGE".to_owned()),
                 thumbnail_url: None,
+                acquired_fans: 0,
                 resonance: Some(crowdrelay_domain::content_supply::PostResonance {
                     engagement: 90,
                     peer_median: Some(40),
@@ -733,6 +734,7 @@ mod tests {
                 media_id: None,
                 media_type: None,
                 thumbnail_url: None,
+                acquired_fans: 0,
                 resonance: None,
             }),
         };
@@ -805,6 +807,7 @@ mod tests {
                 media_id: None,
                 media_type: None,
                 thumbnail_url: None,
+                acquired_fans: 0,
                 resonance: Some(PostResonance {
                     engagement,
                     peer_median: Some(40),
@@ -904,6 +907,7 @@ mod tests {
                 media_id: Some("1790".to_owned()),
                 media_type: Some("IMAGE".to_owned()),
                 thumbnail_url: None,
+                acquired_fans: 0,
                 resonance: Some(crowdrelay_domain::content_supply::PostResonance {
                     engagement: 90,
                     peer_median: Some(40),
