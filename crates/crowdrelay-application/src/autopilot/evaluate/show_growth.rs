@@ -44,12 +44,19 @@ pub(super) fn show_growth_candidates(
             .copied()
             .unwrap_or(0)
     };
-    // Passed over: levers only an external executor can carry out while none
-    // is live, and levers that failed `MAX_LEVER_ATTEMPTS` times. Either
-    // would otherwise hold every later lever of the ladder.
+    // Generic show growth owns deterministic free/owned distribution. A
+    // relationship-sensitive move needs a named counterparty, so it belongs to
+    // the Beacon/booking loops that carry an exact beacon_id/target_id,
+    // relationship evidence and their own cooldown. Passing those levers over
+    // here prevents a vague "contact a partner" action from competing with the
+    // precise relationship engine and lets the owned ladder keep moving.
+    //
+    // External infrastructure levers are also passed over while no executor
+    // can carry them, and repeatedly failed levers cannot block the ladder.
     let evaluate = |snapshot| {
         evaluate_show_growth_passing_over(snapshot, domain_policy, now, |lever| {
-            (!external_executor_live && !lever.is_first_party())
+            lever.is_relationship_sensitive()
+                || (!external_executor_live && !lever.is_first_party())
                 || failed(lever) >= MAX_LEVER_ATTEMPTS
         })
         .0
