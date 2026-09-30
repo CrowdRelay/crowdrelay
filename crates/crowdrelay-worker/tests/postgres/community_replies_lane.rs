@@ -516,9 +516,8 @@ async fn explicit_meta_follow_intent_gets_a_human_reviewed_tracked_capture_link(
             "capture stays tenant-native and source-tagged: {destination}"
         );
         ensure!(source.as_deref() == Some("instagram"));
-        ensure!(
-            community.as_deref() == Some(&format!("comment:{comment_id}"))
-        );
+        let expected_community = format!("comment:{comment_id}");
+        ensure!(community.as_deref() == Some(expected_community.as_str()));
         ensure!(creative.as_deref() == Some("owned_reply_capture"));
         Ok(())
     }
