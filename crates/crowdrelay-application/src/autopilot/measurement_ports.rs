@@ -79,8 +79,10 @@ pub enum AutopilotMeasurementKind {
     StrategistInsightQuality14d,
     /// Fan engagement in the 7 days after a lifecycle message (welcome,
     /// re-engagement, referral invite). Counts ticket orders, Signal push
-    /// endpoint creations, and referral redemptions by the specific fan
-    /// who received the message. The baseline is 0 — lifecycle messages
+    /// endpoint creations, and qualified referrals made by the specific fan
+    /// who received the message. Being referred by somebody else is not the
+    /// recipient's response to the message, and a pending referral is not yet
+    /// a fan-growth outcome. The baseline is 0 — lifecycle messages
     /// target new or dormant fans who haven't engaged yet. This is the
     /// per-fan outcome signal that closes the learning loop for lifecycle
     /// messaging: the brain learns which message templates actually move
