@@ -296,7 +296,7 @@ impl PostgresAcquisitionRepository {
                      AND act.id = post.action_id
                     LEFT JOIN content_sources AS source
                       ON source.workspace_id = click.workspace_id
-                     AND source.id::text = lower(act.payload->>'source_id')
+                     AND source.id::text = lower(COALESCE(act.payload->>'source_id', act.payload->'draft'->>'source_id'))
                     ORDER BY post.posted_at DESC NULLS LAST,
                              post.created_at DESC, post.action_id
                     LIMIT 1

@@ -256,7 +256,7 @@ pub(in crate::autopilot) async fn complete_show_task(
     if !fact || task.is_physical() {
         return Err(RepositoryError::Conflict);
     }
-    sqlx::query(r#"INSERT INTO show_checklist_items(workspace_id,event_id,item_key,status,note,updated_at) VALUES($1,$2,$3,'done','Verified automatically by CrowdRelay from first-party state',$4) ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at WHERE show_checklist_items.status<>'done'"#)
+    sqlx::query(r#"INSERT INTO show_checklist_items(workspace_id,event_id,item_key,status,note,updated_at) VALUES($1,$2,$3,'done','Verified automatically by CrowdRelay from first-party state',$4) ON CONFLICT(workspace_id,event_id,item_key) DO UPDATE SET status='done',note=EXCLUDED.note,updated_at=EXCLUDED.updated_at WHERE show_checklist_items.status NOT IN ('done','skipped','blocked')"#)
       .bind(workspace_id.into_uuid()).bind(event_id.into_uuid()).bind(task.key()).bind(now).execute(&mut **tx).await.map_err(map_sqlx)?;
     Ok(())
 }

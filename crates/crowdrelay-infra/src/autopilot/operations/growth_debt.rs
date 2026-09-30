@@ -577,7 +577,12 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         SELECT * FROM calendar_routing_conflicts
         UNION ALL
         SELECT * FROM ticket_sales_behind_pace
-        ORDER BY idle_hours DESC, subject_id
+        -- Structural debts report idle_hours = 0 forever; pure recency order
+        -- would seat them behind every stale contact and they would never be
+        -- read at all. Structural kinds first, then by idleness.
+        ORDER BY (debt_kind IN ('calendar_routing_conflict',
+                                'ticket_sales_behind_pace')) DESC,
+                 idle_hours DESC, subject_id
         LIMIT $4
         "#,
     )

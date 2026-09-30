@@ -81,8 +81,8 @@ NEXT DECISION
   This is guarded twice on purpose — in SQL at the loader, and again in the
   causal layer via `CausalEstimand::includes_in_treatment_effect`.
 - **CONFLICT**: an evidence row whose control arm is unresolved is held rather
-  than replayed; the delta cursor moves past a row exactly once, so "wait" is
-  the only recoverable answer.
+  than replayed; committed measurement horizons are gated by the consumed
+  observation cursor, so unresolved contrasts need a recoverable wait.
 
 ### The randomised contrast
 

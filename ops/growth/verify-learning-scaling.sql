@@ -31,7 +31,7 @@ WHERE workspace_id=$1
                last_partial_resolution_at)>$2 END;
 EXPLAIN (ANALYZE,BUFFERS)
 EXECUTE old_learning_delta('00000000-0000-0000-0000-000000000001',now()-interval '2 days');
--- Shape and predicate of migration 0388.
+-- Shape and predicate of migration 0390.
 CREATE INDEX new_learning_cursor ON learning_scale (
     workspace_id,
     GREATEST(resolved_at,replayed_3d_at,replayed_14d_at,replayed_30d_at,

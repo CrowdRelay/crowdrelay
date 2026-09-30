@@ -188,7 +188,7 @@ async fn scorecards_for(
     let emails = email_ledgers(pool, ws, &campaign_patterns).await?;
     let pushes = push_ledgers(pool, ws, &campaign_patterns).await?;
     let youtube_waiting = youtube_replies_waiting(pool, ws, &source_ids).await?;
-    let curator = curator_queue(pool, ws).await?;
+    let curator = curator_queue(pool, ws, &source_ids).await?;
     let analytics_granted = analytics_grant(pool, ws).await?;
     let reddit = reddit_standing(pool, ws, now).await?;
     let common_touched = common_touched_domains(pool, ws).await?;
@@ -266,7 +266,7 @@ async fn scorecards_for(
                 as u32,
             has_analytics_grant: analytics_granted,
             fan_email_undelivered: email_ledger.as_ref().map_or(0, |e| e.failed) as u32,
-            curator_queue_unsent: curator.unsent as u32,
+            curator_queue_unsent: curator.get(&video.id).map_or(0, |c| c.unsent) as u32,
             approved_youtube_replies_blocked: youtube_waiting.get(&video.id).copied().unwrap_or(0)
                 as u32,
         };
@@ -301,7 +301,7 @@ async fn scorecards_for(
                 fan_email: email_ledger,
                 push: push_ledger,
                 press: press_ledger,
-                curator_queue: curator.clone(),
+                curator_queue: curator.get(&video.id).cloned().unwrap_or_default(),
                 youtube_replies_approved_waiting: youtube_waiting
                     .get(&video.id)
                     .copied()
@@ -363,7 +363,7 @@ const VIDEO_LINKS_CTE: &str = r#"
         FROM smart_links link
         JOIN videos ON videos.source_key LIKE 'youtube:%'
           AND length(videos.video_id) >= 6
-          AND link.destination_url LIKE '%' || videos.video_id || '%'
+          AND strpos(link.destination_url, videos.video_id) > 0
         WHERE link.workspace_id = $1
     ),
     video_links AS (
@@ -371,7 +371,7 @@ const VIDEO_LINKS_CTE: &str = r#"
         UNION
         SELECT link.id, link.slug, direct.source_id
         FROM smart_links link
-        JOIN direct ON link.destination_url LIKE '%/l/' || direct.slug
+        JOIN direct ON right(link.destination_url, char_length(direct.slug) + 3) = '/l/' || direct.slug
         WHERE link.workspace_id = $1
     ),
     inner_hops AS (
@@ -380,7 +380,7 @@ const VIDEO_LINKS_CTE: &str = r#"
         WHERE EXISTS (
             SELECT 1 FROM smart_links m
             WHERE m.workspace_id = $1 AND m.id <> v.id
-              AND m.destination_url LIKE '%/l/' || v.slug
+              AND right(m.destination_url, char_length(v.slug) + 3) = '/l/' || v.slug
         )
     )
 "#;
@@ -427,7 +427,7 @@ async fn click_ledgers(
 ) -> Result<HashMap<Uuid, VideoClickLedger>, RepositoryError> {
     let rows = sqlx::query_as::<_, (Uuid, String, i64)>(&format!(
         "{VIDEO_LINKS_CTE}
-            SELECT v.source_id, 'community' AS lane, count(click.*) AS clicks
+            SELECT v.source_id, 'community' AS lane, count(DISTINCT click.id) AS clicks
             FROM community_posts post
             JOIN smart_links link
               ON link.workspace_id = post.workspace_id
@@ -440,7 +440,7 @@ async fn click_ledgers(
               AND link.id NOT IN (SELECT id FROM inner_hops)
             GROUP BY v.source_id
             UNION ALL
-            SELECT v.source_id, 'telegram', count(click.*)
+            SELECT v.source_id, 'telegram', count(DISTINCT click.id)
             FROM telegram_posts post
             JOIN video_links v ON v.id = post.smart_link_id
             JOIN click_events click
@@ -450,7 +450,7 @@ async fn click_ledgers(
               AND v.id NOT IN (SELECT id FROM inner_hops)
             GROUP BY v.source_id
             UNION ALL
-            SELECT v.source_id, 'discord', count(click.*)
+            SELECT v.source_id, 'discord', count(DISTINCT click.id)
             FROM discord_posts post
             JOIN video_links v ON v.id = post.smart_link_id
             JOIN click_events click
@@ -460,7 +460,7 @@ async fn click_ledgers(
               AND v.id NOT IN (SELECT id FROM inner_hops)
             GROUP BY v.source_id
             UNION ALL
-            SELECT v.source_id, 'social', count(click.*)
+            SELECT v.source_id, 'social', count(DISTINCT click.id)
             FROM social_posts post
             JOIN video_links v ON v.id = post.smart_link_id
             JOIN click_events click
@@ -526,7 +526,7 @@ async fn post_ledgers(
                     JOIN autopilot_actions a
                       ON a.workspace_id = post.workspace_id
                      AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = a.payload ->> 'source_id'
+                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
                     WHERE post.workspace_id = $1
                     UNION ALL
                     SELECT 'community', post.id, v.source_id
@@ -542,7 +542,7 @@ async fn post_ledgers(
                     JOIN autopilot_actions a
                       ON a.workspace_id = post.workspace_id
                      AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = a.payload ->> 'source_id'
+                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
                     WHERE post.workspace_id = $1
                     UNION ALL
                     SELECT 'telegram', post.id, v.source_id
@@ -555,7 +555,7 @@ async fn post_ledgers(
                     JOIN autopilot_actions a
                       ON a.workspace_id = post.workspace_id
                      AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = a.payload ->> 'source_id'
+                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
                     WHERE post.workspace_id = $1
                     UNION ALL
                     SELECT 'discord', post.id, v.source_id
@@ -568,7 +568,7 @@ async fn post_ledgers(
                     JOIN autopilot_actions a
                       ON a.workspace_id = post.workspace_id
                      AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = a.payload ->> 'source_id'
+                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
                     WHERE post.workspace_id = $1
                     UNION ALL
                     SELECT 'social', post.id, v.source_id
@@ -640,7 +640,7 @@ async fn release_plans(
           ON plan.workspace_id = cs.workspace_id
          AND (plan.source_key = cs.source_key
               OR (cs.source_key LIKE 'youtube:%'
-                  AND plan.listen_url LIKE '%' || substring(cs.source_key from 9) || '%'))
+                  AND strpos(plan.listen_url, substring(cs.source_key from 9)) > 0))
         WHERE cs.workspace_id = $1 AND cs.id = ANY($2)
         ORDER BY cs.id, plan.active DESC, plan.created_at DESC
         "#,
@@ -667,19 +667,26 @@ async fn press_ledgers(
     if plan_keys.is_empty() {
         return Ok(HashMap::new());
     }
-    let counts = sqlx::query_as::<_, (String, i64, i64)>(
+    let counts = sqlx::query_as::<_, (String, i64, i64, i64)>(
         r#"
         SELECT o.subject_key,
                count(*) AS seeded,
-               count(*) FILTER (WHERE EXISTS (
-                   SELECT 1 FROM outreach_interactions i
-                   WHERE i.workspace_id = o.workspace_id
-                     AND i.direction = 'outbound'
-                     AND (i.opportunity_id = o.id
-                          OR (i.target_id = o.target_id
-                              AND i.occurred_at >= o.observed_at))
-               )) AS pitched
+               count(*) FILTER (WHERE pitched.pitched) AS pitched,
+               -- Only an in-window row is still owed a letter; a pitch whose
+               -- deadline passed reads as missed work, never as open work.
+               count(*) FILTER (WHERE o.expires_at > now()
+                                AND NOT pitched.pitched) AS remaining
         FROM outreach_opportunities o
+        CROSS JOIN LATERAL (
+            SELECT EXISTS (
+                SELECT 1 FROM outreach_interactions i
+                WHERE i.workspace_id = o.workspace_id
+                  AND i.direction = 'outbound'
+                  AND (i.opportunity_id = o.id
+                       OR (i.target_id = o.target_id
+                           AND i.occurred_at >= o.observed_at))
+            ) AS pitched
+        ) pitched
         WHERE o.workspace_id = $1
           AND o.subject_kind = 'release'
           AND o.subject_key = ANY($2)
@@ -697,11 +704,22 @@ async fn press_ledgers(
         r#"
         SELECT o.subject_key, count(DISTINCT i.id)
         FROM outreach_interactions i
-        JOIN outreach_opportunities o
-          ON o.workspace_id = i.workspace_id
-         AND o.target_id = i.target_id
-         AND o.subject_kind = 'release'
-         AND o.subject_key = ANY($2)
+        -- One reply lands on one opportunity: the one it names, else the
+        -- freshest this target was pitched at or before the reply — not every
+        -- release that ever wrote them.
+        JOIN LATERAL (
+            SELECT o.subject_key
+            FROM outreach_opportunities o
+            WHERE o.workspace_id = i.workspace_id
+              AND o.target_id = i.target_id
+              AND o.subject_kind = 'release'
+              AND o.subject_key = ANY($2)
+              AND o.active
+            ORDER BY (o.id = i.opportunity_id) DESC,
+                     (o.observed_at <= i.occurred_at) DESC,
+                     o.observed_at DESC
+            LIMIT 1
+        ) o ON true
         WHERE i.workspace_id = $1 AND i.direction = 'inbound'
           AND NOT EXISTS (
               SELECT 1 FROM outreach_interactions r
@@ -722,15 +740,14 @@ async fn press_ledgers(
 
     Ok(counts
         .into_iter()
-        .map(|(key, seeded, pitched)| {
+        .map(|(key, seeded, pitched, remaining)| {
             let seeded = seeded.max(0) as u64;
-            let pitched = pitched.max(0) as u64;
             (
                 key.clone(),
                 VideoPressLedger {
                     seeded,
-                    pitched: pitched.min(seeded),
-                    remaining: seeded.saturating_sub(pitched),
+                    pitched: pitched.max(0) as u64,
+                    remaining: remaining.max(0) as u64,
                     replies_unanswered: unanswered.get(&key).copied().unwrap_or(0).max(0) as u64,
                 },
             )
@@ -888,31 +905,49 @@ async fn youtube_replies_waiting(
     })
 }
 
-/// The manual curator-DM lane, workspace-wide: admitted handle candidates and
-/// how many carry a recorded send. A candidate is "sent" when an outbound
-/// touch names it — the marker the mark-sent route writes once it exists.
-async fn curator_queue(pool: &PgPool, ws: Uuid) -> Result<VideoCuratorLedger, RepositoryError> {
-    let row = sqlx::query_as::<_, (i64, i64)>(
+/// The manual curator-DM lane: the workspace's admitted handle candidates,
+/// scored per video. A send is keyed `manual:curator:{source_id}` — sent for
+/// one video must not mark the candidate done for every video on the board.
+async fn curator_queue(
+    pool: &PgPool,
+    ws: Uuid,
+    source_ids: &[Uuid],
+) -> Result<HashMap<Uuid, VideoCuratorLedger>, RepositoryError> {
+    sqlx::query_as::<_, (Uuid, i64, i64)>(
         r#"
-        SELECT count(*) FILTER (WHERE sent.id IS NULL) AS unsent,
-               count(sent.id) AS sent
+        SELECT video.source_id,
+               count(*) FILTER (WHERE sent.id IS NULL) AS unsent,
+               count(*) FILTER (WHERE sent.id IS NOT NULL) AS sent
         FROM outreach_candidates c
+        CROSS JOIN unnest($2::uuid[]) AS video(source_id)
         LEFT JOIN outreach_interactions sent
           ON sent.workspace_id = c.workspace_id
          AND sent.direction = 'outbound'
          AND sent.candidate_id = c.id
+         AND sent.source_key = 'manual:curator:' || video.source_id::text
         WHERE c.workspace_id = $1
           AND c.route_kind = 'handle'
           AND c.status = 'admitted'
+        GROUP BY video.source_id
         "#,
     )
     .bind(ws)
-    .fetch_one(pool)
+    .bind(source_ids)
+    .fetch_all(pool)
     .await
-    .map_err(map_sqlx)?;
-    Ok(VideoCuratorLedger {
-        unsent: row.0.max(0) as u64,
-        sent: row.1.max(0) as u64,
+    .map_err(map_sqlx)
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(source_id, unsent, sent)| {
+                (
+                    source_id,
+                    VideoCuratorLedger {
+                        unsent: unsent.max(0) as u64,
+                        sent: sent.max(0) as u64,
+                    },
+                )
+            })
+            .collect()
     })
 }
 

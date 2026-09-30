@@ -91,9 +91,13 @@ Delete merged checkpoint branches promptly and enable GitHub automatic head-bran
 deletion when repository-setting access is available.
 
 
-## Final continuity checkpoint after #402
+## Final continuity checkpoint after the main bug-hunt sweep
 
-Reviewed main `a2114862661487606fb25f80d6efbb5651ec5772`. This is a code audit;
+Reviewed main `a2114862661487606fb25f80d6efbb5651ec5772`, then reconciled
+`67c597cc581a52c7fdac1b3cd44f141947be4c0d`. The newer main repairs destination
+retry, nested source attribution, decline cooldowns, webhook subscriptions and
+video analytics; these changes are preserved. Our migrations follow them as
+0389/0390. This is a code audit;
 there is no new production audience measurement. The earlier numbers above are
 historical, and neither those numbers nor synthetic fixtures set capacity targets.
 
@@ -145,7 +149,8 @@ rather than a manually maintained comment.
 ### Validation and remaining acceptance gates
 
 The actual brain/domain Cargo suites ran locally with serialization intact:
-641 brain tests, 1,284 domain tests, 182 application tests and one doctest. Compact-checkpoint tests cover
+After reconciling the newer main: 641 brain tests, 1,288 domain tests,
+183 application tests and one doctest. Compact-checkpoint tests cover
 100,000 observations, saturation, stale/retry handling, metric reset and preview
 projection. The actual SQLx metacognition adapter ran against the PostgreSQL wire
 fixture with 50,000 workspace state rows and 100,000 cycle rows. Those are not

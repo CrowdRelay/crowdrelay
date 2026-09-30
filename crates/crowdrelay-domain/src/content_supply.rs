@@ -21,7 +21,7 @@ pub use drop_surge::{
     DROP_SURGE_LANES, DROP_SURGE_MAX_ATTEMPTS, DropSurgeLaneFailure, drop_surge_eligible,
     drop_surge_link_slug,
 };
-pub use retry::{FailedArtifact, MAX_ARTIFACT_ATTEMPTS, artifact_retry_due};
+pub use retry::{FailedArtifact, MAX_ARTIFACT_ATTEMPTS, RelayLaneFailure, artifact_retry_due};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +242,11 @@ pub struct CommunityRelayTarget {
     /// `None` means nobody recorded it; the drafting worker then infers the
     /// language from the subreddit's own description.
     pub language: Option<String>,
+    /// Relay dispatches into this community that failed, one entry per
+    /// source they carried. The evaluator re-emits a retry under an
+    /// `:attempt{n}` key — without it a dead dispatch dedupes forever while
+    /// the community keeps winning the rotation slot.
+    pub relay_failures: Vec<RelayLaneFailure>,
 }
 
 /// How many fans a Signal push would reach right now, measured with the

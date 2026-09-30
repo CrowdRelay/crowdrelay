@@ -1,16 +1,79 @@
 // Included by snapshots.rs: bounded, platform-aware community selection.
 
+/// Task-level relay failures: the action `succeeded` — it queued the
+/// drafting task — but the task itself died. Counted beside the action's
+/// own failures so a dead `community-repost` run retries under an attempt
+/// key instead of freezing the (source, community) lane as consumed forever.
+/// Same shape as `load_failed_drop_surge_tasks`, keyed by target this time.
+async fn load_failed_relay_tasks(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<HashMap<Uuid, Vec<RelayLaneFailure>>, RepositoryError> {
+    if !sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+        .fetch_one(&repo.pool)
+        .await
+        .map_err(map_sqlx)?
+    {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, i64, OffsetDateTime)>(
+        r#"
+        SELECT action.subject_id,
+               split_part(action.idempotency_key, ':', 3)::uuid AS source_id,
+               count(*)::bigint,
+               max(COALESCE(task.completed_at, task.created_at))
+        FROM autopilot_actions action
+        JOIN LATERAL (
+            SELECT task.status, task.created_at, task.completed_at
+            FROM agent_service_tasks task
+            WHERE task.workspace_id = action.workspace_id
+              AND task.metadata->>'action_id' = action.id::text
+            ORDER BY task.created_at DESC, task.id DESC
+            LIMIT 1
+        ) task ON true
+        WHERE action.workspace_id = $1
+          AND action.context = 'content_supply'
+          AND action.action_kind = 'agent.run.request'
+          AND action.subject_kind = 'target_community'
+          AND action.status = 'succeeded'
+          AND task.status = 'failed'
+          AND split_part(action.idempotency_key, ':', 2) = 'relay'
+          AND split_part(action.idempotency_key, ':', 4) = 'community'
+        GROUP BY action.subject_id, source_id
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let mut failures: HashMap<Uuid, Vec<RelayLaneFailure>> = HashMap::new();
+    for (target, source, count, last_failed_at) in rows {
+        failures
+            .entry(target)
+            .or_default()
+            .push(RelayLaneFailure {
+                source_id: ContentSourceId::from_uuid(source),
+                failures: u32::try_from(count).unwrap_or(u32::MAX),
+                last_failed_at,
+            });
+    }
+    Ok(failures)
+}
+
 pub(in crate::autopilot) async fn load_relay_community_targets(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<CommunityRelayTarget>, RepositoryError> {
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, String, Option<String>)>(
+    let rows = sqlx::query_as::<_, RelayTargetRow>(
         r#"
         SELECT t.id,
                CASE WHEN COALESCE(NULLIF(t.platform, ''), 'reddit') = 'reddit'
-                    THEN t.subreddit ELSE t.display_name END,
-               t.language, COALESCE(NULLIF(t.platform, ''), 'reddit'),
-               COALESCE(NULLIF(t.community_url, ''), place.url)
+                    THEN t.subreddit ELSE t.display_name END AS community_label,
+               t.language, COALESCE(NULLIF(t.platform, ''), 'reddit') AS platform,
+               COALESCE(NULLIF(t.community_url, ''), place.url) AS community_url,
+               COALESCE(relay_failed.source_ids, ARRAY[]::uuid[]) AS relay_failure_sources,
+               COALESCE(relay_failed.counts, ARRAY[]::bigint[]) AS relay_failure_counts,
+               COALESCE(relay_failed.last_failed, ARRAY[]::timestamptz[]) AS relay_failure_last
         FROM agent_outreach_targets t
         LEFT JOIN discovery_places place
           ON place.id = t.place_id AND place.workspace_id = t.workspace_id
@@ -37,6 +100,29 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                   AND split_part(action.idempotency_key, ':', 5) = t.id::text
             ) turn
         ) last ON true
+        LEFT JOIN LATERAL (
+            -- Dispatches into this community whose action itself failed,
+            -- grouped by the source they carried (key element 3). Attempt
+            -- keys land here too — element 5 stays the target id, so every
+            -- attempt's failure counts toward the same lane.
+            SELECT array_agg(source_part ORDER BY source_part) AS source_ids,
+                   array_agg(failures ORDER BY source_part) AS counts,
+                   array_agg(last_failed ORDER BY source_part) AS last_failed
+            FROM (
+                SELECT split_part(action.idempotency_key, ':', 3)::uuid AS source_part,
+                       count(*)::bigint AS failures,
+                       max(COALESCE(action.finished_at, action.updated_at)) AS last_failed
+                FROM autopilot_actions action
+                WHERE action.workspace_id = t.workspace_id
+                  AND action.context = 'content_supply'
+                  AND action.action_kind = 'agent.run.request'
+                  AND action.status = 'failed'
+                  AND split_part(action.idempotency_key, ':', 2) = 'relay'
+                  AND split_part(action.idempotency_key, ':', 4) = 'community'
+                  AND split_part(action.idempotency_key, ':', 5) = t.id::text
+                GROUP BY source_part
+            ) per_source
+        ) relay_failed ON true
         WHERE t.workspace_id = $1
           AND t.target_kind = 'community'
           AND t.screening_verdict = 'admitted'
@@ -75,16 +161,52 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
     .fetch_all(&repo.pool)
     .await
     .map_err(map_sqlx)?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(id, subreddit, language, platform, community_url)| CommunityRelayTarget {
-                target_id: OutreachTargetId::from_uuid(id),
-                subreddit,
-                language,
-                platform,
-                community_url,
-            },
-        )
-        .collect())
+    let mut task_failures = load_failed_relay_tasks(repo, workspace_id).await?;
+    rows.into_iter()
+        .map(|row| {
+            let mut relay_failures: Vec<RelayLaneFailure> = row
+                .relay_failure_sources
+                .iter()
+                .zip(&row.relay_failure_counts)
+                .zip(&row.relay_failure_last)
+                .map(|((source, failures), last_failed_at)| RelayLaneFailure {
+                    source_id: ContentSourceId::from_uuid(*source),
+                    failures: u32::try_from(*failures).unwrap_or(u32::MAX),
+                    last_failed_at: *last_failed_at,
+                })
+                .collect();
+            for failure in task_failures.remove(&row.id).unwrap_or_default() {
+                if let Some(existing) = relay_failures
+                    .iter_mut()
+                    .find(|existing| existing.source_id == failure.source_id)
+                {
+                    existing.failures = existing.failures.saturating_add(failure.failures);
+                    existing.last_failed_at =
+                        existing.last_failed_at.max(failure.last_failed_at);
+                } else {
+                    relay_failures.push(failure);
+                }
+            }
+            Ok(CommunityRelayTarget {
+                target_id: OutreachTargetId::from_uuid(row.id),
+                subreddit: row.community_label,
+                language: row.language,
+                platform: row.platform,
+                community_url: row.community_url,
+                relay_failures,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, FromRow)]
+struct RelayTargetRow {
+    id: Uuid,
+    community_label: String,
+    language: Option<String>,
+    platform: String,
+    community_url: Option<String>,
+    relay_failure_sources: Vec<Uuid>,
+    relay_failure_counts: Vec<i64>,
+    relay_failure_last: Vec<OffsetDateTime>,
 }

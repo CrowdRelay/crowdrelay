@@ -35,6 +35,38 @@ pub const MAX_ARTIFACT_ATTEMPTS: u32 = 3;
 /// minutes after the first failure, an hour after the second.
 #[must_use]
 pub fn artifact_retry_due(failed: &FailedArtifact) -> OffsetDateTime {
-    let doublings = failed.failures.saturating_sub(1).min(4);
-    failed.last_failed_at + Duration::minutes(30 * (1_i64 << doublings))
+    retry_due_at(failed.failures, failed.last_failed_at)
+}
+
+/// A community relay dispatch that failed for one source — the action
+/// itself, or the drafting task it queued.
+///
+/// Same repair the artifact chain and surge lanes got: a failed relay is
+/// neither delivered nor in flight, and re-raising it under the same key
+/// dedupes onto the dead action. That is worse than it looks — the target
+/// loader treats a failed dispatch as a spent turn yet counts it toward no
+/// `last_draft_at`, so the community re-enters selection first
+/// (`NULLS FIRST`) and burns a per-post relay slot forever while emitting
+/// nothing. The retry carries its attempt number in the key and stops after
+/// [`MAX_ARTIFACT_ATTEMPTS`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RelayLaneFailure {
+    /// The synced source whose draft dispatch into the community failed.
+    pub source_id: crate::ContentSourceId,
+    pub failures: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_failed_at: OffsetDateTime,
+}
+
+impl RelayLaneFailure {
+    /// The same growing delay as [`artifact_retry_due`].
+    #[must_use]
+    pub fn retry_due(&self) -> OffsetDateTime {
+        retry_due_at(self.failures, self.last_failed_at)
+    }
+}
+
+fn retry_due_at(failures: u32, last_failed_at: OffsetDateTime) -> OffsetDateTime {
+    let doublings = failures.saturating_sub(1).min(4);
+    last_failed_at + Duration::minutes(30 * (1_i64 << doublings))
 }

@@ -34,7 +34,13 @@ CONSTRAINTS = {
         "crates/crowdrelay-domain/src/fanbase.rs",
         "Platform",
     ),
-    "viryaos_growth_metric_series_platform_check": (
+    "growth_metric_series_platform_check": (
+        "crates/crowdrelay-domain/src/growth_metrics.rs",
+        "MetricPlatform",
+    ),
+    # An objective judges a metric series, so it takes the same alphabet; the
+    # constraint was born inline in 0092 and is re-typed from 0387 on.
+    "growth_objectives_platform_check": (
         "crates/crowdrelay-domain/src/growth_metrics.rs",
         "MetricPlatform",
     ),
@@ -48,17 +54,49 @@ ADD_CONSTRAINT = re.compile(
     r"(?:IN|=\s*ANY)\s*\(\s*(?:ARRAY\s*)?\[?(?P<values>[^\])]*)",
     re.IGNORECASE,
 )
+# `ALTER TABLE x RENAME CONSTRAINT a TO b` — 0346 renamed the whole schema's
+# constraints in one pass; without this the gate would compare a snapshot the
+# live database no longer carries.
+RENAME_CONSTRAINT = re.compile(
+    r"RENAME\s+CONSTRAINT\s+(?P<old>\w+)\s+TO\s+(?P<new>\w+)",
+    re.IGNORECASE,
+)
 QUOTED = re.compile(r"'([^']+)'")
 # `Self::Merch => "merch",` and `Platform::Meta,` style entries.
 AS_STR_ARM = re.compile(r"Self::(\w+)\s*=>\s*\"([^\"]+)\"")
 
 
+def _constraint_renames() -> dict[str, str]:
+    """`RENAME CONSTRAINT a TO b` as `a -> b`, in migration order.
+
+    0346 renamed the whole schema's constraints in one pass; without following
+    the chain the gate compares a snapshot under a name the live database no
+    longer carries.
+    """
+    renames: dict[str, str] = {}
+    for path in sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+        for match in RENAME_CONSTRAINT.finditer(path.read_text(encoding="utf-8")):
+            renames[match.group("old").lower()] = match.group("new").lower()
+    return renames
+
+
+def _resolve(renames: dict[str, str], name: str) -> str:
+    """A constraint's identity is its current name — follow renames forward."""
+    seen: set[str] = set()
+    while name in renames and name not in seen:
+        seen.add(name)
+        name = renames[name]
+    return name
+
+
 def effective_constraint(name: str) -> set[str] | None:
     """Values the constraint holds after every migration has been applied."""
+    renames = _constraint_renames()
+    wanted = _resolve(renames, name.lower())
     latest: set[str] | None = None
     for path in sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-9]_*.sql")):
         for match in ADD_CONSTRAINT.finditer(path.read_text(encoding="utf-8")):
-            if match.group("name").lower() == name.lower():
+            if _resolve(renames, match.group("name").lower()) == wanted:
                 latest = set(QUOTED.findall(match.group("values")))
     return latest
 
@@ -107,11 +145,13 @@ class PlatformVocabularyV1(unittest.TestCase):
         deployment still stores fails the migration and blocks the deploy.
         Dropping a platform is a data migration, not a constraint edit.
         """
+        renames = _constraint_renames()
         for name in CONSTRAINTS:
+            wanted = _resolve(renames, name.lower())
             seen: set[str] = set()
             for path in sorted(MIGRATIONS.glob("[0-9][0-9][0-9][0-9]_*.sql")):
                 for match in ADD_CONSTRAINT.finditer(path.read_text(encoding="utf-8")):
-                    if match.group("name").lower() != name.lower():
+                    if _resolve(renames, match.group("name").lower()) != wanted:
                         continue
                     values = set(QUOTED.findall(match.group("values")))
                     self.assertEqual(

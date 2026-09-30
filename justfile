@@ -53,6 +53,7 @@ check: fmt lint test
     python3 scripts/test_serialized_dates_v1.py
     python3 scripts/test-modularity-contract.py
     python3 scripts/test_platform_vocabulary_v1.py
+    python3 scripts/test_outbox_route_parity_v1.py
     python3 scripts/test_sql_identifiers_v1.py
     python3 scripts/test_sql_scalar_types_v1.py
     python3 scripts/test_sql_columns_v1.py
