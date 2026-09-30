@@ -57,3 +57,18 @@ Do not delete source metadata, campaigns, links, or event history. Without the t
 5. Reconcile campaign clicks, distinct visitor identifiers, actual attributed fan identifiers, consented signup, activation, retention, and conversion using the existing acquisition ledger and growth verification report. No synthetic signup or notification-only success satisfies this step.
 
 Local gates include real PostgreSQL proofs for platform isolation, request-receipt rejection, source policy changes after queuing, campaign reuse, legacy link repair, connector preservation, rollback, and credential/rule preflight without external sends.
+
+
+## Owned fan capture on fresh YouTube uploads
+
+A fresh YouTube upload is both a discovery asset and an acquisition surface. When the tenant has:
+- a connected `youtube_account` grant,
+- standing social auto-post approval,
+- a configured member-site root, and
+- at least one operator-written join-ask variant,
+
+the YouTube worker posts one top-level comment on a fresh owned upload using that join-ask text plus a first-party tracked link to `/signal`.
+
+The link belongs to the source's promotion campaign and is tagged as `channel_source=youtube`, `channel_community=video:{video_id}`, `channel_creative=fan_capture_comment`. A click therefore enters the normal anonymous visitor ledger; if that visitor later signs up, the acquisition can be credited back to the source campaign and YouTube channel instead of stopping at a view/click metric.
+
+The worker does **not** edit video metadata, invent copy, or add a second CTA when the source description already contains `/signal`. Posting is capped at four capture comments per workspace per 24 hours and three attempts per video. Claim metadata on `content_sources` makes concurrent workers fail closed; stale claims reopen after two hours.
