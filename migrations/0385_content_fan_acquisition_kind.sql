@@ -5,10 +5,10 @@
 -- exact tracked-link visit inside the same seven-day window. The Rust enum and
 -- parser fail closed on unknown kinds, and the database does the same here.
 
-ALTER TABLE viryaos_autopilot_measurements
-    DROP CONSTRAINT IF EXISTS viryaos_autopilot_measurements_measurement_kind_check;
-ALTER TABLE viryaos_autopilot_measurements
-    ADD CONSTRAINT viryaos_autopilot_measurements_measurement_kind_check
+ALTER TABLE autopilot_measurements
+    DROP CONSTRAINT IF EXISTS autopilot_measurements_measurement_kind_check;
+ALTER TABLE autopilot_measurements
+    ADD CONSTRAINT autopilot_measurements_measurement_kind_check
     CHECK (measurement_kind IN (
         'ticket_revenue_72h','merch_gross_proxy_7d','promotion_roas_7d',
         'booking_reply_7d','outreach_reply_7d','audience_ticket_revenue_72h',
