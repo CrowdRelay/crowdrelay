@@ -435,6 +435,7 @@ fn fact(resonance: Option<PostResonance>) -> SocialPostFact {
         media_id: None,
         media_type: None,
         thumbnail_url: None,
+        acquired_fans: 0,
         resonance,
     }
 }
@@ -471,8 +472,21 @@ fn only_posts_that_landed_at_home_go_to_communities() {
         posted,
         posted + Duration::hours(6)
     ));
-    // Never read: fail closed.
+    // Never read and no conversion: fail closed.
     assert!(!resonates_for_communities(&fact(None), posted, settled));
+    // A quiet post that created a real fan has stronger evidence than likes.
+    let converting = SocialPostFact {
+        acquired_fans: 1,
+        ..fact(None)
+    };
+    assert!(resonates_for_communities(&converting, posted, settled));
+    // Even conversion evidence waits for the same settle window; the system
+    // must not stampede a fresh post before its normal home-audience read.
+    assert!(!resonates_for_communities(
+        &converting,
+        posted,
+        posted + Duration::hours(6)
+    ));
     // A new account with no history: any real engagement is enough, none is not.
     let first = PostResonance {
         engagement: 4,
