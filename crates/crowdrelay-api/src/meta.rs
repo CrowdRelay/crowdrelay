@@ -112,4 +112,3 @@ pub async fn get() -> impl IntoResponse {
         }),
     )
 }
-
