@@ -1193,9 +1193,8 @@ mod tests {
     #[test]
     fn a_skipped_step_does_not_block_the_one_behind_it() {
         // A gated step nobody approved must not stall the play. Settling step
-        // zero leaves step one to run on its own schedule. The track-us play
-        // is single-step since the post-show rung moved to Show Growth, so the
-        // two-step dormant revival carries the property.
+        // zero leaves step one to run on its own schedule; the now single-step
+        // track-us play can't carry the property, so dormant revival does.
         let mut snapshot = running_of(PlayKind::DormantRevival);
         snapshot.steps[0].settled = true;
         let due = snapshot.steps[1].due_at + Duration::hours(1);
