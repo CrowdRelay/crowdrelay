@@ -7,11 +7,12 @@
 //! a column that does not exist would be a production failure with no earlier
 //! warning.
 //!
-//! Four properties are asserted here and none of them can be reached without
+//! Five properties are asserted here and none of them can be reached without
 //! rows: two acts' arrivals through the same channel become one sample of the
-//! sum; an act outside the organisation never joins it; a fan who left counts
-//! in neither the numerator nor the denominator; and a signup with no visitor
-//! is unattributed rather than quietly dropped.
+//! sum; an act outside the organisation never joins it; a fan who left stays in
+//! the denominator but not the numerator; an arrival younger than 30 days is
+//! not called retained early; and a signup with no visitor is unattributed
+//! rather than quietly dropped.
 
 use crate::common;
 
@@ -53,7 +54,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     // One act's own channel, larger than the pooled one. It leads on arrivals
     // and must still never be pooled evidence.
-    for index in 0..34 {
+    for index in 0..50 {
         arrival(
             pool,
             act_a,
@@ -65,7 +66,8 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     }
-    // Churn. Netted out by construction: absent from both sides of the rate.
+    // Churn. The acquisition happened, so it stays in the denominator; the
+    // fan no longer qualifies for the retained numerator.
     for index in 0..9 {
         arrival(
             pool,
@@ -78,6 +80,19 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     }
+    // Fresh success is real acquisition evidence but not retention evidence yet.
+    // It must not enter the mature 30-90d cohort until the full window elapsed.
+    arrival_with_age(
+        pool,
+        act_a,
+        reddit_a,
+        250,
+        true,
+        "active",
+        now,
+        5,
+    )
+    .await?;
     // The outsider's traffic, which the organisation must not see at all.
     for index in 0..7 {
         arrival(pool, outsider, reddit_out, 300 + index, true, "active", now).await?;
@@ -100,11 +115,14 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         reddit.acts
     );
     assert_eq!(
-        reddit.signups, 32,
-        "16 + 16 active arrivals pooled to {} — a churned fan or an outsider's fan leaked in",
+        reddit.signups, 41,
+        "32 mature active arrivals + 9 churned arrivals should remain in the denominator; the fresh or outsider fan leaked in: {}",
         reddit.signups
     );
-    assert_eq!(reddit.stayed_30d, 16, "12 + 4 stayed");
+    assert_eq!(
+        reddit.stayed_30d, 16,
+        "only the 12 + 4 mature, still-engaged fans belong in the numerator"
+    );
     assert_eq!(reddit.community.as_deref(), Some("r-metal"));
 
     let facebook = counts
@@ -117,7 +135,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "one act's channel reported {} acts, which would let it claim to be pooled",
         facebook.acts
     );
-    assert_eq!(facebook.signups, 34);
+    assert_eq!(facebook.signups, 50);
 
     assert_eq!(
         counts.unattributed_signups, 3,
@@ -221,10 +239,26 @@ async fn arrival(
     status: &str,
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    arrival_with_age(
+        pool, workspace_id, smart_link_id, index, stayed, status, now, 45,
+    )
+    .await
+}
+
+async fn arrival_with_age(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    smart_link_id: Uuid,
+    index: i32,
+    stayed: bool,
+    status: &str,
+    now: OffsetDateTime,
+    age_days: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let fan_id = Uuid::now_v7();
     let visitor = Uuid::now_v7();
     let email = format!("fan{index}-{}@example.test", workspace_id.simple());
-    let signed_up = now - time::Duration::days(45);
+    let signed_up = now - time::Duration::days(age_days);
 
     sqlx::query(
         "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1, $2, $3, $4)",
@@ -323,7 +357,7 @@ async fn untracked_arrival(
     .bind(workspace_id)
     .bind(fan_id)
     .bind(format!("req-untracked-{index}-{}", workspace_id.simple()))
-    .bind(now - time::Duration::days(20))
+    .bind(now - time::Duration::days(45))
     .execute(pool)
     .await?;
     Ok(())
