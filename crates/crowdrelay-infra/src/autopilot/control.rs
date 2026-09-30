@@ -126,9 +126,6 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                latest_report.occurred_at AS executor_reported_at,
                                latest_report.metadata AS executor_metadata
                         FROM autopilot_actions action
-                LEFT JOIN autopilot_decisions decision
-                  ON decision.workspace_id=action.workspace_id
-                 AND decision.id=action.decision_id
                         LEFT JOIN LATERAL (
                             SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at, report.metadata
                             FROM autopilot_execution_reports report
