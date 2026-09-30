@@ -157,6 +157,28 @@ pub fn template_platform(template: &str) -> Option<&'static str> {
     }
 }
 
+/// Growth-metric platforms a template can directly compound.
+///
+/// Most templates own one platform. `social-post` is different on purpose:
+/// one run creates Instagram, Facebook and X variants, so refusing to map it
+/// to platform growth made real Meta follower growth invisible to strategy
+/// ranking until tracked conversions arrived. The rank uses the strongest
+/// measured platform signal; direct retained-fan attribution still lives in
+/// the stronger evidence tier below and therefore wins once it matures.
+#[must_use]
+pub fn template_growth_platforms(template: &str) -> &'static [&'static str] {
+    match template {
+        "social-post" => &["instagram", "facebook", "x"],
+        _ => match template_platform(template) {
+            Some("social") => &["social"],
+            Some("telegram") => &["telegram"],
+            Some("bandcamp") => &["bandcamp"],
+            Some("signal") => &["signal"],
+            _ => &[],
+        },
+    }
+}
+
 /// What a channel actually returned, measured at the fan rather than the
 /// follower: attributed conversions and the distinct visitors whose clicks
 /// preceded them, read from `fan_provenance_events`.
@@ -290,12 +312,15 @@ pub fn rank_templates(
     channel_yield: &[ChannelYield],
 ) -> Vec<&'static str> {
     let score_for = |template: &str| -> (u32, RankKey) {
-        let growth_key = template_platform(template).and_then(|platform| {
-            growth
-                .iter()
-                .find(|entry| entry.platform == platform)
-                .and_then(PlatformGrowth::rank_key)
-        });
+        let growth_key = template_growth_platforms(template)
+            .iter()
+            .filter_map(|platform| {
+                growth
+                    .iter()
+                    .find(|entry| entry.platform == *platform)
+                    .and_then(PlatformGrowth::rank_key)
+            })
+            .max();
 
         let channels = template_channels(template);
         let durable = channels
@@ -373,6 +398,40 @@ mod tests {
     #[test]
     fn no_evidence_leaves_the_strategy_order_untouched() {
         assert_eq!(rank_templates(PRIOR, &[], &[]), PRIOR.to_vec());
+    }
+
+    #[test]
+    fn social_post_uses_the_best_meta_platform_growth_signal() {
+        let prior = ["telegram-poster", "social-post", "growth-strategist"];
+        let measured = [
+            growth("telegram", 2_000, 0),
+            growth("facebook", 5_000, 0),
+            growth("instagram", 2_000, 200),
+        ];
+
+        let ranked = rank_templates(&prior, &measured, &[]);
+
+        assert_eq!(
+            ranked.first(),
+            Some(&"social-post"),
+            "a multi-platform social template must benefit from the Meta surface that is actually compounding"
+        );
+    }
+
+    #[test]
+    fn durable_social_fan_yield_still_outranks_meta_follower_growth() {
+        let prior = ["social-post", "telegram-poster"];
+        let measured = [growth("instagram", 10_000, 1_000)];
+        let mut telegram = yielded("telegram", 1, 0);
+        telegram.durable_90d = 1;
+
+        let ranked = rank_templates(&prior, &measured, &[telegram]);
+
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-poster"),
+            "a retained attributed fan is stronger North-Star evidence than even healthy follower growth"
+        );
     }
 
     #[test]
