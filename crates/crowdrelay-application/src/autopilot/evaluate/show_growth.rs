@@ -49,7 +49,13 @@ pub(super) fn show_growth_candidates(
     // would otherwise hold every later lever of the ladder.
     let evaluate = |snapshot| {
         evaluate_show_growth_passing_over(snapshot, domain_policy, now, |lever| {
-            (!external_executor_live && !lever.is_first_party())
+            // Relationship selection has one owner. The Beacon evaluator emits
+            // RequestBeaconOutreach with a concrete verified beacon_id,
+            // suppression state and relationship phase; generic show.growth
+            // carries none of those and therefore never owns partner/scene
+            // outbound delivery.
+            lever.is_beacon_outreach()
+                || (!external_executor_live && !lever.is_first_party())
                 || failed(lever) >= MAX_LEVER_ATTEMPTS
         })
         .0
