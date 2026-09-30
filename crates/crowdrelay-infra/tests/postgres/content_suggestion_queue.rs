@@ -431,12 +431,12 @@ async fn a_concept_that_never_produced_retires_and_the_tail_is_named()
 }
 
 /// 5.6 — shared learning, respecting per-band taste. A same-style sibling's
-/// productions pool into the target act's prior and the raised row names the
-/// evidence; a different-style labelmate and an org-less lookalike teach
-/// nothing; an act that never declared a style pools nothing.
+/// measured fan yield becomes a weak roster prior. A different-style labelmate
+/// and an org-less lookalike teach nothing; an act that never declared a style
+/// pools nothing.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
-async fn a_same_style_siblings_productions_lift_the_format()
+async fn a_same_style_siblings_measured_fan_yield_informs_the_format()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
 
@@ -448,8 +448,7 @@ async fn a_same_style_siblings_productions_lift_the_format()
         .await?;
 
     // The act being advised: full band fixture, two-format spine so both
-    // beats are feasible, and a declared style written messily on purpose —
-    // the sibling's tidier spelling must still match it.
+    // beats are feasible, and a declared style written messily on purpose.
     let target = WorkspaceId::new();
     seed_workspace(&pool, target).await?;
     sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
@@ -458,7 +457,8 @@ async fn a_same_style_siblings_productions_lift_the_format()
         .execute(&pool)
         .await?;
     sqlx::query(
-        "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'act_style', 'Stoner  DOOM')",
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'act_style', 'Stoner  DOOM')",
     )
     .bind(target.into_uuid())
     .execute(&pool)
@@ -475,37 +475,6 @@ async fn a_same_style_siblings_productions_lift_the_format()
     )
     .await?;
 
-    // Two productions on the sibling's ledger — the floor the lift needs.
-    async fn produced_twice(
-        pool: &PgPool,
-        workspace_id: Uuid,
-        format_key: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for _ in 0..2 {
-            let suggestion_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO content_suggestions
-                     (id, workspace_id, format_key, concept, status)
-                 VALUES ($1, $2, $3, 'sibling beat', 'done')
-                 RETURNING id",
-            )
-            .bind(Uuid::now_v7())
-            .bind(workspace_id)
-            .bind(format_key)
-            .fetch_one(pool)
-            .await?;
-            sqlx::query(
-                "INSERT INTO suggestion_outcomes
-                     (workspace_id, suggestion_id, outcome, resolved_at)
-                 VALUES ($1, $2, 'done', now() - interval '10 days')",
-            )
-            .bind(workspace_id)
-            .bind(suggestion_id)
-            .execute(pool)
-            .await?;
-        }
-        Ok(())
-    }
-
     async fn member(
         pool: &PgPool,
         organization_id: Option<Uuid>,
@@ -513,7 +482,8 @@ async fn a_same_style_siblings_productions_lift_the_format()
     ) -> Result<Uuid, Box<dyn std::error::Error>> {
         let id = WorkspaceId::new();
         sqlx::query(
-            "INSERT INTO workspaces (id, slug, name, organization_id) VALUES ($1, $2, $2, $3)",
+            "INSERT INTO workspaces (id, slug, name, organization_id)
+             VALUES ($1, $2, $2, $3)",
         )
         .bind(id.into_uuid())
         .bind(format!("member-{}", id.into_uuid().simple()))
@@ -521,7 +491,8 @@ async fn a_same_style_siblings_productions_lift_the_format()
         .execute(pool)
         .await?;
         sqlx::query(
-            "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, 'act_style', $2)",
+            "INSERT INTO tenant_settings (workspace_id, key, value)
+             VALUES ($1, 'act_style', $2)",
         )
         .bind(id.into_uuid())
         .bind(style)
@@ -530,35 +501,162 @@ async fn a_same_style_siblings_productions_lift_the_format()
         Ok(id.into_uuid())
     }
 
-    // Same style, same org — teaches. Different style, same org — does not.
-    // Same style, no org — cannot even be seen.
+    async fn measured_piece(
+        pool: &PgPool,
+        workspace_id: Uuid,
+        format_key: &str,
+        ordinal: u32,
+        new_fans: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source_id = Uuid::now_v7();
+        let prefix = format!("yield-{}-{ordinal}", workspace_id.simple());
+        sqlx::query(
+            "INSERT INTO content_sources
+                 (id, workspace_id, source_kind, source_key, title, occurred_at,
+                  expires_at, format_key)
+             VALUES ($1,$2,'video',$3,'roster measured piece',
+                     now() - interval '30 days', now() + interval '30 days',$4)",
+        )
+        .bind(source_id)
+        .bind(workspace_id)
+        .bind(format!("{prefix}-source"))
+        .bind(format_key)
+        .execute(pool)
+        .await?;
+
+        let decision_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO autopilot_decisions
+                 (id, workspace_id, decision_key, context, subject_kind, subject_id,
+                  decision_kind, confidence_basis_points, disposition, reason,
+                  input_snapshot, policy_snapshot, recommendation, evaluated_at,
+                  trace_id)
+             VALUES ($1,$2,$3,'growth_intelligence','content_source',$4,
+                     'seed.post',9000,'auto_execute','roster yield fixture',
+                     '{}','{}','{}',now(),$5)
+             RETURNING id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(format!("{prefix}-decision"))
+        .bind(source_id)
+        .bind(Uuid::now_v7())
+        .fetch_one(pool)
+        .await?;
+        let action_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO autopilot_actions
+                 (id, workspace_id, decision_id, context, action_kind, subject_kind,
+                  subject_id, idempotency_key, payload, status, finished_at)
+             VALUES ($1,$2,$3,'growth_intelligence','community.engage.request',
+                     'content_source',$4,$5,$6,'succeeded',
+                     now() - interval '21 days')
+             RETURNING id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(source_id)
+        .bind(format!("{prefix}-action"))
+        .bind(json!({
+            "kind": "request_community_engagement",
+            "source_id": source_id.to_string(),
+            "platform": "reddit",
+            "title": "roster measured piece",
+            "body": "fixture",
+        }))
+        .fetch_one(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO community_posts
+                 (id, workspace_id, action_id, subreddit, title, body, status,
+                  posted_at)
+             VALUES ($1,$2,$3,'r/Metal','roster measured piece','fixture',
+                     'posted',now() - interval '21 days')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(action_id)
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            WITH seeded AS (
+                INSERT INTO fans (
+                    workspace_id, normalized_email, status, created_at, updated_at
+                )
+                SELECT $1,
+                       $2 || '-' || n::text || '@example.test',
+                       'active',
+                       now() - interval '20 days',
+                       now() - interval '20 days'
+                FROM generate_series(1, $4::int) AS n
+                RETURNING id
+            )
+            INSERT INTO fan_provenance_events (
+                workspace_id, fan_id, event_kind, channel, source_target,
+                action_id, attribution_method, attribution_confidence, occurred_at,
+                format_key
+            )
+            SELECT $1, id, 'conversion', 'reddit', 'fixture',
+                   $3, 'last_tracked_click', 1.0,
+                   now() - interval '20 days', $5
+            FROM seeded
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&prefix)
+        .bind(action_id)
+        .bind(new_fans)
+        .bind(format_key)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    // Same style, same org — two mature pieces at 30 fans each teach.
+    // Different style and org-less lookalikes get deliberately stronger data
+    // so the test proves the taste/org gates, not an accidental tie.
     let sibling = member(&pool, Some(organization_id), "stoner doom").await?;
-    produced_twice(&pool, sibling, "playthrough").await?;
+    measured_piece(&pool, sibling, "playthrough", 1, 30).await?;
+    measured_piece(&pool, sibling, "playthrough", 2, 30).await?;
+
     let other_style = member(&pool, Some(organization_id), "black metal").await?;
-    produced_twice(&pool, other_style, "playthrough").await?;
+    measured_piece(&pool, other_style, "playthrough", 1, 100).await?;
+    measured_piece(&pool, other_style, "playthrough", 2, 100).await?;
+
     let outsider = member(&pool, None, "stoner doom").await?;
-    produced_twice(&pool, outsider, "playthrough").await?;
+    measured_piece(&pool, outsider, "playthrough", 1, 100).await?;
+    measured_piece(&pool, outsider, "playthrough", 2, 100).await?;
 
     let today = time::OffsetDateTime::now_utc().date();
     let raised = repo.refresh_suggestions(target, today).await?;
     let proven = raised
         .iter()
         .find(|s| s.format_key.as_deref() == Some("playthrough"))
-        .ok_or("the spine's proven beat is raised")?;
+        .ok_or("the spine's roster-proven beat is raised")?;
     assert_eq!(
-        proven.evidence.get("sibling_productions"),
+        proven.evidence.get("sibling_measured_pieces"),
         Some(&json!(2)),
-        "only the same-style sibling's two productions count — not the \
-         black-metal labelmate's, not the org-less lookalike's"
+        "only two same-style same-org pieces may contribute"
+    );
+    assert_eq!(
+        proven.evidence.get("sibling_fans_per_piece"),
+        Some(&json!(30.0)),
+        "the roster prior uses measured fan yield, not production count"
+    );
+    assert_eq!(
+        proven.evidence.get("sibling_yield_multiplier"),
+        Some(&json!(1.25)),
+        "strong sibling evidence is still capped at a weak +25% prior"
     );
     assert!(
-        proven.reason.contains("same-style acts"),
-        "the raised row says where the prior came from: {}",
+        proven.reason.contains("fans/piece"),
+        "the raised row says what the sibling evidence actually measured: {}",
         proven.reason
     );
 
-    // A workspace with no declared style pools nothing — the prior is
-    // honest absence, not a borrowed one.
+    // A workspace with no declared style pools nothing — the prior is honest
+    // absence, not a borrowed label-wide average.
     let unstyled = WorkspaceId::new();
     seed_workspace(&pool, unstyled).await?;
     sqlx::query("UPDATE workspaces SET organization_id = $2 WHERE id = $1")
@@ -579,10 +677,11 @@ async fn a_same_style_siblings_productions_lift_the_format()
     .await?;
     let theirs = repo.refresh_suggestions(unstyled, today).await?;
     assert!(
-        theirs
-            .iter()
-            .all(|s| s.evidence.get("sibling_productions") == Some(&json!(0))),
-        "an act that never declared a style inherits nothing"
+        theirs.iter().all(|s| {
+            s.evidence.get("sibling_measured_pieces") == Some(&json!(0))
+                && s.evidence.get("sibling_yield_multiplier") == Some(&json!(1.0))
+        }),
+        "an act that never declared a style inherits no roster prior"
     );
     Ok(())
 }
