@@ -79,6 +79,38 @@ def is_test_module(path: Path) -> bool:
     return path.name == "tests.rs" or path.name.endswith("_tests.rs")
 
 
+def production_body(source: str) -> str:
+    """Strip `#[cfg(test)]` modules, keeping everything around them.
+
+    The same fixture reasoning as `is_test_module`: an inline `#[cfg(test)]`
+    block is test code wherever it sits, and a fixture INSERT inside one is
+    not a writer to the ledger. Brace-matched, mirroring
+    scripts/api-sql-ratchet.py, so code after the module still counts.
+    """
+    out = source
+    while True:
+        marker = out.find("#[cfg(test)]")
+        if marker == -1:
+            return out
+        brace = out.find("{", marker)
+        if brace == -1:
+            return out[:marker]
+        depth = 0
+        end = None
+        for index in range(brace, len(out)):
+            char = out[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end is None:
+            return out[:marker]
+        out = out[:marker] + out[end:]
+
+
 def rust_sources(include_tests: bool) -> list[Path]:
     paths: list[Path] = []
     for crate in sorted(CRATES.iterdir()):
@@ -147,7 +179,7 @@ class EveryWriterSuppliesATrace(unittest.TestCase):
         for path in rust_sources(include_tests=False):
             if is_test_module(path):
                 continue
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = production_body(path.read_text(encoding="utf-8", errors="replace"))
             if f"INSERT INTO {DECISION_TABLE}" in text:
                 writers.add(str(path.relative_to(ROOT)))
         self.assertEqual(
