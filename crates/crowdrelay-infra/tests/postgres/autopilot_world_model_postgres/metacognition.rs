@@ -373,3 +373,31 @@ async fn a_busy_strategy_writer_does_not_block_the_growth_learner()
     owner.rollback().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn legacy_cursor_upgrade_preserves_existing_learning()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_pool, repo, workspace) = continuity_fixture().await?;
+    let mut model = crowdrelay_brain::CausalModel::default();
+    let old_day = (OffsetDateTime::now_utc() - time::Duration::days(366)).date();
+    model.value_exchange.observe(i64::from(old_day.to_julian_day()), 12345.0, 100.0);
+    let mut legacy = serde_json::to_value(&model)?;
+    legacy.as_object_mut().ok_or("model")?.remove("evidence_cursor");
+    repo.save_brain_state(workspace, "causal_model", &legacy).await?;
+    let (_, written_at) = repo
+        .load_brain_state(workspace, "causal_model")
+        .await?
+        .ok_or("checkpoint")?;
+    let loaded = repo.load_causal_model(workspace).await?;
+    assert!(matches!(
+        loaded.belief,
+        crowdrelay_application::autopilot::BeliefStateOrigin::Checkpoint { .. }
+    ));
+    assert_eq!(loaded.model.evidence_cursor, Some(written_at));
+    assert_eq!(loaded.model.value_exchange.days_observed, 1);
+    let mut retained = serde_json::to_value(&loaded.model)?;
+    retained.as_object_mut().ok_or("model")?.remove("evidence_cursor");
+    assert_eq!(retained, legacy, "a metadata upgrade must retain existing learning");
+    Ok(())
+}

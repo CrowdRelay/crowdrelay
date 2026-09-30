@@ -369,6 +369,7 @@ jobs:
             strategy_learning_retries_independently_of_a_newer_causal_checkpoint \
             causal_checkpoint_does_not_consume_an_unread_measurement \
             a_busy_strategy_writer_does_not_block_the_growth_learner \
+            legacy_cursor_upgrade_preserves_existing_learning \
             two_acts_arrivals_become_one_sample \
             video_promotion \
             autopilot_relay_loader \

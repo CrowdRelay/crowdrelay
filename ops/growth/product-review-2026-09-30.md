@@ -120,9 +120,11 @@ strategy observation; otherwise it would remain in every future delta. Corrupt c
 The causal model also carries the last measurement actually read, rather than
 using its later database save time. This closes the read→save gap: an outcome
 arriving in that gap remains newer than the consumed observation cursor. Legacy
-checkpoints lacking the field rebuild once under the existing 180-day observation
-window, then retain compact state plus deltas. Rebuild cost is not constant and
-must be measured; this is not an unlimited archive replay guarantee.
+checkpoints lacking only cursor metadata retain their existing beliefs and
+resume once from their historical watermark. A metadata upgrade does not discard
+older experience or force a history scan. Incompatible evidence-basis versions
+still rebuild under the existing 180-day observation window; that recovery cost
+is not constant and must be measured.
 
 Evidence reads now use distinct prepared SQL for delta, full replay and control
 contrast, with bound values. An expression index matches all five timestamps and
@@ -161,7 +163,7 @@ preserves stored state and a fresh process resumes the actual strategy writer
 without duplicate learning. The socket proxy has one backend, so this is not a
 native concurrency proof. Native migration,
 concurrency, lock timeout, Spotify snapshot, independent strategy retry and causal
-read/save regression tests are selected explicitly in CI's migrated e2e step.
+read/save and legacy-knowledge preservation regression tests are selected explicitly in CI's migrated e2e step.
 
 The remaining P0 is still **live growth proof**. Follow a delivered campaign to
 provider receipt, platform-specific destination clicks, subsequent fresh audience

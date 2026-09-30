@@ -307,7 +307,7 @@ transactional write. Its own observation cursor advances with its posterior;
 a different learner's save cannot drop its pending observations. New no-op
 horizons advance the scan watermark without increasing confidence. Causal state
 carries its consumed measurement cursor too, rather than using the later save
-time. Timestamp cursors still require ordered commits: an arbitrary late commit
+time. Legacy checkpoints missing only cursor metadata retain their accumulated\nbeliefs and resume from their historical watermark. Timestamp cursors still\nrequire ordered commits: an arbitrary late commit
 older than a consumed watermark requires a transactional horizon inbox to recover.
 
 `growth_intelligence/metacognition.rs` owns the compact assessment checkpoint.

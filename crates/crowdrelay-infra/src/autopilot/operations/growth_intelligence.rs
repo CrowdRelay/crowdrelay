@@ -1240,14 +1240,17 @@ pub(in crate::autopilot) async fn load_causal_model(
             // Built on evidence the learners no longer read: rebuild, don't
             // extend (`EVIDENCE_BASIS_VERSION`). Full replay rebuilds strategy too.
             Ok(model)
-                if model.evidence_basis_version < crowdrelay_brain::EVIDENCE_BASIS_VERSION
-                    || model.evidence_cursor.is_none() =>
+                if model.evidence_basis_version < crowdrelay_brain::EVIDENCE_BASIS_VERSION =>
             {
                 tracing::info!(stale = model.evidence_basis_version, "checkpoint rebuilt");
                 full_replay_with_origin(repo, workspace_id).await?
             }
             Ok(mut model) => {
-                let evidence_cursor = model.evidence_cursor.expect("validated checkpoint cursor");
+                // Upgrading cursor metadata must preserve accumulated beliefs.
+                // Legacy state resumes at its historical watermark once;
+                // later checkpoints persist only measurement time actually read.
+                let evidence_cursor = model.evidence_cursor.unwrap_or(checkpoint_time);
+                model.evidence_cursor = Some(evidence_cursor);
                 // Load only delta evidence since the checkpoint.
                 let (delta, read_cursor) = super::evidence::load_growth_evidence_with_cursor(
                     repo,
