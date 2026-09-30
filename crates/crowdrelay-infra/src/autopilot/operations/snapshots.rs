@@ -323,10 +323,7 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
                   AND interaction.target_id = target.id
                   AND interaction.direction = 'inbound'
             ) AS target_ever_replied,
-            -- Scoped to the target, not the opportunity: Gmail and sheet
-            -- ingesters write replies with opportunity_id NULL, so an
-            -- opportunity-scoped read never sees an automated reply and the
-            -- evaluator's AlreadyReplied/Declined arms go dead.
+            -- Target scope like the counters above: ingested replies carry opportunity_id NULL.
             COALESCE((
                 SELECT interaction.disposition
                 FROM outreach_interactions AS interaction
@@ -334,8 +331,7 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
                   AND interaction.target_id = target.id
                   AND interaction.direction = 'inbound'
                   AND interaction.phase = 'reply'
-                ORDER BY interaction.occurred_at DESC, interaction.id DESC
-                LIMIT 1
+                ORDER BY interaction.occurred_at DESC, interaction.id DESC LIMIT 1
             ), 'none') AS last_reply_disposition,
             EXISTS (
                 SELECT 1
