@@ -2,7 +2,7 @@
   "name": "CrowdRelay — Autopilot press-pitch executor",
   "nodes": [
     {
-      "parameters": {},
+      "parameters": {"inputSource": "passthrough"},
       "id": "press-pitch-trigger",
       "name": "Called by verified ingress",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
