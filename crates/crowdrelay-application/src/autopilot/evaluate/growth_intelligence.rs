@@ -1150,7 +1150,6 @@ fn community_novelty_bps(history: &[crowdrelay_brain::CommunityEngagementSummary
     novelty as u16
 }
 
-
 #[cfg(test)]
 mod social_content_performance_tests {
     use super::*;

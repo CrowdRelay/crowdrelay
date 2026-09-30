@@ -157,6 +157,48 @@ async fn seed_rung(
     Ok(action_id)
 }
 
+async fn seed_human_booking_activity(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    event_id: Uuid,
+    count: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let city_id: Uuid =
+        sqlx::query_scalar("SELECT city_id FROM events WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id.into_uuid())
+            .bind(event_id)
+            .fetch_one(pool)
+            .await?;
+
+    for ordinal in 0..count {
+        let target_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO booking_targets
+             (workspace_id, city_id, target_kind, display_name, contact_email)
+             VALUES ($1,$2,'promoter',$3,$4) RETURNING id",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(city_id)
+        .bind(format!("Human Booker Target {ordinal}"))
+        .bind(format!(
+            "human-booker-{ordinal}-{}@example.test",
+            workspace_id.into_uuid().simple()
+        ))
+        .fetch_one(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO booking_interactions
+             (workspace_id,target_id,direction,phase,source_key,occurred_at)
+             VALUES ($1,$2,'outbound','initial',$3,now())",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(target_id)
+        .bind(format!("gmail:human-booker-{ordinal}"))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn rung_state(
     pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
@@ -178,13 +220,7 @@ async fn rung_state(
 async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("ladder").await?;
-    seed_human_booking_activity(
-        &fixture.pool,
-        fixture.workspace_id,
-        fixture.event_id,
-        3,
-    )
-    .await?;
+    seed_human_booking_activity(&fixture.pool, fixture.workspace_id, fixture.event_id, 3).await?;
 
     // One owned rung parked on the event, one relationship-sensitive partner
     // rung parked beside it, one foreign rung, and one already queued by a

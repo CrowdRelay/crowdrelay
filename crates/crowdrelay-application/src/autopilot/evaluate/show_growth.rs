@@ -154,7 +154,6 @@ fn request_candidate(
             "ladder_authorized".to_owned(),
             serde_json::Value::Bool(true),
         );
-
     }
     let action = AutopilotActionPayload::RequestShowGrowth {
         event_id: snapshot.event_id,

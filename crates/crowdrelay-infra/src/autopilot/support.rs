@@ -382,7 +382,7 @@ fn enrich_show_growth_briefing(
             .push(field("Active local partners", "Aktywni lokalni partnerzy", partners.to_string()));
     }
 
-    if lever.requires_relationship_approval() {
+    if lever.is_relationship_sensitive() {
         match locale {
             BriefingLocale::En => {
                 briefing.why_it_matters =

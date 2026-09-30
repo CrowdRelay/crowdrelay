@@ -126,7 +126,7 @@ struct ReplyDraft {
     model: Option<String>,
 }
 
-fn owned_join_capture_requested(platform: &str, draft: &ReplyDraft) -> Option<&str> {
+fn owned_join_capture_requested<'a>(platform: &str, draft: &'a ReplyDraft) -> Option<&'a str> {
     if !matches!(platform, "instagram" | "facebook")
         || draft.capture_intent.as_deref() != Some("join")
     {
@@ -489,6 +489,7 @@ impl CommunityExecutorWorker {
             .await?;
         let Some(reply) = draft
             .reply
+            .as_deref()
             .map(|r| r.trim().to_owned())
             .filter(|r| !r.is_empty())
         else {
