@@ -1,8 +1,10 @@
 // The hook scorecard: which of the band's own posts held attention over the
 // last 60 days, judged against the band's own medians
-// (`crowdrelay_domain::hook_scorecard`). The Content page reads it so the
-// people making the next video see which openings worked; the drafters read
-// the same verdicts through the agents service.
+// (`crowdrelay_domain::hook_scorecard`), and which of those exact sources
+// created first-party fans. Attention remains its own verdict; acquisition is
+// shown beside it so the next creator can distinguish a hook people watched
+// from a hook that actually moved somebody into the fan graph. The Content
+// page reads it and the drafters consume the same evidence.
 
 /// The window the medians are taken over — about two months of posting, so
 /// a median has enough posts behind it without reaching back to a different
@@ -23,6 +25,8 @@ type HookRow = (
     Option<i64>,
     Option<i64>,
     Option<i64>,
+    i64,
+    i64,
 );
 
 pub async fn content_hooks(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
@@ -50,22 +54,69 @@ async fn load_content_hooks(
     // refresh; a key that was never written reads as NULL, never as zero.
     let rows = sqlx::query_as::<_, HookRow>(
         r#"
-        SELECT id,
-               metadata->>'platform',
-               metadata->>'media_type',
-               metadata->>'body',
-               metadata->>'url',
-               occurred_at,
-               (metadata->>'reach')::bigint,
-               (metadata->>'avg_watch_ms')::bigint,
-               (metadata->>'saves')::bigint,
-               (metadata->>'shares')::bigint,
-               (metadata->>'views')::bigint
-        FROM content_sources
-        WHERE workspace_id = $1
-          AND source_kind = 'social_post'
-          AND occurred_at >= $2 - make_interval(days => $3::int)
-        ORDER BY occurred_at DESC
+        SELECT source.id,
+               source.metadata->>'platform',
+               source.metadata->>'media_type',
+               source.metadata->>'body',
+               source.metadata->>'url',
+               source.occurred_at,
+               (source.metadata->>'reach')::bigint,
+               (source.metadata->>'avg_watch_ms')::bigint,
+               (source.metadata->>'saves')::bigint,
+               (source.metadata->>'shares')::bigint,
+               (source.metadata->>'views')::bigint,
+               COALESCE(outcome.fans_acquired, 0)::bigint,
+               COALESCE(outcome.fans_activated_within_30d, 0)::bigint
+        FROM content_sources AS source
+        LEFT JOIN LATERAL (
+            SELECT
+                count(DISTINCT provenance.fan_id)::bigint AS fans_acquired,
+                count(DISTINCT provenance.fan_id) FILTER (
+                    WHERE fan.status = 'active'
+                      AND consent.granted
+                      AND activity.last_action_at IS NOT NULL
+                      AND activity.last_action_at >= fan.created_at
+                      AND activity.last_action_at <= $2
+                      AND activity.last_action_at <= fan.created_at + interval '30 days'
+                )::bigint AS fans_activated_within_30d
+            FROM autopilot_actions AS action
+            JOIN fan_provenance_events AS provenance
+              ON provenance.workspace_id = action.workspace_id
+             AND provenance.action_id = action.id
+             AND provenance.event_kind = 'conversion'
+             AND provenance.attribution_method = 'last_tracked_click'
+            JOIN fans AS fan
+              ON fan.workspace_id = provenance.workspace_id
+             AND fan.id = provenance.fan_id
+            LEFT JOIN LATERAL (
+                SELECT latest.granted
+                FROM fan_consents AS latest
+                WHERE latest.workspace_id = fan.workspace_id
+                  AND latest.fan_id = fan.id
+                  AND latest.purpose = 'marketing'
+                ORDER BY latest.recorded_at DESC, latest.id DESC
+                LIMIT 1
+            ) AS consent ON true
+            LEFT JOIN LATERAL (
+                SELECT fan_last_meaningful_action(
+                    fan.workspace_id,
+                    fan.id,
+                    fan.normalized_email
+                ) AS last_action_at
+            ) AS activity ON true
+            WHERE action.workspace_id = source.workspace_id
+              AND (
+                  lower(action.payload->>'source_id') = source.id::text
+                  OR lower(action.payload->'draft'->>'source_id') = source.id::text
+              )
+              AND provenance.occurred_at >= source.occurred_at
+              AND provenance.occurred_at <
+                  source.occurred_at + interval '14 days'
+        ) AS outcome ON true
+        WHERE source.workspace_id = $1
+          AND source.source_kind = 'social_post'
+          AND source.occurred_at >= $2 - make_interval(days => $3::int)
+        ORDER BY source.occurred_at DESC
         LIMIT $4
         "#,
     )
@@ -98,6 +149,11 @@ async fn load_content_hooks(
                 .as_deref()
                 .and_then(|body| body.lines().find(|line| !line.trim().is_empty()))
                 .map(|line| line.chars().take(160).collect::<String>());
+            let fan_conversion_per_1000_reach = row.6
+                .filter(|reach| *reach > 0)
+                .map(|reach| row.11.saturating_mul(1_000) / reach);
+            let fan_activation_bps = (row.11 > 0)
+                .then(|| row.12.saturating_mul(10_000) / row.11);
             json!({
                 "id": row.0,
                 "platform": row.1,
@@ -110,6 +166,10 @@ async fn load_content_hooks(
                 "saves": row.8,
                 "shares": row.9,
                 "views": row.10,
+                "fans_acquired": row.11,
+                "fans_activated_within_30d": row.12,
+                "fan_conversion_per_1000_reach": fan_conversion_per_1000_reach,
+                "fan_activation_bps": fan_activation_bps,
                 "verdict": score.verdict,
                 "watch_index_bps": score.watch_index_bps,
                 "keep_index_bps": score.keep_index_bps,
