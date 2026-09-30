@@ -874,8 +874,9 @@ mod tests {
         assert_eq!(converting.len(), 2, "owned push plus one community relay");
         assert!(
             converting.iter().any(|candidate| matches!(
-                candidate.action,
-                AutopilotActionPayload::RequestCommunityEngagement { .. }
+                &candidate.action,
+                AutopilotActionPayload::RequestAgentRun { template_id, .. }
+                    if template_id == "community-repost"
             )),
             "a fan-converting post must earn the community relay"
         );
