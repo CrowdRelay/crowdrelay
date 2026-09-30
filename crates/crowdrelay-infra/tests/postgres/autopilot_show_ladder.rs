@@ -157,6 +157,49 @@ async fn seed_rung(
     Ok(action_id)
 }
 
+async fn seed_human_booking_activity(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    event_id: Uuid,
+    count: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let city_id: Uuid = sqlx::query_scalar(
+        "SELECT city_id FROM events WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(event_id)
+    .fetch_one(pool)
+    .await?;
+
+    for ordinal in 0..count {
+        let target_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO booking_targets
+             (workspace_id, city_id, target_kind, display_name, contact_email)
+             VALUES ($1,$2,'promoter',$3,$4) RETURNING id",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(city_id)
+        .bind(format!("Human Booker Target {ordinal}"))
+        .bind(format!(
+            "human-booker-{ordinal}-{}@example.test",
+            workspace_id.into_uuid().simple()
+        ))
+        .fetch_one(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO booking_interactions
+             (workspace_id,target_id,direction,phase,source_key,occurred_at)
+             VALUES ($1,$2,'outbound','initial',$3,now())",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(target_id)
+        .bind(format!("gmail:human-booker-{ordinal}"))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn rung_state(
     pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
@@ -178,6 +221,13 @@ async fn rung_state(
 async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("ladder").await?;
+    seed_human_booking_activity(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.event_id,
+        crowdrelay_domain::show_growth::ACTIVE_BOOKING_TOUCHES_30D,
+    )
+    .await?;
 
     // One owned rung parked on the event, one relationship-sensitive partner
     // rung parked beside it, one foreign rung, and one already queued by a
@@ -312,6 +362,40 @@ async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
         .await;
     assert!(result.is_err());
 
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn quiet_tenant_show_ladder_releases_partner_backstop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("ladder-quiet").await?;
+    let partner = seed_rung(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.event_id,
+        "partner_cross_promo",
+        "show.growth.request.partner",
+        "awaiting_approval",
+        None,
+    )
+    .await?;
+
+    let mutation = fixture
+        .repository
+        .approve_show_ladder(
+            fixture.workspace_id,
+            crowdrelay_domain::EventId::from_uuid(fixture.event_id),
+            &IdempotencyKey::parse("ladder-approve-quiet")?,
+            None,
+        )
+        .await?;
+    assert_eq!(mutation.status, "approved:1");
+
+    let (status, approved_by) =
+        rung_state(&fixture.pool, fixture.workspace_id, partner).await?;
+    assert_eq!(status, "queued", "quiet tenant gets the bounded backstop");
+    assert_eq!(approved_by.as_deref(), Some("operator:show_ladder"));
     Ok(())
 }
 

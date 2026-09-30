@@ -236,6 +236,7 @@ mod tests_booking {
             city_signal_fans: 2,
             qualified_referrers_in_city: 0,
             beacon_partners: 0,
+            human_booking_targets_30d: 0,
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
@@ -300,6 +301,7 @@ mod tests_booking {
             city_signal_fans: 2,
             qualified_referrers_in_city: 0,
             beacon_partners: 0,
+            human_booking_targets_30d: 0,
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
@@ -391,6 +393,7 @@ mod tests_booking {
             city_signal_fans: 20,
             qualified_referrers_in_city: 4,
             beacon_partners: 0,
+            human_booking_targets_30d: 0,
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: unreciprocated,
@@ -481,6 +484,7 @@ mod tests_booking {
             city_signal_fans: 20,
             qualified_referrers_in_city: 4,
             beacon_partners: 0,
+            human_booking_targets_30d: 0,
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
@@ -547,11 +551,11 @@ mod tests_booking {
         Ok(())
     }
 
-    /// A broad ladder approval automates the band's own repeatable promotion,
-    /// not relationship-sensitive outreach. A partner ask stays parked for the
-    /// booker even when the rest of the show ladder was pre-approved.
+    /// Adaptive autonomy: when the tenant is visibly booking, partner outreach
+    /// stays per-action and human-led. When that activity is sparse, the same
+    /// explicit show-ladder approval becomes the bounded backstop.
     #[test]
-    fn an_approved_ladder_does_not_pre_authorize_partner_outreach()
+    fn show_ladder_partner_autonomy_tracks_tenant_booking_activity()
     -> Result<(), Box<dyn std::error::Error>> {
         use crowdrelay_domain::show_growth::{
             ShowGrowthHistory, ShowGrowthLever, ShowGrowthPolicy, ShowGrowthSnapshot,
@@ -569,7 +573,7 @@ mod tests_booking {
             guardrail_reason: None,
         };
         let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
-        let snapshot = |approved: bool| ShowGrowthSnapshot {
+        let snapshot = |approved: bool, human_booking_targets_30d: u32| ShowGrowthSnapshot {
             event_id: EventId::new(),
             published: true,
             communication_enabled: true,
@@ -582,6 +586,7 @@ mod tests_booking {
             city_signal_fans: 20,
             qualified_referrers_in_city: 4,
             beacon_partners: 0,
+            human_booking_targets_30d,
             attendees: 0,
             morning_after_send_at: None,
             unreciprocated_crossbill_edge: false,
@@ -594,20 +599,35 @@ mod tests_booking {
             },
         };
 
-        let parked = show_growth::show_growth_candidates(snapshot(false), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
+        let parked = show_growth::show_growth_candidates(snapshot(false, 0), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(parked[0].policy_snapshot.get("ladder_authorized"), None);
 
-        // Approving the full ladder does not consume relationship capital.
-        // The candidate remains individually reviewable and carries no
-        // show-ladder pre-authorization token.
-        let released = show_growth::show_growth_candidates(snapshot(true), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
-        assert_eq!(released.len(), 1);
-        assert_eq!(released[0].disposition, PolicyDisposition::RequireApproval);
-        assert_eq!(released[0].policy_snapshot.get("ladder_authorized"), None);
+        // Three distinct tenant-side targets in 30 days means there is a real
+        // booking cadence to work with: CrowdRelay assists but does not consume
+        // the relationship on a broad campaign approval.
+        let active = show_growth::show_growth_candidates(snapshot(true, 3), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].disposition, PolicyDisposition::RequireApproval);
+        assert_eq!(active[0].policy_snapshot.get("ladder_authorized"), None);
+
+        // Sparse tenant activity flips the same ladder into backstop mode.
+        // The disposition remains honest, while persistence can honour the
+        // explicit ladder authorization without asking again.
+        let quiet = show_growth::show_growth_candidates(snapshot(true, 1), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].disposition, PolicyDisposition::RequireApproval);
+        assert_eq!(
+            quiet[0].policy_snapshot.get("ladder_authorized"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            quiet[0].policy_snapshot.get("relationship_backstop_authorized"),
+            Some(&serde_json::Value::Bool(true))
+        );
         assert!(matches!(
-            released[0].action,
+            quiet[0].action,
             AutopilotActionPayload::RequestShowGrowth {
                 lever: ShowGrowthLever::PartnerCrossPromo,
                 ..
