@@ -247,7 +247,13 @@ async fn persist_decision_and_action_tx(
     // between `evaluate/show_growth` and this write, and the revoke path
     // reaches only `context='show_growth'` rows — anywhere else the flag
     // would queue a rung no revoke could cancel.
+    let relationship_sensitive_show_growth = matches!(
+        &candidate.action,
+        AutopilotActionPayload::RequestShowGrowth { lever, .. }
+            if lever.requires_relationship_approval()
+    );
     let mut ladder_authorized = candidate.context == AutopilotContext::ShowGrowth
+        && !relationship_sensitive_show_growth
         && candidate.policy_snapshot.get("ladder_authorized") == Some(&json!(true));
     if ladder_authorized {
         // The flag was read when the snapshot loaded; a revoke may have
