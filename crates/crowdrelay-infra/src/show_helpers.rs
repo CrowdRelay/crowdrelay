@@ -133,9 +133,9 @@ pub struct CommunityCandidate {
     /// First-hop tracked clicks from those posts. `None` when the tenant has
     /// not run a measurable post here in the window.
     pub tracked_clicks_90d: Option<u64>,
-    /// Distinct owned fans who joined within seven days of those tracked
-    /// clicks. This is the North-Star evidence the booker can use without the
-    /// system taking the relationship decision away from them.
+    /// Distinct owned fans attributed to these posts by the conversion ledger,
+    /// within seven days of a tracked click. Earlier touches do not get a
+    /// second acquisition credit for the same fan.
     pub fans_acquired_90d: Option<u64>,
 }
 
@@ -678,7 +678,7 @@ pub async fn who_can_help(
             SELECT
                 COUNT(DISTINCT post.id)::bigint AS measured_posts,
                 COUNT(DISTINCT click.id)::bigint AS tracked_clicks,
-                COUNT(DISTINCT acquisition.fan_id)::bigint AS fans_acquired
+                COUNT(DISTINCT conversion.fan_id)::bigint AS fans_acquired
             FROM community_posts AS post
             JOIN smart_links AS link
               ON link.workspace_id = post.workspace_id
@@ -688,15 +688,21 @@ pub async fn who_can_help(
              AND click.smart_link_id = link.id
              AND click.occurred_at >= post.posted_at
              AND click.occurred_at >= now() - INTERVAL '90 days'
-            LEFT JOIN fan_acquisition_events AS acquisition
-              ON acquisition.workspace_id = click.workspace_id
-             AND acquisition.anonymous_visitor_id = click.anonymous_visitor_id
-             AND acquisition.occurred_at >= click.occurred_at
-             AND acquisition.occurred_at < click.occurred_at + INTERVAL '7 days'
+             AND click.occurred_at <= now()
+            LEFT JOIN fan_provenance_events AS conversion
+              ON conversion.workspace_id = post.workspace_id
+             AND conversion.action_id = post.action_id
+             AND conversion.source_target = link.slug
+             AND conversion.event_kind = 'conversion'
+             AND conversion.attribution_method = 'last_tracked_click'
+             AND conversion.occurred_at >= click.occurred_at
+             AND conversion.occurred_at < click.occurred_at + INTERVAL '7 days'
+             AND conversion.occurred_at <= now()
             WHERE post.workspace_id = target.workspace_id
               AND post.target_id = target.id
               AND post.status = 'posted'
               AND post.posted_at >= now() - INTERVAL '90 days'
+              AND post.posted_at <= now()
         ) AS yield ON true
         WHERE target.workspace_id = $1
           AND target.country_code = $2

@@ -13,6 +13,8 @@ use crowdrelay_infra::show_helpers::who_can_help;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+include!("show_helpers_yield.rs");
+
 /// 3.10 — two workspaces seed different candidates for the same city; each
 /// sees only its own plus the shared cold rooms; and an event with no city
 /// degrades rather than erroring.
@@ -194,8 +196,8 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .execute(pool)
     .await?;
     let fan_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO fans (workspace_id, normalized_email, status)
-         VALUES ($1,$2,'active') RETURNING id",
+        "INSERT INTO fans (workspace_id, normalized_email, status, created_at)
+         VALUES ($1,$2,'active',now() - interval '12 hours') RETURNING id",
     )
     .bind(act)
     .bind(format!("helper-yield-{}@example.test", visitor_id.simple()))
@@ -212,6 +214,21 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .bind(visitor_id)
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+            (workspace_id, fan_id, event_kind, channel, source_target, community,
+             action_id, attribution_method, occurred_at)
+         VALUES ($1,$2,'conversion','reddit',$3,'r/wroclaw',$4,
+                 'last_tracked_click',now() - interval '12 hours')",
+    )
+    .bind(act)
+    .bind(fan_id)
+    .bind(&link_slug)
+    .bind(action_id)
+    .execute(pool)
+    .await?;
+    seed_earlier_community_touch(pool, act, decision_id, visitor_id).await?;
 
     // ── cold_rooms: the registry's rooms minus this tenant's marks ──
     // "Klub A" (marked by the show above) and "Klub B" (marked by the other
@@ -413,15 +430,22 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     assert_eq!(
         communities,
-        [("r/wroclaw", "PL"), ("r/aaa-unmeasured", "PL")],
+        [
+            ("r/wroclaw", "PL"),
+            ("r/earlier-touch", "PL"),
+            ("r/aaa-unmeasured", "PL"),
+        ],
         "fan-producing community sorts ahead of an alphabetically earlier unmeasured one: {communities:?}"
     );
     assert_eq!(helpers.communities[0].measured_posts_90d, 1);
     assert_eq!(helpers.communities[0].tracked_clicks_90d, Some(1));
     assert_eq!(helpers.communities[0].fans_acquired_90d, Some(1));
-    assert_eq!(helpers.communities[1].measured_posts_90d, 0);
-    assert_eq!(helpers.communities[1].tracked_clicks_90d, None);
-    assert_eq!(helpers.communities[1].fans_acquired_90d, None);
+    assert_eq!(helpers.communities[1].measured_posts_90d, 1);
+    assert_eq!(helpers.communities[1].tracked_clicks_90d, Some(1));
+    assert_eq!(helpers.communities[1].fans_acquired_90d, Some(0));
+    assert_eq!(helpers.communities[2].measured_posts_90d, 0);
+    assert_eq!(helpers.communities[2].tracked_clicks_90d, None);
+    assert_eq!(helpers.communities[2].fans_acquired_90d, None);
 
     // cold_rooms — the shared registry minus this tenant's marks. "Klub A"
     // is out because the tenant played it; "Klub B" is IN because the other
