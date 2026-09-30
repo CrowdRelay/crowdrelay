@@ -221,7 +221,7 @@ async fn strategy_learning_retries_independently_of_a_newer_causal_checkpoint()
         &serde_json::to_value(CausalModel::default())?,
     )
     .await?;
-    sqlx::query("INSERT INTO growth_evidence(workspace_id,recipient_id,channel,strategy,observed_incremental_fans,replayed_14d_at,resolved_at,outcome_basis) VALUES($1,'strategy-retry','reddit_post','community_first',4,$2,$2,'attributed')")
+    sqlx::query("INSERT INTO growth_evidence(workspace_id,recipient_id,channel,strategy,observed_incremental_fans,replayed_14d_at,resolved_at,outcome_basis) VALUES($1,'strategy-retry','reddit_post','content_first',4,$2,$2,'attributed')")
         .bind(workspace.into_uuid()).bind(measured).execute(&pool).await?;
 
     let constraint = format!("strategy_retry_{}", workspace.into_uuid().simple());
@@ -258,6 +258,58 @@ async fn strategy_learning_retries_independently_of_a_newer_causal_checkpoint()
     assert_eq!(
         repeated, learned,
         "a repeated model load must not invent confidence"
+    );
+    sqlx::query("UPDATE growth_evidence SET replayed_30d_at=now() WHERE workspace_id=$1")
+        .bind(workspace.into_uuid())
+        .execute(&pool)
+        .await?;
+    repo.load_causal_model(workspace).await?;
+    let (settled, _) = repo
+        .load_brain_state(workspace, "strategy_posterior")
+        .await?
+        .ok_or("posterior")?;
+    let settled_posterior: StateConditionedStrategyPosterior =
+        serde_json::from_value(settled.clone())?;
+    assert_eq!(
+        settled_posterior.cells().map(|(_, _, _, n)| n).sum::<u32>(),
+        1
+    );
+    assert!(
+        settled["_strategy_observation_cursor_micros"].as_i64()
+            > learned["_strategy_observation_cursor_micros"].as_i64()
+    );
+    repo.load_causal_model(workspace).await?;
+    assert_eq!(
+        repo.load_brain_state(workspace, "strategy_posterior")
+            .await?
+            .ok_or("posterior")?
+            .0,
+        settled
+    );
+    sqlx::query("UPDATE growth_evidence SET resolved_at=NULL,replayed_14d_at=NULL,replayed_30d_at=NULL,last_partial_resolution_at=now(),partial_resolution_count=1 WHERE workspace_id=$1")
+        .bind(workspace.into_uuid()).execute(&pool).await?;
+    repo.load_causal_model(workspace).await?;
+    let (partial, _) = repo
+        .load_brain_state(workspace, "strategy_posterior")
+        .await?
+        .ok_or("posterior")?;
+    let partial_posterior: StateConditionedStrategyPosterior =
+        serde_json::from_value(partial.clone())?;
+    assert_eq!(
+        partial_posterior.cells().map(|(_, _, _, n)| n).sum::<u32>(),
+        1
+    );
+    assert!(
+        partial["_strategy_observation_cursor_micros"].as_i64()
+            > settled["_strategy_observation_cursor_micros"].as_i64()
+    );
+    repo.load_causal_model(workspace).await?;
+    assert_eq!(
+        repo.load_brain_state(workspace, "strategy_posterior")
+            .await?
+            .ok_or("posterior")?
+            .0,
+        partial
     );
     Ok(())
 }

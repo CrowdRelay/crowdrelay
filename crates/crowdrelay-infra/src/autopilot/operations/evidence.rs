@@ -183,12 +183,25 @@ pub(in crate::autopilot) async fn load_growth_evidence(
     .await
 }
 
+pub(super) async fn load_growth_evidence_with_cursor(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    since: Option<OffsetDateTime>,
+) -> Result<(Vec<GrowthEvidence>, Option<OffsetDateTime>), RepositoryError> {
+    load_evidence_with_cursor(
+        &repo.pool,
+        workspace_id,
+        &EvidenceSelector::ResolvedAfter(since),
+    )
+    .await
+}
+
 pub(super) async fn load_growth_evidence_on(
     connection: &mut sqlx::PgConnection,
     workspace_id: WorkspaceId,
     since: Option<OffsetDateTime>,
-) -> Result<Vec<GrowthEvidence>, RepositoryError> {
-    load_evidence(
+) -> Result<(Vec<GrowthEvidence>, Option<OffsetDateTime>), RepositoryError> {
+    load_evidence_with_cursor(
         connection,
         workspace_id,
         &EvidenceSelector::ResolvedAfter(since),
@@ -268,6 +281,16 @@ async fn load_evidence<'e>(
     workspace_id: WorkspaceId,
     selector: &EvidenceSelector<'_>,
 ) -> Result<Vec<GrowthEvidence>, RepositoryError> {
+    load_evidence_with_cursor(executor, workspace_id, selector)
+        .await
+        .map(|(evidence, _)| evidence)
+}
+
+async fn load_evidence_with_cursor<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    workspace_id: WorkspaceId,
+    selector: &EvidenceSelector<'_>,
+) -> Result<(Vec<GrowthEvidence>, Option<OffsetDateTime>), RepositoryError> {
     let (since, contrast_experiments) = match selector {
         EvidenceSelector::ResolvedAfter(since) => (*since, None),
         EvidenceSelector::ControlArmOf(experiments) => (None, Some(*experiments)),
@@ -316,6 +339,7 @@ async fn load_evidence<'e>(
         replayed_3d_at: Option<OffsetDateTime>,
         replayed_14d_at: Option<OffsetDateTime>,
         replayed_30d_at: Option<OffsetDateTime>,
+        last_partial_resolution_at: Option<OffsetDateTime>,
         observed_metrics: serde_json::Value,
         outcome_basis: String,
         posterior_mean_y30: Option<f64>,
@@ -336,7 +360,7 @@ async fn load_evidence<'e>(
                ge.episode_id, ge.resolved_at,
                ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
                COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
-               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at,
+               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at, ge.last_partial_resolution_at,
                ge.observed_metrics, ge.outcome_basis,
                posterior.mean_y30 AS posterior_mean_y30,
                posterior.std_y30 AS posterior_std_y30
@@ -489,6 +513,20 @@ async fn load_evidence<'e>(
         .await
         .map_err(map_sqlx)?;
 
+    let read_cursor = rows
+        .iter()
+        .flat_map(|row| {
+            [
+                row.resolved_at,
+                row.replayed_3d_at,
+                row.replayed_14d_at,
+                row.replayed_30d_at,
+                row.last_partial_resolution_at,
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .max();
     let evidence: Vec<GrowthEvidence> = rows
         .into_iter()
         .map(|row| {
@@ -628,7 +666,7 @@ async fn load_evidence<'e>(
             }
         })
         .collect();
-    Ok(evidence)
+    Ok((evidence, read_cursor))
 }
 
 /// Saves a brain state checkpoint (serialized posterior state) for fast

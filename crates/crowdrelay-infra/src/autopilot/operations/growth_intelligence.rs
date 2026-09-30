@@ -1249,7 +1249,7 @@ pub(in crate::autopilot) async fn load_causal_model(
             Ok(mut model) => {
                 let evidence_cursor = model.evidence_cursor.expect("validated checkpoint cursor");
                 // Load only delta evidence since the checkpoint.
-                let delta = super::evidence::load_growth_evidence(
+                let (delta, read_cursor) = super::evidence::load_growth_evidence_with_cursor(
                     repo,
                     workspace_id,
                     Some(evidence_cursor),
@@ -1278,7 +1278,7 @@ pub(in crate::autopilot) async fn load_causal_model(
                     &contrast,
                     Some(evidence_cursor),
                 );
-                causal_cursor::advance(&mut model, &delta);
+                causal_cursor::advance(&mut model, read_cursor);
                 // Also apply delta evidence to the strategy posterior so it
                 // stays in sync with the causal model's evidence replay —
                 // including the per-horizon gating, which is why the
@@ -1412,12 +1412,13 @@ async fn full_replay(
     use crowdrelay_brain::{CausalModel, DispatchPrediction, PredictionOutcome};
 
     // Try the new growth evidence table first.
-    let evidence = super::evidence::load_growth_evidence(repo, workspace_id, None).await?;
+    let (evidence, read_cursor) =
+        super::evidence::load_growth_evidence_with_cursor(repo, workspace_id, None).await?;
     let evidence_replayed = u32::try_from(evidence.len()).unwrap_or(u32::MAX);
     if !evidence.is_empty() {
         let mut model = CausalModel::default();
         apply_evidence_to_model(&mut model, &evidence);
-        causal_cursor::advance(&mut model, &evidence);
+        causal_cursor::advance(&mut model, read_cursor);
         // Also replay evidence into the strategy posterior from scratch — this
         // is every row, so it rebuilds rather than accumulates.
         apply_evidence_to_stored_strategy_posterior(

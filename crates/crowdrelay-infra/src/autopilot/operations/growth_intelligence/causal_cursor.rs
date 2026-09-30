@@ -1,22 +1,10 @@
 //! A checkpoint may only consume measurements actually included in its state.
 
-use crowdrelay_brain::{CausalModel, GrowthEvidence};
+use crowdrelay_brain::CausalModel;
+use time::OffsetDateTime;
 
-pub(super) fn advance(model: &mut CausalModel, evidence: &[GrowthEvidence]) {
-    model.evidence_cursor = model
-        .evidence_cursor
-        .into_iter()
-        .chain(evidence.iter().flat_map(|ev| {
-            [
-                ev.resolved_at,
-                ev.replayed_3d_at,
-                ev.replayed_14d_at,
-                ev.replayed_30d_at,
-            ]
-            .into_iter()
-            .flatten()
-        }))
-        .max();
+pub(super) fn advance(model: &mut CausalModel, read_cursor: Option<OffsetDateTime>) {
+    model.evidence_cursor = model.evidence_cursor.into_iter().chain(read_cursor).max();
 }
 
 #[cfg(test)]
@@ -27,7 +15,7 @@ mod tests {
     fn save_time_cannot_advance_the_learning_cursor() {
         let mut model = CausalModel::default();
         let original = model.evidence_cursor;
-        advance(&mut model, &[]);
+        advance(&mut model, None);
         let state = serde_json::to_value(&model).unwrap();
         let restored: CausalModel = serde_json::from_value(state.clone()).unwrap();
         assert_eq!(restored.evidence_cursor, original);

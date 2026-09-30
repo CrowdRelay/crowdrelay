@@ -109,8 +109,9 @@ Strategy learning now owns its observation cursor and atomically saves it with
 its posterior using one transaction/connection and a nonblocking writer lock.
 Previously a failed strategy save followed by a successful causal save could
 permanently skip an outcome; the opposite failure could repeat it. Another
-learner's checkpoint no longer controls this consumer. No new observations mean
-no posterior rewrite. Corrupt cursor/state blocks that write and is reported.
+learner's checkpoint no longer controls this consumer. Repeated horizon reads do not rewrite the checkpoint. A newly read Y30
+settlement or partial-only reading advances the scan watermark without relearning its earlier Y14
+strategy observation; otherwise it would remain in every future delta. Corrupt cursor/state blocks that write and is reported.
 
 The causal model also carries the last measurement actually read, rather than
 using its later database save time. This closes the read→save gap: an outcome
@@ -144,7 +145,7 @@ rather than a manually maintained comment.
 ### Validation and remaining acceptance gates
 
 The actual brain/domain Cargo suites ran locally with serialization intact:
-641 brain tests, 1,284 domain tests and one doctest. Compact-checkpoint tests cover
+641 brain tests, 1,284 domain tests, 182 application tests and one doctest. Compact-checkpoint tests cover
 100,000 observations, saturation, stale/retry handling, metric reset and preview
 projection. The actual SQLx metacognition adapter ran against the PostgreSQL wire
 fixture with 50,000 workspace state rows and 100,000 cycle rows. Those are not

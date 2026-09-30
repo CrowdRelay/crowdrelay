@@ -103,7 +103,7 @@ async fn refresh(
     // checkpoint may be newer after a failed strategy save, or older after a
     // failed causal save. Neither case can drop or duplicate strategy learning.
     let delta;
-    let (rows, cursor, mut after) = match replay {
+    let (rows, cursor, read_cursor, mut after) = match replay {
         PosteriorReplay::Delta => {
             delta = super::super::evidence::load_growth_evidence_on(
                 &mut *guard,
@@ -111,11 +111,24 @@ async fn refresh(
                 own_cursor,
             )
             .await?;
-            (delta.as_slice(), own_cursor, before.clone())
+            (delta.0.as_slice(), own_cursor, delta.1, before.clone())
         }
         PosteriorReplay::FromScratch => (
             full_evidence,
             None,
+            full_evidence
+                .iter()
+                .flat_map(|ev| {
+                    [
+                        ev.resolved_at,
+                        ev.replayed_3d_at,
+                        ev.replayed_14d_at,
+                        ev.replayed_30d_at,
+                    ]
+                    .into_iter()
+                    .flatten()
+                })
+                .max(),
             StateConditionedStrategyPosterior::default(),
         ),
     };
@@ -128,17 +141,22 @@ async fn refresh(
         })
         .cloned()
         .collect();
-    if accepted.is_empty() && replay == PosteriorReplay::Delta {
+    // Consume newly read horizons even when they do not update this posterior
+    // (e.g. Y30 after Y14). Otherwise those rows stay in every future delta.
+    // Gate strategy observations against the previous cursor, then advance the
+    // scan watermark; a no-op horizon cannot manufacture posterior confidence.
+    let learned_through = read_cursor
+        .into_iter()
+        .chain(cursor)
+        .max()
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    if accepted.is_empty()
+        && replay == PosteriorReplay::Delta
+        && learned_through <= cursor.unwrap_or(OffsetDateTime::UNIX_EPOCH)
+    {
         return Ok(());
     }
     apply_evidence_to_strategy_posterior(&mut after, &accepted, cursor);
-    // Advance only to an observation actually read, never the later save time.
-    let learned_through = accepted
-        .iter()
-        .filter_map(observation_time)
-        .max()
-        .or(cursor)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
     let mut state = serde_json::to_value(&after).map_err(|_| RepositoryError::Unexpected)?;
     state
         .as_object_mut()
