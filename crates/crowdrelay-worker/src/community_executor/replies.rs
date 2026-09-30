@@ -116,8 +116,31 @@ struct AgentComments {
 struct ReplyDraft {
     reply: Option<String>,
     skip_reason: Option<String>,
+    /// Optional signal from newer agents builds. Missing means no capture:
+    /// deploy order can never turn an old drafter into a CTA bot.
+    #[serde(default)]
+    capture_intent: Option<String>,
+    #[serde(default)]
+    capture_evidence: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+}
+
+fn owned_join_capture_requested(platform: &str, draft: &ReplyDraft) -> Option<&str> {
+    if !matches!(platform, "instagram" | "facebook")
+        || draft.capture_intent.as_deref() != Some("join")
+    {
+        return None;
+    }
+    draft
+        .capture_evidence
+        .as_deref()
+        .map(str::trim)
+        .filter(|evidence| !evidence.is_empty())
+}
+
+fn owned_reply_capture_slug(comment_id: Uuid) -> String {
+    format!("reply-capture-{}", comment_id.simple())
 }
 
 #[derive(Deserialize)]
@@ -535,6 +558,36 @@ impl CommunityExecutorWorker {
             }
             ReviewOutcome::Unavailable => None,
         };
+
+        // A capture CTA is never inferred from engagement. It needs the
+        // drafter's explicit, evidenced join intent, a clean mechanical draft,
+        // a passing independent review, and a tenant-owned member site.
+        // Even then it always goes to a person: unattended conversational
+        // replies remain link-free.
+        let capture_evidence = owned_join_capture_requested(&row.platform, &draft);
+        let capture_link = if guard_hold.is_none()
+            && matches!(review, ReviewOutcome::Passed { .. })
+            && capture_evidence.is_some()
+        {
+            self.owned_reply_capture_link(row).await?
+        } else {
+            None
+        };
+        let reply = capture_link.as_ref().map_or(reply.clone(), |link| {
+            let candidate = format!("{reply}\n\n{link}");
+            // Approval editing is capped at 400 chars too. If the tracked URL
+            // would make the draft impossible to approve, leave the normal
+            // conversational reply alone rather than silently truncating it.
+            if candidate.chars().count() <= 400 {
+                candidate
+            } else {
+                reply.clone()
+            }
+        });
+        let capture_added = capture_link
+            .as_ref()
+            .is_some_and(|link| reply.contains(link));
+
         // Each channel's own pair of switches: Reddit's write switches, or
         // the owned-channel publish gate.
         let unattended = if row.platform == "reddit" {
@@ -542,7 +595,18 @@ impl CommunityExecutorWorker {
         } else {
             owned_replies::unattended_owned_replies_enabled()
         };
-        let (status, hold_reason, approved_by, not_before) =
+        let (status, hold_reason, approved_by, not_before) = if capture_added {
+            let evidence = capture_evidence.unwrap_or_default();
+            (
+                "awaiting_approval",
+                Some(format!(
+                    "held: commenter explicitly asked how to follow/join — tracked fan-capture link added; review before sending ({})",
+                    evidence.chars().take(160).collect::<String>()
+                )),
+                None,
+                None,
+            )
+        } else {
             match route_reply(guard_hold.as_deref(), review, unattended) {
                 ReplyRoute::Approve => (
                     "approved",
@@ -551,7 +615,8 @@ impl CommunityExecutorWorker {
                     Some(reply_not_before(OffsetDateTime::now_utc(), unit_draw())),
                 ),
                 ReplyRoute::AwaitApproval { reason } => ("awaiting_approval", reason, None, None),
-            };
+            }
+        };
         sqlx::query(
             r#"
             UPDATE community_comments
@@ -572,6 +637,56 @@ impl CommunityExecutorWorker {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Mints the tenant-owned tracked link offered only when the commenter
+    /// explicitly asked how to join/follow. The smart-link dimensions make
+    /// click → visitor → fan attribution readable without adding a second
+    /// reply ledger.
+    async fn owned_reply_capture_link(
+        &self,
+        row: &DraftRow,
+    ) -> Result<Option<String>, CommunityExecutorError> {
+        let snapshot = crowdrelay_infra::join_ask::load_join_ask_snapshot(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+        )
+        .await?;
+        let Some(base) = snapshot.member_site_base_url else {
+            return Ok(None);
+        };
+        let slug = owned_reply_capture_slug(row.id);
+        let destination = format!(
+            "{}/signal?utm_source={}&utm_medium=comment_reply&utm_campaign=owned_reply_capture&utm_content={}",
+            base.trim_end_matches('/'),
+            row.platform,
+            row.id.simple()
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO smart_links
+                (workspace_id, slug, destination_url, active,
+                 channel_source, channel_community, channel_creative)
+            VALUES ($1,$2,$3,true,$4,$5,'owned_reply_capture')
+            ON CONFLICT (workspace_id, slug) DO UPDATE SET
+                destination_url = EXCLUDED.destination_url,
+                active = true,
+                channel_source = EXCLUDED.channel_source,
+                channel_community = EXCLUDED.channel_community,
+                channel_creative = EXCLUDED.channel_creative
+            "#,
+        )
+        .bind(self.workspace_id.into_uuid())
+        .bind(&slug)
+        .bind(destination)
+        .bind(&row.platform)
+        .bind(format!("comment:{}", row.id))
+        .execute(&self.pool)
+        .await?;
+        Ok(Some(format!(
+            "{}/l/{slug}",
+            self.public_origin.trim_end_matches('/')
+        )))
     }
 
     /// The independent review of a community post or reply. Any failure to
