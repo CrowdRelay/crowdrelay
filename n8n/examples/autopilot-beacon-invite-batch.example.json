@@ -2,7 +2,7 @@
   "name": "CrowdRelay \u2014 CrowdRelay beacon invite batch executor",
   "nodes": [
     {
-      "parameters": {},
+      "parameters": {"inputSource": "passthrough"},
       "id": "bi-trigger",
       "name": "Called by verified ingress",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
