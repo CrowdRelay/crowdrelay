@@ -361,12 +361,14 @@ fn outbound_metadata(source_label: &str, book: OutreachBook, entry: &OutreachLog
     let map = &mut map;
     put(map, "entity_ref", &entry.entity_ref);
 
+    if matches!(book, OutreachBook::Promo | OutreachBook::Scout) {
+        put(map, "name", &entry.name);
+    }
     if book == OutreachBook::Promo {
         // The one-off import keyed promo's lead under `lead_id`.
         if let Some(lead) = &entry.entity_ref {
             map.insert("lead_id".to_owned(), json!(lead));
         }
-        put(map, "name", &entry.name);
         put(map, "segment", &entry.segment);
     }
     put(map, "channel", &entry.channel);
@@ -395,6 +397,9 @@ fn reply_metadata(book: OutreachBook, entry: &OutreachLogEntry) -> Value {
     match book {
         OutreachBook::Master => put(map, "reply_type", &entry.reply_type),
         OutreachBook::Promo => put(map, "response_type", &entry.response_type),
+        // SCOUT has no separate reply-type column; its Result / Status cell
+        // is already preserved above as `result`.
+        OutreachBook::Scout => {}
     }
     Value::Object(map.clone())
 }

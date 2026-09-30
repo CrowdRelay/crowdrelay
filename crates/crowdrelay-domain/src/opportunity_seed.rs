@@ -286,6 +286,14 @@ const INELIGIBLE_STATUS_WORDS: &[&str] = &[
     "submitted",
     "zgłoszone",
     "zgloszone",
+    // The human SCOUT sheet uses this after a manual form/email was already
+    // submitted. Importing it as eligible would let the live-opportunity
+    // loop propose the same application again before the reply arrives.
+    "czeka na odpowiedź",
+    "czeka na odpowiedz",
+    // A blocked route is deliberately not actionable even when every other
+    // field still looks like a strong opportunity.
+    "blocked",
     "done",
     "nieaktualne",
     "merged",
@@ -1105,6 +1113,22 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn human_scout_waiting_and_blocked_statuses_are_ineligible() {
+        for status in ["Czeka na odpowiedź", "Czeka na odpowiedz", "Blocked"] {
+            assert!(
+                !eligible_for(status),
+                "{status} means the route is already submitted or blocked"
+            );
+        }
+
+        // These remain actionable states: one needs preparation, the other
+        // needs a human to use a form/platform rather than an automatic send.
+        assert!(eligible_for("Do przygotowania"));
+        assert!(eligible_for("Ręczne zgłoszenie"));
+        assert!(eligible_for("Monitor"));
     }
 
     #[test]
