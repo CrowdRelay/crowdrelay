@@ -162,6 +162,50 @@ impl Fixture {
         .await
         .expect("click");
     }
+
+    async fn acquired_fan_from_click(
+        &self,
+        link_id: Uuid,
+        click_days_ago: i64,
+        signup_days_ago: i64,
+        tag: &str,
+    ) {
+        let visitor = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO click_events
+             (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(self.ws())
+        .bind(link_id)
+        .bind(visitor)
+        .bind(self.now - time::Duration::days(click_days_ago))
+        .execute(&self.pool)
+        .await
+        .expect("attributed click");
+        let fan: Uuid = sqlx::query_scalar(
+            "INSERT INTO fans (workspace_id, normalized_email, status)
+             VALUES ($1,$2,'active') RETURNING id",
+        )
+        .bind(self.ws())
+        .bind(format!("video-convert-{tag}-{}@x.test", visitor.simple()))
+        .fetch_one(&self.pool)
+        .await
+        .expect("fan");
+        sqlx::query(
+            "INSERT INTO fan_acquisition_events
+             (workspace_id, fan_id, source, request_id, anonymous_visitor_id, occurred_at)
+             VALUES ($1,$2,'public_signup',$3,$4,$5)",
+        )
+        .bind(self.ws())
+        .bind(fan)
+        .bind(Uuid::now_v7())
+        .bind(visitor)
+        .bind(self.now - time::Duration::days(signup_days_ago))
+        .execute(&self.pool)
+        .await
+        .expect("fan acquisition");
+    }
 }
 
 /// One card carries the whole read: touched-domain attribution, first-hop
@@ -204,6 +248,11 @@ async fn scorecard_reads_the_release_and_its_ledgers() {
     for _ in 0..5 {
         f.click(inner, 1).await;
     }
+    // Two people clicked the first hop and then became owned fans. The inner
+    // redirect has more traffic but is the same journey and must not create a
+    // second attribution path.
+    f.acquired_fan_from_click(wrap, 2, 1, "a").await;
+    f.acquired_fan_from_click(wrap, 2, 1, "b").await;
 
     // One posted community post carrying the wrap link, one waiting on the
     // operator, and one Reddit-removed post that halts the account.
@@ -477,10 +526,16 @@ async fn scorecard_reads_the_release_and_its_ledgers() {
     assert_eq!(card.ads_views, Some(50));
     assert!(card.analytics_through.is_some());
     assert_eq!(card.pace, Pace::Behind, "125 at day 5 is under half of 357");
-    assert_eq!(card.tracked_clicks.community, 3);
+    assert_eq!(card.tracked_clicks.community, 5);
     assert_eq!(
-        card.tracked_clicks.total, 3,
+        card.tracked_clicks.total, 5,
         "the inner hop's five clicks are the same people arriving twice"
+    );
+    assert_eq!(card.acquired_fans, 2);
+    assert_eq!(
+        card.fan_conversion_basis_points,
+        Some(4_000),
+        "two owned fans from five first-hop tracked clicks"
     );
     assert_eq!(card.sends.community.posted, 1);
     assert_eq!(card.sends.community.awaiting_manual_post, 1);
@@ -528,6 +583,8 @@ async fn scorecard_reads_the_release_and_its_ledgers() {
         unmeasured.attributed_views, None,
         "no traffic series, not zero"
     );
+    assert_eq!(unmeasured.acquired_fans, 0);
+    assert_eq!(unmeasured.fan_conversion_basis_points, None);
     assert_eq!(unmeasured.pace, Pace::Unmeasured);
     assert!(
         unmeasured
