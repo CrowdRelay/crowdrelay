@@ -44,6 +44,14 @@ pub struct VideoScorecardView {
     /// Clicks on this video's tracked links, per lane plus the total. A link
     /// chained onto another of the video's links counts on the first hop only.
     pub tracked_clicks: VideoClickLedger,
+    /// Distinct fans who signed up after clicking one of this video's tracked
+    /// links inside the scorecard window. This is the owned-audience outcome:
+    /// views and clicks are attention; this is conversion.
+    pub acquired_fans: u64,
+    /// Acquired fans per 10,000 tracked clicks. `None` when the video has no
+    /// tracked clicks, because a zero denominator is unmeasured rather than a
+    /// 0% conversion rate.
+    pub fan_conversion_basis_points: Option<u32>,
     /// What each lane sent, is still holding, or already spent — see the
     /// fields for the per-lane vocabulary.
     pub sends: VideoSendsLedger,
