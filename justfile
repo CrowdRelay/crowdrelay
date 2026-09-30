@@ -177,7 +177,8 @@ test-postgres-env:
       b_a_reply_inside_the_window_resolves_to_one \
       queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event \
       a_far_out_approval_is_held_for_the_briefing \
-      an_anchor_is_one_room_whoever_claims_it
+      an_anchor_is_one_room_whoever_claims_it \
+      lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
       the_outcome_appears_in_the_timeline_it_caused \
       the_drip_claims_one_post_per_batch_per_interval \
