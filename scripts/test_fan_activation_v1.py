@@ -13,10 +13,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/fan_activation.rs"
-MIGRATION = ROOT / "migrations/0382_activation_retention_integrity.sql"
+MIGRATION = ROOT / "migrations/0383_attendance_is_meaningful_fan_action.sql"
 INDEX_MIGRATIONS = (
     ROOT / "migrations/0003_phase2_referrals_rewards.sql",
     ROOT / "migrations/0078_fan_last_meaningful_action.sql",
+    ROOT / "migrations/0010_concert_qr_checkins.sql",
+    ROOT / "migrations/0031_audience_intelligence.sql",
 )
 METRICS = ROOT / "crates/crowdrelay-infra/src/autopilot/growth_metrics.rs"
 
@@ -42,7 +44,7 @@ class FanActivationContract(unittest.TestCase):
         # than by somebody noticing the number looks wrong.
         block = (
             shipped(self.domain)
-            .split("pub const fn all() -> [Self; 6] {", 1)[1]
+            .split("pub const fn all() -> [Self; 7] {", 1)[1]
             .split("\n    }", 1)[0]
         )
         rust = {name for name in re.findall(r"Self::(\w+)", block)}
@@ -110,8 +112,20 @@ class FanActivationContract(unittest.TestCase):
             "merch_order_facts_fan_confirmed_idx",
             "referral_attributions_referrer_status_idx",
             "fan_sessions_fan_last_seen_idx",
+            "concert_checkins_fan_time_idx",
+            "admission_passes_fan_status_idx",
         ):
             self.assertIn(index, self.index_migrations)
+
+    def test_observed_attendance_is_first_party_activity(self) -> None:
+        attendance = self.migration.split("-- attendance:", 1)[1].split(
+            "-- event_interest:", 1
+        )[0]
+        self.assertIn("FROM concert_checkins", attendance)
+        self.assertIn("FROM admission_passes", attendance)
+        self.assertIn("status = 'redeemed'", attendance)
+        self.assertIn("redeemed_at IS NOT NULL", attendance)
+        self.assertNotIn("ticket_orders", attendance)
 
     def test_qualified_referral_means_an_actual_qualified_fan(self) -> None:
         self.assertIn("status = 'qualified'", self.migration)
