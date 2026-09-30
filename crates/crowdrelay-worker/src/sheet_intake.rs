@@ -69,7 +69,7 @@ pub const MAX_ROWS_PER_FILE: usize = 5000;
 /// every transport's skip-unchanged marker (`<sha|mtime>#<rev>`). Bump it
 /// when the intake rules change or previously-scanned files stay skipped
 /// under rules they predate.
-pub const SHEET_INTAKE_REVISION: u32 = 7;
+pub const SHEET_INTAKE_REVISION: u32 = 8;
 
 /// How many leading rows a banner may occupy before the sheet is left to
 /// the contact fallback. `SCOUT AUTO` tabs stack title + rule note + a
@@ -140,7 +140,7 @@ pub struct SheetHarvest {
     /// Beacon rows whose own write failed — isolated per row.
     pub beacons_failed: u64,
     /// Sheets carrying an outreach log (`VIRYA_MASTER`/`PROMO` OUTREACH
-    /// tabs) that the dedicated reader claimed.
+    /// tabs or the human SCOUT `OUTREACH_LOG`) that the dedicated reader claimed.
     pub outreach_log_sheets: usize,
     /// Send rows newly written to `outreach_interactions`.
     pub outreach_sends_recorded: u64,
