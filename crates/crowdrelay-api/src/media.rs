@@ -42,6 +42,12 @@ pub(crate) fn public_routes() -> axum::Router<crate::AppState> {
         // Public on purpose: Meta's crawler fetches the image when a post
         // carrying it publishes. Unguessable uuid ids, no listing route.
         .route("/v1/public/media/{id}", axum::routing::get(get_media))
+        // The capture page's server-side read: title and publish time for an
+        // owned YouTube id, everything else about the source stays private.
+        .route(
+            "/v1/public/videos/{youtube_id}",
+            axum::routing::get(crate::public_videos::public_video),
+        )
 }
 
 /// Largest image Meta will fetch for a post; anything past it is rejected

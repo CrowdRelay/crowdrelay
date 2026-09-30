@@ -1065,3 +1065,41 @@ async fn reddit_standing(
         }
     }
 }
+
+/// The one fact a public capture page may render: an owned video's title and
+/// publish time. Everything else about the source stays server-side.
+#[derive(Debug, FromRow)]
+pub struct PublicVideoSummary {
+    /// The video's title as the watcher last saw it.
+    pub title: String,
+    /// The publish timestamp the watcher recorded.
+    pub published_at: OffsetDateTime,
+}
+
+/// `None` when `youtube_id` names no active video source of this workspace —
+/// the same retirement flag the scorecard read applies.
+///
+/// # Errors
+///
+/// Propagates the database error, classified.
+pub async fn public_owned_video(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    youtube_id: &str,
+) -> Result<Option<PublicVideoSummary>, RepositoryError> {
+    sqlx::query_as::<_, PublicVideoSummary>(
+        r#"
+        SELECT title, occurred_at AS published_at
+        FROM content_sources
+        WHERE workspace_id = $1
+          AND source_kind = 'video'
+          AND source_key = 'youtube:' || $2
+          AND active
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(youtube_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)
+}
