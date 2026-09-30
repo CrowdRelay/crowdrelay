@@ -79,12 +79,13 @@ pub const EMERGING_TREND_LIFT: f64 = 1.125;
 pub const SIBLING_PROOF_MIN: u32 = 2;
 pub const SIBLING_PROOF_LIFT: f64 = 1.15;
 
-/// One outcome's report of what a production earned — `new_fans` from the
-/// suggestion's `results` payload — decays at this rate per older report.
-/// The most recent measured outcome is half the answer; the one before it
-/// a quarter. Two or three reports are all a format usually has, so the
-/// weighting stays shallow enough that a single viral outlier cannot pin
-/// the yield.
+/// One produced piece's measured fan yield decays at this rate per older
+/// sample. In normal operation the repository derives that sample from
+/// first-party conversion provenance; legacy/uninstrumented formats may still
+/// contribute an operator-reported `results.new_fans` fallback. The most
+/// recent measured piece is half the answer; the one before it a quarter.
+/// Two or three samples are all a format usually has, so one viral outlier
+/// cannot pin the yield.
 pub const YIELD_EMA_ALPHA: f64 = 0.5;
 /// Measured yield shrinks toward the purpose prior rather than replacing
 /// it: a format's first report moves expected fans by a third, and the
@@ -95,11 +96,11 @@ pub const YIELD_PRIOR_WEIGHT: f64 = 2.0;
 pub const YIELD_MIN: f64 = 0.25;
 pub const YIELD_MAX: f64 = 4.0;
 
-/// What the band's own resolved outcomes measured for one format: the
-/// exponentially-weighted mean of reported `new_fans` (recent reports
-/// weigh more), and how many outcomes carried a real measurement.
-/// `measured` counts only outcomes that reported — `done` without a
-/// `new_fans` figure teaches the stale rule, not the yield.
+/// What the band's own measured productions earned for one format: the
+/// exponentially-weighted mean of new fans per mature content piece (recent
+/// pieces weigh more), and how many pieces carried a real measurement.
+/// Published zero-conversion pieces count as evidence; fresh/uninstrumented
+/// pieces do not.
 #[derive(Clone, Copy, Debug)]
 pub struct FormatYield {
     pub measured_fans_ema: f64,
@@ -331,10 +332,11 @@ pub struct RankingInputs<'a> {
     pub arc_format_keys: &'a BTreeMap<String, Uuid>,
     /// Outcome count per format key — what the band has already tried.
     pub outcome_counts: &'a BTreeMap<String, u32>,
-    /// Measured new-fan yield per format key, learned from the resolved
-    /// outcomes' `results` payloads — the answer to "what did this format
-    /// actually earn when this band made it". Absent entries mean no
-    /// measurement exists and the purpose prior stands unmodified.
+    /// Measured new-fan yield per format key — normally first-party
+    /// source→post→conversion provenance, with legacy self-report only as a
+    /// fallback. This is the answer to "what did this format actually earn
+    /// when this band made it". Absent entries mean no measurement exists and
+    /// the purpose prior stands unmodified.
     pub format_yield: &'a BTreeMap<String, FormatYield>,
     /// Suggestion count per format key — novelty decays as the engine
     /// repeats itself.
