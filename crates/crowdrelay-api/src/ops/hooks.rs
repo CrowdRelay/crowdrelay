@@ -286,16 +286,19 @@ mod hooks_postgres_tests {
             .expect("workspace");
         let now = OffsetDateTime::now_utc();
         // Four ordinary reels and one watched half again as long.
+        let mut source_ids = Vec::new();
         for (index, watch_ms) in [4_000_i64, 4_000, 4_000, 4_000, 6_000].into_iter().enumerate() {
+            let source_id = Uuid::now_v7();
             sqlx::query(
                 r#"INSERT INTO content_sources
-                   (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
-                   VALUES ($1,'social_post',$2,'reel',$3,$3 + interval '45 days',
+                   (id, workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+                   VALUES ($1,$2,'social_post',$3,'reel',$4,$4 + interval '45 days',
                            jsonb_build_object('platform','instagram','media_type','VIDEO',
-                                              'body', E'\nOpening line ' || $4::text || E'\nrest',
-                                              'reach',1000,'avg_watch_ms',$5::bigint,
+                                              'body', E'\nOpening line ' || $5::text || E'\nrest',
+                                              'reach',1000,'avg_watch_ms',$6::bigint,
                                               'saves',5,'shares',5))"#,
             )
+            .bind(source_id)
             .bind(workspace_id)
             .bind(format!("instagram:{index}"))
             .bind(now - time::Duration::days(i64::try_from(index).unwrap_or(0) + 1))
@@ -304,6 +307,115 @@ mod hooks_postgres_tests {
             .execute(&pool)
             .await
             .expect("post");
+            source_ids.push(source_id);
+        }
+
+        // The long-watched reel also acquired two fans through actions that
+        // explicitly carry this source. One of them opened a real first-party
+        // session inside 30 days of signup; the other only signed up. The
+        // scorecard must keep attention and fan outcome as separate facts.
+        let held_source_id = source_ids[4];
+        let decision_id = Uuid::now_v7();
+        let action_id = Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO autopilot_decisions
+               (id, workspace_id, decision_key, context, subject_kind, subject_id,
+                decision_kind, confidence_basis_points, disposition, reason,
+                input_snapshot, policy_snapshot, recommendation, trace_id)
+               VALUES ($1,$2,$3,'content_supply','content_source',$4,
+                       'seed.hook_outcome',9000,'auto_execute','hook test',
+                       '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,$5)"#,
+        )
+        .bind(decision_id)
+        .bind(workspace_id)
+        .bind(format!("hook-outcome-{}", workspace_id.simple()))
+        .bind(held_source_id)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .expect("decision");
+        sqlx::query(
+            r#"INSERT INTO autopilot_actions
+               (id, workspace_id, decision_id, context, action_kind, subject_kind,
+                subject_id, idempotency_key, payload, status, finished_at)
+               VALUES ($1,$2,$3,'content_supply','community.engage.request',
+                       'content_source',$4,$5,$6,'succeeded',$7)"#,
+        )
+        .bind(action_id)
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(held_source_id)
+        .bind(format!("hook-outcome-action-{}", workspace_id.simple()))
+        .bind(json!({
+            "kind": "request_community_engagement",
+            "source_id": held_source_id.to_string(),
+            "platform": "reddit",
+        }))
+        .bind(now - time::Duration::days(4))
+        .execute(&pool)
+        .await
+        .expect("action");
+
+        for index in 0..2 {
+            let fan_id = Uuid::now_v7();
+            let created_at = now - time::Duration::days(4);
+            sqlx::query(
+                r#"INSERT INTO fans
+                   (id, workspace_id, normalized_email, status, created_at, updated_at)
+                   VALUES ($1,$2,$3,'active',$4,$4)"#,
+            )
+            .bind(fan_id)
+            .bind(workspace_id)
+            .bind(format!("hook-fan-{index}-{}@example.test", workspace_id.simple()))
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("fan");
+            sqlx::query(
+                r#"INSERT INTO fan_consents
+                   (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+                   VALUES ($1,$2,'marketing',true,'privacy-v1','hook-test',$3)"#,
+            )
+            .bind(workspace_id)
+            .bind(fan_id)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("consent");
+            sqlx::query(
+                r#"INSERT INTO fan_provenance_events
+                   (workspace_id, fan_id, event_kind, channel, source_target,
+                    action_id, attribution_method, attribution_confidence, occurred_at)
+                   VALUES ($1,$2,'conversion','instagram','held-hook',$3,
+                           'last_tracked_click',1.0,$4)"#,
+            )
+            .bind(workspace_id)
+            .bind(fan_id)
+            .bind(action_id)
+            .bind(created_at + time::Duration::hours(1))
+            .execute(&pool)
+            .await
+            .expect("provenance");
+
+            if index == 0 {
+                let mut session_hash = fan_id.as_bytes().to_vec();
+                session_hash.extend_from_slice(fan_id.as_bytes());
+                sqlx::query(
+                    r#"INSERT INTO fan_sessions
+                       (workspace_id, fan_id, session_token_hash, created_at,
+                        last_seen_at, expires_at)
+                       VALUES ($1,$2,$3,$4,$5,$6)"#,
+                )
+                .bind(workspace_id)
+                .bind(fan_id)
+                .bind(session_hash)
+                .bind(created_at)
+                .bind(now - time::Duration::days(2))
+                .bind(now + time::Duration::days(30))
+                .execute(&pool)
+                .await
+                .expect("session");
+            }
         }
 
         let body = load_content_hooks(&pool, workspace_id, now).await.expect("hooks");
@@ -316,6 +428,21 @@ mod hooks_postgres_tests {
         assert_eq!(held["avg_watch_ms"], 6_000);
         assert_eq!(held["watch_index_bps"], 15_000);
         assert_eq!(held["opening"], "Opening line 4", "the first non-empty line");
-        assert_eq!(body["links"], json!([]), "no conversions yet, no links");
+        assert_eq!(held["fans_acquired"], 2);
+        assert_eq!(held["fans_activated_within_30d"], 1);
+        assert_eq!(held["fan_conversion_per_1000_reach"], 2);
+        assert_eq!(held["fan_activation_bps"], 5_000);
+        assert!(
+            posts
+                .iter()
+                .filter(|post| post["id"] != held["id"])
+                .all(|post| post["fans_acquired"] == 0),
+            "fan outcome belongs to the exact source, not every post in the window"
+        );
+        assert_eq!(
+            body["links"],
+            json!([]),
+            "source-level provenance does not fabricate smart-link rows"
+        );
     }
 }
