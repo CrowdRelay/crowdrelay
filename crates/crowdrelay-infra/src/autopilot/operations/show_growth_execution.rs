@@ -34,6 +34,16 @@ pub(in crate::autopilot) async fn execute_show_growth(
     send_at: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    // Legacy/stale generic actions must fail closed too. These levers require
+    // a named verified relationship target; only RequestBeaconOutreach carries
+    // that identity and its suppression/consent state. Never let a generic
+    // show-growth executor invent the destination after approval.
+    if lever.is_beacon_outreach() {
+        return Err(RepositoryError::ConflictBecause(
+            "partner/scene show growth must execute through a named verified Beacon",
+        ));
+    }
+
     let event = sqlx::query_as::<_, GrowthEventFacts>(
         r#"
         SELECT event.slug, event.title, city.slug, event.venue, event.ticket_url,
