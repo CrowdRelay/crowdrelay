@@ -17,6 +17,7 @@ struct ShowGrowthRow {
     city_signal_fans: i64,
     qualified_referrers_in_city: i64,
     beacon_partners: i64,
+    human_booking_targets_30d: i64,
     attendees: i64,
     free_listing_sweep_requested: bool,
     canonical_link_setup_requested: bool,
@@ -56,6 +57,17 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
             COALESCE(city_signal.city_signal_fans, 0)::bigint AS city_signal_fans,
             COALESCE(referrers.qualified_referrers, 0)::bigint AS qualified_referrers_in_city,
             COALESCE(beacons.beacon_partners, 0)::bigint AS beacon_partners,
+            (
+                SELECT COUNT(DISTINCT interaction.target_id)::bigint
+                FROM booking_interactions AS interaction
+                WHERE interaction.workspace_id = event.workspace_id
+                  AND interaction.occurred_at >= $2 - INTERVAL '30 days'
+                  AND (
+                      interaction.source_key LIKE 'gmail:%'
+                      OR interaction.source_key LIKE 'master:%'
+                      OR interaction.source_key LIKE 'promo:%'
+                  )
+            ) AS human_booking_targets_30d,
             COALESCE(attendance.attendees, 0)::bigint AS attendees,
             COALESCE(history.free_listing_sweep_requested, false) AS free_listing_sweep_requested,
             COALESCE(history.canonical_link_setup_requested, false) AS canonical_link_setup_requested,
@@ -268,6 +280,7 @@ fn map_row(row: ShowGrowthRow) -> Result<ShowGrowthSnapshot, RepositoryError> {
         qualified_referrers_in_city: bounded_u32(row.qualified_referrers_in_city)?,
         beacon_partners: u16::try_from(row.beacon_partners)
             .map_err(|_| RepositoryError::Unexpected)?,
+        human_booking_targets_30d: bounded_u32(row.human_booking_targets_30d)?,
         attendees: bounded_u32(row.attendees)?,
         unreciprocated_crossbill_edge: row.unreciprocated_crossbill_edge,
         ladder_approved: row.ladder_approved,
