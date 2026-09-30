@@ -549,7 +549,4 @@ mod tests_booking {
         Ok(())
     }
 
-    /// Adaptive autonomy: when the tenant is visibly booking, partner outreach
-    /// stays per-action and human-led. When that activity is sparse, the same
-
 }

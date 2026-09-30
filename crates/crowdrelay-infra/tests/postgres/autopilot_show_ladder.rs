@@ -178,6 +178,14 @@ async fn rung_state(
 async fn ladder_approval_releases_parked_rungs_and_revoke_cancels_only_its_own()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("ladder").await?;
+    seed_human_booking_activity(
+        &fixture.pool,
+        fixture.workspace_id,
+        fixture.event_id,
+        3,
+    )
+    .await?;
+
     // One owned rung parked on the event, one relationship-sensitive partner
     // rung parked beside it, one foreign rung, and one already queued by a
     // person's own approval — the ladder must tell all four apart.

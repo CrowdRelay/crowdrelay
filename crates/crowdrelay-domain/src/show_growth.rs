@@ -267,12 +267,12 @@ impl ShowGrowthLever {
         )
     }
 
-    /// A show-ladder approval may pre-authorize repeatable owned/first-party
-    /// promotion only. Relationship-sensitive moves stay per-action no matter
-    /// how quiet the booking ledger is: absence of recent touches is not
-    /// consent to spend a promoter, venue or scene relationship.
+    /// A broad show-ladder approval covers repeatable owned/first-party
+    /// promotion only. Relationship-sensitive moves always keep their own
+    /// human gate: sparse recorded booking activity is not permission to spend
+    /// relationship capital on the operator's behalf.
     #[must_use]
-    pub const fn ladder_may_pre_authorize(self, _human_booking_targets_30d: u32) -> bool {
+    pub const fn ladder_may_pre_authorize(self) -> bool {
         !self.is_relationship_sensitive()
     }
 

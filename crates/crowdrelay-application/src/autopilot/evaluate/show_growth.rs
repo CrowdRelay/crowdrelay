@@ -146,7 +146,7 @@ fn request_candidate(
     // promotion. Relationship-sensitive moves stay per-action regardless of
     // booking cadence: silence in the interaction ledger is not authority.
     if snapshot.ladder_approved
-        && lever.ladder_may_pre_authorize(snapshot.human_booking_targets_30d)
+        && lever.ladder_may_pre_authorize()
         && let Some(map) = policy_snapshot.as_object_mut()
     {
         map.insert(
