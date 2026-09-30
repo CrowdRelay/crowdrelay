@@ -136,24 +136,18 @@ fn request_candidate(
         RATE_FLOOR,
     );
     let mut policy_snapshot = policy_evidence(policy, domain_policy)?;
-    // Adaptive autonomy: an active tenant-side booking cadence keeps
-    // relationship-sensitive promotion human-led. If that cadence is sparse,
-    // an explicitly approved show ladder becomes a bounded backstop instead
-    // of letting the event stall. The persistence seam re-checks this marker.
+    // The broad ladder approval covers repeatable owned/first-party growth.
+    // Relationship-sensitive promotion keeps an individual human gate even
+    // when recorded booking activity is quiet; absence of ledger activity is
+    // not evidence that the operator delegated the relationship.
     if snapshot.ladder_approved
-        && lever.ladder_may_pre_authorize(snapshot.human_booking_targets_30d)
+        && lever.ladder_may_pre_authorize()
         && let Some(map) = policy_snapshot.as_object_mut()
     {
         map.insert(
             "ladder_authorized".to_owned(),
             serde_json::Value::Bool(true),
         );
-        if lever.is_relationship_sensitive() {
-            map.insert(
-                "relationship_backstop_authorized".to_owned(),
-                serde_json::Value::Bool(true),
-            );
-        }
     }
     let action = AutopilotActionPayload::RequestShowGrowth {
         event_id: snapshot.event_id,
