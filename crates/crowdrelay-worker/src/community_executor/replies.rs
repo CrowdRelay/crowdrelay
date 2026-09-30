@@ -565,25 +565,22 @@ impl CommunityExecutorWorker {
         // Even then it always goes to a person: unattended conversational
         // replies remain link-free.
         let capture_evidence = owned_join_capture_requested(&row.platform, &draft);
+        let capture_url_chars = self.public_origin.trim_end_matches('/').chars().count()
+            + "/l/".chars().count()
+            + owned_reply_capture_slug(row.id).chars().count();
+        let capture_fits = reply.chars().count() + 2 + capture_url_chars <= 400;
         let capture_link = if guard_hold.is_none()
             && matches!(review, ReviewOutcome::Passed { .. })
             && capture_evidence.is_some()
+            && capture_fits
         {
             self.owned_reply_capture_link(row).await?
         } else {
             None
         };
-        let reply = capture_link.as_ref().map_or(reply.clone(), |link| {
-            let candidate = format!("{reply}\n\n{link}");
-            // Approval editing is capped at 400 chars too. If the tracked URL
-            // would make the draft impossible to approve, leave the normal
-            // conversational reply alone rather than silently truncating it.
-            if candidate.chars().count() <= 400 {
-                candidate
-            } else {
-                reply.clone()
-            }
-        });
+        let reply = capture_link
+            .as_ref()
+            .map_or(reply.clone(), |link| format!("{reply}\n\n{link}"));
         let capture_added = capture_link
             .as_ref()
             .is_some_and(|link| reply.contains(link));
