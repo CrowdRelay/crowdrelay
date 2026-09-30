@@ -1039,6 +1039,9 @@ impl PostgresAutopilotRepository {
             .bind(event_id.into_uuid())
             .bind(now)
             .bind(OUTWARD_HOLD_SECONDS)
+            .bind(i64::from(
+                crowdrelay_domain::show_growth::ACTIVE_BOOKING_TOUCHES_30D,
+            ))
             .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
