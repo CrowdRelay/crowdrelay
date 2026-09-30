@@ -45,7 +45,7 @@ MEASUREMENT      Y14 / Y30 windows, control arm swept    measurement/readiness.r
                  in the same transaction
   ↓
 CAUSAL UPDATE    apply_evidence_to_model over the        …/growth_intelligence/evidence_replay.rs
-                 resolved_at delta, contrasted against
+                 new measurement horizons, contrasted against
                  the experiment's control arm
   ↓
 BELIEF UPDATE    checkpoint + delta replay               load_causal_model
@@ -96,7 +96,8 @@ NEXT DECISION
   whether they are contrasted. A slope fitted between a control-adjusted Y30
   and a raw Y14 describes neither quantity.
 - Earned **across batches**, not only within one. The learning cursor is
-  `resolved_at` and the randomisation does not respect it: an experiment's
+  the latest measurement actually read (3d/14d/30d, resolution or partial stamp),
+  independent of checkpoint save time. The randomisation does not respect it: an experiment's
   treated units resolve when their own measurements finish, on different days,
   while the control arm resolves once alongside the first of them. Delta replay
   therefore fetches the control arm of every experiment in the batch by
@@ -296,3 +297,22 @@ Wired or deleted since this table first listed them:
 5. **The loop is correct and barely exercised.** Almost no outcome has
    resolved. Most of the arithmetic above is right and untested by reality; no
    code change fixes that.
+
+
+### Durable checkpoint ownership
+
+`growth_intelligence/strategy_checkpoint.rs` owns
+`apply_evidence_to_stored_strategy_posterior` and the strategy checkpoint's
+transactional write. Its own observation cursor advances with its posterior;
+a different learner's save cannot drop its pending observations. New no-op
+horizons advance the scan watermark without increasing confidence. Causal state
+carries its consumed measurement cursor too, rather than using the later save
+time. Timestamp cursors still require ordered commits: an arbitrary late commit
+older than a consumed watermark requires a transactional horizon inbox to recover.
+
+`growth_intelligence/metacognition.rs` owns the compact assessment checkpoint.
+The completed evaluator submits an observation, while preview only projects it.
+Duplicate/stale observations do not advance the streak, and a metric change
+resets comparable continuity. Advisory checkpoint outages have bounded waits and
+preserve stored state. More evaluations can change exploration, but they do not
+create more outcome evidence or posterior confidence.

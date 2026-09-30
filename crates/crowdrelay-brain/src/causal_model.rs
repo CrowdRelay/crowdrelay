@@ -299,7 +299,7 @@ pub struct CausalModel {
     pub evidence_basis_version: u32,
     /// Latest measurement included in this state, independent of its save time.
     /// Absent in legacy checkpoints; the loader rebuilds those once.
-    #[serde(default)]
+    #[serde(default, with = "crowdrelay_domain::wire_time::option")]
     pub evidence_cursor: Option<time::OffsetDateTime>,
     /// The effect size worth acting on, in this tenant's outcome units.
     ///
