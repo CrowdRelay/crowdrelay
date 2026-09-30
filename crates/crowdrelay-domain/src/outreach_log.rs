@@ -187,18 +187,21 @@ pub struct OutreachLogEntry {
 }
 
 impl OutreachLogEntry {
+    /// An explicit unsent state wins over ambiguous dates and contradictory
+    /// reply cells. SCOUT's `Date` also dates planned work; preserving the raw
+    /// value must not turn a dated `NOT SENT` row into outreach history.
+    fn explicitly_unsent(&self) -> bool {
+        self.status.as_deref().is_some_and(|status| {
+            ["draft", "queued", "planned", "not sent", "not_sent"]
+                .contains(&status.trim().to_lowercase().as_str())
+        })
+    }
+
     /// The sheet proves the letter went out: a send timestamp, or a
-    /// status only a sent letter can reach. An explicit draft/not-sent
-    /// verdict beats a bare date — the scout sheet's `Date` is the day
-    /// the row was worked, not proof the letter left.
+    /// status only a sent letter can reach, unless it explicitly says unsent.
     #[must_use]
     pub fn was_sent(&self) -> bool {
-        if matches!(
-            self.status
-                .as_deref()
-                .map(|status| status.trim().to_lowercase()),
-            Some(status) if status == "draft" || status == "not sent"
-        ) {
+        if self.explicitly_unsent() {
             return false;
         }
         if self.sent_at().is_some() {
@@ -213,6 +216,9 @@ impl OutreachLogEntry {
     /// The sheet says an answer came back.
     #[must_use]
     pub fn was_replied(&self) -> bool {
+        if self.explicitly_unsent() {
+            return false;
+        }
         if self.replied_at().is_some() {
             return true;
         }
@@ -909,6 +915,36 @@ mod tests {
         let entry = &report.entries[0];
         assert!(!entry.was_sent(), "a draft was never sent");
         assert!(!entry.was_replied());
+    }
+
+    #[test]
+    fn explicit_unsent_status_refuses_history_even_with_dates_and_reply_fields() {
+        for status in ["DRAFT", "queued", " Planned ", "NOT SENT", "not_sent"] {
+            let entry = OutreachLogEntry {
+                status: Some(status.to_owned()),
+                sent_at_raw: Some("2026-08-11".to_owned()),
+                reply_at_raw: Some("2026-08-12".to_owned()),
+                reply_type: Some("HUMAN".to_owned()),
+                result: Some("Accepted".to_owned()),
+                ..OutreachLogEntry::default()
+            };
+            assert!(
+                entry.sent_at().is_some(),
+                "raw dates remain available for audit"
+            );
+            assert!(!entry.was_sent(), "{status} is intent, not proof of a send");
+            assert!(
+                !entry.was_replied(),
+                "contradictory reply fields cannot mint history"
+            );
+        }
+        let sent = OutreachLogEntry {
+            status: Some("SENT".to_owned()),
+            sent_at_raw: Some("2026-08-11".to_owned()),
+            ..OutreachLogEntry::default()
+        };
+        assert!(sent.was_sent());
+        assert!(!sent.was_replied());
     }
 
     #[test]

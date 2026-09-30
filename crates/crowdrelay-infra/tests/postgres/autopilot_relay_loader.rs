@@ -6,12 +6,14 @@
 //! applies the same place-fitness predicate the growth-intelligence loader
 //! does, caps the spread at three communities per post, and rotates by
 //! least-recently-drafted so the same three names are not always the ones
-//! picked. These tests pin the contract: who is eligible, who is not, and in
-//! which order.
+//! picked. Source-bound drafting requests consume a turn before their outcome
+//! becomes a post. These tests pin eligibility, rotation, and per-target retries.
 
 use std::time::Duration;
 
 include!("relay_platforms.rs");
+include!("relay_draft_rotation.rs");
+include!("drop_surge_retry.rs");
 
 use crate::common;
 use crowdrelay_application::autopilot::AutopilotDecisionRepository;

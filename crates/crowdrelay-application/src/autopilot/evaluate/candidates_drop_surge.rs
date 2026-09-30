@@ -55,15 +55,22 @@ fn surge_caption(snapshot: &ContentSupplySnapshot, max: usize) -> String {
     lock_screen_line(&text, max)
 }
 
-/// How many times this lane already failed for the source — the retry
-/// counter the idempotency key carries so a re-raised lane lands as a new
-/// action instead of deduping onto the dead one.
-fn surge_attempt(snapshot: &ContentSupplySnapshot, lane: &str) -> u32 {
-    snapshot
-        .drop_surge_failures
-        .iter()
-        .find(|failure| failure.lane == lane)
-        .map_or(0, |failure| failure.failures)
+/// The retry suffix once this source and destination may try again.
+/// `None` means backoff or the existing attempt ceiling holds this lane.
+fn surge_retry(
+    snapshot: &ContentSupplySnapshot,
+    lane: &str,
+    now: OffsetDateTime,
+) -> Option<String> {
+    let Some(failure) = snapshot.drop_surge_failures.iter().find(|failure| failure.lane == lane) else {
+        return Some(String::new());
+    };
+    if failure.failures >= crowdrelay_domain::content_supply::DROP_SURGE_MAX_ATTEMPTS
+        || now < failure.retry_due()
+    {
+        return None;
+    }
+    Some(format!(":attempt{}", failure.failures))
 }
 
 /// The drop fan-out for one fresh video or release: one candidate per lane,
@@ -111,15 +118,6 @@ fn drop_surge_candidates(
         {
             continue;
         }
-        let failures = surge_attempt(snapshot, lane);
-        if failures >= crowdrelay_domain::content_supply::DROP_SURGE_MAX_ATTEMPTS {
-            continue;
-        }
-        let retry = if failures == 0 {
-            String::new()
-        } else {
-            format!(":attempt{failures}")
-        };
         if lane == "community" {
             if snapshot.source_kind != crowdrelay_domain::content_supply::ContentSourceKind::Video {
                 continue;
@@ -130,6 +128,9 @@ fn drop_surge_candidates(
                     .contains(&target.platform)
             }) {
                 let target_id = target.target_id.into_uuid();
+                let Some(retry) = surge_retry(snapshot, &format!("community:{target_id}"), now) else {
+                    continue;
+                };
                 let address = if target.platform == "reddit" {
                     format!("r/{}", target.subreddit)
                 } else {
@@ -168,6 +169,9 @@ fn drop_surge_candidates(
             }
             continue;
         }
+        let Some(retry) = surge_retry(snapshot, lane, now) else {
+            continue;
+        };
         // The email lane needs an absolute link — `cta_url` is relative.
         // Without the tenant's site origin there is nothing a reader can
         // click, so the lane waits for the setting rather than sending a

@@ -229,4 +229,3 @@ struct ReferralCodeResponse {
     fan_id: Uuid,
     code: String,
 }
-
