@@ -13998,7 +13998,7 @@ components:
         One video read against the "+1000 CrowdRelay-driven views in 14 days"
         plan. `attributed_views` is null while no `traffic:*` series exists —
         it distinguishes "unmeasured" from zero.
-      required: [source_id, source_key, video_id, title, url, published_at, age_days, view_target, window_days, expected_by_now, attributed_views, total_views, ads_views, analytics_through, pace, tracked_clicks, sends, missing, reddit]
+      required: [source_id, source_key, video_id, title, url, published_at, age_days, view_target, window_days, expected_by_now, attributed_views, total_views, ads_views, analytics_through, fans_captured, pace, tracked_clicks, sends, missing, reddit]
       properties:
         source_id: { type: string, format: uuid }
         source_key: { type: string }
@@ -14014,6 +14014,13 @@ components:
         total_views: { type: [integer, 'null'], minimum: 0 }
         ads_views: { type: [integer, 'null'], minimum: 0 }
         analytics_through: { type: [string, 'null'], format: date-time }
+        fans_captured:
+          type: [integer, 'null']
+          minimum: 0
+          description: >-
+            Distinct fans who clicked one of the video's tracked links and
+            joined within seven days. Null when the video has no tracked links
+            at all — not a zero.
         pace: { type: string, enum: [on_track, behind, unmeasured, closed] }
         tracked_clicks:
           type: object

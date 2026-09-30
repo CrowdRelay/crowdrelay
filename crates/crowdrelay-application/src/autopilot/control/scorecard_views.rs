@@ -40,6 +40,10 @@ pub struct VideoScorecardView {
     /// Newest `traffic:*` reading — how fresh the attribution is.
     #[serde(with = "time::serde::rfc3339::option")]
     pub analytics_through: Option<OffsetDateTime>,
+    /// Distinct fans who clicked one of the video's tracked links and joined
+    /// within seven days. `None` means the video has no tracked links at all —
+    /// not that the links captured no one.
+    pub fans_captured: Option<u64>,
     pub pace: crowdrelay_domain::video_scorecard::Pace,
     /// Clicks on this video's tracked links, per lane plus the total. A link
     /// chained onto another of the video's links counts on the first hop only.
