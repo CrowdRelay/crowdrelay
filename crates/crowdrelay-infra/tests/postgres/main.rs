@@ -127,5 +127,6 @@ mod support_slot_ask;
 mod team_initial_digest;
 mod venue_directory;
 mod venue_seed;
+mod video_promotion;
 mod workspace_wordmark;
 mod zz_wire_dates;

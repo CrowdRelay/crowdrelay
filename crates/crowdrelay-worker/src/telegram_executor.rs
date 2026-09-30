@@ -432,6 +432,18 @@ impl TelegramExecutorWorker {
     /// Processes a single claimed action: checks anti-spam guardrails,
     /// posts to Telegram via the Bot API, and records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), TelegramExecutorError> {
+        if !crowdrelay_infra::promotion_policy::action_platform_allowed(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+            action.action_id,
+            "telegram",
+        )
+        .await?
+        {
+            self.mark_failed(action.id, "platform_excluded_by_campaign")
+                .await?;
+            return Ok(());
+        }
         // The cooldown is about the channel actually posted in, so the
         // connection is resolved before anything is checked against it.
         //

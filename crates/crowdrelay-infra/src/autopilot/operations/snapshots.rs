@@ -617,89 +617,9 @@ const MAX_RELAY_COMMUNITIES_PER_POST: i64 = 3;
 /// stops drafting more. See `load_relay_community_targets`.
 const MAX_WAITING_COMMUNITY_DRAFTS: i64 = 2;
 
-/// The communities a synced band post may be relayed into. The predicate is
-/// the same one the community executor re-checks at post time — admitted by
-/// screening and promoted — so a relay can only name a place the second wall
-/// would still let through.
-///
-/// Ordering is a rotation, not a ranking of worth: communities the relay has
-/// never drafted for come first, then the least recently drafted-for. A live
-/// draft (pending, awaiting manual post) counts as a turn — stacking a second
-/// approval on a community already queued for one is the flood this ordering
-/// exists to prevent. `failed`/`cancelled` rows do not count: a draft that
-/// never landed consumed nothing from the community.
-pub(in crate::autopilot) async fn load_relay_community_targets(
-    repo: &PostgresAutopilotRepository,
-    workspace_id: WorkspaceId,
-) -> Result<Vec<CommunityRelayTarget>, RepositoryError> {
-    // Backpressure: no new drafts while earlier ones wait for somebody to
-    // post them. Every relay drafted per community costs an agent run and,
-    // once drafted, an approval ask — and with no automatic publisher the
-    // queue only empties by hand. In the week to 2026-09-26 the relay spent
-    // twenty agent runs and forty-one approval asks on community drafts;
-    // one community post had ever gone out and ten had failed. The owned
-    // push to fans is unaffected: it does not read this list.
-    let waiting = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT count(*)
-        FROM community_posts
-        WHERE workspace_id = $1
-          AND status IN ('pending', 'awaiting_manual_post')
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(&repo.pool)
-    .await
-    .map_err(map_sqlx)?;
-    if waiting >= MAX_WAITING_COMMUNITY_DRAFTS {
-        return Ok(Vec::new());
-    }
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
-        r#"
-        SELECT t.id, t.subreddit, t.language
-        FROM agent_outreach_targets t
-        LEFT JOIN discovery_places place ON place.id = t.place_id
-        LEFT JOIN LATERAL (
-            SELECT MAX(cp.created_at) AS last_draft_at
-            FROM community_posts cp
-            WHERE cp.workspace_id = t.workspace_id
-              AND cp.target_id = t.id
-              AND cp.status IN ('pending', 'awaiting_manual_post', 'posted')
-        ) last ON true
-        WHERE t.workspace_id = $1
-          AND t.target_kind = 'community'
-          AND t.screening_verdict = 'admitted'
-          AND t.status = 'promoted'
-          AND t.subreddit IS NOT NULL
-          AND btrim(t.subreddit) <> ''
-          -- The audience graph's own judgement overrides the target row —
-          -- a community blocked in the console drops out of the relay pool
-          -- on the next pass, the same predicate the growth-intelligence
-          -- loader applies. A target with no place row predates the link
-          -- and stays eligible: unknown is not refused.
-          AND (place.id IS NULL
-               OR (place.status = 'active'
-                   AND place.membership_state NOT IN ('rejected', 'not_a_fit')))
-        ORDER BY last.last_draft_at ASC NULLS FIRST, t.created_at, t.id
-        LIMIT $2
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(MAX_RELAY_COMMUNITIES_PER_POST)
-    .fetch_all(&repo.pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    rows.into_iter()
-        .map(|(id, subreddit, language)| {
-            Ok(CommunityRelayTarget {
-                target_id: OutreachTargetId::from_uuid(id),
-                subreddit,
-                language,
-            })
-        })
-        .collect()
-}
+// Platform-aware admission and bounded rotation live in relay_targets.rs.
+// A platform's manual backlog does not starve an independently ready forum.
+include!("relay_targets.rs");
 
 #[derive(Debug, FromRow)]
 struct ExperimentRow {

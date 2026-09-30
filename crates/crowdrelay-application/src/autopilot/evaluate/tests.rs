@@ -3,15 +3,15 @@ mod tests {
     use super::*;
     use crowdrelay_domain::{
         EventId, ReleasePlanId, TeamOpportunityId, TicketTypeId,
+        autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
         live_opportunities::{
             LiveOpportunityKind, LiveOpportunityPolicy, LiveOpportunitySnapshot,
             live_opportunity_score,
         },
-        autonomy::{AutonomyLevel, Confidence, PolicyDisposition},
         pricing::TicketYieldPolicy,
         release_autopilot::{
-            ReleaseAutopilotPolicy, ReleaseMilestone, ReleaseMilestoneHistory,
-            ReleasePlanSnapshot, ReleaseTier, ShowWeekCollision,
+            ReleaseAutopilotPolicy, ReleaseMilestone, ReleaseMilestoneHistory, ReleasePlanSnapshot,
+            ReleaseTier, ShowWeekCollision,
         },
     };
 
@@ -69,8 +69,7 @@ mod tests {
             auto_submission_capable: true,
             fit_basis_points: 7_000,
             reputation_basis_points: 6_000,
-            evidence_confidence: Confidence::from_basis_points(7_000)
-                .expect("a valid confidence"),
+            evidence_confidence: Confidence::from_basis_points(7_000).expect("a valid confidence"),
             expected_fee_minor: 70_000,
             estimated_cost_minor: 90_000,
             application_fee_minor: 0,
@@ -164,8 +163,7 @@ mod tests {
 
     /// And it still never widens what the machine may do unattended.
     #[test]
-    fn a_forced_approval_decision_never_auto_executes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn a_forced_approval_decision_never_auto_executes() -> Result<(), Box<dyn std::error::Error>> {
         let policy = live_policy(AutonomyLevel::BoundedAuto)?;
         let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
         let snapshot = landmark_scoring_67();
@@ -317,8 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn every_show_in_the_collision_week_is_named()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn every_show_in_the_collision_week_is_named() -> Result<(), Box<dyn std::error::Error>> {
         let (snapshot, now) = warmup_due();
         let shows = [
             show_this_week(now, "Friday gig"),
@@ -452,6 +449,7 @@ mod tests {
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::Event,
             source_version: 2,
+            promotion_excluded_platforms: Vec::new(),
             source_key: String::new(),
             title: String::new(),
             source_url: None,
@@ -481,21 +479,31 @@ mod tests {
             guarded_until: None,
             guardrail_reason: None,
         };
-        let keys = |snapshot: &ContentSupplySnapshot| -> Result<(String, String), serde_json::Error> {
-            let candidates =
-                content_candidates(snapshot, &policy, &[], None, ContextEvidence::UNPROVEN, now)?;
-            assert_eq!(candidates.len(), 1);
-            Ok((
-                candidates[0].decision_key.clone(),
-                candidates[0].action_idempotency_key.clone(),
-            ))
-        };
+        let keys =
+            |snapshot: &ContentSupplySnapshot| -> Result<(String, String), serde_json::Error> {
+                let candidates = content_candidates(
+                    snapshot,
+                    &policy,
+                    &[],
+                    None,
+                    ContextEvidence::UNPROVEN,
+                    now,
+                )?;
+                assert_eq!(candidates.len(), 1);
+                Ok((
+                    candidates[0].decision_key.clone(),
+                    candidates[0].action_idempotency_key.clone(),
+                ))
+            };
 
         // The first request keeps the key it always had, so actions already
         // written stay deduplicated against it.
         let (first_decision, first_action) = keys(&snapshot)?;
         let source = snapshot.source_id;
-        assert_eq!(first_action, format!("action:content:{source}:sv2:LiveListing"));
+        assert_eq!(
+            first_action,
+            format!("action:content:{source}:sv2:LiveListing")
+        );
 
         snapshot.failed_artifacts = vec![FailedArtifact {
             artifact: ContentArtifactKind::LiveListing,
@@ -519,6 +527,7 @@ mod tests {
         };
         let now = OffsetDateTime::now_utc();
         let snapshot = ContentSupplySnapshot {
+            promotion_excluded_platforms: Vec::new(),
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 3,
@@ -572,11 +581,15 @@ mod tests {
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
                 subreddit: "indieheads".to_owned(),
+                platform: "reddit".to_owned(),
+                community_url: None,
                 language: Some("en".to_owned()),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
                 subreddit: "listentothis".to_owned(),
+                platform: "reddit".to_owned(),
+                community_url: None,
                 language: None,
             },
         ];
@@ -588,8 +601,7 @@ mod tests {
             reached: 40,
         });
 
-        let candidates =
-            content_candidates(
+        let candidates = content_candidates(
             &snapshot,
             &policy,
             &communities,
@@ -650,9 +662,7 @@ mod tests {
                     // A caption adaptation is free-tier work.
                     assert_eq!(*tier, crowdrelay_brain::AgentTier::Basic);
                 }
-                other => {
-                    return Err(format!("expected repost draft task, got {other:?}").into())
-                }
+                other => return Err(format!("expected repost draft task, got {other:?}").into()),
             }
             assert_eq!(candidate.decision_kind, "relay_owned_post");
             // The community is the subject — the inflight-subject index must
@@ -705,6 +715,7 @@ mod tests {
             site_origin: None,
             drop_surge_failures: Vec::new(),
             surge_requested_at: None,
+            promotion_excluded_platforms: Vec::new(),
             occurred_at: now - time::Duration::hours(1),
             expires_at: now + time::Duration::days(44),
             communication_enabled: None,
@@ -737,7 +748,14 @@ mod tests {
             guardrail_reason: None,
         };
 
-        let candidates = content_candidates(&snapshot, &policy, &[], None, ContextEvidence::UNPROVEN, now)?;
+        let candidates = content_candidates(
+            &snapshot,
+            &policy,
+            &[],
+            None,
+            ContextEvidence::UNPROVEN,
+            now,
+        )?;
         assert_eq!(candidates.len(), 1);
         assert!(matches!(
             candidates[0].action,
@@ -745,8 +763,6 @@ mod tests {
         ));
         Ok(())
     }
-
-
 
     #[test]
     fn a_post_that_has_not_landed_at_home_reaches_fans_but_not_communities()
@@ -771,6 +787,7 @@ mod tests {
             site_origin: None,
             drop_surge_failures: Vec::new(),
             surge_requested_at: None,
+            promotion_excluded_platforms: Vec::new(),
             occurred_at: now - time::Duration::hours(hours_old),
             expires_at: now + time::Duration::days(40),
             communication_enabled: None,
@@ -810,6 +827,8 @@ mod tests {
         let communities = vec![CommunityRelayTarget {
             target_id: OutreachTargetId::new(),
             subreddit: "doommetal".to_owned(),
+            platform: "reddit".to_owned(),
+            community_url: None,
             language: Some("en".to_owned()),
         }];
         // Five hours old: doing well, but too early to tell.
@@ -854,6 +873,7 @@ mod tests {
         };
         let now = OffsetDateTime::now_utc();
         let snapshot = ContentSupplySnapshot {
+            promotion_excluded_platforms: Vec::new(),
             source_id: ContentSourceId::new(),
             source_kind: ContentSourceKind::SocialPost,
             source_version: 3,
@@ -907,11 +927,15 @@ mod tests {
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
                 subreddit: "indieheads".to_owned(),
+                platform: "reddit".to_owned(),
+                community_url: None,
                 language: Some("en".to_owned()),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
                 subreddit: "listentothis".to_owned(),
+                platform: "reddit".to_owned(),
+                community_url: None,
                 language: None,
             },
         ];
@@ -925,9 +949,10 @@ mod tests {
             now,
         )?;
         assert!(
-            candidates
-                .iter()
-                .all(|candidate| !matches!(candidate.action, AutopilotActionPayload::RequestSignalPush { .. })),
+            candidates.iter().all(|candidate| !matches!(
+                candidate.action,
+                AutopilotActionPayload::RequestSignalPush { .. }
+            )),
             "no push for a passed tonight"
         );
         assert_eq!(candidates.len(), 2, "the two community drafts remain");
@@ -935,4 +960,5 @@ mod tests {
     }
 
     include!("drop_surge_tests.rs");
+    include!("video_promotion_tests.rs");
 }

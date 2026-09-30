@@ -118,6 +118,11 @@ pub(super) async fn success_evidence_for(
            SELECT 1 FROM autopilot_execution_reports \
            WHERE workspace_id=$1 AND action_id=$2 AND status='succeeded' \
              AND provider_reference IS NOT NULL \
+             AND (NOT EXISTS (SELECT 1 FROM autopilot_actions a \
+                  WHERE a.workspace_id=$1 AND a.id=$2 AND a.action_kind='content.artifact.request') \
+                  OR COALESCE(NULLIF(btrim(metadata->'artifact_delivery'->>'url'), ''), \
+                     NULLIF(btrim(metadata->'artifact_delivery'->>'surface'), ''), \
+                     NULLIF(btrim(metadata->'artifact_delivery'->>'reference'), '')) IS NOT NULL) \
              AND receipt_key <> $3 \
          )",
     )

@@ -100,30 +100,72 @@ fn drop_surge_candidates(
     let confidence = crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(
         DROP_SURGE_CONFIDENCE,
     );
-    let outward = disposition(
-        policy.autonomy_level,
-        confidence,
-        policy.minimum_confidence,
-    );
+    let outward = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
 
     let mut out = Vec::new();
     for &lane in crowdrelay_domain::content_supply::DROP_SURGE_LANES {
+        if snapshot
+            .promotion_excluded_platforms
+            .iter()
+            .any(|excluded| excluded == lane)
+        {
+            continue;
+        }
         let failures = surge_attempt(snapshot, lane);
         if failures >= crowdrelay_domain::content_supply::DROP_SURGE_MAX_ATTEMPTS {
             continue;
         }
-        // A retried lane needs a key the dead action does not already own —
-        // same repair the artifact chain got for `FailedArtifact`.
         let retry = if failures == 0 {
             String::new()
         } else {
             format!(":attempt{failures}")
         };
-        // A community lane with nobody admitted to hear it is a task run for
-        // nothing — the engager would wake, find zero targets and report
-        // silence. Skipping is honest: the lane retries once a community is
-        // actually admitted.
-        if lane == "community" && communities.is_empty() {
+        if lane == "community" {
+            if snapshot.source_kind != crowdrelay_domain::content_supply::ContentSourceKind::Video {
+                continue;
+            }
+            for target in communities.iter().filter(|target| {
+                !snapshot
+                    .promotion_excluded_platforms
+                    .contains(&target.platform)
+            }) {
+                let target_id = target.target_id.into_uuid();
+                let address = if target.platform == "reddit" {
+                    format!("r/{}", target.subreddit)
+                } else {
+                    target
+                        .community_url
+                        .clone()
+                        .unwrap_or_else(|| target.subreddit.clone())
+                };
+                out.push(DecisionCandidate {
+                    context: policy.context,
+                    subject: ActionSubject::TargetCommunity(target_id),
+                    decision_kind: "drop_surge_fanout",
+                    confidence,
+                    disposition: crowdrelay_domain::autonomy::internal_work_disposition(outward),
+                    reason: "fresh video drafted for one admitted community; publication requires approval",
+                    input_snapshot: input_snapshot.clone(),
+                    policy_snapshot: policy_snapshot.clone(),
+                    action: AutopilotActionPayload::RequestAgentRun {
+                        template_id: "community-engager".to_owned(),
+                        prompt: format!(
+                            "Draft exactly one post for the named community. No other targets or sources.\n\n\
+                             source_id: {source}\ntarget_id: {target_id}\nplatform: {}\naddress: {address}\n\
+                             language: {}\n\nSource title: {}\nSource URL: {}\nDescription: {}\n\
+                             Use only source facts. Follow the community's verified rules.\n\
+                             Missing credentials or a manual-only platform means a draft for a person, not permission to publish.",
+                            target.platform, target.language.as_deref().unwrap_or("not recorded"),
+                            snapshot.title, snapshot.source_url.as_deref().unwrap_or(""),
+                            surge_caption(snapshot, 400),
+                        ),
+                        priority: 1,
+                        tier: crowdrelay_brain::AgentTier::Basic,
+                    },
+                    decision_key: format!("decision:drop_surge:v{}:{source}:community:{target_id}{retry}", policy.version),
+                    action_idempotency_key: format!("action:drop_surge:{source}:community:{target_id}{retry}"),
+                });
+            }
             continue;
         }
         // The email lane needs an absolute link — `cta_url` is relative.
@@ -139,8 +181,10 @@ fn drop_surge_candidates(
             continue;
         };
         let subject = crate::autopilot::drop_surge_subject(snapshot.source_id, lane);
-        let decision_key =
-            format!("decision:drop_surge:v{}:{source}:{lane}{retry}", policy.version);
+        let decision_key = format!(
+            "decision:drop_surge:v{}:{source}:{lane}{retry}",
+            policy.version
+        );
         let action_idempotency_key = format!("action:drop_surge:{source}:{lane}{retry}");
         let reason = "fresh drop — the first hours are where a new video earns its fans";
         let action = match lane {
@@ -180,34 +224,6 @@ fn drop_surge_candidates(
                 audience_size: None,
                 audience_basis: "fans who consented to marketing email".to_owned(),
             },
-            "community" => {
-                // The engager writes each community's post in its own
-                // language — this dispatch is internal drafting work whose
-                // outputs park as approval-gated posts downstream, so it
-                // takes the internal-work upgrade like the relay's do.
-                let targets = communities
-                    .iter()
-                    .map(|target| format!("r/{}", target.subreddit))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                AutopilotActionPayload::RequestAgentRun {
-                    template_id: "community-engager".to_owned(),
-                    prompt: format!(
-                        "A new video just dropped. Draft one post per admitted community carrying it.\n\n\
-                        The ONLY facts you may use — the source's own words, no invented details:\n\
-                        - title: {}\n\
-                        - description: {}\n\
-                        - source_id: {source}\n\
-                        - tracked link for every post: /l/{link_slug} (never a raw YouTube or foreign URL)\n\n\
-                        Admitted communities: {targets}\n\n\
-                        Write each post in that community's own language and norms.",
-                        snapshot.title.trim(),
-                        surge_caption(snapshot, 400),
-                    ),
-                    priority: 1,
-                    tier: crowdrelay_brain::AgentTier::Basic,
-                }
-            }
             _ => {
                 // Channel lanes: telegram, discord, instagram, facebook, x —
                 // one `agent.content.request` action each, exactly the shape
@@ -246,18 +262,7 @@ fn drop_surge_candidates(
                 }
             }
         };
-        let disposition = match lane {
-            // Only the engager dispatch is internal work — the drafted posts
-            // it produces come back as their own gated actions.
-            "community" => {
-                crowdrelay_domain::autonomy::internal_work_disposition(disposition(
-                    policy.autonomy_level,
-                    confidence,
-                    policy.minimum_confidence,
-                ))
-            }
-            _ => outward,
-        };
+        let disposition = outward;
         out.push(DecisionCandidate {
             context: policy.context,
             subject,

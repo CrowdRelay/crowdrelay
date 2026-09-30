@@ -11,6 +11,8 @@
 
 use std::time::Duration;
 
+include!("relay_platforms.rs");
+
 use crate::common;
 use crowdrelay_application::autopilot::AutopilotDecisionRepository;
 use crowdrelay_domain::WorkspaceId;

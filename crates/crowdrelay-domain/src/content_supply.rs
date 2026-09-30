@@ -220,6 +220,8 @@ pub fn resonates_for_communities(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CommunityRelayTarget {
     pub target_id: OutreachTargetId,
+    pub platform: String,
+    pub community_url: Option<String>,
     /// The clean subreddit name (no `r/`), as stored on the admitted target.
     pub subreddit: String,
     /// The language the community posts in — BCP-47-ish short code (`pl`,
@@ -246,6 +248,9 @@ pub struct ContentSupplySnapshot {
     pub source_id: ContentSourceId,
     pub source_kind: ContentSourceKind,
     pub source_version: i64,
+    /// Source-owned campaign exclusions; rechecked before publishing.
+    #[serde(default)]
+    pub promotion_excluded_platforms: Vec<String>,
     /// The source's own key — `youtube:{video_id}`, `release:{plan}` — the
     /// stable name a drop surge's tracked links are minted from.
     #[serde(default)]
@@ -442,7 +447,12 @@ pub fn evaluate_content_supply(
     }
 
     for artifact in required_artifacts(snapshot.source_kind) {
-        if !artifact_owed(snapshot, *artifact) {
+        if !artifact_owed(snapshot, *artifact)
+            || !crate::video_promotion::artifact_allowed(
+                *artifact,
+                &snapshot.promotion_excluded_platforms,
+            )
+        {
             continue;
         }
         let already_done = snapshot.completed_artifacts.contains(artifact);

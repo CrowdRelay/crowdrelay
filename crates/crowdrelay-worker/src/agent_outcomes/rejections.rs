@@ -43,7 +43,10 @@ pub enum OutcomeRejection {
     /// (English when none is recorded). A Polish caption relayed word for
     /// word into r/melodicdeathmetal was removed by its moderators on
     /// 2026-09-26, under a batch approval given on an English sample.
-    CommunityLanguageMismatch { expected: String, found: &'static str },
+    CommunityLanguageMismatch {
+        expected: String,
+        found: &'static str,
+    },
     /// A community post that names no trusted video source — or names one
     /// that does not exist, is inactive, expired, or is not a video. A thread
     /// post exists to share a release video; anything else is a post about
@@ -75,11 +78,14 @@ pub enum OutcomeRejection {
     /// or an empty one. A consultation that proposes nothing is not advice —
     /// there is nothing to evaluate and nothing to record verdicts for.
     MissingProposalContent,
+    /// The source owner excluded this destination from the promotion.
+    PlatformExcluded { platform: String },
 }
 
 impl std::fmt::Display for OutcomeRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PlatformExcluded { platform } => write!(f, "PLATFORM_EXCLUDED: {platform}"),
             Self::InsufficientEvidence { reason } => {
                 write!(f, "INSUFFICIENT_EVIDENCE: {reason}")
             }

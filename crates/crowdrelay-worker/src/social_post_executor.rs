@@ -602,6 +602,18 @@ impl SocialPostExecutorWorker {
     /// posts to the platform (or marks as awaiting manual post), and
     /// records the result.
     async fn process_action(&self, action: &ClaimedAction) -> Result<(), SocialPostExecutorError> {
+        if !crowdrelay_infra::promotion_policy::action_platform_allowed(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+            action.action_id,
+            &action.platform,
+        )
+        .await?
+        {
+            self.mark_failed(action.id, "platform_excluded_by_campaign")
+                .await?;
+            return Ok(());
+        }
         if !matches!(
             action.platform.as_str(),
             "instagram" | "facebook" | "x" | "telegram"

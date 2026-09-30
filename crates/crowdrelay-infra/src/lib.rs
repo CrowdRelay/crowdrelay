@@ -71,6 +71,8 @@ pub mod outreach_mail;
 pub mod peer_act_seed;
 pub mod place_reach;
 pub mod portfolio;
+pub mod promotion_campaign;
+pub mod promotion_policy;
 pub mod proofs;
 pub mod provider_verification;
 pub mod push_preferences;

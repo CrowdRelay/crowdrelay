@@ -9,6 +9,8 @@
 
 use crate::common;
 
+include!("video_promotion_refresh.rs");
+
 use anyhow::{Context, Result, anyhow};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use crowdrelay_worker::video_source_sync::{FeedEntry, VideoSourceSyncWorker};

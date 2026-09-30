@@ -430,24 +430,10 @@ impl AgentOutcomeWorker {
         // pool for the same reason the trace is — `agent_service_tasks` is a
         // foreign schema. A failed lookup falls back to `video`, the strictest
         // existing gate, so a missing table cannot widen what may be posted.
-        let producing_template: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT template_id FROM agent_service_tasks
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
-        .bind(outcome.workspace_id)
-        .bind(outcome.task_id)
-        .fetch_optional(&self.pool)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::debug!(
-                outcome_id = %outcome.id,
-                error = %error,
-                "could not resolve the producing template; strictest source gate applies"
-            );
-            None
-        });
+        let producing_task = self.community_producing_task(outcome).await;
+        let producing_template = producing_task
+            .as_ref()
+            .map(|(template, _)| template.as_str());
         let mut tx = self.pool.begin().await?;
         let decision_id = Uuid::now_v7();
 
@@ -532,6 +518,14 @@ impl AgentOutcomeWorker {
         // under one context with its action under another is a timeline that
         // does not join.
         let community_target_id = community_target_id(outcome);
+        if let Some(target_id) = community_target_id
+            && let Some(pinned) = producing_task
+                .as_ref()
+                .and_then(|(_, prompt)| pinned_community_uuid(prompt, "target_id"))
+            && pinned != target_id
+        {
+            return Err(OutcomeRejection::UnvettedCommunity { target_id }.into());
+        }
         let effective_context = effective_context(outcome, community_target_id);
 
         // Insert the decision row. decision_key mirrors the outcome's
@@ -715,7 +709,7 @@ impl AgentOutcomeWorker {
                 // the model writes the words; the source's own media and
                 // permalink are attached here, where the model cannot
                 // substitute a URL it invented.
-                let allowed_source_kind = match producing_template.as_deref() {
+                let allowed_source_kind = match producing_template {
                     Some("community-repost") => "social_post",
                     _ => "video",
                 };
@@ -729,11 +723,22 @@ impl AgentOutcomeWorker {
                 let source_uuid = source_id_raw
                     .as_deref()
                     .and_then(|s| Uuid::parse_str(s).ok());
+                if let Some(pinned) = producing_task
+                    .as_ref()
+                    .and_then(|(_, prompt)| pinned_community_uuid(prompt, "source_id"))
+                    && source_uuid != Some(pinned)
+                {
+                    return Err(OutcomeRejection::UnsourcedPost {
+                        source_id: source_id_raw,
+                    }
+                    .into());
+                }
                 let source_row: Option<CommunityPostSourceRow> = match source_uuid {
                     Some(source_id) => {
                         sqlx::query_as::<_, CommunityPostSourceRow>(
                             r#"
-                        SELECT metadata->>'media_url' AS media_url,
+                        SELECT source_kind, metadata AS source_metadata,
+                               metadata->>'media_url' AS media_url,
                                metadata->>'media_id' AS media_id,
                                metadata->>'media_type' AS media_type,
                                metadata->>'thumbnail_url' AS thumbnail_url,
@@ -1483,14 +1488,15 @@ impl AgentOutcomeWorker {
             r#"
             INSERT INTO smart_links
                 (workspace_id, slug, destination_url, active,
-                 channel_source, channel_community, channel_creative)
-            VALUES ($1, $2, $3, true, $4, $5, $6)
+                 channel_source, channel_community, channel_creative, campaign_id)
+            VALUES ($1, $2, $3, true, $4, $5, $6, $7)
             ON CONFLICT (workspace_id, slug) DO UPDATE SET
                 destination_url = EXCLUDED.destination_url,
                 active = true,
                 channel_source = EXCLUDED.channel_source,
                 channel_community = EXCLUDED.channel_community,
-                channel_creative = EXCLUDED.channel_creative
+                channel_creative = EXCLUDED.channel_creative,
+                campaign_id = COALESCE(EXCLUDED.campaign_id, smart_links.campaign_id)
             "#,
         )
         .bind(workspace_id)
@@ -1499,6 +1505,7 @@ impl AgentOutcomeWorker {
         .bind(request.channel_source)
         .bind(request.channel_community)
         .bind(request.channel_creative)
+        .bind(request.campaign_id)
         .execute(&mut **tx)
         .await;
 
@@ -1843,24 +1850,13 @@ struct OutcomeRow {
     created_at: time::OffsetDateTime,
 }
 
-/// The validated content source behind a community post — read by the source
-/// gate, carried into the action payload so the media the post ships is the
-/// source's own, never a URL the model produced.
-#[derive(sqlx::FromRow)]
-struct CommunityPostSourceRow {
-    media_url: Option<String>,
-    media_id: Option<String>,
-    media_type: Option<String>,
-    thumbnail_url: Option<String>,
-    source_url: Option<String>,
-}
-
 /// What one draft asked for when its link gets minted: the proposed
 /// destination, the channel labels the `smart_links` row records, and the
 /// registered source's own URL — the one foreign destination the domain may
 /// accept, because it was written by the watcher, not the model.
 struct AgentSmartLinkRequest<'a> {
     destination: &'a str,
+    campaign_id: Option<Uuid>,
     channel_source: &'a str,
     channel_community: Option<&'a str>,
     channel_creative: Option<&'a str>,

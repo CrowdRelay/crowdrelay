@@ -884,12 +884,23 @@ impl AutopilotContentStateRepository for PostgresAutopilotRepository {
             >(
                 r#"
                 SELECT action.subject_id, action.id,
-                       action.payload->>'artifact', action.status,
+                       action.payload->>'artifact',
+                       CASE WHEN action.action_kind='content.artifact.request'
+                                  AND action.status='succeeded' AND emission.action_id IS NULL
+                            THEN 'requested' ELSE action.status END,
                        action.created_at, emission.emitted_at
                 FROM autopilot_actions AS action
                 LEFT JOIN autopilot_action_emissions AS emission
                   ON emission.workspace_id = action.workspace_id
                  AND emission.action_id = action.id
+                 AND (action.action_kind <> 'content.artifact.request' OR EXISTS (
+                     SELECT 1 FROM autopilot_execution_reports receipt
+                     WHERE receipt.workspace_id=action.workspace_id AND receipt.action_id=action.id
+                       AND receipt.status='succeeded'
+                       AND COALESCE(NULLIF(btrim(receipt.metadata->'artifact_delivery'->>'url'),''),
+                                    NULLIF(btrim(receipt.metadata->'artifact_delivery'->>'surface'),''),
+                                    NULLIF(btrim(receipt.metadata->'artifact_delivery'->>'reference'),'')) IS NOT NULL
+                 ))
                 WHERE action.workspace_id = $1
                   AND action.context = 'content_supply'
                   AND action.subject_id IS NOT NULL

@@ -9,11 +9,31 @@
 ///
 /// Only `video` and `release` sources promote — those are the kinds the
 /// drop-surge window evaluates.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromoteContentRequest {
+    #[serde(default)]
+    pub excluded_platforms: Option<Vec<String>>,
+}
+
 pub async fn promote_content_source(
     State(state): State<AppState>,
     Path(source_id): Path<String>,
     headers: HeaderMap,
+    request: Option<Json<PromoteContentRequest>>,
 ) -> Response {
+    let exclusions = request.and_then(|Json(request)| request.excluded_platforms);
+    if exclusions.as_ref().is_some_and(|platforms| {
+        platforms.len() > crowdrelay_domain::video_promotion::PROMOTION_PLATFORMS.len()
+            || platforms.iter().any(|platform| {
+                !crowdrelay_domain::video_promotion::PROMOTION_PLATFORMS
+                    .contains(&platform.as_str())
+            })
+    }) {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
     // A disabled autopilot must not be startable from the outside — same
     // master-switch check the cycle-run button makes.
     if !state.autopilot_runtime_enabled {
@@ -28,6 +48,7 @@ pub async fn promote_content_source(
         state.autopilot.pool(),
         state.ops.workspace_id(),
         source_id,
+        exclusions,
     )
     .await
     {
