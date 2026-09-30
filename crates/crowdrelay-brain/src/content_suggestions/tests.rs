@@ -361,7 +361,6 @@ fn a_confirmed_trend_lifts_the_format() {
 }
 
 static EMPTY_KEYS: BTreeSet<String> = BTreeSet::new();
-static EMPTY_COUNTS: BTreeMap<String, u32> = BTreeMap::new();
 static EMPTY_YIELD: BTreeMap<String, FormatYield> = BTreeMap::new();
 
 #[test]
