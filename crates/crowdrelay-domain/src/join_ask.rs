@@ -457,11 +457,17 @@ fn choose_variant(
     for post in &snapshot.posts {
         if post.platform != platform
             || post.status != "posted"
-            || post.posted_at.is_none_or(|posted_at| posted_at > mature_before)
+            || post
+                .posted_at
+                .is_none_or(|posted_at| posted_at > mature_before)
         {
             continue;
         }
-        let Some(index) = snapshot.variants.iter().position(|variant| variant == &post.text) else {
+        let Some(index) = snapshot
+            .variants
+            .iter()
+            .position(|variant| variant == &post.text)
+        else {
             // The operator edited/removed this wording. Its evidence belongs
             // to the old text and must not silently transfer by array index.
             continue;
@@ -780,9 +786,7 @@ mod tests {
                 status: "posted".to_owned(),
                 created_at: datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index),
                 text: "join us".to_owned(),
-                posted_at: Some(
-                    datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index),
-                ),
+                posted_at: Some(datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index)),
                 fans_7d: 0,
             });
         }
