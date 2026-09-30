@@ -112,6 +112,10 @@ pub struct SocialPostFact {
     /// The still a video post shows — what an image post can actually carry
     /// when `media_type` is VIDEO.
     pub thumbnail_url: Option<String>,
+    /// Distinct fans whose conversion provenance points at a relay/posting
+    /// action carrying this source. Unlike likes or reach this is already the
+    /// product outcome: somebody crossed from audience into the fan graph.
+    pub acquired_fans: u32,
     /// How the post landed with the band's own followers, against the band's
     /// other recent posts on the same platform. `None` until the sync has
     /// read its engagement.
@@ -178,21 +182,30 @@ const RESONANCE_MIN_PEERS: u32 = 3;
 /// Whether a synced post has earned a place in other people's communities.
 ///
 /// The owned audience gets every post — they followed the band. Communities
-/// get the ones the band's own followers answered: at or above the account's
-/// usual engagement, once it has had time to show. A post nobody engaged
-/// with at home is not one strangers will; carrying only what resonated is
-/// both what spreads and what reads as a band sharing its best, not a bot
-/// mirroring a feed. Fail closed: no engagement read, no community relay.
+/// get posts with one of two pieces of evidence after the settle window:
+///
+/// * the band's own followers engaged at or above the account's normal; or
+/// * the source already produced at least one first-party attributed fan.
+///
+/// Fan acquisition is the stronger signal. A post that quietly converted a
+/// listener must not be suppressed because its like count looked ordinary.
+/// With neither conversions nor readable engagement, fail closed.
 #[must_use]
 pub fn resonates_for_communities(
     post: &SocialPostFact,
     occurred_at: OffsetDateTime,
     now: OffsetDateTime,
 ) -> bool {
+    if now - occurred_at < Duration::hours(RESONANCE_SETTLE_HOURS) {
+        return false;
+    }
+    if post.acquired_fans > 0 {
+        return true;
+    }
     let Some(resonance) = post.resonance else {
         return false;
     };
-    if now - occurred_at < Duration::hours(RESONANCE_SETTLE_HOURS) || resonance.engagement <= 0 {
+    if resonance.engagement <= 0 {
         return false;
     }
     // With reach on both sides, the rate decides: engagement per thousand
@@ -426,12 +439,11 @@ pub fn evaluate_content_supply(
         // the post's own facts has nothing to carry, and a relay that would
         // have to invent the share is exactly what this path exists to
         // prevent.
-        let relay_hours = if snapshot
-            .social_post
-            .as_ref()
-            .and_then(|post| post.resonance.as_ref())
-            .is_some_and(is_outlier)
-        {
+        let relay_hours = if snapshot.social_post.as_ref().is_some_and(|post| {
+            post.acquired_fans > 0 || post.resonance.as_ref().is_some_and(is_outlier)
+        }) {
+            // A content item that already converted somebody is at least as
+            // valuable to keep in the relay window as an engagement outlier.
             policy.social_post_relay_hours.max(OUTLIER_RELAY_HOURS)
         } else {
             policy.social_post_relay_hours
