@@ -133,7 +133,8 @@ impl PostgresOpportunitySeedRepository {
     ) -> Result<bool, sqlx::Error> {
         // The link is dated source evidence: a row carrying one was
         // observed at import time, a row without one was never observed.
-        let observed_at = row.destination_url.is_some().then(OffsetDateTime::now_utc);
+        let observed_at: Option<OffsetDateTime> =
+            row.destination_url.is_some().then(OffsetDateTime::now_utc);
         sqlx::query_scalar::<_, bool>(
             r#"
             INSERT INTO team_opportunities

@@ -489,6 +489,7 @@ impl GithubRegistrySyncWorker {
             + harvest.agents_failed
             + harvest.beacons_failed
             + harvest.outreach_failed
+            + harvest.festival_failed
             + harvest.opportunities_failed;
 
         // A re-listed file is the truth about its rows: contacts it no
