@@ -78,8 +78,9 @@ pub enum AutopilotMeasurementKind {
     /// production) rather than workspace-wide fan growth.
     StrategistInsightQuality14d,
     /// Fan engagement in the 7 days after a lifecycle message (welcome,
-    /// re-engagement, referral invite). Counts ticket orders, Signal push
-    /// endpoint creations, and qualified referrals made by the specific fan
+    /// re-engagement, referral invite). Counts redeemed admission passes,
+    /// Signal push endpoint creations, and qualified referrals made by the
+    /// specific fan
     /// who received the message. Being referred by somebody else is not the
     /// recipient's response to the message, and a pending referral is not yet
     /// a fan-growth outcome. The baseline is 0 — lifecycle messages
