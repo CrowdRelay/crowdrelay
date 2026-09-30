@@ -45,7 +45,8 @@ mod worker_signals;
 use crowdrelay_application::autopilot::{BeliefStateOrigin, LoadedCausalModel};
 use crowdrelay_brain::{
     CommunityEngagementSummary, GrowthIntelligenceSnapshot, GrowthTarget, GrowthTargetProgress,
-    GrowthTrend, RecentInsight, TenantPreferencePosterior, WorldModel, agent_standing_policy,
+    GrowthTrend, RecentInsight, SocialContentPerformance, TenantPreferencePosterior, WorldModel,
+    agent_standing_policy,
     platform_yield::PlatformGrowth,
 };
 use crowdrelay_domain::growth_metrics::{AUDIENCE_WEIGHT_SCALE, MetricPlatform, NorthStarMetric};
@@ -134,6 +135,19 @@ struct EngagementHistoryRow {
     avg_upvotes: f64,
     avg_comments: f64,
     avg_upvote_ratio: Option<f64>,
+}
+
+/// A recent owned-social post with first-party fan outcomes. Kept distinct
+/// from attention metrics so the next draft can learn what created people in
+/// the fan graph rather than merely what accumulated engagement.
+#[derive(Debug, sqlx::FromRow)]
+struct SocialPerformanceRow {
+    platform: String,
+    media_type: Option<String>,
+    body: Option<String>,
+    reach: Option<i64>,
+    fans_acquired: i64,
+    fans_activated_within_30d: i64,
 }
 
 /// Derived from [`WorkerTemplate::ALL`] rather than retyped. This was a
