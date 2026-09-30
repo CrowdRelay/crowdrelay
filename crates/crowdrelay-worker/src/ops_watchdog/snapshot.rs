@@ -539,6 +539,49 @@ async fn load_snapshot(
                AND d.error_code='claim_expired_unknown'
                AND d.completed_at > now() - interval '1 day'
             )::bigint AS abandoned_claims_24h,
+            -- The acquisition funnel's pulse. `last_fan_at` is the last
+            -- moment a non-deleted fan row was created — null when nobody
+            -- has ever joined, which is itself the finding.
+            (SELECT max(f.created_at) FROM fans f
+             WHERE f.workspace_id=$1 AND f.deleted_at IS NULL) AS last_fan_at,
+            -- Demand arriving at the funnel: every tracked click in the
+            -- last week, and the per-channel split so `capture_clicks_7d`
+            -- is computed in Rust where CAPTURE_CHANNELS lives rather than
+            -- re-typed into SQL as a second copy of the list.
+            (SELECT count(*) FROM click_events c
+             WHERE c.workspace_id=$1
+               AND c.occurred_at > now() - interval '7 days')::bigint AS clicks_7d,
+            (SELECT jsonb_object_agg(lower(per_channel.channel_source), per_channel.hits)
+             FROM (
+                SELECT l.channel_source, count(*)::bigint AS hits
+                FROM click_events c
+                JOIN smart_links l
+                  ON l.workspace_id = c.workspace_id AND l.id = c.smart_link_id
+                WHERE c.workspace_id=$1
+                  AND c.occurred_at > now() - interval '7 days'
+                  AND l.channel_source IS NOT NULL
+                GROUP BY l.channel_source
+             ) per_channel) AS clicks_7d_by_channel,
+            -- Drafts parked for a person, with their age in hours. The
+            -- two-day grace and the autopost-platform filter both apply in
+            -- Rust — `parse_autopost_platforms` owns the platform vocabulary,
+            -- and re-mapping it in SQL is how copies drift. Bounded: a
+            -- workspace's parked drafts are few.
+            (SELECT jsonb_agg(to_jsonb(stale) ORDER BY stale.age_hours DESC)
+             FROM (
+                SELECT p.platform,
+                       (EXTRACT(EPOCH FROM (now() - p.created_at)) / 3600.0)::double precision
+                           AS age_hours
+                FROM social_posts p
+                WHERE p.workspace_id=$1 AND p.status='awaiting_manual_post'
+                LIMIT 200
+             ) stale) AS parked_manual_posts,
+            -- The tenant's autopost lane as stored — absent means the
+            -- domain default, and the parse that decides that lives in
+            -- `social_autopost`, not here.
+            (SELECT t.value FROM tenant_settings t
+             WHERE t.workspace_id=$1 AND t.key='social_autopost_platforms')
+                AS social_autopost_platforms_setting,
             -- The video scorecards are read outside this transaction; the
             -- column exists only so the row type can carry them.
             '[]'::jsonb AS video_cards

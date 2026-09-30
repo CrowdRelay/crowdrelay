@@ -746,5 +746,149 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            YouTube → reauthorize.",
             }),
         },
+        Condition {
+            // Seven days without a join is the funnel stalled: the +1000
+            // views machine can deliver clicks, but if nobody became a fan
+            // the capture seam — the /watch page, the signup it leads to —
+            // is where the loss is. Warning, not critical: nothing errored,
+            // and the next fan clears it. A workspace that has never had a
+            // fan fires from day one — an empty fanbase is the biggest stall
+            // there is, and it clears the moment the first join lands.
+            key: "fans.acquisition_stalled",
+            severity: "warning",
+            summary: "No fan has joined in the last week",
+            active: snapshot
+                .last_fan_at
+                .is_none_or(|at| OffsetDateTime::now_utc() - at > FAN_STALL_WINDOW),
+            details: json!({
+                "last_fan_at": snapshot.last_fan_at.and_then(|at| {
+                    at.format(&Rfc3339).ok()
+                }),
+                "clicks_7d": snapshot.clicks_7d,
+                "capture_clicks_7d": capture_clicks_7d(snapshot),
+                "remedy": "drive the next clicks to the /watch capture page — \
+                           a smart link on a capture channel to an owned video \
+                           lands there when CROWDRELAY_WATCH_PAGE_ORIGIN is \
+                           set — and ask for the join at the next show.",
+            }),
+        },
+        Condition {
+            // A draft parked `awaiting_manual_post` on a platform the tenant
+            // configured for autopost is the executor having failed — the
+            // lane was supposed to publish it itself. Parked on a platform
+            // outside the setting is the lane working as designed, so it
+            // never raises this. The two-day grace covers a normal weekend
+            // of executor hiccups; past it, "waiting for a person" is a
+            // machine failure nobody is looking at.
+            key: "social.manual_posts_stale",
+            severity: "warning",
+            summary: "Drafts are parked for manual posting on a platform the tenant set to autopost",
+            active: !stale_autopost_parked(snapshot).is_empty(),
+            details: stale_autopost_details(snapshot),
+        },
     ]
+}
+
+/// Seven days without a join is a stall, not a slow week — the cadence a
+/// growing fanbase is measured against.
+const FAN_STALL_WINDOW: time::Duration = time::Duration::days(7);
+
+/// Drafts older than two days have outlived executor poll lag, retries and
+/// a normal approval cadence — parked past it, the lane itself is suspect.
+const MANUAL_POST_STALE_HOURS: f64 = 48.0;
+
+/// Clicks in the last week that arrived on a channel the capture page may
+/// interpose — `CAPTURE_CHANNELS`, plus `reddit`, whose links land there
+/// when the community's rules allow it.
+fn capture_clicks_7d(snapshot: &OpsSnapshot) -> Option<i64> {
+    snapshot
+        .clicks_7d_by_channel
+        .as_ref()
+        .and_then(Value::as_object)
+        .map(|channels| {
+            channels
+                .iter()
+                .filter(|(channel, _)| {
+                    crowdrelay_domain::fan_landing::CAPTURE_CHANNELS.contains(&channel.as_str())
+                        || channel.as_str() == "reddit"
+                })
+                .filter_map(|(_, hits)| hits.as_i64())
+                .sum()
+        })
+}
+
+/// Parked drafts past the stale age on a platform the tenant's
+/// `social_autopost_platforms` setting — absent means the domain default —
+/// says the machine should post itself.
+fn stale_autopost_parked(snapshot: &OpsSnapshot) -> Vec<(String, f64)> {
+    let autopost_platforms = snapshot
+        .social_autopost_platforms_setting
+        .as_deref()
+        .and_then(crowdrelay_domain::social_autopost::parse_autopost_platforms)
+        .unwrap_or_else(|| {
+            crowdrelay_domain::social_autopost::DEFAULT_AUTOPOST_PLATFORMS
+                .iter()
+                .map(|platform| (*platform).to_owned())
+                .collect()
+        });
+    snapshot
+        .parked_manual_posts
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|posts| {
+            posts
+                .iter()
+                .filter_map(|post| {
+                    let platform = post.get("platform")?.as_str()?.to_owned();
+                    let age_hours = post.get("age_hours")?.as_f64()?;
+                    Some((platform, age_hours))
+                })
+                .filter(|(platform, age_hours)| {
+                    *age_hours > MANUAL_POST_STALE_HOURS
+                        && autopost_platforms.contains(platform)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The stale population as `{platform: {count, oldest_age_hours}}` — the
+/// per-platform count routes the fix to the executor that failed.
+fn stale_autopost_details(snapshot: &OpsSnapshot) -> Value {
+    let stale = stale_autopost_parked(snapshot);
+    let mut per_platform: HashMap<&str, (i64, f64)> = HashMap::new();
+    for (platform, age_hours) in &stale {
+        let entry = per_platform
+            .entry(platform.as_str())
+            .or_insert((0, 0.0));
+        entry.0 += 1;
+        entry.1 = entry.1.max(*age_hours);
+    }
+    let per_platform: serde_json::Map<String, Value> = per_platform
+        .into_iter()
+        .map(|(platform, (count, oldest))| {
+            (
+                platform.to_owned(),
+                json!({"count": count, "oldest_age_hours": oldest}),
+            )
+        })
+        .collect();
+    json!({
+        "stale_by_platform": per_platform,
+        "autopost_platforms": snapshot
+            .social_autopost_platforms_setting
+            .as_deref()
+            .and_then(crowdrelay_domain::social_autopost::parse_autopost_platforms)
+            .unwrap_or_else(|| {
+                crowdrelay_domain::social_autopost::DEFAULT_AUTOPOST_PLATFORMS
+                    .iter()
+                    .map(|platform| (*platform).to_owned())
+                    .collect()
+            }),
+        "stale_after_hours": MANUAL_POST_STALE_HOURS,
+        "remedy": "the social post executor should have published these itself — \
+                   check its logs for a rate-limit or provider failure on the \
+                   named platforms; posting them by hand hides the failure \
+                   the lane exists to prevent.",
+    })
 }
