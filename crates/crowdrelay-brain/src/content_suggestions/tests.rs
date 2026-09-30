@@ -70,7 +70,7 @@ fn inputs<'a>(
         outcome_counts: outcomes,
         format_yield: &EMPTY_YIELD,
         suggestion_counts: suggestions,
-        sibling_produced: &EMPTY_COUNTS,
+        sibling_format_yield: &EMPTY_YIELD,
         reach,
         weights: EfeWeights::default(),
         today: today(),
@@ -548,7 +548,7 @@ fn a_stale_concept_retires_itself() {
 }
 
 #[test]
-fn sibling_proof_lifts_but_never_resurrects() {
+fn sibling_fan_yield_informs_but_never_overrides_the_band() {
     let formats = vec![
         entry("playthrough", TeamSkill::Video, FormatRequirement::Nothing),
         entry(
@@ -561,10 +561,16 @@ fn sibling_proof_lifts_but_never_resurrects() {
     let empty = BTreeSet::new();
     let empty_arc = BTreeMap::new();
     let empty_counts = BTreeMap::new();
-    let proven = BTreeMap::from([("playthrough".to_owned(), 3_u32)]);
+    let proven = BTreeMap::from([(
+        "playthrough".to_owned(),
+        FormatYield {
+            measured_fans_ema: 40.0,
+            measured: 3,
+        },
+    )]);
 
     let ranked = rank_suggestions(&RankingInputs {
-        sibling_produced: &proven,
+        sibling_format_yield: &proven,
         ..inputs(
             &formats,
             &profile(),
@@ -578,19 +584,26 @@ fn sibling_proof_lifts_but_never_resurrects() {
             &reach,
         )
     });
-    // The roster-proven format leads and names the evidence.
     assert_eq!(ranked[0].format_key, "playthrough");
     assert_eq!(
-        ranked[0].evidence.get("sibling_productions"),
+        ranked[0].evidence.get("sibling_measured_pieces"),
         Some(&serde_json::json!(3))
     );
-    assert!(ranked[0].reason.contains("same-style acts"));
+    assert_eq!(
+        ranked[0].evidence.get("sibling_yield_multiplier"),
+        Some(&serde_json::json!(SIBLING_YIELD_MAX))
+    );
+    assert!(ranked[0].reason.contains("fans/piece"));
 
-    // A single sibling production is an anecdote — below the floor, the
-    // ranking is untouched.
-    let anecdote = BTreeMap::from([("rehearsal_clip".to_owned(), 1_u32)]);
+    let anecdote = BTreeMap::from([(
+        "rehearsal_clip".to_owned(),
+        FormatYield {
+            measured_fans_ema: 100.0,
+            measured: 1,
+        },
+    )]);
     let with = rank_suggestions(&RankingInputs {
-        sibling_produced: &anecdote,
+        sibling_format_yield: &anecdote,
         ..inputs(
             &formats,
             &profile(),
@@ -619,14 +632,12 @@ fn sibling_proof_lifts_but_never_resurrects() {
     assert_eq!(
         with.iter().map(|s| &s.format_key).collect::<Vec<_>>(),
         without.iter().map(|s| &s.format_key).collect::<Vec<_>>(),
-        "one production must not reorder"
+        "one measured piece must not reorder"
     );
 
-    // And the lift cannot argue back what the band itself declined —
-    // the decline gate fires before the term ever applies.
     let declined = BTreeSet::from(["playthrough".to_owned()]);
     let ranked = rank_suggestions(&RankingInputs {
-        sibling_produced: &proven,
+        sibling_format_yield: &proven,
         ..inputs(
             &formats,
             &profile(),
