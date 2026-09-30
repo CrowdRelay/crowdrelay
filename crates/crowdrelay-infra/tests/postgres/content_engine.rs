@@ -867,7 +867,9 @@ async fn suggestion_engine_raises_only_what_the_band_can_do()
     let playthrough = raised
         .iter()
         .find(|suggestion| suggestion.format_key.as_deref() == Some("playthrough"))
-        .expect("observed first-party fan yield should lift the mature playthrough into the vital few");
+        .expect(
+            "observed first-party fan yield should lift the mature playthrough into the vital few",
+        );
     let learned_multiplier = playthrough.evidence["format_yield"]
         .as_f64()
         .expect("format-yield multiplier is auditable evidence");
