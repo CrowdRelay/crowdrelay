@@ -126,6 +126,9 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                                latest_report.occurred_at AS executor_reported_at,
                                latest_report.metadata AS executor_metadata
                         FROM autopilot_actions action
+                LEFT JOIN autopilot_decisions decision
+                  ON decision.workspace_id=action.workspace_id
+                 AND decision.id=action.decision_id
                         LEFT JOIN LATERAL (
                             SELECT report.status, report.executor_id, report.provider_reference, report.occurred_at, report.metadata
                             FROM autopilot_execution_reports report
@@ -181,7 +184,9 @@ impl AutopilotControlRepository for PostgresAutopilotRepository {
                     let needs_you_rows = sqlx::query_as::<_, PendingActionRow>(
                         r#"
                         SELECT action.id, action.context, action.action_kind, action.subject_kind,
-                               action.subject_id, action.payload, action.created_at,
+                               action.subject_id, action.payload,
+                       decision.input_snapshot AS decision_input_snapshot,
+                       action.created_at,
                                action.approval_expires_at,
                                assignment.assignee_member_id,
                                profile.member_key AS assignee_member_key,
