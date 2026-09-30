@@ -60,6 +60,13 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
+                    let wordmark = sqlx::query_scalar::<_, String>(
+                        "SELECT crowdrelay_workspace_wordmark($1)",
+                    )
+                    .bind(workspace_id.into_uuid())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(map_sqlx)?;
                     // The referral invite is the fan→fan growth loop. The
                     // executor receives a complete first-party URL rather than
                     // reconstructing one from the code: domains are tenant
@@ -108,6 +115,9 @@ impl PostgresAutopilotRepository {
                             "action_id": action.id,
                             "fan_id": fan_id,
                             "template_key": template_key,
+                            "brand": {
+                                "wordmark": wordmark,
+                            },
                             "fan": {
                                 "email": fan.0,
                                 "display_name": fan.1,
