@@ -58,10 +58,10 @@ pub enum NorthStarMetric {
     /// Every audience the tenant has, each counted for what it is worth.
     ///
     /// `TotalAudience` answers "is the audience growing" but treats a TikTok
-    /// follower and a fan who installed Signal as the same person, and leaves
-    /// the Signal fan out of the sum entirely. Both are wrong in the same
-    /// direction: they teach the brain that the cheapest follower is the best
-    /// one.
+    /// follower and a fan who installed Signal as equally valuable audience
+    /// slots. It includes Signal, but does not deduplicate the same person
+    /// across platforms. Weighting fixes the value problem; it does not claim
+    /// identity resolution.
     ///
     /// This weights each platform by how much of the relationship the tenant
     /// actually holds — see [`MetricPlatform::audience_weight`] — and reports
