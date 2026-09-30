@@ -77,18 +77,20 @@ fn a_video_dispatch_pins_each_forum_and_discord_identity_without_reddit_routing(
 }
 
 #[test]
-fn community_dispatches_keep_the_existing_retry_budget() -> Result<(), Box<dyn std::error::Error>> {
+fn community_dispatches_keep_the_existing_retry_budget_per_target()
+-> Result<(), Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     let mut snapshot = fresh_video_snapshot(now);
+    let target = surge_community();
     snapshot.drop_surge_failures = vec![crowdrelay_domain::content_supply::DropSurgeLaneFailure {
-        lane: "community".to_owned(),
+        lane: format!("community:{}", target.target_id.into_uuid()),
         failures: crowdrelay_domain::content_supply::DROP_SURGE_MAX_ATTEMPTS,
         last_failed_at: now,
     }];
     let candidates = content_candidates(
         &snapshot,
         &surge_policy(),
-        &[surge_community()],
+        &[target],
         None,
         ContextEvidence::UNPROVEN,
         now,
@@ -97,5 +99,119 @@ fn community_dispatches_keep_the_existing_retry_budget() -> Result<(), Box<dyn s
         candidate.action,
         AutopilotActionPayload::RequestAgentRun { .. }
     )));
+    Ok(())
+}
+
+#[test]
+fn a_failed_community_retries_only_itself_after_backoff() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = OffsetDateTime::now_utc();
+    let mut snapshot = fresh_video_snapshot(now);
+    let failed = surge_community();
+    let untouched = surge_community();
+    snapshot.drop_surge_failures = vec![crowdrelay_domain::content_supply::DropSurgeLaneFailure {
+        lane: format!("community:{}", failed.target_id.into_uuid()),
+        failures: 1,
+        last_failed_at: now,
+    }];
+    let evaluate = |at| {
+        content_candidates(
+            &snapshot,
+            &surge_policy(),
+            &[failed.clone(), untouched.clone()],
+            None,
+            ContextEvidence::UNPROVEN,
+            at,
+        )
+    };
+    let key = |target: &crowdrelay_domain::content_supply::CommunityRelayTarget| {
+        format!(
+            "action:drop_surge:{}:community:{}",
+            snapshot.source_id.into_uuid(),
+            target.target_id.into_uuid(),
+        )
+    };
+    let waiting = evaluate(now + time::Duration::minutes(29))?;
+    assert!(
+        !waiting
+            .iter()
+            .any(|candidate| candidate.action_idempotency_key.starts_with(&key(&failed)))
+    );
+    assert!(
+        waiting
+            .iter()
+            .any(|candidate| candidate.action_idempotency_key == key(&untouched))
+    );
+    let due = evaluate(now + time::Duration::minutes(30))?;
+    assert!(
+        due.iter()
+            .any(|candidate| candidate.action_idempotency_key
+                == format!("{}:attempt1", key(&failed)))
+    );
+    assert!(
+        due.iter()
+            .any(|candidate| candidate.action_idempotency_key == key(&untouched))
+    );
+    let mut exhausted = snapshot.clone();
+    exhausted.drop_surge_failures[0].failures =
+        crowdrelay_domain::content_supply::DROP_SURGE_MAX_ATTEMPTS;
+    let candidates = content_candidates(
+        &exhausted,
+        &surge_policy(),
+        &[failed.clone(), untouched.clone()],
+        None,
+        ContextEvidence::UNPROVEN,
+        now + time::Duration::hours(2),
+    )?;
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.action_idempotency_key.starts_with(&key(&failed)))
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.action_idempotency_key == key(&untouched))
+    );
+    Ok(())
+}
+
+#[test]
+fn owned_drop_retries_wait_without_blocking_other_lanes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = OffsetDateTime::now_utc();
+    let mut snapshot = fresh_video_snapshot(now);
+    snapshot.drop_surge_failures = vec![crowdrelay_domain::content_supply::DropSurgeLaneFailure {
+        lane: "telegram".to_owned(),
+        failures: 2,
+        last_failed_at: now,
+    }];
+    let evaluate = |at| {
+        content_candidates(
+            &snapshot,
+            &surge_policy(),
+            &[],
+            None,
+            ContextEvidence::UNPROVEN,
+            at,
+        )
+    };
+    let waiting = evaluate(now + time::Duration::minutes(59))?;
+    assert!(
+        !waiting
+            .iter()
+            .any(|candidate| candidate.action_idempotency_key.contains(":telegram"))
+    );
+    assert!(
+        waiting
+            .iter()
+            .any(|candidate| candidate.action_idempotency_key.ends_with(":discord"))
+    );
+    let due = evaluate(now + time::Duration::minutes(60))?;
+    assert!(due.iter().any(|candidate| {
+        candidate
+            .action_idempotency_key
+            .ends_with(":telegram:attempt2")
+    }));
     Ok(())
 }

@@ -47,6 +47,64 @@ struct ContentRow {
     surge_requested_at: Option<OffsetDateTime>,
 }
 
+/// Dispatch success only proves the task was created. Read the latest task's
+/// failure receipt separately: the foreign table may not exist on this stack.
+/// Failed actions are counted by the main snapshot query, never twice here.
+async fn load_failed_drop_surge_tasks(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+) -> Result<HashMap<Uuid, Vec<DropSurgeLaneFailure>>, RepositoryError> {
+    if !sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+        .fetch_one(&repo.pool)
+        .await
+        .map_err(map_sqlx)?
+    {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, (Uuid, String, i64, OffsetDateTime)>(
+        r#"
+        SELECT source.id,
+               'community:' || split_part(action.idempotency_key, ':', 5) AS lane,
+               count(*)::bigint,
+               max(COALESCE(task.completed_at, task.created_at))
+        FROM content_sources source
+        JOIN autopilot_actions action
+          ON action.workspace_id = source.workspace_id
+         AND action.idempotency_key LIKE 'action:drop_surge:' || source.id::text || ':community:%'
+        JOIN LATERAL (
+            SELECT t.status, t.created_at, t.completed_at
+            FROM agent_service_tasks t
+            WHERE t.workspace_id = action.workspace_id
+              AND t.metadata->>'action_id' = action.id::text
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT 1
+        ) task ON true
+        WHERE source.workspace_id = $1 AND source.active
+          AND action.context = 'content_supply'
+          AND action.action_kind = 'agent.run.request'
+          AND action.status = 'succeeded'
+          AND task.status = 'failed'
+        GROUP BY source.id, lane
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    let mut failures: HashMap<Uuid, Vec<DropSurgeLaneFailure>> = HashMap::new();
+    for (source, lane, count, last_failed_at) in rows {
+        failures
+            .entry(source)
+            .or_default()
+            .push(DropSurgeLaneFailure {
+                lane,
+                failures: u32::try_from(count).unwrap_or(u32::MAX),
+                last_failed_at,
+            });
+    }
+    Ok(failures)
+}
+
 pub(in crate::autopilot) async fn load_content_supply_snapshots(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -319,11 +377,12 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 array_agg(per_lane.last_failed_at ORDER BY per_lane.lane) AS last_failed
             FROM (
                 SELECT
-                    -- Element 4 of 'action:drop_surge:{uuid}:{lane}…' — the
-                    -- uuid is element 3, the lane is always the fourth
-                    -- colon-separated segment because the retry suffix
-                    -- comes after it.
-                    split_part(action.idempotency_key, ':', 4) AS lane,
+                    -- Owned lanes use element 4. Community dispatches also
+                    -- carry the target in element 5, before the retry suffix:
+                    -- one destination's failure cannot re-key its siblings.
+                    CASE WHEN split_part(action.idempotency_key, ':', 4) = 'community'
+                         THEN 'community:' || split_part(action.idempotency_key, ':', 5)
+                         ELSE split_part(action.idempotency_key, ':', 4) END AS lane,
                     count(*)::bigint AS failures,
                     max(COALESCE(action.finished_at, action.updated_at)) AS last_failed_at
                 FROM autopilot_actions AS action
@@ -332,7 +391,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                   AND action.idempotency_key
                       LIKE 'action:drop_surge:' || source.id::text || ':%'
                   AND action.status = 'failed'
-                GROUP BY split_part(action.idempotency_key, ':', 4)
+                GROUP BY lane
             ) AS per_lane
         ) AS surge_failed ON true
         WHERE source.workspace_id = $1
@@ -367,9 +426,32 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
     .await
     .map_err(map_sqlx)?;
 
+    let mut task_failures = load_failed_drop_surge_tasks(repo, workspace_id).await?;
     rows.into_iter()
         .map(|row| {
             let source_kind = parse_content_source_kind(&row.source_kind)?;
+            let mut drop_surge_failures: Vec<DropSurgeLaneFailure> = row
+                .surge_lane_names
+                .iter()
+                .zip(&row.surge_lane_counts)
+                .zip(&row.surge_lane_last)
+                .map(|((lane, failures), last_failed_at)| DropSurgeLaneFailure {
+                    lane: lane.clone(),
+                    failures: u32::try_from(*failures).unwrap_or(u32::MAX),
+                    last_failed_at: *last_failed_at,
+                })
+                .collect();
+            for failure in task_failures.remove(&row.source_id).unwrap_or_default() {
+                if let Some(existing) = drop_surge_failures
+                    .iter_mut()
+                    .find(|existing| existing.lane == failure.lane)
+                {
+                    existing.failures = existing.failures.saturating_add(failure.failures);
+                    existing.last_failed_at = existing.last_failed_at.max(failure.last_failed_at);
+                } else {
+                    drop_surge_failures.push(failure);
+                }
+            }
             Ok(ContentSupplySnapshot {
                 source_id: ContentSourceId::from_uuid(row.source_id),
                 source_kind,
@@ -412,17 +494,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                         })
                     })
                     .collect::<Result<_, RepositoryError>>()?,
-                drop_surge_failures: row
-                    .surge_lane_names
-                    .iter()
-                    .zip(&row.surge_lane_counts)
-                    .zip(&row.surge_lane_last)
-                    .map(|((lane, failures), last_failed_at)| DropSurgeLaneFailure {
-                        lane: lane.clone(),
-                        failures: u32::try_from(*failures).unwrap_or(u32::MAX),
-                        last_failed_at: *last_failed_at,
-                    })
-                    .collect(),
+                drop_surge_failures,
                 surge_requested_at: row.surge_requested_at,
                 promotion_excluded_platforms:
                     crowdrelay_domain::video_promotion::excluded_platforms(

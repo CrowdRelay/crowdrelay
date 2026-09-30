@@ -16,10 +16,26 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
           ON place.id = t.place_id AND place.workspace_id = t.workspace_id
         LEFT JOIN discovery_place_rules rules ON rules.place_id = place.id
         LEFT JOIN LATERAL (
-            SELECT MAX(cp.created_at) AS last_draft_at
-            FROM community_posts cp
-            WHERE cp.workspace_id = t.workspace_id AND cp.target_id = t.id
-              AND cp.status IN ('pending', 'awaiting_manual_post', 'posted', 'rate_limited')
+            -- A source-bound drafting request consumes a turn before its
+            -- outcome becomes a post. Otherwise the same initial targets
+            -- monopolize the pool while their task keys dedupe every cycle.
+            SELECT MAX(turn.created_at) AS last_draft_at
+            FROM (
+                SELECT cp.created_at
+                FROM community_posts cp
+                WHERE cp.workspace_id = t.workspace_id AND cp.target_id = t.id
+                  AND cp.status IN ('pending', 'awaiting_manual_post', 'posted', 'rate_limited')
+                UNION ALL
+                SELECT action.created_at
+                FROM autopilot_actions action
+                WHERE action.workspace_id = t.workspace_id
+                  AND action.subject_id = t.id AND action.subject_kind = 'target_community'
+                  AND action.context = 'content_supply' AND action.action_kind = 'agent.run.request'
+                  AND action.status IN ('awaiting_approval', 'queued', 'processing', 'succeeded')
+                  AND split_part(action.idempotency_key, ':', 2) IN ('relay', 'drop_surge')
+                  AND split_part(action.idempotency_key, ':', 4) = 'community'
+                  AND split_part(action.idempotency_key, ':', 5) = t.id::text
+            ) turn
         ) last ON true
         WHERE t.workspace_id = $1
           AND t.target_kind = 'community'
@@ -41,6 +57,11 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                WHERE waiting.workspace_id = t.workspace_id
                  AND waiting.platform = COALESCE(NULLIF(t.platform, ''), 'reddit')
                  AND waiting.status IN ('pending', 'awaiting_manual_post')) < $3
+          AND NOT EXISTS (SELECT 1 FROM autopilot_actions drafting
+                          WHERE drafting.workspace_id=t.workspace_id AND drafting.subject_id=t.id
+                            AND drafting.subject_kind='target_community' AND drafting.context='content_supply'
+                            AND drafting.action_kind='agent.run.request'
+                            AND drafting.status IN ('awaiting_approval','queued','processing'))
           AND NOT EXISTS (SELECT 1 FROM community_posts waiting
                           WHERE waiting.workspace_id=t.workspace_id AND waiting.target_id=t.id
                             AND waiting.status IN ('pending','awaiting_manual_post','rate_limited'))

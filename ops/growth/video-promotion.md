@@ -36,7 +36,7 @@ Owned and community lanes share a source-owned acquisition campaign, reusing a m
 
 ## Connector preservation and rollback
 
-Migration `0382_source_owned_promotion_metadata.sql` adds a trigger preserving omitted promotion exclusions, campaign identity, and the promotion-request timestamp when older video or release producers refresh facts. Newly registered YouTube aliases inherit an existing asset's explicit exclusions. Explicit values still replace those fields. It does not modify existing rows or remove audit data. The video watcher merges refreshed facts so an unchanged feed does not bump versions merely because operator-owned metadata exists.
+Migration `0383_source_owned_promotion_metadata.sql` adds a trigger preserving omitted promotion exclusions, campaign identity, and the promotion-request timestamp when older video or release producers refresh facts. Newly registered YouTube aliases inherit an existing asset's explicit exclusions. Explicit values still replace those fields. It does not modify existing rows or remove audit data. The video watcher merges refreshed facts so an unchanged feed does not bump versions merely because operator-owned metadata exists.
 
 For a coordinated rollback, stop affected promotion workers first, restore compatible application versions through the normal deployment gates, and remove the additive trigger and function:
 

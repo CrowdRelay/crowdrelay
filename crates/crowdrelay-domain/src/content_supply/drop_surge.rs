@@ -39,13 +39,24 @@ pub const DROP_SURGE_MAX_ATTEMPTS: u32 = MAX_ARTIFACT_ATTEMPTS;
 /// action, and [`DROP_SURGE_MAX_ATTEMPTS`] caps the count.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DropSurgeLaneFailure {
-    /// The lane name — one of [`DROP_SURGE_LANES`]. Kept as a String because
-    /// the ledger stores it inside the action's idempotency key, not as a
-    /// typed column.
+    /// An owned lane name, or `community:{target_uuid}` for one community.
+    /// The target is part of the retry identity: a failed draft must not
+    /// re-key successful siblings or exhaust another community's budget.
     pub lane: String,
     pub failures: u32,
     #[serde(with = "time::serde::rfc3339")]
     pub last_failed_at: OffsetDateTime,
+}
+
+impl DropSurgeLaneFailure {
+    /// The same growing delay as the artifact chain: thirty minutes after
+    /// the first failure, sixty after the second. A provider outage must not
+    /// consume the entire attempt budget in consecutive autopilot cycles.
+    #[must_use]
+    pub fn retry_due(&self) -> OffsetDateTime {
+        let doublings = self.failures.saturating_sub(1).min(4);
+        self.last_failed_at + Duration::minutes(30 * (1_i64 << doublings))
+    }
 }
 
 /// The smart-link slug a surge lane points at: `drop-{key}-{lane}`.

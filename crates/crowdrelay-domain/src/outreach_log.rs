@@ -187,10 +187,23 @@ pub struct OutreachLogEntry {
 }
 
 impl OutreachLogEntry {
+    /// An explicit unsent state wins over ambiguous dates and contradictory
+    /// reply cells. SCOUT's `Date` also dates planned work; preserving the raw
+    /// value must not turn a dated `NOT SENT` row into outreach history.
+    fn explicitly_unsent(&self) -> bool {
+        self.status.as_deref().is_some_and(|status| {
+            ["draft", "queued", "planned", "not sent", "not_sent"]
+                .contains(&status.trim().to_lowercase().as_str())
+        })
+    }
+
     /// The sheet proves the letter went out: a send timestamp, or a
-    /// status only a sent letter can reach.
+    /// status only a sent letter can reach, unless it explicitly says unsent.
     #[must_use]
     pub fn was_sent(&self) -> bool {
+        if self.explicitly_unsent() {
+            return false;
+        }
         if self.sent_at().is_some() {
             return true;
         }
@@ -203,6 +216,9 @@ impl OutreachLogEntry {
     /// The sheet says an answer came back.
     #[must_use]
     pub fn was_replied(&self) -> bool {
+        if self.explicitly_unsent() {
+            return false;
+        }
         if self.replied_at().is_some() {
             return true;
         }
@@ -775,7 +791,7 @@ mod tests {
                 ("result", "Needs application package"),
             ],
         );
-        let report = extract_outreach_log(&vec![header.clone(), sent.clone(), replied, draft])
+        let report = extract_outreach_log(&[header.clone(), sent.clone(), replied, draft])
             .expect("SCOUT outreach log is claimed");
         assert_eq!(report.book, OutreachBook::Scout);
         assert_eq!(report.entries.len(), 3);
@@ -794,7 +810,7 @@ mod tests {
             .expect("result column");
         refreshed[result_index] = "Still waiting".to_owned();
         let refreshed_report =
-            extract_outreach_log(&vec![header, refreshed]).expect("SCOUT row re-parses");
+            extract_outreach_log(&[header, refreshed]).expect("SCOUT row re-parses");
         assert_eq!(
             first_id, refreshed_report.entries[0].outreach_id,
             "status/result edits must refresh the same interaction identity"
@@ -899,6 +915,36 @@ mod tests {
         let entry = &report.entries[0];
         assert!(!entry.was_sent(), "a draft was never sent");
         assert!(!entry.was_replied());
+    }
+
+    #[test]
+    fn explicit_unsent_status_refuses_history_even_with_dates_and_reply_fields() {
+        for status in ["DRAFT", "queued", " Planned ", "NOT SENT", "not_sent"] {
+            let entry = OutreachLogEntry {
+                status: Some(status.to_owned()),
+                sent_at_raw: Some("2026-08-11".to_owned()),
+                reply_at_raw: Some("2026-08-12".to_owned()),
+                reply_type: Some("HUMAN".to_owned()),
+                result: Some("Accepted".to_owned()),
+                ..OutreachLogEntry::default()
+            };
+            assert!(
+                entry.sent_at().is_some(),
+                "raw dates remain available for audit"
+            );
+            assert!(!entry.was_sent(), "{status} is intent, not proof of a send");
+            assert!(
+                !entry.was_replied(),
+                "contradictory reply fields cannot mint history"
+            );
+        }
+        let sent = OutreachLogEntry {
+            status: Some("SENT".to_owned()),
+            sent_at_raw: Some("2026-08-11".to_owned()),
+            ..OutreachLogEntry::default()
+        };
+        assert!(sent.was_sent());
+        assert!(!sent.was_replied());
     }
 
     #[test]
