@@ -612,20 +612,12 @@ mod tests_booking {
         assert_eq!(active[0].disposition, PolicyDisposition::RequireApproval);
         assert_eq!(active[0].policy_snapshot.get("ladder_authorized"), None);
 
-        // Sparse tenant activity flips the same ladder into backstop mode.
-        // The disposition remains honest, while persistence can honour the
-        // explicit ladder authorization without asking again.
+        // Sparse recorded activity changes nothing: silence in the ledger is
+        // not consent to spend relationship capital.
         let quiet = show_growth::show_growth_candidates(snapshot(true, 1), &policy, ContextEvidence::measured(EvidenceCount(RATE_FLOOR)), &std::collections::HashMap::new(), true, &std::collections::HashMap::new(), now)?;
         assert_eq!(quiet.len(), 1);
         assert_eq!(quiet[0].disposition, PolicyDisposition::RequireApproval);
-        assert_eq!(
-            quiet[0].policy_snapshot.get("ladder_authorized"),
-            Some(&serde_json::Value::Bool(true))
-        );
-        assert_eq!(
-            quiet[0].policy_snapshot.get("relationship_backstop_authorized"),
-            Some(&serde_json::Value::Bool(true))
-        );
+        assert_eq!(quiet[0].policy_snapshot.get("ladder_authorized"), None);
         assert!(matches!(
             quiet[0].action,
             AutopilotActionPayload::RequestShowGrowth {
