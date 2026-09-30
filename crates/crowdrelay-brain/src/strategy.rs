@@ -665,6 +665,32 @@ mod tests {
     }
 
     #[test]
+    fn strategy_priority_prefers_a_channel_that_proved_durable_fans() {
+        let world = WorldModel {
+            platform_growth: vec![crate::platform_yield::PlatformGrowth {
+                platform: "social".to_owned(),
+                audience: 5_000,
+                gained_this_month: 250,
+            }],
+            channel_yield: vec![crate::platform_yield::ChannelYield {
+                channel: "telegram".to_owned(),
+                conversions_30d: 1,
+                unique_clickers_30d: 0,
+                durable_90d: 1,
+            }],
+            ..Default::default()
+        };
+
+        let ranked = GrowthStrategy::AggressiveDiscovery.template_priority_for(&world);
+
+        assert_eq!(
+            ranked.first(),
+            Some(&"telegram-scanner"),
+            "direct retained-fan evidence must reach the strategy call site, not stop in the helper"
+        );
+    }
+
+    #[test]
     fn strategy_hysteresis_stays_event_driven_past_entry_threshold() {
         let world = WorldModel {
             days_to_next_event: Some(18),
