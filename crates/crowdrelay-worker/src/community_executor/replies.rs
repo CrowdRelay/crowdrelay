@@ -914,4 +914,50 @@ mod replies_tests {
         let payload = review_payload("reddit_reply", "r/test", "body", "ctx", Some("claude"));
         assert_eq!(payload["drafted_by_provider"], "claude");
     }
+
+    fn draft_with_capture(intent: Option<&str>, evidence: Option<&str>) -> ReplyDraft {
+        ReplyDraft {
+            reply: Some("Dzięki, że pytasz.".to_owned()),
+            skip_reason: None,
+            capture_intent: intent.map(str::to_owned),
+            capture_evidence: evidence.map(str::to_owned),
+            provider: Some("test".to_owned()),
+            model: Some("test".to_owned()),
+        }
+    }
+
+    #[test]
+    fn only_explicit_evidenced_meta_join_intent_requests_capture() {
+        let good = draft_with_capture(Some("join"), Some("gdzie mogę was śledzić?"));
+        assert_eq!(
+            owned_join_capture_requested("instagram", &good),
+            Some("gdzie mogę was śledzić?")
+        );
+        assert_eq!(
+            owned_join_capture_requested("facebook", &good),
+            Some("gdzie mogę was śledzić?")
+        );
+
+        assert!(owned_join_capture_requested("reddit", &good).is_none());
+        assert!(owned_join_capture_requested("youtube", &good).is_none());
+
+        let missing_evidence = draft_with_capture(Some("join"), None);
+        assert!(owned_join_capture_requested("instagram", &missing_evidence).is_none());
+
+        let ordinary = draft_with_capture(Some("none"), Some("kocham ten numer"));
+        assert!(owned_join_capture_requested("instagram", &ordinary).is_none());
+
+        // Older agents builds deserialize with both optional fields absent.
+        let legacy = draft_with_capture(None, None);
+        assert!(owned_join_capture_requested("facebook", &legacy).is_none());
+    }
+
+    #[test]
+    fn reply_capture_slug_is_stable_and_comment_scoped() {
+        let id = Uuid::parse_str("018f5a00-1234-7abc-8def-0123456789ab").unwrap();
+        assert_eq!(
+            owned_reply_capture_slug(id),
+            "reply-capture-018f5a0012347abc8def0123456789ab"
+        );
+    }
 }
