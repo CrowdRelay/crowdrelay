@@ -247,6 +247,15 @@ impl ShowGrowthLever {
         )
     }
 
+    /// These two levers describe relationship discovery/outreach, but do not
+    /// name a recipient. The Beacon subsystem owns their actual outbound
+    /// execution because it carries a concrete verified beacon_id plus
+    /// suppression, relationship phase and consent state.
+    #[must_use]
+    pub const fn is_beacon_outreach(self) -> bool {
+        matches!(self, Self::PartnerCrossPromo | Self::GrassrootsSceneRelay)
+    }
+
     /// Third-party show promotion spends relationship capital: a promoter,
     /// venue, creator or scene node may remember a clumsy ask long after the
     /// campaign ends.
