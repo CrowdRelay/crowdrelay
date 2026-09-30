@@ -82,17 +82,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Fresh success is real acquisition evidence but not retention evidence yet.
     // It must not enter the mature 30-90d cohort until the full window elapsed.
-    arrival_with_age(
-        pool,
-        act_a,
-        reddit_a,
-        250,
-        true,
-        "active",
-        now,
-        5,
-    )
-    .await?;
+    arrival_with_age(pool, act_a, reddit_a, 250, true, "active", now, 5).await?;
     // The outsider's traffic, which the organisation must not see at all.
     for index in 0..7 {
         arrival(pool, outsider, reddit_out, 300 + index, true, "active", now).await?;
@@ -240,7 +230,14 @@ async fn arrival(
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     arrival_with_age(
-        pool, workspace_id, smart_link_id, index, stayed, status, now, 45,
+        pool,
+        workspace_id,
+        smart_link_id,
+        index,
+        stayed,
+        status,
+        now,
+        45,
     )
     .await
 }

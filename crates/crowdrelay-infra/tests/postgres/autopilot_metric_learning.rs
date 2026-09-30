@@ -227,7 +227,10 @@ async fn lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient(
     .bind(format!("SUBJECT{}", &subject.simple().to_string()[..12]))
     .bind(other_code)
     .bind(other_referrer)
-    .bind(format!("OTHER{}", &other_referrer.simple().to_string()[..12]))
+    .bind(format!(
+        "OTHER{}",
+        &other_referrer.simple().to_string()[..12]
+    ))
     .execute(&f.pool)
     .await
     .expect("referral codes");
@@ -268,7 +271,8 @@ async fn lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient(
     };
 
     assert_eq!(
-        observe().await, 0.0,
+        observe().await,
+        0.0,
         "being referred by somebody else is not the recipient responding to a referral invite"
     );
 
@@ -290,7 +294,8 @@ async fn lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient(
     .expect("pending outbound referral");
 
     assert_eq!(
-        observe().await, 0.0,
+        observe().await,
+        0.0,
         "pending attribution must not teach the learner that multiply succeeded"
     );
 
@@ -310,7 +315,8 @@ async fn lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient(
     .expect("qualify outbound referral");
 
     assert_eq!(
-        observe().await, 1.0,
+        observe().await,
+        1.0,
         "a qualified fan brought by the lifecycle recipient is the multiply outcome"
     );
 
@@ -328,7 +334,8 @@ async fn lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient(
     .expect("reverse outbound referral");
 
     assert_eq!(
-        observe().await, 0.0,
+        observe().await,
+        0.0,
         "a reversed referral must stop contributing positive learning evidence"
     );
 }

@@ -872,8 +872,7 @@ async fn the_world_model_reports_growth_per_platform() -> Result<(), Box<dyn std
 /// reaches the actual WorldModel and strategy rerank, not only the SQL helper.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn channel_yield_waits_for_full_retention_window()
--> Result<(), Box<dyn std::error::Error>> {
+async fn channel_yield_waits_for_full_retention_window() -> Result<(), Box<dyn std::error::Error>> {
     let (pool, database_url) =
         common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
     let workspace_id = WorkspaceId::new();
@@ -997,8 +996,8 @@ async fn channel_yield_waits_for_full_retention_window()
         "both 45-day-old, still-active fans proved retention"
     );
 
-    let ranked =
-        crowdrelay_brain::strategy::GrowthStrategy::AggressiveDiscovery.template_priority_for(world);
+    let ranked = crowdrelay_brain::strategy::GrowthStrategy::AggressiveDiscovery
+        .template_priority_for(world);
     let telegram_at = ranked
         .iter()
         .position(|template| *template == "telegram-scanner")

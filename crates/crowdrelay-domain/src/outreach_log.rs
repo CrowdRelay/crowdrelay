@@ -378,7 +378,7 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
         // contact column, not its name column.
         "recipient" | "kontakt" | "contact_email" | "email" | "public_email" => {
             Some(columns::CONTACT)
-        },
+        }
         "channel" | "kanał" | "kanal" => Some(columns::CHANNEL),
         "purpose" | "cel" => Some(columns::PURPOSE),
         "subject" | "temat" | "subject_thread" => Some(columns::SUBJECT),
@@ -393,7 +393,7 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
         "followup_due" | "follow_up_due" => Some(columns::FOLLOWUP_DUE),
         "next_step" | "następny_krok" | "nastepny_krok" | "reason_next_step" => {
             Some(columns::NEXT_STEP)
-        },
+        }
         "notes" | "uwagi" | "note" => Some(columns::NOTES),
         "gmail_message_id" | "message_id" => Some(columns::GMAIL_MESSAGE_ID),
         "gmail_thread_id" | "thread_id" => Some(columns::GMAIL_THREAD_ID),
@@ -559,10 +559,7 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             .filter(|cell| cell.contains('@') && cell.len() <= 320);
         let result = capped(clean(cell_at(&index, row, columns::RESULT)), 200);
         let status = if book == OutreachBook::Scout {
-            scout_status(
-                cell_at(&index, row, columns::STATUS),
-                result.as_deref(),
-            )
+            scout_status(cell_at(&index, row, columns::STATUS), result.as_deref())
         } else {
             capped(clean(cell_at(&index, row, columns::STATUS)), 60)
         };
@@ -778,9 +775,8 @@ mod tests {
                 ("result", "Needs application package"),
             ],
         );
-        let report =
-            extract_outreach_log(&vec![header.clone(), sent.clone(), replied, draft])
-                .expect("SCOUT outreach log is claimed");
+        let report = extract_outreach_log(&vec![header.clone(), sent.clone(), replied, draft])
+            .expect("SCOUT outreach log is claimed");
         assert_eq!(report.book, OutreachBook::Scout);
         assert_eq!(report.entries.len(), 3);
         assert!(report.entries[0].was_sent());
