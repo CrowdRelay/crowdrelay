@@ -816,23 +816,24 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                     JOIN fans AS fan
                       ON fan.workspace_id = interest.workspace_id
                      AND fan.id = interest.fan_id
+                    LEFT JOIN LATERAL (
+                        SELECT consent.granted
+                        FROM fan_consents AS consent
+                        WHERE consent.workspace_id = fan.workspace_id
+                          AND consent.fan_id = fan.id
+                          AND consent.purpose = 'marketing'
+                        ORDER BY consent.recorded_at DESC, consent.id DESC
+                        LIMIT 1
+                    ) AS consent ON true
                     WHERE interest.workspace_id = $1
-                      AND fan.status = 'active'
-                      AND EXISTS (
-                          SELECT 1 FROM fan_consents AS consent
-                          WHERE consent.workspace_id = fan.workspace_id
-                            AND consent.fan_id = fan.id
-                            AND consent.purpose = 'marketing'
-                            AND consent.granted
-                            AND consent.recorded_at = (
-                                SELECT max(latest.recorded_at) FROM fan_consents AS latest
-                                WHERE latest.workspace_id = fan.workspace_id
-                                  AND latest.fan_id = fan.id
-                                  AND latest.purpose = 'marketing'
-                            )
-                      )
-                      AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
-                          BETWEEN $2 - INTERVAL '30 days' AND $2
+                      -- Keep this predicate identical to
+                      -- fan_activation_kpi.activated_30d. City is only a
+                      -- partition of the North Star, never a second
+                      -- definition of an activated fan.
+                      AND consent.granted
+                      AND fan.created_at >= $2 - INTERVAL '30 days'
+                      AND fan.last_activity_at IS NOT NULL
+                      AND fan.last_activity_at <= fan.created_at + INTERVAL '30 days'
                     GROUP BY interest.city_id
                 ), recorded AS (
                     INSERT INTO growth_metric_points (
@@ -870,30 +871,13 @@ impl AutopilotFirstPartyGrowthMetrics for PostgresAutopilotRepository {
                     SELECT
                         (SELECT count(*)::bigint FROM fans
                           WHERE workspace_id = $1 AND status = 'active') AS active_fans,
-                        -- The definition lives in crowdrelay_domain::fan_activation
-                        -- and this is its set-oriented form: signed up, consented,
-                        -- and at least one meaningful action inside the window.
-                        -- An account whose status is 'active' is not a person who
-                        -- did anything, which is what the other series counts and
-                        -- why it is not the campaign KPI.
-                        (SELECT count(*)::bigint FROM fans AS fan
-                          WHERE fan.workspace_id = $1
-                            AND fan.status = 'active'
-                            AND EXISTS (
-                                SELECT 1 FROM fan_consents AS consent
-                                WHERE consent.workspace_id = fan.workspace_id
-                                  AND consent.fan_id = fan.id
-                                  AND consent.purpose = 'marketing'
-                                  AND consent.granted
-                                  AND consent.recorded_at = (
-                                      SELECT max(latest.recorded_at) FROM fan_consents AS latest
-                                      WHERE latest.workspace_id = fan.workspace_id
-                                        AND latest.fan_id = fan.id
-                                        AND latest.purpose = 'marketing'
-                                  )
-                            )
-                            AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
-                                BETWEEN $2 - INTERVAL '30 days' AND $2
+                        -- One definition only. The North Star itself reads this
+                        -- view, so the historical growth series must read the
+                        -- same row rather than maintain a look-alike predicate
+                        -- that can drift.
+                        (SELECT COALESCE(activated_30d, 0)::bigint
+                           FROM fan_activation_kpi
+                          WHERE workspace_id = $1
                         ) AS activated_fans_30d,
                         (SELECT count(*)::bigint FROM merch_order_facts
                           WHERE workspace_id = $1) AS paid_orders
