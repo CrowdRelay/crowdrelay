@@ -26,6 +26,20 @@ pub struct RecentInsight {
     pub recommended_action: Option<String>,
 }
 
+/// One owned-social post whose tracked path created fans. This is prompt
+/// evidence, not a creative prescription: the next drafter should adapt the
+/// pattern while writing a fresh post.
+#[derive(Clone, Debug, Serialize)]
+pub struct SocialContentPerformance {
+    pub platform: String,
+    pub media_type: Option<String>,
+    pub opening: Option<String>,
+    pub reach: Option<u64>,
+    pub fans_acquired: u32,
+    pub fans_activated_within_30d: u32,
+    pub fan_conversion_per_1000_reach: Option<u32>,
+}
+
 /// A snapshot of one worker template's dispatch state.
 #[derive(Clone, Debug, Serialize)]
 pub struct GrowthIntelligenceSnapshot {
@@ -44,6 +58,10 @@ pub struct GrowthIntelligenceSnapshot {
     pub unengaged_targets: Vec<UnengagedTarget>,
     pub recent_insights: Vec<RecentInsight>,
     pub community_engagement_history: Vec<CommunityEngagementSummary>,
+    /// Best recent owned-social fan acquisition examples. Populated only for
+    /// the social-post worker so other prompts do not carry irrelevant copy.
+    #[serde(default)]
+    pub social_content_history: Vec<SocialContentPerformance>,
     pub standing: Standing,
     pub world_model: WorldModel,
     /// Tenant operating preference posterior — how this tenant tends to
