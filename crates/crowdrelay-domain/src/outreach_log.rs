@@ -188,9 +188,19 @@ pub struct OutreachLogEntry {
 
 impl OutreachLogEntry {
     /// The sheet proves the letter went out: a send timestamp, or a
-    /// status only a sent letter can reach.
+    /// status only a sent letter can reach. An explicit draft/not-sent
+    /// verdict beats a bare date — the scout sheet's `Date` is the day
+    /// the row was worked, not proof the letter left.
     #[must_use]
     pub fn was_sent(&self) -> bool {
+        if matches!(
+            self.status
+                .as_deref()
+                .map(|status| status.trim().to_lowercase()),
+            Some(status) if status == "draft" || status == "not sent"
+        ) {
+            return false;
+        }
         if self.sent_at().is_some() {
             return true;
         }
