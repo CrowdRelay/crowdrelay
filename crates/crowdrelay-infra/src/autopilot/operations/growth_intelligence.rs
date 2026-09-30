@@ -655,10 +655,18 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
     // channels), so levels are summed across that platform's series.
     let (north_star_current, north_star_this_month) =
         if north_star == NorthStarMetric::ActivatedFans30d {
-            // `activated_30d` is already a rolling 30-day count — signed up,
-            // consented, did something meaningful. It is a windowed level, not a
-            // cumulative one, so there is no month-boundary subtraction to do:
-            // the current count IS the month's progress.
+            // `activated_30d` is a rolling 30-day LEVEL. The target below is
+            // monthly GROWTH in that level. Feeding the whole level into
+            // `GrowthTargetProgress` made the default North Star look Ahead
+            // almost permanently (20 active fans versus a +5 growth target
+            // became 400% progress before anybody new activated).
+            //
+            // The cycle ledger is the canonical history here: every completed
+            // cycle records the exact world-model North Star value together
+            // with the metric name. Older `growth_metric_points` for this key
+            // were written by a predicate that drifted from
+            // `fan_activation_kpi`, so using them as the baseline would turn
+            // a measurement fix into a historical discontinuity.
             let activated: i64 = sqlx::query_scalar(
                 r#"
             SELECT COALESCE(activated_30d, 0)::bigint
@@ -671,8 +679,51 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             .await
             .map_err(map_sqlx)?
             .unwrap_or(0);
-            let value = u32::try_from(activated.max(0)).unwrap_or(u32::MAX);
-            (value, value)
+
+            let baseline: i64 = sqlx::query_scalar(
+                r#"
+            WITH readings AS (
+                SELECT started_at, north_star_value::bigint AS value
+                FROM autopilot_cycle_runs
+                WHERE workspace_id = $1
+                  AND north_star_metric = 'activated_fans_30d'
+                  AND north_star_value IS NOT NULL
+                  AND started_at <= $2
+            ),
+            before_month AS (
+                SELECT value
+                FROM readings
+                WHERE started_at < date_trunc('month', $2::timestamptz)
+                ORDER BY started_at DESC
+                LIMIT 1
+            ),
+            first_in_month AS (
+                SELECT value
+                FROM readings
+                WHERE started_at >= date_trunc('month', $2::timestamptz)
+                ORDER BY started_at ASC
+                LIMIT 1
+            )
+            SELECT COALESCE(
+                (SELECT value FROM before_month),
+                (SELECT value FROM first_in_month),
+                $3::bigint
+            )::bigint
+            "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(now)
+            .bind(activated)
+            .fetch_one(pool)
+            .await
+            .map_err(map_sqlx)?;
+
+            let current = activated.max(0);
+            let this_month = current.saturating_sub(baseline.max(0));
+            (
+                u32::try_from(current).unwrap_or(u32::MAX),
+                u32::try_from(this_month).unwrap_or(u32::MAX),
+            )
         } else {
             match (north_star.platform(), north_star.metric_key()) {
                 (Some(platform), Some(metric_key)) => {
