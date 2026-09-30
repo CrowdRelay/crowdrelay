@@ -793,6 +793,157 @@ async fn the_world_model_reports_growth_per_platform() -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// Source ROI may influence strategy only after retention had time to happen.
+///
+/// A fresh conversion is valuable immediately as acquisition evidence, but it
+/// cannot also receive the durable-fan bonus before thirty days elapsed. A
+/// mature fan who is still consented and meaningfully active can. This test
+/// reaches the actual WorldModel and strategy rerank, not only the SQL helper.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn channel_yield_waits_for_full_retention_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("channel-retention-{suffix}"))
+        .bind("Channel retention integrity")
+        .execute(&pool)
+        .await?;
+
+    let now = OffsetDateTime::now_utc();
+
+    async fn fan(
+        pool: &sqlx::PgPool,
+        workspace_id: WorkspaceId,
+        suffix: &str,
+        channel: &str,
+        index: usize,
+        age_days: i64,
+        now: OffsetDateTime,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let fan_id = Uuid::now_v7();
+        let signed_up = now - time::Duration::days(age_days);
+        let email = format!("{channel}-{index}-{suffix}@source-roi.test");
+
+        sqlx::query(
+            "INSERT INTO fans
+               (id, workspace_id, normalized_email, status, created_at, last_activity_at)
+             VALUES ($1, $2, $3, 'active', $4, $5)",
+        )
+        .bind(fan_id)
+        .bind(workspace_id.into_uuid())
+        .bind(&email)
+        .bind(signed_up)
+        .bind(now - time::Duration::days(1))
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO fan_consents
+               (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+             VALUES ($1, $2, 'marketing', true, 'v1', 'test', $3)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(signed_up)
+        .execute(pool)
+        .await?;
+
+        let mut hash = fan_id.as_bytes().to_vec();
+        hash.extend_from_slice(fan_id.as_bytes());
+        sqlx::query(
+            "INSERT INTO fan_sessions
+               (workspace_id, fan_id, session_token_hash, created_at, last_seen_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(hash)
+        .bind(signed_up)
+        .bind(now - time::Duration::days(1))
+        .bind(now + time::Duration::days(30))
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO fan_provenance_events
+               (workspace_id, fan_id, event_kind, channel, occurred_at)
+             VALUES ($1, $2, 'conversion', $3, $4)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id)
+        .bind(channel)
+        .bind(signed_up)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    fan(&pool, workspace_id, &suffix, "reddit", 0, 5, now).await?;
+    fan(&pool, workspace_id, &suffix, "telegram", 0, 45, now).await?;
+    fan(&pool, workspace_id, &suffix, "telegram", 1, 45, now).await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world = &snapshots
+        .first()
+        .ok_or("the loader returned no snapshots")?
+        .world_model;
+
+    let reddit = world
+        .channel_yield
+        .iter()
+        .find(|row| row.channel == "reddit")
+        .ok_or("reddit yield missing")?;
+    assert_eq!(reddit.conversions_30d, 1);
+    assert_eq!(
+        reddit.durable_90d, 0,
+        "a five-day-old fan cannot be called durable before the retention window exists"
+    );
+
+    let telegram = world
+        .channel_yield
+        .iter()
+        .find(|row| row.channel == "telegram")
+        .ok_or("telegram yield missing")?;
+    assert_eq!(telegram.conversions_30d, 0);
+    assert_eq!(
+        telegram.durable_90d, 2,
+        "both 45-day-old, still-active fans proved retention"
+    );
+
+    let ranked =
+        crowdrelay_brain::strategy::GrowthStrategy::AggressiveDiscovery.template_priority_for(world);
+    let telegram_at = ranked
+        .iter()
+        .position(|template| *template == "telegram-scanner")
+        .ok_or("telegram scanner missing")?;
+    let reddit_at = ranked
+        .iter()
+        .position(|template| *template == "reddit-scanner")
+        .ok_or("reddit scanner missing")?;
+    assert!(
+        telegram_at < reddit_at,
+        "proven retention should outrank a fresh conversion without double-counting it: {ranked:?}"
+    );
+
+    Ok(())
+}
+
 /// A community's size must never reach the audience total.
 ///
 /// `social` series hold how many people are in r/Metal, not how many follow

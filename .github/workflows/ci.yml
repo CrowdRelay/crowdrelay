@@ -361,7 +361,9 @@ jobs:
             b_a_reply_inside_the_window_resolves_to_one \
             queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event \
             an_anchor_is_one_room_whoever_claims_it \
-            lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient
+            lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient \
+            channel_yield_waits_for_full_retention_window \
+            two_acts_arrivals_become_one_sample
           cargo test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
             the_outcome_appears_in_the_timeline_it_caused \
             the_drip_claims_one_post_per_batch_per_interval \

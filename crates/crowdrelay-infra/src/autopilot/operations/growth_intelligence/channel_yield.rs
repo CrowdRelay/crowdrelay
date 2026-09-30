@@ -31,10 +31,12 @@ pub(super) async fn load_channel_yield(
     pool: &PgPool,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<ChannelYield>, RepositoryError> {
-    // Durable fans: the 90-day conversions whose fan is still active, still
-    // consented to marketing (latest record) and meaningfully active in the
-    // last 30 days — the acquisition-channel read's `activated` definition
-    // and the community pool's, so the three agree on who stayed.
+    // Durable fans: only conversions old enough to have had a full 30-day
+    // retention window can earn the retention bonus. They must still be active,
+    // still consented to marketing (latest record), and have a meaningful
+    // action both after that 30-day anniversary and inside the current 30-day
+    // window. A fan acquired yesterday can contribute a conversion today, but
+    // cannot also be called durable before thirty days have actually elapsed.
     let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
         r#"
         WITH evidence AS (
@@ -51,6 +53,7 @@ pub(super) async fn load_channel_yield(
              AND fan.id = evidence.fan_id
              AND fan.status = 'active'
             WHERE evidence.event_kind = 'conversion'
+              AND evidence.occurred_at <= now() - interval '30 days'
               AND EXISTS (
                   SELECT 1 FROM fan_consents AS consent
                   WHERE consent.workspace_id = fan.workspace_id
@@ -65,7 +68,10 @@ pub(super) async fn load_channel_yield(
                     )
               )
               AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
-                  >= now() - interval '30 days'
+                  >= GREATEST(
+                      now() - interval '30 days',
+                      evidence.occurred_at + interval '30 days'
+                  )
             GROUP BY evidence.channel
         )
         SELECT evidence.channel,

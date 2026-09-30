@@ -1,13 +1,13 @@
 //! Reading the band's outreach workbooks — the `OUTREACH` tabs the band
 //! fills in by hand.
 //!
-//! Two dialects share one sheet shape: `VIRYA_MASTER.xlsx` (English
-//! headers — `Sent_At`, `Reply_At`, `Result`, `Recipient`) and
+//! Three dialects feed the same history: `VIRYA_MASTER.xlsx` (English
+//! headers — `Sent_At`, `Reply_At`, `Result`, `Recipient`),
 //! `PROMO.xlsx` (Polish headers — `Data_wysłania`, `Data_odpowiedzi`,
-//! `Wynik`, `Kontakt`). Both carry `Outreach_ID` first and the reply
-//! columns nobody else's sheets have, which is what claims the tab before
-//! the registry-dump guard or the contact reader can file it as something
-//! it is not.
+//! `Wynik`, `Kontakt`), and the compact human `SCOUT.OUTREACH_LOG`.
+//! MASTER/PROMO carry explicit `Outreach_ID` values; SCOUT carries the
+//! counterparty + subject + date instead, from which this reader derives a
+//! stable id. The header pins keep all three ahead of the contact fallback.
 //!
 //! # What a row means
 //!
@@ -35,6 +35,7 @@
 //!
 //! Parse-only like its sibling readers: no IO, no clock, no writes.
 
+use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Iso8601, macros::format_description};
 
 use crate::outreach::OutreachReplyDisposition;
@@ -109,14 +110,19 @@ const REPLIED_STATUSES: &[&str] = &["replied", "answered", "odpowiedziano"];
 
 /// Which workbook dialect a claimed sheet speaks — decided from the
 /// header, not the file name, so a renamed copy or a `BACKUP` export
-/// still dedupes onto the same `source_key` namespace the one-off import
-/// wrote (`master:ORC-…`, `promo:OUT-…`).
+/// still dedupes onto the same `source_key` namespace (`master:ORC-…`,
+/// `promo:OUT-…`, or `scout:<derived-id>`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutreachBook {
     /// `VIRYA_MASTER` shape — `Recipient`, `Gmail_Thread_ID`, `Result`.
     Master,
     /// `PROMO` shape — `Nazwa`, `Kontakt`, `Wynik`, `Response_Type`.
     Promo,
+    /// Human `SCOUT.OUTREACH_LOG` shape — a compact history table with
+    /// recipient, public email, subject/thread, date, action, result/status
+    /// and reason/next-step. It has no explicit row id, so the parser derives
+    /// a deterministic one from the stable message identity fields.
+    Scout,
 }
 
 impl OutreachBook {
@@ -126,6 +132,7 @@ impl OutreachBook {
         match self {
             Self::Master => "master",
             Self::Promo => "promo",
+            Self::Scout => "scout",
         }
     }
 }
@@ -137,8 +144,9 @@ impl OutreachBook {
 pub struct OutreachLogEntry {
     /// The sheet's own row identity — the dedupe key the interactions
     /// carry (`{book}:{outreach_id}` / `{book}:{outreach_id}:reply`).
-    /// Required: a row without one cannot be told apart from its own
-    /// re-import and is refused.
+    /// MASTER/PROMO require the sheet to supply this. SCOUT derives it
+    /// deterministically from recipient/email + subject + date, so a rescan
+    /// refreshes the same interaction instead of inventing another.
     pub outreach_id: String,
     /// `Entity_ID`/`Lead_ID` — kept for audit and metadata, not a join.
     pub entity_ref: Option<String>,
@@ -286,7 +294,8 @@ impl OutreachLogEntry {
 }
 
 /// Why a row was not usable. Numbered for the sheet, not the grid —
-/// a spreadsheet's own row number is what the operator sees.
+/// a spreadsheet's own row number is what the operator sees. SCOUT may
+/// omit an explicit id only when its stable identity fields can derive one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutreachLogRefusal {
     /// No `Outreach_ID`: the row cannot be told apart from its own
@@ -319,12 +328,10 @@ pub struct OutreachLogReport {
     pub rows_read: usize,
 }
 
-/// Whether a header row is an outreach log. `Outreach_ID` plus the reply
-/// columns is the pin — every other sheet in either workbook stops at
-/// naming things, while these columns record that a letter moved. A
-/// `Reply_At`/`Data_odpowiedzi` column and a verdict column are both
-/// required: an export that logs only sends is a contact history, not
-/// this reader's sheet.
+/// Whether a header row is an outreach log. MASTER/PROMO pin on
+/// `Outreach_ID` + send/reply/verdict columns. Human SCOUT pins on its
+/// complete seven-column compact history shape; a plain contact list still
+/// cannot satisfy either contract.
 #[must_use]
 pub fn is_outreach_log(header: &[String]) -> bool {
     let has = |name: &str| {
@@ -332,10 +339,22 @@ pub fn is_outreach_log(header: &[String]) -> bool {
             .iter()
             .any(|cell| canonical_column(cell) == Some(name))
     };
-    has(columns::OUTREACH_ID)
+    let durable_book = has(columns::OUTREACH_ID)
         && has(columns::SENT_AT)
         && has(columns::REPLY_AT)
-        && (has(columns::RESULT) || has(columns::REPLY_TYPE))
+        && (has(columns::RESULT) || has(columns::REPLY_TYPE));
+    // SCOUT intentionally keeps a compact operator-facing history table.
+    // Its seven fields are specific enough to claim without mistaking an
+    // ordinary contact list for sent history.
+    let scout_book = !has(columns::OUTREACH_ID)
+        && has(columns::NAME)
+        && has(columns::CONTACT)
+        && has(columns::SUBJECT)
+        && has(columns::SENT_AT)
+        && has(columns::STATUS)
+        && has(columns::RESULT)
+        && has(columns::NEXT_STEP);
+    durable_book || scout_book
 }
 
 /// The column this header cell names, in the shared vocabulary.
@@ -347,28 +366,34 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
     let cell = cell
         .trim()
         .to_lowercase()
-        .replace([' ', '-'], "_")
-        .replace("__", "_");
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
     match cell.as_str() {
         "outreach_id" | "outreach" => Some(columns::OUTREACH_ID),
         "entity_id" | "lead_id" => Some(columns::ENTITY_REF),
-        "nazwa" | "display_name" => Some(columns::NAME),
+        "nazwa" | "display_name" | "recipient_organization" => Some(columns::NAME),
         // `Recipient` on master holds the address — it is this sheet's
         // contact column, not its name column.
-        "recipient" | "kontakt" | "contact_email" | "email" => Some(columns::CONTACT),
+        "recipient" | "kontakt" | "contact_email" | "email" | "public_email" => {
+            Some(columns::CONTACT)
+        },
         "channel" | "kanał" | "kanal" => Some(columns::CHANNEL),
         "purpose" | "cel" => Some(columns::PURPOSE),
-        "subject" | "temat" => Some(columns::SUBJECT),
-        "sent_at" | "data_wysłania" | "data_wyslania" | "wysłano" | "wyslano" => {
+        "subject" | "temat" | "subject_thread" => Some(columns::SUBJECT),
+        "sent_at" | "data_wysłania" | "data_wyslania" | "wysłano" | "wyslano" | "date" => {
             Some(columns::SENT_AT)
         }
-        "status" => Some(columns::STATUS),
+        "status" | "action" => Some(columns::STATUS),
         "reply_at" | "data_odpowiedzi" | "answered_at" => Some(columns::REPLY_AT),
         "reply_type" => Some(columns::REPLY_TYPE),
         "response_type" => Some(columns::RESPONSE_TYPE),
-        "result" | "wynik" | "outcome" => Some(columns::RESULT),
+        "result" | "wynik" | "outcome" | "result_status" => Some(columns::RESULT),
         "followup_due" | "follow_up_due" => Some(columns::FOLLOWUP_DUE),
-        "next_step" | "następny_krok" | "nastepny_krok" => Some(columns::NEXT_STEP),
+        "next_step" | "następny_krok" | "nastepny_krok" | "reason_next_step" => {
+            Some(columns::NEXT_STEP)
+        },
         "notes" | "uwagi" | "note" => Some(columns::NOTES),
         "gmail_message_id" | "message_id" => Some(columns::GMAIL_MESSAGE_ID),
         "gmail_thread_id" | "thread_id" => Some(columns::GMAIL_THREAD_ID),
@@ -379,6 +404,62 @@ pub fn canonical_column(cell: &str) -> Option<&'static str> {
         "send_guard_key" | "guard_key" => Some(columns::SEND_GUARD_KEY),
         _ => None,
     }
+}
+
+fn scout_outreach_id(
+    index: &std::collections::BTreeMap<&str, usize>,
+    row: &[String],
+) -> Option<String> {
+    let value = |name: &str| {
+        index
+            .get(name)
+            .and_then(|cell| row.get(*cell))
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_lowercase()
+    };
+    let identity = [
+        value(columns::NAME),
+        value(columns::CONTACT),
+        value(columns::SUBJECT),
+        value(columns::SENT_AT),
+    ]
+    .join("\0");
+    if identity.chars().all(|character| character == '\0') {
+        return None;
+    }
+    let digest = Sha256::digest(identity.as_bytes());
+    Some(
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
+}
+
+fn scout_status(action: Option<&str>, result: Option<&str>) -> Option<String> {
+    let action = action?.trim();
+    if action.is_empty() {
+        return None;
+    }
+    let lower = action.to_lowercase();
+    let result = result.unwrap_or("").trim().to_lowercase();
+    if lower.contains("not sent") {
+        return Some("DRAFT".to_owned());
+    }
+    if lower.contains("positive reply")
+        || lower.contains("warm contact")
+        || lower.contains("accepted")
+        || result.contains("accepted")
+        || result.contains("positive reply")
+    {
+        return Some("REPLIED".to_owned());
+    }
+    if lower.contains("already sent") {
+        return Some("SENT".to_owned());
+    }
+    Some(action.to_owned())
 }
 
 /// Reads one whole grid as an outreach log, or declines it.
@@ -400,7 +481,17 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             .iter()
             .any(|cell| canonical_column(cell) == Some(name))
     };
-    let book = if has(columns::RESPONSE_TYPE) || has(columns::NAME) {
+    let scout_shape = !has(columns::OUTREACH_ID)
+        && has(columns::NAME)
+        && has(columns::CONTACT)
+        && has(columns::SUBJECT)
+        && has(columns::SENT_AT)
+        && has(columns::STATUS)
+        && has(columns::RESULT)
+        && has(columns::NEXT_STEP);
+    let book = if scout_shape {
+        OutreachBook::Scout
+    } else if has(columns::RESPONSE_TYPE) || has(columns::NAME) {
         OutreachBook::Promo
     } else {
         OutreachBook::Master
@@ -444,16 +535,37 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
         }
         report.rows_read += 1;
         let row_number = offset + 2;
-        let Some(outreach_id) = clean(cell_at(&index, row, columns::OUTREACH_ID)) else {
-            report
-                .refusals
-                .push((row_number, OutreachLogRefusal::MissingId));
-            continue;
+        let outreach_id = match clean(cell_at(&index, row, columns::OUTREACH_ID)) {
+            Some(id) => id,
+            None if book == OutreachBook::Scout => {
+                let Some(id) = scout_outreach_id(&index, row) else {
+                    report
+                        .refusals
+                        .push((row_number, OutreachLogRefusal::MissingId));
+                    continue;
+                };
+                id
+            }
+            None => {
+                report
+                    .refusals
+                    .push((row_number, OutreachLogRefusal::MissingId));
+                continue;
+            }
         };
         // An address-shaped cell is the contact route; anything else
         // (a name, a note) asserts nothing about where the letter went.
         let contact = clean(cell_at(&index, row, columns::CONTACT))
             .filter(|cell| cell.contains('@') && cell.len() <= 320);
+        let result = capped(clean(cell_at(&index, row, columns::RESULT)), 200);
+        let status = if book == OutreachBook::Scout {
+            scout_status(
+                cell_at(&index, row, columns::STATUS),
+                result.as_deref(),
+            )
+        } else {
+            capped(clean(cell_at(&index, row, columns::STATUS)), 60)
+        };
         report.entries.push(OutreachLogEntry {
             outreach_id,
             entity_ref: capped(clean(cell_at(&index, row, columns::ENTITY_REF)), 96),
@@ -463,10 +575,10 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             purpose: capped(clean(cell_at(&index, row, columns::PURPOSE)), 500),
             subject: capped(clean(cell_at(&index, row, columns::SUBJECT)), 500),
             sent_at_raw: capped(clean(cell_at(&index, row, columns::SENT_AT)), 60),
-            status: capped(clean(cell_at(&index, row, columns::STATUS)), 60),
+            status,
             reply_at_raw: capped(clean(cell_at(&index, row, columns::REPLY_AT)), 60),
             reply_type: capped(clean(cell_at(&index, row, columns::REPLY_TYPE)), 60),
-            result: capped(clean(cell_at(&index, row, columns::RESULT)), 200),
+            result,
             response_type: capped(clean(cell_at(&index, row, columns::RESPONSE_TYPE)), 200),
             followup_due_raw: capped(clean(cell_at(&index, row, columns::FOLLOWUP_DUE)), 60),
             next_step: capped(clean(cell_at(&index, row, columns::NEXT_STEP)), 500),
@@ -474,7 +586,11 @@ pub fn extract_outreach_log(grid: &[Vec<String>]) -> Option<OutreachLogReport> {
             gmail_message_id: capped(clean(cell_at(&index, row, columns::GMAIL_MESSAGE_ID)), 120),
             gmail_thread_id: capped(clean(cell_at(&index, row, columns::GMAIL_THREAD_ID)), 120),
             segment: capped(clean(cell_at(&index, row, columns::SEGMENT)), 120),
-            source_system: capped(clean(cell_at(&index, row, columns::SOURCE_SYSTEM)), 60),
+            source_system: if book == OutreachBook::Scout {
+                Some("scout".to_owned())
+            } else {
+                capped(clean(cell_at(&index, row, columns::SOURCE_SYSTEM)), 60)
+            },
             source_id: capped(clean(cell_at(&index, row, columns::SOURCE_ID)), 160),
             created_at_raw: capped(clean(cell_at(&index, row, columns::CREATED_AT)), 60),
             send_guard_key: capped(clean(cell_at(&index, row, columns::SEND_GUARD_KEY)), 200),
@@ -580,6 +696,21 @@ mod tests {
         .collect()
     }
 
+    fn scout_header() -> Vec<String> {
+        [
+            "Recipient / Organization",
+            "Public Email",
+            "Subject / Thread",
+            "Date",
+            "Action",
+            "Result / Status",
+            "Reason / Next Step",
+        ]
+        .iter()
+        .map(|header| header.to_string())
+        .collect()
+    }
+
     fn row(header: &[String], values: &[(&str, &str)]) -> Vec<String> {
         header
             .iter()
@@ -602,6 +733,76 @@ mod tests {
     #[test]
     fn the_promo_header_is_claimed() {
         assert!(is_outreach_log(&promo_header()));
+    }
+
+    #[test]
+    fn the_scout_header_is_claimed() {
+        assert!(is_outreach_log(&scout_header()));
+    }
+
+    #[test]
+    fn scout_history_derives_stable_ids_and_send_semantics() {
+        let header = scout_header();
+        let sent = row(
+            &header,
+            &[
+                ("name", "Metal Forever"),
+                ("contact", "redakce@metalforever.info"),
+                ("subject", "VIRYA / concert news"),
+                ("sent_at", "2026-08-10"),
+                ("status", "Already sent before this run"),
+                ("result", "Czeka na odpowiedź"),
+                ("next_step", "Dedupe from Gmail."),
+            ],
+        );
+        let replied = row(
+            &header,
+            &[
+                ("name", "Metal Gentleman Promotion"),
+                ("contact", "promotion@metalgentleman.com"),
+                ("subject", "Virya - Metalgentleman submission"),
+                ("sent_at", "2026-08-08"),
+                ("status", "Existing positive reply"),
+                ("result", "Accepted / coverage promised"),
+                ("next_step", "Do not cold-pitch duplicate."),
+            ],
+        );
+        let draft = row(
+            &header,
+            &[
+                ("name", "Euroblast Festival"),
+                ("contact", "su@euroblast.net"),
+                ("subject", "Band application"),
+                ("sent_at", "2026-08-11"),
+                ("status", "NOT SENT"),
+                ("result", "Needs application package"),
+            ],
+        );
+        let report =
+            extract_outreach_log(&vec![header.clone(), sent.clone(), replied, draft])
+                .expect("SCOUT outreach log is claimed");
+        assert_eq!(report.book, OutreachBook::Scout);
+        assert_eq!(report.entries.len(), 3);
+        assert!(report.entries[0].was_sent());
+        assert!(!report.entries[0].was_replied());
+        assert!(report.entries[1].was_sent());
+        assert!(report.entries[1].was_replied());
+        assert!(!report.entries[2].was_sent());
+        assert_eq!(report.entries[0].source_system.as_deref(), Some("scout"));
+
+        let first_id = report.entries[0].outreach_id.clone();
+        let mut refreshed = sent;
+        let result_index = header
+            .iter()
+            .position(|cell| canonical_column(cell) == Some(columns::RESULT))
+            .expect("result column");
+        refreshed[result_index] = "Still waiting".to_owned();
+        let refreshed_report =
+            extract_outreach_log(&vec![header, refreshed]).expect("SCOUT row re-parses");
+        assert_eq!(
+            first_id, refreshed_report.entries[0].outreach_id,
+            "status/result edits must refresh the same interaction identity"
+        );
     }
 
     #[test]

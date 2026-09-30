@@ -20,10 +20,11 @@
 //!   as soon as it ran two creatives, and the "more than one act contributed"
 //!   rule the domain enforces would then pass on a single act's traffic.
 //!
-//! Churn is netted out by construction rather than by a subtraction: the
-//! population is `fans.status = 'active'`, so somebody who left is absent from
-//! the numerator *and* the denominator. A channel that brings a hundred people
-//! who all leave reads as a channel that brought nobody, which is what it is.
+//! Churn stays in the denominator. Source ROI asks what share of acquired people
+//! were still real fans after a full 30-day window, so an unsubscribe cannot
+//! erase the acquisition that preceded it. Only arrivals between 30 and 90 days
+//! old are eligible: newer people have not had time to prove retention, and
+//! older cohorts belong to a different operating period.
 
 use crowdrelay_domain::acquisition_channel::{
     AttributionEvidence, ChannelAttribution, ChannelIdentity, attribute_channel,
@@ -94,10 +95,11 @@ pub async fn pooled_channel_counts(
                 fan.workspace_id,
                 fan.normalized_email,
                 acquisition.anonymous_visitor_id,
-                acquisition.occurred_at AS signed_up_at,
-                fan_last_meaningful_action(
+                COALESCE(acquisition.occurred_at, fan.created_at) AS signed_up_at,
+                fan.status = 'active' AS stayed_active,
+                CASE WHEN fan.status = 'active' THEN fan_last_meaningful_action(
                     fan.workspace_id, fan.id, fan.normalized_email
-                ) AS last_action_at,
+                ) END AS last_action_at,
                 EXISTS (
                     SELECT 1 FROM fan_consents AS consent
                     WHERE consent.workspace_id = fan.workspace_id
@@ -125,7 +127,9 @@ pub async fn pooled_channel_counts(
                 LIMIT 1
             ) AS acquisition ON true
             WHERE fan.workspace_id = ANY($1)
-              AND fan.status = 'active'
+              AND fan.status IN ('active', 'unsubscribed', 'suppressed')
+              AND COALESCE(acquisition.occurred_at, fan.created_at)
+                    BETWEEN $2 - INTERVAL '90 days' AND $2 - INTERVAL '30 days'
         ), attributed AS (
             SELECT
                 arrival.workspace_id,
@@ -134,9 +138,14 @@ pub async fn pooled_channel_counts(
                 link.channel_source,
                 link.channel_community,
                 (
-                    arrival.consented
+                    arrival.stayed_active
+                    AND arrival.consented
                     AND arrival.last_action_at IS NOT NULL
-                    AND arrival.last_action_at BETWEEN $2 - INTERVAL '30 days' AND $2
+                    AND arrival.last_action_at >= GREATEST(
+                        $2 - INTERVAL '30 days',
+                        arrival.signed_up_at + INTERVAL '30 days'
+                    )
+                    AND arrival.last_action_at <= $2
                 ) AS stayed
             FROM arrival
             -- Each act's own clicks and its own links. Scoping these to the

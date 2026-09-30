@@ -61,10 +61,10 @@ pub struct ChannelSample {
     pub community: Option<String>,
     pub acts: u16,
     pub signups: u32,
-    /// Signups who are still active fans, still consented, and did something
-    /// meaningful in the last thirty days. Churn is netted out by construction:
-    /// a fan who left is not counted here and not counted in `signups` either,
-    /// because both come from the same active-fan population.
+    /// Mature signups who are still active fans, still consented, and did
+    /// something meaningful after their 30-day anniversary and inside the
+    /// current 30-day window. Churn stays in `signups` and therefore lowers
+    /// this count's rate; an unsubscribe cannot erase a failed acquisition.
     pub stayed_30d: u32,
 }
 
@@ -152,9 +152,9 @@ pub enum Finding {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PooledCounts {
     pub samples: Vec<ChannelSample>,
-    /// Acts in the organisation with at least one active fan. The denominator
-    /// for "how much of this roster is in the numbers" — an eight-act roster
-    /// where two acts have fans is not eight acts of evidence.
+    /// Acts in the organisation with at least one active fan. This is roster
+    /// coverage context, not the retention-rate denominator — channel rates use
+    /// matured acquisitions, including people who later left.
     pub acts_with_fans: u16,
     /// Arrivals that could not be traced to any channel. Carried into the read
     /// because a leaderboard over a tenth of the roster's arrivals is a
