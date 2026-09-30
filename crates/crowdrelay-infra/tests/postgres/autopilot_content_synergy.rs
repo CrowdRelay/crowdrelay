@@ -202,6 +202,118 @@ async fn content_link_clicks_counts_only_the_posts_own_traffic() {
     assert_eq!(observed, 3.0);
 }
 
+/// The same tracked link must answer the actual North-Star question too:
+/// which distinct fans signed up after clicking this action's content.
+/// Repeat clicks by one visitor and unrelated workspace traffic cannot
+/// inflate the result.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn content_fan_acquisition_counts_distinct_fans_from_the_posts_link() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
+    let action_id = insert_action(
+        &f,
+        "agent.content.request",
+        serde_json::json!({
+            "kind": "request_agent_content",
+            "task_id": uuid::Uuid::now_v7(),
+            "draft": {"platform": "instagram", "text": "new single out", "cta_url": "https://virya.test/join"},
+        }),
+    )
+    .await;
+    let link_id = insert_smart_link(&f, "fan-post-link").await;
+    let other_link = insert_smart_link(&f, "fan-other-link").await;
+    sqlx::query(
+        r#"INSERT INTO social_posts
+           (workspace_id, action_id, platform, content, smart_link, smart_link_id,
+            status, posted_at)
+           VALUES ($1,$2,'instagram','{}'::jsonb,'/l/fan-post-link',$3,'posted',$4)"#,
+    )
+    .bind(workspace)
+    .bind(action_id)
+    .bind(link_id)
+    .bind(f.now - time::Duration::days(13))
+    .execute(&f.pool)
+    .await
+    .expect("social post");
+
+    let anchor = f.now - time::Duration::days(14);
+    for (ordinal, link, visitor, click_day, signup_day) in [
+        (1, link_id, uuid::Uuid::now_v7(), 1, 2),
+        (2, link_id, uuid::Uuid::now_v7(), 3, 4),
+        (3, other_link, uuid::Uuid::now_v7(), 1, 2),
+    ] {
+        sqlx::query(
+            "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(workspace)
+        .bind(link)
+        .bind(visitor)
+        .bind(anchor + time::Duration::days(click_day))
+        .execute(&f.pool)
+        .await
+        .expect("click");
+
+        // One real fan per visitor. The unrelated-link fan must not count.
+        let fan_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO fans (workspace_id, normalized_email, status)
+             VALUES ($1,$2,'active') RETURNING id",
+        )
+        .bind(workspace)
+        .bind(format!("content-fan-{ordinal}@example.test"))
+        .fetch_one(&f.pool)
+        .await
+        .expect("fan");
+        sqlx::query(
+            "INSERT INTO fan_acquisition_events
+             (workspace_id, fan_id, source, request_id, anonymous_visitor_id, occurred_at)
+             VALUES ($1,$2,'public_signup',$3,$4,$5)",
+        )
+        .bind(workspace)
+        .bind(fan_id)
+        .bind(uuid::Uuid::now_v7())
+        .bind(visitor)
+        .bind(anchor + time::Duration::days(signup_day))
+        .execute(&f.pool)
+        .await
+        .expect("acquisition");
+
+        if link == link_id && ordinal == 1 {
+            // Repeat click by the same visitor; DISTINCT fan_id keeps this at
+            // one acquired fan rather than two.
+            sqlx::query(
+                "INSERT INTO click_events
+                 (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+                 VALUES ($1,$2,$3,$4)",
+            )
+            .bind(workspace)
+            .bind(link_id)
+            .bind(visitor)
+            .bind(anchor + time::Duration::days(1))
+            .execute(&f.pool)
+            .await
+            .expect("repeat click");
+        }
+    }
+
+    let observed = f
+        .repository
+        .observe_measurement(
+            f.workspace_id,
+            &measurement(
+                &f,
+                action_id,
+                AutopilotMeasurementKind::ContentFanAcquisition7d,
+                action_id,
+            ),
+            f.now,
+        )
+        .await
+        .expect("tracked content fan acquisition observes cleanly");
+    assert_eq!(observed, 2.0);
+}
+
 /// A community post carries no `smart_link_id` — only the `/l/{slug}` path
 /// in `smart_link`. The observation resolves the slug back to the
 /// `smart_links` row, so its clicks count the same as a joined id's.
@@ -392,9 +504,10 @@ async fn content_link_clicks_abandons_a_community_post_with_no_link() {
     }
 }
 
-/// The posted transition schedules exactly one `content_link_clicks_7d`
-/// measurement anchored at `posted_at` — and a replayed transition inserts
-/// nothing a second time. A post with no tracked link schedules nothing.
+/// The posted transition schedules the two content-funnel measurements
+/// (clicks and acquired fans), both anchored at `posted_at` — and a replayed
+/// transition inserts nothing a second time. A post with no tracked link
+/// schedules neither.
 #[tokio::test]
 #[ignore = "postgres"]
 async fn posted_transition_schedules_one_click_measurement() {
@@ -455,7 +568,10 @@ async fn posted_transition_schedules_one_click_measurement() {
                       max(EXTRACT(EPOCH FROM (due_at - action_finished_at)))::bigint
                FROM autopilot_measurements
                WHERE workspace_id = $1 AND action_id = $2
-                 AND measurement_kind = 'content_link_clicks_7d'"#,
+                 AND measurement_kind IN (
+                     'content_link_clicks_7d',
+                     'content_fan_acquisition_7d'
+                 )"#,
         )
         .bind(workspace)
         .bind(action_id)
@@ -463,7 +579,7 @@ async fn posted_transition_schedules_one_click_measurement() {
         .await
         .expect("count");
         if with_link {
-            assert_eq!(rows, 1, "one measurement even after a replay");
+            assert_eq!(rows, 2, "two funnel measurements even after a replay");
             assert_eq!(due_offset_secs, Some(7 * 24 * 60 * 60));
         } else {
             assert_eq!(rows, 0, "an untracked post schedules nothing");
