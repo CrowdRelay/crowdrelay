@@ -111,10 +111,108 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // ── communities: this workspace, the city's country, active ──
-    community(pool, act, "PL", "r/wroclaw", true).await?;
+    let yielding_community = community(pool, act, "PL", "r/wroclaw", true).await?;
+    // Alphabetically earlier but unmeasured: fan yield, not name, should put
+    // the proven community first in the helper shortlist.
+    community(pool, act, "PL", "r/aaa-unmeasured", true).await?;
     community(pool, act, "PL", "r/inactive", false).await?;
     community(pool, act, "DE", "r/berlin", true).await?;
     community(pool, other, "PL", "r/theirs", true).await?;
+
+    // One measurable community journey: post -> tracked click -> owned fan.
+    // The helper read should surface this as decision evidence for the booker.
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_decisions
+            (id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+         VALUES ($1,$2,$3,'growth_intelligence','target_community',$4,
+                 'seed.community',9000,'auto_execute','seed helper yield',
+                 '{}','{}','{}',now(),$5)",
+    )
+    .bind(decision_id)
+    .bind(act)
+    .bind(format!("helper-yield-{decision_id}"))
+    .bind(yielding_community)
+    .bind(Uuid::now_v7())
+    .execute(pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_actions
+            (id, workspace_id, decision_id, context, action_kind, subject_kind,
+             subject_id, idempotency_key, payload, status, finished_at)
+         VALUES ($1,$2,$3,'growth_intelligence','community.engage.request',
+                 'target_community',$4,$5,'{}','succeeded',now())",
+    )
+    .bind(action_id)
+    .bind(act)
+    .bind(decision_id)
+    .bind(yielding_community)
+    .bind(format!("helper-yield-action-{action_id}"))
+    .execute(pool)
+    .await?;
+    let link_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO smart_links (id, workspace_id, slug, destination_url)
+         VALUES ($1,$2,$3,'https://example.test/fan')",
+    )
+    .bind(link_id)
+    .bind(act)
+    .bind(format!("helper-yield-{}", link_id.simple()))
+    .execute(pool)
+    .await?;
+    let link_slug: String = sqlx::query_scalar(
+        "SELECT slug FROM smart_links WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(act)
+    .bind(link_id)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO community_posts
+            (workspace_id, action_id, target_id, subreddit, title, body,
+             smart_link, status, posted_at)
+         VALUES ($1,$2,$3,'r/wroclaw','show','body',$4,'posted',
+                 now() - interval '2 days')",
+    )
+    .bind(act)
+    .bind(action_id)
+    .bind(yielding_community)
+    .bind(format!("/l/{link_slug}"))
+    .execute(pool)
+    .await?;
+    let visitor_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO click_events
+            (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+         VALUES ($1,$2,$3,now() - interval '1 day')",
+    )
+    .bind(act)
+    .bind(link_id)
+    .bind(visitor_id)
+    .execute(pool)
+    .await?;
+    let fan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1,$2,'active') RETURNING id",
+    )
+    .bind(act)
+    .bind(format!("helper-yield-{}@example.test", visitor_id.simple()))
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events
+            (workspace_id, fan_id, source, request_id, anonymous_visitor_id, occurred_at)
+         VALUES ($1,$2,'public_signup',$3,$4,now() - interval '12 hours')",
+    )
+    .bind(act)
+    .bind(fan_id)
+    .bind(Uuid::now_v7())
+    .bind(visitor_id)
+    .execute(pool)
+    .await?;
 
     // ── cold_rooms: the registry's rooms minus this tenant's marks ──
     // "Klub A" (marked by the show above) and "Klub B" (marked by the other
@@ -316,9 +414,15 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     assert_eq!(
         communities,
-        [("r/wroclaw", "PL")],
-        "communities must be this tenant's, active, in the show's country: {communities:?}"
+        [("r/wroclaw", "PL"), ("r/aaa-unmeasured", "PL")],
+        "fan-producing community sorts ahead of an alphabetically earlier unmeasured one: {communities:?}"
     );
+    assert_eq!(helpers.communities[0].measured_posts_90d, 1);
+    assert_eq!(helpers.communities[0].tracked_clicks_90d, Some(1));
+    assert_eq!(helpers.communities[0].fans_acquired_90d, Some(1));
+    assert_eq!(helpers.communities[1].measured_posts_90d, 0);
+    assert_eq!(helpers.communities[1].tracked_clicks_90d, None);
+    assert_eq!(helpers.communities[1].fans_acquired_90d, None);
 
     // cold_rooms — the shared registry minus this tenant's marks. "Klub A"
     // is out because the tenant played it; "Klub B" is IN because the other
@@ -645,12 +749,13 @@ async fn community(
     country_code: &str,
     name: &str,
     active: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    sqlx::query(
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar(
         "INSERT INTO community_outreach_targets
             (workspace_id, symbol_slug, community_name, platform, url,
              country_code, active)
-         VALUES ($1, $2, $3, 'reddit', $4, $5, $6)",
+         VALUES ($1, $2, $3, 'reddit', $4, $5, $6)
+         RETURNING id",
     )
     .bind(workspace_id)
     .bind(name.replace('/', "-"))
@@ -658,9 +763,8 @@ async fn community(
     .bind(format!("https://www.reddit.com/{name}"))
     .bind(country_code)
     .bind(active)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn booking_target(
