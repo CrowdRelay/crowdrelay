@@ -13,6 +13,8 @@ use crowdrelay_infra::show_helpers::who_can_help;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+include!("show_helpers_yield.rs");
+
 /// 3.10 — two workspaces seed different candidates for the same city; each
 /// sees only its own plus the shared cold rooms; and an event with no city
 /// degrades rather than erroring.
@@ -174,7 +176,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
             (workspace_id, action_id, target_id, subreddit, title, body,
              smart_link, status, posted_at)
          VALUES ($1,$2,$3,'r/wroclaw','show','body',$4,'posted',
-                 now() - interval '2 days')",
+                 now() - interval '50 days')",
     )
     .bind(act)
     .bind(action_id)
@@ -186,7 +188,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO click_events
             (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
-         VALUES ($1,$2,$3,now() - interval '1 day')",
+         VALUES ($1,$2,$3,now() - interval '49 days')",
     )
     .bind(act)
     .bind(link_id)
@@ -194,8 +196,8 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .execute(pool)
     .await?;
     let fan_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO fans (workspace_id, normalized_email, status)
-         VALUES ($1,$2,'active') RETURNING id",
+        "INSERT INTO fans (workspace_id, normalized_email, status, created_at)
+         VALUES ($1,$2,'active',now() - interval '48 days') RETURNING id",
     )
     .bind(act)
     .bind(format!("helper-yield-{}@example.test", visitor_id.simple()))
@@ -204,7 +206,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO fan_acquisition_events
             (workspace_id, fan_id, source, request_id, anonymous_visitor_id, occurred_at)
-         VALUES ($1,$2,'public_signup',$3,$4,now() - interval '12 hours')",
+         VALUES ($1,$2,'public_signup',$3,$4,now() - interval '48 days')",
     )
     .bind(act)
     .bind(fan_id)
@@ -212,6 +214,21 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .bind(visitor_id)
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+            (workspace_id, fan_id, event_kind, channel, source_target, community,
+             action_id, attribution_method, occurred_at)
+         VALUES ($1,$2,'conversion','reddit',$3,'r/wroclaw',$4,
+                 'last_tracked_click',now() - interval '48 days')",
+    )
+    .bind(act)
+    .bind(fan_id)
+    .bind(&link_slug)
+    .bind(action_id)
+    .execute(pool)
+    .await?;
+    seed_earlier_community_touch(pool, act, decision_id, visitor_id).await?;
 
     // ── cold_rooms: the registry's rooms minus this tenant's marks ──
     // "Klub A" (marked by the show above) and "Klub B" (marked by the other
@@ -229,6 +246,14 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // second bill they shared before, a tenant act the crossbill edge already
     // covers, and an act of our own — the last two must not list.
     let friday_id = event_id(pool, act, "friday").await?;
+    sqlx::query("INSERT INTO fan_consents (workspace_id,fan_id,purpose,granted,policy_version,source) VALUES ($1,$2,'marketing',true,'v1','helper-proof')")
+        .bind(act).bind(fan_id).execute(pool).await?;
+    sqlx::query("INSERT INTO event_interests (workspace_id,event_id,fan_id) VALUES ($1,$2,$3)")
+        .bind(act)
+        .bind(friday_id)
+        .bind(fan_id)
+        .execute(pool)
+        .await?;
     let peer = peer_act(pool, "The Openers").await?;
     sqlx::query(
         "INSERT INTO event_acts (workspace_id, event_id, act_slug, act_name, position, peer_act_id)
@@ -413,15 +438,31 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     assert_eq!(
         communities,
-        [("r/wroclaw", "PL"), ("r/aaa-unmeasured", "PL")],
+        [
+            ("r/wroclaw", "PL"),
+            ("r/earlier-touch", "PL"),
+            ("r/aaa-unmeasured", "PL"),
+        ],
         "fan-producing community sorts ahead of an alphabetically earlier unmeasured one: {communities:?}"
     );
     assert_eq!(helpers.communities[0].measured_posts_90d, 1);
     assert_eq!(helpers.communities[0].tracked_clicks_90d, Some(1));
     assert_eq!(helpers.communities[0].fans_acquired_90d, Some(1));
-    assert_eq!(helpers.communities[1].measured_posts_90d, 0);
-    assert_eq!(helpers.communities[1].tracked_clicks_90d, None);
-    assert_eq!(helpers.communities[1].fans_acquired_90d, None);
+    assert_eq!(helpers.communities[0].fans_retained_30d, Some(1));
+    assert_eq!(helpers.communities[1].measured_posts_90d, 1);
+    assert_eq!(helpers.communities[1].tracked_clicks_90d, Some(1));
+    assert_eq!(helpers.communities[1].fans_acquired_90d, Some(0));
+    assert_eq!(helpers.communities[1].fans_retained_30d, Some(0));
+    assert_eq!(helpers.communities[2].measured_posts_90d, 0);
+    assert_eq!(helpers.communities[2].tracked_clicks_90d, None);
+    assert_eq!(helpers.communities[2].fans_acquired_90d, None);
+    assert_eq!(helpers.communities[2].fans_retained_30d, None);
+    sqlx::query("INSERT INTO fan_consents (workspace_id,fan_id,purpose,granted,policy_version,source) VALUES ($1,$2,'marketing',false,'v1','helper-proof')")
+        .bind(act).bind(fan_id).execute(pool).await?;
+    let withdrawn = who_can_help(pool, act, "friday")
+        .await?
+        .ok_or("withdrawn helper read missing")?;
+    assert_eq!(withdrawn.communities[0].fans_retained_30d, Some(0));
 
     // cold_rooms — the shared registry minus this tenant's marks. "Klub A"
     // is out because the tenant played it; "Klub B" is IN because the other

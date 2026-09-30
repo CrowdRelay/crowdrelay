@@ -40,6 +40,10 @@ async fn social_performance_keeps_mature_retention_separate_from_new_arrivals()
     assert!(mature.retention_window_complete);
     assert_eq!(mature.fans_observed_30d, 4);
     assert_eq!(
+        mature.fans_activated_within_30d, 1,
+        "a later return does not erase activation"
+    );
+    assert_eq!(
         mature.fans_retained_30d, 1,
         "withdrawn consent, silence and future activity do not count"
     );
@@ -113,6 +117,15 @@ async fn seed(
         if ordinal == 1 {
             sqlx::query("INSERT INTO fan_consents (workspace_id,fan_id,purpose,granted,policy_version,source,recorded_at) VALUES ($1,$2,'marketing',false,'v1','proof',$3)")
                 .bind(tenant).bind(fan).bind(now - Duration::hours(1)).execute(pool).await?;
+        }
+        if ordinal == 0 {
+            let early_event = Uuid::now_v7();
+            sqlx::query("INSERT INTO events (id,workspace_id,slug,title,starts_at,status,published_at) VALUES ($1,$2,$3,'Early show',$4,'published',$5)")
+                .bind(early_event).bind(tenant).bind(early_event.to_string())
+                .bind(now + Duration::days(20)).bind(now).execute(pool).await?;
+            sqlx::query("INSERT INTO event_interests (workspace_id,event_id,fan_id,created_at) VALUES ($1,$2,$3,$4)")
+                .bind(tenant).bind(early_event).bind(fan).bind(conversion + Duration::hours(1))
+                .execute(pool).await?;
         }
         if ordinal != 2 {
             let activity = if ordinal == 3 {

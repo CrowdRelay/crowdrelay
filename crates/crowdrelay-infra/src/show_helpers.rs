@@ -133,9 +133,9 @@ pub struct CommunityCandidate {
     /// First-hop tracked clicks from those posts. `None` when the tenant has
     /// not run a measurable post here in the window.
     pub tracked_clicks_90d: Option<u64>,
-    /// Distinct owned fans who joined within seven days of those tracked
-    /// clicks. This is the North-Star evidence the booker can use without the
-    /// system taking the relationship decision away from them.
+    /// Distinct owned fans attributed to these posts by the conversion ledger,
+    /// within seven days of a tracked click. Earlier touches do not get a
+    /// second acquisition credit for the same fan.
     pub fans_acquired_90d: Option<u64>,
     /// Active, consented fans with a meaningful action after a full 30-day window.
     /// Immature acquisitions cannot contribute to this count.
@@ -682,13 +682,16 @@ pub async fn who_can_help(
             SELECT
                 COUNT(DISTINCT post.id)::bigint AS measured_posts,
                 COUNT(DISTINCT click.id)::bigint AS tracked_clicks,
-                COUNT(DISTINCT acquisition.fan_id)::bigint AS fans_acquired,
-                COUNT(DISTINCT acquisition.fan_id) FILTER (
+                COUNT(DISTINCT conversion.fan_id)::bigint AS fans_acquired,
+                COUNT(DISTINCT conversion.fan_id) FILTER (
                     WHERE fan.status = 'active'
                       AND consent.granted
-                      AND acquisition.occurred_at <= now() - INTERVAL '30 days'
-                      AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
-                          BETWEEN GREATEST(now() - INTERVAL '30 days', acquisition.occurred_at + INTERVAL '30 days') AND now()
+                      AND conversion.occurred_at <= now() - INTERVAL '30 days'
+                      AND fan_has_meaningful_action_between(
+                          fan.workspace_id, fan.id, fan.normalized_email,
+                          GREATEST(now() - INTERVAL '30 days', conversion.occurred_at + INTERVAL '30 days'),
+                          now()
+                      )
                 )::bigint AS fans_retained
             FROM community_posts AS post
             JOIN smart_links AS link
@@ -699,24 +702,29 @@ pub async fn who_can_help(
              AND click.smart_link_id = link.id
              AND click.occurred_at >= post.posted_at
              AND click.occurred_at >= now() - INTERVAL '90 days'
-            LEFT JOIN fan_acquisition_events AS acquisition
-              ON acquisition.workspace_id = click.workspace_id
-             AND acquisition.anonymous_visitor_id = click.anonymous_visitor_id
-             AND acquisition.occurred_at >= click.occurred_at
-             AND acquisition.occurred_at < click.occurred_at + INTERVAL '7 days'
-             AND acquisition.occurred_at <= now()
+             AND click.occurred_at <= now()
+            LEFT JOIN fan_provenance_events AS conversion
+              ON conversion.workspace_id = post.workspace_id
+             AND conversion.action_id = post.action_id
+             AND conversion.source_target = link.slug
+             AND conversion.event_kind = 'conversion'
+             AND conversion.attribution_method = 'last_tracked_click'
+             AND conversion.occurred_at >= click.occurred_at
+             AND conversion.occurred_at < click.occurred_at + INTERVAL '7 days'
+             AND conversion.occurred_at <= now()
             LEFT JOIN fans AS fan
-              ON fan.workspace_id = acquisition.workspace_id AND fan.id = acquisition.fan_id
+              ON fan.workspace_id = conversion.workspace_id AND fan.id = conversion.fan_id
             LEFT JOIN LATERAL (
                 SELECT latest.granted FROM fan_consents AS latest
                 WHERE latest.workspace_id = fan.workspace_id AND latest.fan_id = fan.id
-                  AND latest.purpose = 'marketing'
+                  AND latest.purpose = 'marketing' AND latest.recorded_at <= now()
                 ORDER BY latest.recorded_at DESC, latest.id DESC LIMIT 1
             ) AS consent ON true
             WHERE post.workspace_id = target.workspace_id
               AND post.target_id = target.id
               AND post.status = 'posted'
               AND post.posted_at >= now() - INTERVAL '90 days'
+              AND post.posted_at <= now()
         ) AS yield ON true
         WHERE target.workspace_id = $1
           AND target.country_code = $2
