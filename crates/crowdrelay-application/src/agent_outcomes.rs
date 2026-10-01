@@ -92,10 +92,10 @@ impl OutcomeKind {
             | Self::SignalPush
             | Self::OutreachTargets
             | Self::BeaconCandidates
-            | Self::ContactResearch
             | Self::OpportunityFindings
             | Self::StrategyProposals => "require_approval",
             Self::AudienceSegments
+            | Self::ContactResearch
             | Self::CampaignInsight
             | Self::ReleasePlanNote
             | Self::GenericInsight => "recommend_only",
@@ -488,7 +488,11 @@ pub fn provenance_admission(
     kind: OutcomeKind,
     provenance: Option<&OutcomeProvenance>,
 ) -> Result<(), ProvenanceRejection> {
-    if kind.disposition() != "require_approval" {
+    // ContactResearch is internal evidence, not an approval card, but it can
+    // later shape text sent to a real person. It therefore gets the same
+    // provenance bar as outward proposals without pretending a human must
+    // approve the act of learning.
+    if kind.disposition() != "require_approval" && kind != OutcomeKind::ContactResearch {
         return Ok(());
     }
     let Some(provenance) = provenance else {
