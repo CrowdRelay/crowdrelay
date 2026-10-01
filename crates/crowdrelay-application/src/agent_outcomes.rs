@@ -23,6 +23,9 @@ pub enum OutcomeKind {
     SignalPush,
     AudienceSegments,
     OutreachTargets,
+    /// Event-scoped public network research. Items are reviewed Beacon
+    /// candidates, never outreach instructions.
+    BeaconCandidates,
     CampaignInsight,
     ReleasePlanNote,
     GenericInsight,
@@ -45,6 +48,7 @@ impl OutcomeKind {
             Self::SignalPush => "signal_push",
             Self::AudienceSegments => "audience_segments",
             Self::OutreachTargets => "outreach_targets",
+            Self::BeaconCandidates => "beacon_candidates",
             Self::CampaignInsight => "campaign_insight",
             Self::ReleasePlanNote => "release_plan_note",
             Self::GenericInsight => "generic_insight",
@@ -60,6 +64,7 @@ impl OutcomeKind {
             Self::PressPitch | Self::SocialPost => "promotion_budget",
             Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
+            Self::BeaconCandidates => "beacon",
             Self::CampaignInsight
             | Self::ReleasePlanNote
             | Self::GenericInsight
@@ -82,6 +87,7 @@ impl OutcomeKind {
             | Self::SocialPost
             | Self::SignalPush
             | Self::OutreachTargets
+            | Self::BeaconCandidates
             | Self::OpportunityFindings
             | Self::StrategyProposals => "require_approval",
             Self::AudienceSegments
@@ -99,6 +105,7 @@ impl OutcomeKind {
             Self::SignalPush => "agent_signal_push_proposal",
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
+            Self::BeaconCandidates => "agent_beacon_candidate",
             Self::OpportunityFindings => "agent_opportunity_finding",
             Self::StrategyProposals => "agent_strategy_consult",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
@@ -388,6 +395,7 @@ pub fn validate(
         "signal_push" => OutcomeKind::SignalPush,
         "audience_segments" => OutcomeKind::AudienceSegments,
         "outreach_targets" => OutcomeKind::OutreachTargets,
+        "beacon_candidates" => OutcomeKind::BeaconCandidates,
         "campaign_insight" => OutcomeKind::CampaignInsight,
         "release_plan_note" => OutcomeKind::ReleasePlanNote,
         "generic_insight" => OutcomeKind::GenericInsight,
