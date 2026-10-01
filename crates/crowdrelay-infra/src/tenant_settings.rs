@@ -41,7 +41,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 22] = [
+pub const EDITABLE_KEYS: [&str; 23] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_LIVE_PAGE_PATH,

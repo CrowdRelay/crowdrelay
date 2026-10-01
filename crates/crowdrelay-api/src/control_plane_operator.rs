@@ -42,6 +42,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/ops/connections",
             get(crate::ops::list_connection_health),
         )
+        // The organic-acquisition funnel is the console's "did that action
+        // grow fans" read — the same handler the admin surface serves.
+        .route(
+            "/v1/control-plane/ops/organic-funnel",
+            get(crate::ops::organic_funnel),
+        )
         // ── Conversion analytics ─────────────────────────────────────
         // The fan-360 half of the North Star: where fans came from, what
         // they paid, and what a referral or an ad actually converted.
