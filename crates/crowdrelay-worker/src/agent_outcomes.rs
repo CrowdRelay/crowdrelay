@@ -1879,4 +1879,7 @@ struct AgentSmartLinkRequest<'a> {
 }
 
 #[cfg(test)]
+include!("agent_outcomes/contact_research_tests.rs");
+
+#[cfg(test)]
 mod tests;
