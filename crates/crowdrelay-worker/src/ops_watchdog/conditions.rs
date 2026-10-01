@@ -345,23 +345,25 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             // cannot learn.
             key: "learning.posterior_never_updated",
             severity: "critical",
-            summary: "The brain has never corrected its causal prior with an observation",
+            summary: "The brain has never learned from a measured fan outcome",
             active: snapshot.decisions_total >= DECISIONS_BEFORE_LEARNING_EXPECTED
                 && snapshot.causal_observations.unwrap_or(0) == 0,
             details: json!({
                 "decisions": snapshot.decisions_total,
                 "causal_observations": snapshot.causal_observations,
                 "checkpoint_present": snapshot.causal_observations.is_some(),
-                "remedy": "every prediction the brain makes is currently its prior. \
+                "remedy": "the fan-outcome posterior has no observations. \
                            Fan outcomes count only fans traced to an action's own \
                            tracked links (since #325); a dispatch whose posts carry \
                            no live tracked link is abandoned as no_tracked_link and \
                            teaches nothing, and rows measured before that change \
                            (outcome_basis = workspace_window) are not learned from. \
-                           Correction needs a tracked post to go live and a fan to \
-                           sign up through it — check publishing and tracked-link \
-                           coverage first. Until then, treat the brain's rankings \
-                           as assumptions.",
+                           A live tracked post and a mature measurement window can \
+                           teach even when zero fans sign up. Check publication \
+                           lineage, measurement status and outcome_basis, then \
+                           replay update counts and checkpoint persistence. \
+                           This counter covers fan outcomes, not separate platform \
+                           metric or treatment-effect learners.",
             }),
         },
         Condition {
