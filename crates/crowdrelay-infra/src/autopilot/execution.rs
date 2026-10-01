@@ -453,7 +453,7 @@ pub(super) async fn schedule_effect_measurement(
         // borrowed from another Beacon or another show.
         AutopilotActionPayload::RequestBeaconOutreach { beacon_id, .. } => {
             plans.push((
-                AutopilotMeasurementKind::BeaconOutreachReply14d,
+                AutopilotMeasurementKind::BeaconOutreachReplyQuality14d,
                 beacon_id.into_uuid(),
                 0.0,
                 now + time::Duration::days(14),
