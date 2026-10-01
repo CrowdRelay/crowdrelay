@@ -364,6 +364,9 @@ jobs:
             queued_team_assignment_email_uses_fast_lane_and_emits_bridge_event \
             an_anchor_is_one_room_whoever_claims_it \
             lifecycle_engagement_counts_only_qualified_referrals_made_by_recipient \
+            release_milestone_metrics_reach_the_evidence_row \
+            platform_lifts_keep_units_and_survive_checkpoint_without_relearning \
+            platform_lifts_require_fresh_complete_series_and_preserve_direction \
             channel_yield_waits_for_full_retention_window \
             metacognition_continuity_is_idempotent_and_previews_are_read_only \
             unreadable_and_contended_continuity_preserves_history \
@@ -474,4 +477,3 @@ jobs:
             fi
           done
           echo "OK"
-

@@ -294,15 +294,24 @@ pub(super) fn apply_evidence_to_model_with_contrast(
             && horizon_is_new(ev.resolved_at, None)
         {
             for (metric_key, observed) in &ev.observed_metrics {
-                let obs_var =
-                    2.0 * observed.abs().max(1.0) * evidence_quality.variance_multiplier();
+                if metric_key == "release_channel_lift" {
+                    continue; // Legacy sum lost its platform/metric identities.
+                }
+                // A release-series pre/post contrast has no action-matched
+                // control. A fan experiment's assignment cannot identify it.
+                let metric_quality = if metric_key.starts_with("release_channel_lift:") {
+                    crowdrelay_brain::evidence::EvidenceQuality::Observational
+                } else {
+                    evidence_quality
+                };
+                let obs_var = 2.0 * observed.abs().max(1.0) * metric_quality.variance_multiplier();
                 model.update_metric(
                     metric_key,
                     Some(template.as_str()),
                     target_key,
                     *observed,
                     obs_var,
-                    evidence_quality,
+                    metric_quality,
                 );
                 metric_updates += 1;
             }
@@ -646,6 +655,9 @@ pub(in crate::autopilot) fn apply_evidence_to_strategy_posterior(
         }
     }
 }
+
+#[cfg(test)]
+mod platform_metric_tests;
 
 pub(super) use super::strategy_checkpoint::{
     PosteriorReplay, apply_evidence_to_stored_strategy_posterior,

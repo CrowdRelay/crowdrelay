@@ -872,6 +872,11 @@ impl CausalModel {
         observation_variance: f64,
         quality: crate::evidence::EvidenceQuality,
     ) {
+        // Historical release aggregates mix platforms and units. Preserve
+        // their evidence/checkpoint data, but never extend that posterior.
+        if metric_key == "release_channel_lift" {
+            return;
+        }
         self.metric_posteriors
             .entry(metric_key.to_owned())
             .or_default()
@@ -895,6 +900,9 @@ impl CausalModel {
         template_id: &str,
         target_key: Option<&str>,
     ) -> Option<(f64, f64, u32)> {
+        if metric_key == "release_channel_lift" {
+            return None;
+        }
         self.metric_posteriors
             .get(metric_key)
             .map(|posterior| posterior.predict_stats(template_id, target_key))
@@ -1100,6 +1108,7 @@ impl CausalModel {
         let secondary = self
             .metric_posteriors
             .iter()
+            .filter(|(key, _)| key.as_str() != "release_channel_lift")
             .map(|(key, posterior)| {
                 (
                     key.clone(),
@@ -1135,5 +1144,7 @@ impl CausalModel {
     }
 }
 
+#[cfg(test)]
+mod platform_metric_tests;
 #[cfg(test)]
 mod tests;

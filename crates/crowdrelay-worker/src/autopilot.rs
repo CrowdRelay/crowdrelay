@@ -9,7 +9,7 @@ use crowdrelay_application::{
         AutopilotFirstPartyGrowthMetrics, AutopilotMeasurementKind, AutopilotMeasurementRepository,
         AutopilotPlayOutcomeRepository, AutopilotPolicyConfig, AutopilotReplyTriageRepository,
         AutopilotWaveOutcomeRepository, EvaluateAutopilot, ORG_ATTENTION_BUDGET_ERROR_KIND,
-        assess_measurement_effect, assess_play_claim, assess_wave_claim,
+        assess_play_claim, assess_wave_claim,
     },
 };
 use crowdrelay_domain::{
@@ -831,15 +831,20 @@ impl AutopilotWorker {
                         let assess_harm = harm.as_ref().ok_or(RepositoryError::Unexpected)?;
                         let observed = self
                             .repository
-                            .observe_measurement(self.workspace_id, &measurement, observed_at)
-                            .await?;
-                        let effect = assess_measurement_effect(&measurement, observed, assess_harm)
-                            .ok_or(RepositoryError::Unexpected)?;
-                        self.repository
-                            .complete_measurement(
+                            .observe_measurement_with_metrics(
                                 self.workspace_id,
                                 &measurement,
-                                observed,
+                                observed_at,
+                            )
+                            .await?;
+                        let effect = observed
+                            .assess_effect(&measurement, assess_harm)
+                            .ok_or(RepositoryError::Unexpected)?;
+                        self.repository
+                            .complete_measurement_with_metrics(
+                                self.workspace_id,
+                                &measurement,
+                                &observed,
                                 effect,
                                 harm.as_ref(),
                                 observed_at,

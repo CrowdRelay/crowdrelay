@@ -10,14 +10,16 @@
 
 use crate::common;
 use crowdrelay_application::autopilot::{
-    AutopilotMeasurementKind, AutopilotMeasurementRepository, ClaimedAutopilotMeasurement,
-    HarmObservation, assess_measurement_effect,
+    AutopilotMeasurementKind, AutopilotMeasurementObservation, AutopilotMeasurementRepository,
+    ClaimedAutopilotMeasurement, HarmObservation,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::ids::{AutopilotActionId, AutopilotMeasurementId};
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use std::time::Duration;
 use time::OffsetDateTime;
+
+mod platforms;
 
 struct Fixture {
     pool: sqlx::PgPool,
@@ -155,6 +157,19 @@ async fn queue_measurement(
 /// Observes and completes one measurement the way the worker loop does, so the
 /// tests exercise the real classification step rather than a hand-made effect.
 async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observed: f64) {
+    resolve_with_metrics(
+        f,
+        measurement,
+        AutopilotMeasurementObservation::scalar(observed),
+    )
+    .await;
+}
+
+async fn resolve_with_metrics(
+    f: &Fixture,
+    measurement: &ClaimedAutopilotMeasurement,
+    observed: AutopilotMeasurementObservation,
+) {
     sqlx::query(
         "UPDATE autopilot_measurements SET status='processing', started_at=now() \
          WHERE workspace_id=$1 AND id=$2",
@@ -164,13 +179,14 @@ async fn resolve(f: &Fixture, measurement: &ClaimedAutopilotMeasurement, observe
     .execute(&f.pool)
     .await
     .expect("processing");
-    let effect = assess_measurement_effect(measurement, observed, &HarmObservation::default())
+    let effect = observed
+        .assess_effect(measurement, &HarmObservation::default())
         .expect("a measurement the worker can classify");
     f.repository
-        .complete_measurement(
+        .complete_measurement_with_metrics(
             f.workspace_id,
             measurement,
-            observed,
+            &observed,
             effect,
             Some(&HarmObservation::default()),
             f.now,
@@ -987,12 +1003,12 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
         let claim = claim(kind);
         let observed = f
             .repository
-            .observe_measurement(f.workspace_id, &claim, f.now)
+            .observe_measurement_with_metrics(f.workspace_id, &claim, f.now)
             .await
             .expect("release observation");
         assert!(
-            (observed - expected).abs() < 1e-9,
-            "{} observed {observed}, expected {expected}",
+            (observed.value - expected).abs() < 1e-9,
+            "{} observed {observed:?}, expected {expected}",
             kind.as_str()
         );
         sqlx::query(
@@ -1011,7 +1027,7 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
         .execute(&f.pool)
         .await
         .expect("measurement row");
-        resolve(&f, &claim, observed).await;
+        resolve_with_metrics(&f, &claim, observed).await;
     }
 
     let metrics: serde_json::Value = sqlx::query_scalar(
@@ -1026,7 +1042,11 @@ async fn release_milestone_metrics_reach_the_evidence_row() {
     assert_eq!(metrics["release_acquisitions"].as_f64(), Some(2.0));
     assert_eq!(metrics["release_link_clicks"].as_f64(), Some(2.0));
     assert_eq!(metrics["release_fan_conversions"].as_f64(), Some(1.0));
-    assert_eq!(metrics["release_channel_lift"].as_f64(), Some(40.0));
+    assert_eq!(
+        metrics["release_channel_lift:youtube:views"].as_f64(),
+        Some(40.0)
+    );
+    assert!(metrics.get("release_channel_lift").is_none());
 }
 
 /// A release plan with no listenable URL never gets a campaign, so its

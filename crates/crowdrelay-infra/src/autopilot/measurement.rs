@@ -4,6 +4,8 @@ mod fan_windows;
 mod observation;
 mod readiness;
 
+use crowdrelay_application::autopilot::AutopilotMeasurementObservation;
+
 use super::*;
 use readiness::{
     dispatch_reached_an_audience, measured_evidence_quality, refresh_evidence_readiness,
@@ -148,6 +150,21 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         .await
     }
 
+    async fn observe_measurement_with_metrics(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement: &ClaimedAutopilotMeasurement,
+        now: OffsetDateTime,
+    ) -> Result<AutopilotMeasurementObservation, RepositoryError> {
+        self.bounded(observation::observe_with_metrics(
+            &self.pool,
+            workspace_id,
+            measurement,
+            now,
+        ))
+        .await
+    }
+
     async fn observe_action_harm(
         &self,
         workspace_id: WorkspaceId,
@@ -171,10 +188,31 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
         harm: Option<&HarmObservation>,
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError> {
+        self.complete_measurement_with_metrics(
+            workspace_id,
+            measurement,
+            &AutopilotMeasurementObservation::scalar(observed_value),
+            effect,
+            harm,
+            now,
+        )
+        .await
+    }
+
+    async fn complete_measurement_with_metrics(
+        &self,
+        workspace_id: WorkspaceId,
+        measurement: &ClaimedAutopilotMeasurement,
+        observation: &AutopilotMeasurementObservation,
+        effect: EffectResult,
+        harm: Option<&HarmObservation>,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
         self.bounded(async {
-            if !observed_value.is_finite() {
+            if !observation.is_valid_for(measurement.kind) {
                 return Err(RepositoryError::Unexpected);
             }
+            let observed_value = observation.value;
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
@@ -209,6 +247,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .bind(effect.delta_basis_points)
             .bind(json!({
                 "measurement_kind": measurement.kind.as_str(),
+                "series_lifts": observation.series_lifts,
+                "scalar_aggregate_is_mixed": observation.series_lifts.len() > 1,
             }))
             .bind(now)
             .execute(&mut *transaction)
@@ -506,7 +546,11 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             // The fan-growth kinds return `None` here on purpose: they write
             // typed columns that dedicated posteriors consume, and a value in
             // two places is a value learned twice.
-            if let Some(metric_key) = measurement.kind.learnable_metric_key() {
+            let metrics = measurement.kind.learnable_metric_key()
+                .map(|key| (key.to_owned(), observed_value))
+                .into_iter()
+                .chain(observation.series_lifts.iter().map(|series| (series.learning_key(), series.lift)));
+            for (metric_key, metric_value) in metrics {
                 let _ = sqlx::query(
                     r#"
                     UPDATE growth_evidence
@@ -525,7 +569,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .bind(workspace_id.into_uuid())
                 .bind(measurement.action_id.into_uuid())
                 .bind(metric_key)
-                .bind(observed_value)
+                .bind(metric_value)
                 .execute(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;

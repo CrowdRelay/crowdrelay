@@ -8,8 +8,12 @@
 //! a level and some report an effect, and the two must never be classified the
 //! same way.
 
+mod observation;
+mod repository;
+pub use observation::{AutopilotMeasurementObservation, AutopilotSeriesLift};
+pub use repository::AutopilotMeasurementRepository;
+
 use crate::RepositoryError;
-use async_trait::async_trait;
 use crowdrelay_domain::performance::{
     EffectAssessment, EffectDirection, EffectResult, assess_effect, assess_signed_effect,
 };
@@ -248,7 +252,8 @@ impl AutopilotMeasurementKind {
     /// posteriors consume (`observed_fans`, `observed_incremental_fans`,
     /// `durable_fans_30d`, `observed_signal_installs`). Duplicating them into
     /// the map would let one observation reach two learners and count twice.
-    /// Everything else returns a key: the value a measurement produces is
+    /// Release-channel lift writes dimensioned series keys instead.
+    /// Other kinds return a key: the value a measurement produces is
     /// evidence, and evidence that only reaches the outcomes table is stored,
     /// not learned.
     ///
@@ -274,7 +279,9 @@ impl AutopilotMeasurementKind {
             Self::ReleaseBoundAcquisition14d => Some("release_acquisitions"),
             Self::ReleaseLinkClicks14d => Some("release_link_clicks"),
             Self::ReleaseFanConversion14d => Some("release_fan_conversions"),
-            Self::ReleaseChannelLift14d => Some("release_channel_lift"),
+            // Its series have different units; dimensioned observations own
+            // their keys. The historical sum cannot teach a common posterior.
+            Self::ReleaseChannelLift14d => None,
             Self::CampaignTicketConversion14d => Some("campaign_ticket_conversions"),
             Self::CampaignUnsubscribe7d => Some("campaign_unsubscribe_rate"),
             Self::ContentLinkClicks7d => Some("content_link_clicks"),
@@ -697,66 +704,6 @@ impl ClaimedAutopilotMeasurement {
     pub fn counterfactual_value(&self) -> f64 {
         self.baseline_value * self.kind.counterfactual_window_days()
     }
-}
-
-#[async_trait]
-pub trait AutopilotMeasurementRepository: Send + Sync {
-    async fn claim_due_measurements(
-        &self,
-        workspace_id: WorkspaceId,
-        limit: u32,
-        now: OffsetDateTime,
-    ) -> Result<Vec<ClaimedAutopilotMeasurement>, RepositoryError>;
-
-    async fn observe_measurement(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement: &ClaimedAutopilotMeasurement,
-        now: OffsetDateTime,
-    ) -> Result<f64, RepositoryError>;
-
-    /// Counts the harm events attributable to the measurement's action in
-    /// its window — the cost side of the ledger the value observation alone
-    /// does not see. Best called before `observe_measurement`: harm exists
-    /// whether or not the primary metric is observable, and a cancelled
-    /// event's measurement abandons while its harm is still real.
-    async fn observe_action_harm(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement: &ClaimedAutopilotMeasurement,
-        now: OffsetDateTime,
-    ) -> Result<HarmObservation, RepositoryError>;
-
-    async fn complete_measurement(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement: &ClaimedAutopilotMeasurement,
-        observed_value: f64,
-        effect: EffectResult,
-        harm: Option<&HarmObservation>,
-        now: OffsetDateTime,
-    ) -> Result<(), RepositoryError>;
-
-    /// Fails a measurement, retryable or terminal. `harm` rides along so a
-    /// terminal failure merges its `harm:*` keys in the same transaction
-    /// that resolves readiness — the evidence row closes with the harm it
-    /// observed already on it, and no replay delta can slip between the
-    /// two writes. On a retryable miss the row stays `pending` and the
-    /// merge is skipped: the retried completion owns it.
-    ///
-    /// `None` means the observation itself failed — no `harm:*` keys are
-    /// written at all. A failed look is not a clean reading: writing zeros
-    /// would teach the posterior "no harm" from a measurement that never
-    /// looked, and overwrite whatever a sibling attempt already landed.
-    async fn fail_measurement(
-        &self,
-        workspace_id: WorkspaceId,
-        measurement: &ClaimedAutopilotMeasurement,
-        error_kind: &'static str,
-        retryable: bool,
-        harm: Option<&HarmObservation>,
-        now: OffsetDateTime,
-    ) -> Result<(), RepositoryError>;
 }
 
 #[must_use]
