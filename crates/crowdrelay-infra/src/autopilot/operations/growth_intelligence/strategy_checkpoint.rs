@@ -106,7 +106,7 @@ async fn refresh(
     let (rows, cursor, read_cursor, mut after) = match replay {
         PosteriorReplay::Delta => {
             delta = super::super::evidence::load_growth_evidence_on(
-                &mut *guard,
+                &mut guard,
                 workspace_id,
                 own_cursor,
             )

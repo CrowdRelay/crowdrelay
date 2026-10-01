@@ -1,3 +1,9 @@
+// Test-only: compiled solely under `cfg(test)`. The inner attribute says so
+// in this file as well as at the `#[path]` site in `payments.rs`, because
+// `api-sql-ratchet.py` reads files one at a time and would otherwise count
+// this fixture's INSERTs as HTTP-layer writes.
+#![cfg(test)]
+
 use super::*;
 
 #[tokio::test]

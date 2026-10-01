@@ -29,10 +29,26 @@ pub(super) enum EligibilityTarget {
 /// Event types outside the gated set are always eligible; a gated type whose
 /// payload carries no parseable fan ID is never eligible.
 pub(super) fn eligibility_target(event_type: &str, payload: &Value) -> EligibilityTarget {
-    if matches!(event_type, "fan.confirmation_requested" | "fan.session_requested") {
-        let field = if event_type == "fan.confirmation_requested" { "confirmation_token" } else { "session_recovery_token" };
-        return match (payload.get("fan_id").and_then(Value::as_str).and_then(|id| Uuid::parse_str(id).ok()), payload.get(field).and_then(Value::as_str)) {
-            (Some(fan_id), Some(token)) => EligibilityTarget::Authentication { fan_id, token_hash: Sha256::digest(token.as_bytes()).into() },
+    if matches!(
+        event_type,
+        "fan.confirmation_requested" | "fan.session_requested"
+    ) {
+        let field = if event_type == "fan.confirmation_requested" {
+            "confirmation_token"
+        } else {
+            "session_recovery_token"
+        };
+        return match (
+            payload
+                .get("fan_id")
+                .and_then(Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok()),
+            payload.get(field).and_then(Value::as_str),
+        ) {
+            (Some(fan_id), Some(token)) => EligibilityTarget::Authentication {
+                fan_id,
+                token_hash: Sha256::digest(token.as_bytes()).into(),
+            },
             _ => EligibilityTarget::MissingRecipient,
         };
     }

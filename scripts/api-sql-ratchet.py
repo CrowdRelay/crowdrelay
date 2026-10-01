@@ -32,6 +32,15 @@ API_SRC = ROOT / "crates/crowdrelay-api/src"
 WRITE = re.compile(r"\b(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM)\b", re.IGNORECASE)
 
 
+# A module file whose own first attribute is `#![cfg(test)]` is compiled only
+# under test, enforced by the compiler, so none of it is HTTP-layer code. That
+# is how a `#[cfg(test)] #[path = "x_tests.rs"] mod x_tests;` file is seen
+# here: the outer attribute lives in the parent file, which this script reads
+# separately. Matched only before any item, so the attribute cannot hide a
+# file's production code by appearing halfway down it.
+INNER_TEST_CFG = re.compile(r"\A(?:\s*(?://[^\n]*)?\n)*\s*#!\[cfg\(test\)\]")
+
+
 def production_body(source: str) -> str:
     """Strip `#[cfg(test)]` modules, keeping everything around them.
 
@@ -39,6 +48,8 @@ def production_body(source: str) -> str:
     module escape the ratchet entirely, so each attribute's module is removed by
     matching its braces.
     """
+    if INNER_TEST_CFG.match(source):
+        return ""
     out = source
     while True:
         marker = out.find("#[cfg(test)]")

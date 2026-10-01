@@ -288,7 +288,9 @@ impl OutboxWorker {
             .zip(&targets)
             .filter_map(|(claim, target)| match *target {
                 EligibilityTarget::Fan { fan_id, .. } => Some((claim.workspace_id, fan_id)),
-                EligibilityTarget::NotGated | EligibilityTarget::MissingRecipient | EligibilityTarget::Authentication { .. } => None,
+                EligibilityTarget::NotGated
+                | EligibilityTarget::MissingRecipient
+                | EligibilityTarget::Authentication { .. } => None,
             })
             .collect();
 
@@ -302,11 +304,25 @@ impl OutboxWorker {
             .await
         };
 
-        let auth_recipients: Vec<_> = claims.iter().zip(&targets).filter_map(|(claim,target)| {
-            if let EligibilityTarget::Authentication { fan_id, token_hash } = *target { Some((claim.workspace_id,fan_id,token_hash)) } else { None }
-        }).collect();
-        let authentication = if auth_recipients.is_empty() { Ok(std::collections::HashSet::new()) } else {
-            self.database_call("check_authentication_delivery_eligibility", self.store.eligible_authentication_tokens(&auth_recipients)).await
+        let auth_recipients: Vec<_> = claims
+            .iter()
+            .zip(&targets)
+            .filter_map(|(claim, target)| {
+                if let EligibilityTarget::Authentication { fan_id, token_hash } = *target {
+                    Some((claim.workspace_id, fan_id, token_hash))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let authentication = if auth_recipients.is_empty() {
+            Ok(std::collections::HashSet::new())
+        } else {
+            self.database_call(
+                "check_authentication_delivery_eligibility",
+                self.store.eligible_authentication_tokens(&auth_recipients),
+            )
+            .await
         };
 
         let unavailable_kind = consent.as_ref().err().map(|error| {
@@ -324,7 +340,11 @@ impl OutboxWorker {
                 EligibilityTarget::NotGated => EligibilityDecision::Eligible,
                 EligibilityTarget::MissingRecipient => EligibilityDecision::Ineligible,
                 EligibilityTarget::Authentication { fan_id, token_hash } => match &authentication {
-                    Ok(eligible) if eligible.contains(&(claim.workspace_id,fan_id,token_hash)) => EligibilityDecision::Eligible,
+                    Ok(eligible)
+                        if eligible.contains(&(claim.workspace_id, fan_id, token_hash)) =>
+                    {
+                        EligibilityDecision::Eligible
+                    }
                     Ok(_) => EligibilityDecision::Ineligible,
                     Err(_) => EligibilityDecision::Unavailable("eligibility_database"),
                 },
