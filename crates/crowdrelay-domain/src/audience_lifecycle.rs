@@ -292,8 +292,10 @@ pub fn evaluate_fan_lifecycle(
     // an "asked" flag — so it asks once, at the edges twice, then stops.
     if !snapshot.has_signal_install
         && snapshot.last_marketing_touch_at.is_some()
-        && now - snapshot.created_at >= Duration::days(i64::from(policy.signal_install_ask_after_days))
-        && now - snapshot.created_at < Duration::days(i64::from(policy.signal_install_ask_until_days))
+        && now - snapshot.created_at
+            >= Duration::days(i64::from(policy.signal_install_ask_after_days))
+        && now - snapshot.created_at
+            < Duration::days(i64::from(policy.signal_install_ask_until_days))
     {
         return FanLifecycleDecision::RequestMessage {
             template: LifecycleTemplate::SignalInstallAsk,

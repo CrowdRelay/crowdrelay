@@ -87,10 +87,12 @@ The payload also carries `brand.wordmark`, resolved by CrowdRelay from the
 workspace's own brand identity, and the fan's locale. Render the tenant's name
 from `brand.wordmark`; never compile a band name into the executor. When a
 referral URL is present, send `fan.referral_url` verbatim — hostname and route
-construction belong to CrowdRelay.
+construction belong to CrowdRelay. The same holds for `fan.install_url` on the
+install ask: it is a tracked redirect the ledger counts, so send it verbatim or
+the ask teaches nothing.
 The executor renders the named template and sends it.
 
-Seven keys exist. An executor that handles some by name and lets the rest fall
+Eight keys exist. An executor that handles some by name and lets the rest fall
 through to a default is the failure this list exists to prevent: three of these
 were being rendered as the Synesthesia follow-up, including the one that thanks
 somebody for a referral that converted — the payoff of the only compounding
@@ -105,6 +107,7 @@ loop the product has.
 | `crowdrelay.fan.returning_thanks.v1` | Bought enough shows to count as a returning fan. |
 | `crowdrelay.fan.referral_thanks.v1` | A referral they made converted. |
 | `crowdrelay.fan.referral_invite.v1` | Has referred nobody; asks them to. Carries `fan.referral_code` **and the complete tenant-native `fan.referral_url`**. Send `fan.referral_url` verbatim; never construct a hostname or referral path in the executor. |
+| `crowdrelay.fan.signal_install_ask.v1` | Confirmed fan with no Signal install (app or identified web session); asks them to open it. Carries **the complete tracked `fan.install_url`** — the tenant's `/l/` redirect to the Signal page. Send it verbatim; a link the executor rebuilds bypasses the click ledger, and a missing `fan.install_url` is a send-stopper, not a detail to work around. Every send of this template waits for a person's approval in CrowdRelay before it reaches the executor. |
 
 **Fail on a key you do not know.** A default branch sends the wrong message,
 which is worse than sending none: it is indistinguishable from working, and the

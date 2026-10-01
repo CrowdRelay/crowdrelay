@@ -179,6 +179,12 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(push::fan_preferences).post(push::update_fan_preferences),
         )
         .route("/v1/me/push/endpoints", post(push::register_endpoint))
+        // The identified half of the install funnel for surfaces that hold
+        // no push transport — web Signal links itself here.
+        .route(
+            "/v1/me/signal/installations",
+            post(signal_installations::link_installation),
+        )
         .route(
             "/v1/me/push/endpoints/disable",
             post(push::disable_endpoint),
