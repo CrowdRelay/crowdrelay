@@ -81,9 +81,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use super::{
-    evidence_ledger::EvidenceLedger,
-    model::*,
-    policy_config::*,
+    evidence_ledger::EvidenceLedger, model::*, policy_config::*,
     ports::{AutopilotDecisionRepository, LoadedCausalModel},
 };
 mod beacons;
@@ -191,8 +189,7 @@ where
         };
         let mut report = AutopilotCycleReport::default();
 
-        let loaded_causal_model =
-            self.load_cycle_causal_model(&policies, &mut report).await?;
+        let loaded_causal_model = self.load_cycle_causal_model(&policies, &mut report).await?;
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
             // Registered before the arm runs so a context that produced
