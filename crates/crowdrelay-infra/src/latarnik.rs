@@ -349,7 +349,7 @@ pub async fn relationship_research_queue(
     workspace_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<Vec<crowdrelay_application::autopilot::RelationshipResearchSnapshot>, sqlx::Error> {
-    const MAX_RESEARCH_PER_CYCLE: usize = 8;
+    const MAX_RESEARCH_PER_CYCLE: usize = 3;
     let review = dual_role_review(pool, workspace_id, now, true).await?;
     let mut queue = Vec::new();
 
