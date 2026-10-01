@@ -57,6 +57,23 @@ class BeaconLearnedSelectionContract(unittest.TestCase):
         self.assertIn("already-eligible Beacon outreach", beacon)
         self.assertIn("may\n// reorder due asks; it must never make an ineligible Beacon eligible", beacon)
 
+    def test_calendar_urgency_precedes_learned_fan_value(self) -> None:
+        beacon = read(BEACON)
+
+        sort = beacon.split("candidates.sort_by", 1)[1].split("});", 1)[0]
+        self.assertIn("left.event_starts_at", sort)
+        self.assertIn(".cmp(&right.event_starts_at)", sort)
+        self.assertIn("right.rank_value.total_cmp(&left.rank_value)", sort)
+        self.assertLess(
+            sort.index("left.event_starts_at"),
+            sort.index("right.rank_value.total_cmp(&left.rank_value)"),
+        )
+        self.assertIn("event_starts_at", beacon)
+        self.assertIn(
+            "later_show_never_jumps_urgent_relationship_work_for_higher_y30",
+            beacon,
+        )
+
     def test_primary_fan_value_not_reply_or_click_proxy_drives_ordering(self) -> None:
         beacon = read(BEACON)
 
@@ -74,6 +91,7 @@ class BeaconLearnedSelectionContract(unittest.TestCase):
             "north_star_ranking",
             "template_id",
             "target_key",
+            "event_starts_at",
             "rank_value_y30_fans",
             "expected_incremental_y30",
             "p_meaningful_effect",
