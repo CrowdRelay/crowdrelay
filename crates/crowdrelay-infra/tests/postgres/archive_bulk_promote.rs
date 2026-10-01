@@ -328,9 +328,25 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
     .execute(&pool)
     .await?;
 
+    // A personal mailbox and an inbound reply, but the sheet names the
+    // organisation: a zine editor answering booking mail, not a fan.
+    let named_org =
+        seed_drive_contact(&pool, workspace, "zine@gmail.com", None, None, false, true).await;
+    sqlx::query(
+        "UPDATE drive_contacts SET organization = 'Metal Zine' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace)
+    .bind(named_org)
+    .execute(&pool)
+    .await?;
+
     let counts = gdrive.segment_counts(workspace).await?;
     assert_eq!(counts.likely_fan, 2, "personal + inbound-corporate");
-    assert_eq!(counts.likely_org, 1, "corporate without inbound");
+    assert_eq!(
+        counts.likely_org, 2,
+        "corporate without inbound + a named organisation on gmail"
+    );
     assert_eq!(counts.beacon, 1);
     assert_eq!(counts.inactive, 1);
     assert_eq!(counts.gone, 1);
@@ -344,8 +360,12 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
     let orgs = gdrive
         .list_contacts(workspace, Some(ContactSegment::LikelyOrg), 500)
         .await?;
-    assert_eq!(orgs.len(), 1);
-    assert_eq!(orgs[0].row.normalized_email, "c@klubx.pl");
+    let mut org_emails: Vec<&str> = orgs
+        .iter()
+        .map(|org| org.row.normalized_email.as_str())
+        .collect();
+    org_emails.sort_unstable();
+    assert_eq!(org_emails, vec!["c@klubx.pl", "zine@gmail.com"]);
 
     cleanup(&pool, &[workspace]).await;
     Ok(())
