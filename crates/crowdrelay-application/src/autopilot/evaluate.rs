@@ -223,22 +223,13 @@ where
                         }
                     }
 
-                    // Relationship intelligence is internal work, not a send.
-                    // The Brain spends research only on warm contacts that are
-                    // otherwise eligible for a future value-led touch. The
-                    // returned fact is separately grounding-checked and no
-                    // outward authority is inherited from this dispatch.
-                    let research = self
-                        .repository
-                        .load_relationship_research_snapshots(self.workspace_id, now)
-                        .await?;
-                    for snapshot in research {
-                        if let Some(candidate) =
-                            relationship_research_candidate(snapshot, &policy, now)?
-                        {
-                            self.persist(&candidate, &mut limits, &mut report).await?;
-                        }
-                    }
+                    self.evaluate_relationship_research(
+                        &policy,
+                        now,
+                        &mut limits,
+                        &mut report,
+                    )
+                    .await?;
                 }
                 AutopilotContext::CampaignLifecycle => {
                     let snapshots = self
