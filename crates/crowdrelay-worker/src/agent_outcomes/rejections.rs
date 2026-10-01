@@ -82,6 +82,9 @@ pub enum OutcomeRejection {
     /// bad event identity, unsupported kind, or a URL/contact the source data
     /// never contained.
     UngroundedBeaconCandidate { reason: String },
+    /// Relationship research did not match the Brain-pinned Beacon, cited a
+    /// source URL the task never saw, or failed the PersonalHook domain rules.
+    UngroundedContactResearch { reason: String },
     /// The source owner excluded this destination from the promotion.
     PlatformExcluded { platform: String },
 }
@@ -143,6 +146,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::UngroundedBeaconCandidate { reason } => write!(
                 f,
                 "UNGROUNDED_BEACON_CANDIDATE: {reason}"
+            ),
+            Self::UngroundedContactResearch { reason } => write!(
+                f,
+                "UNGROUNDED_CONTACT_RESEARCH: {reason}"
             ),
         }
     }
