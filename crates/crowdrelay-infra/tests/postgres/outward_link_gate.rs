@@ -371,7 +371,6 @@ async fn only_live_workspace_redirects_may_leave_in_a_letter()
     let (pool, url) = common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
     let workspace_id = workspace(&pool).await?;
     let other_workspace = workspace(&pool).await?;
-    let city_id = city(&pool, &format!("linkgate-{}", Uuid::now_v7().simple())).await?;
     advertise(&pool, workspace_id).await?;
     sqlx::query(
         "INSERT INTO tenant_settings (workspace_id, key, value)
@@ -397,6 +396,10 @@ async fn only_live_workspace_redirects_may_leave_in_a_letter()
         "site/extra",
         "",
     ] {
+        // Each refusal leaves the ask inflight, and the inflight-subject index
+        // admits one queued booking outreach per city — so each slug's letter
+        // needs its own subject.
+        let city_id = city(&pool, &format!("linkgate-{}", Uuid::now_v7().simple())).await?;
         let target_id = target(&pool, workspace_id, city_id).await?;
         let action_id = outreach_action(
             &pool,

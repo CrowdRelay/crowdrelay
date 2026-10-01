@@ -149,7 +149,10 @@ async fn retry_backoff_is_bounded_and_terminal_failures_stay_terminal()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, url, workspace_id, action_id) = fixture().await?;
     let repo = repository(&pool, &url);
-    let mut now = OffsetDateTime::now_utc();
+    // Postgres stores timestamptz at microsecond precision, so a nanosecond
+    // clock reading never round-trips equal against a stored available_at —
+    // and the rounded second has to sit after the fixture's own now().
+    let mut now = OffsetDateTime::now_utc().replace_nanosecond(0)? + time::Duration::seconds(1);
     for (index, delay) in [5_i64, 10, 20, 40, 0].into_iter().enumerate() {
         let action = repo
             .claim_due_actions(workspace_id, 1, now)
