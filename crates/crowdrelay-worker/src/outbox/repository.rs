@@ -1,6 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
+mod authentication;
+
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
@@ -15,6 +18,8 @@ pub(super) enum EligibilityTarget {
     NotGated,
     /// The payload named a fan whose current state decides eligibility.
     Fan { fan_id: Uuid, require_consent: bool },
+    /// Authentication mail requires a live, unconsumed token, not marketing eligibility.
+    Authentication { fan_id: Uuid, token_hash: [u8; 32] },
     /// The event type gates on a fan the payload did not name usably.
     MissingRecipient,
 }
@@ -24,7 +29,15 @@ pub(super) enum EligibilityTarget {
 /// Event types outside the gated set are always eligible; a gated type whose
 /// payload carries no parseable fan ID is never eligible.
 pub(super) fn eligibility_target(event_type: &str, payload: &Value) -> EligibilityTarget {
+    if matches!(event_type, "fan.confirmation_requested" | "fan.session_requested") {
+        let field = if event_type == "fan.confirmation_requested" { "confirmation_token" } else { "session_recovery_token" };
+        return match (payload.get("fan_id").and_then(Value::as_str).and_then(|id| Uuid::parse_str(id).ok()), payload.get(field).and_then(Value::as_str)) {
+            (Some(fan_id), Some(token)) => EligibilityTarget::Authentication { fan_id, token_hash: Sha256::digest(token.as_bytes()).into() },
+            _ => EligibilityTarget::MissingRecipient,
+        };
+    }
     let (raw_fan_id, require_consent) = match event_type {
+        "fan.created" | "fan.confirmed" => (payload.get("fan_id").and_then(Value::as_str), true),
         "event.reminder_due" => (payload.get("fan_id").and_then(Value::as_str), false),
         "event.announcement_due" => (
             payload
@@ -748,7 +761,7 @@ mod eligibility_tests {
     fn ungated_event_types_need_no_recipient_lookup() {
         assert_eq!(
             eligibility_target("fan.created", &serde_json::json!({"fan_id": "not-a-uuid"})),
-            EligibilityTarget::NotGated
+            EligibilityTarget::MissingRecipient
         );
     }
 

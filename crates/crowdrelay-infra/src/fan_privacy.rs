@@ -49,6 +49,7 @@ impl PostgresFanPrivacyRepository {
         let mut tx = self.pool.begin().await.map_err(Self::unexpected)?;
         let fan_id = Self::lock_current_fan(&mut tx, workspace_id, session_token).await?;
         let tombstone_email = format!("deleted-{fan_id}@account.invalid");
+        Self::erase_contact_intents(&mut tx, workspace_id, fan_id).await?;
 
         // AREA persists the fan e-mail separately. Preserve collectible history,
         // but remove the account relationship and direct address.
@@ -187,6 +188,7 @@ impl PostgresFanPrivacyRepository {
         // goes too — otherwise the erased person could never re-register
         // under their own address and staff views would keep serving PII.
         for statement in [
+            "DELETE FROM fan_ad_attribution WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM fan_identifiers WHERE workspace_id = $1 AND fan_id = $2",
             "UPDATE signal_installations SET fan_id = NULL WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM fan_push_endpoints WHERE workspace_id = $1 AND fan_id = $2",
@@ -313,6 +315,32 @@ impl PostgresFanPrivacyRepository {
 
         tx.commit().await.map_err(Self::unexpected)?;
         Ok(SynesthesiaLeaderboardUnpublishReceipt { fan_id, changed })
+    }
+
+    async fn erase_contact_intents(
+        tx: &mut Transaction<'_, Postgres>, workspace_id: Uuid, fan_id: Uuid,
+    ) -> Result<(), FanPrivacyError> {
+        let event_ids = sqlx::query_scalar::<_, Uuid>(r#"
+            UPDATE outbox_events AS event
+            SET payload = jsonb_build_object('fan_id', $2::uuid::text, 'identity_erased', true),
+                status = CASE WHEN event.status IN ('pending','processing') THEN 'dead' ELSE event.status END,
+                dead_at = CASE WHEN event.status IN ('pending','processing') THEN now() ELSE event.dead_at END,
+                locked_at = NULL, lock_owner = NULL, lease_expires_at = NULL,
+                last_error_kind = 'account_erased'
+            WHERE event.workspace_id = $1 AND event.event_type NOT LIKE 'ticket.%'
+              AND (event.payload->>'fan_id' = $2::text OR event.payload#>>'{fan,id}' = $2::text
+                   OR event.payload->>'email' = (SELECT normalized_email FROM fans WHERE workspace_id=$1 AND id=$2))
+            RETURNING event.id
+        "#).bind(workspace_id).bind(fan_id).fetch_all(&mut **tx).await.map_err(Self::unexpected)?;
+        sqlx::query(r#"
+            UPDATE webhook_deliveries
+            SET status = CASE WHEN status IN ('pending','processing') THEN 'cancelled' ELSE status END,
+                cancelled_at = CASE WHEN status IN ('pending','processing') THEN now() ELSE cancelled_at END,
+                locked_at = NULL, lock_owner = NULL, lease_expires_at = NULL,
+                response_excerpt = NULL, last_error_kind = 'account_erased'
+            WHERE workspace_id=$1 AND outbox_event_id = ANY($2)
+        "#).bind(workspace_id).bind(&event_ids).execute(&mut **tx).await.map_err(Self::unexpected)?;
+        Ok(())
     }
 
     async fn lock_current_fan(
