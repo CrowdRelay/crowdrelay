@@ -151,6 +151,38 @@ async fn run(pool: &sqlx::PgPool) -> Result<()> {
         },
         attempt_number: 1,
     };
+    // A real processing claim reaches the agent-service guard; a fabricated
+    // action with no ledger row is now refused before any execution.
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_decisions
+             (id, workspace_id, decision_key, context, subject_kind, subject_id,
+              decision_kind, confidence_basis_points, disposition, reason,
+              input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+         VALUES ($1,$2,$3,'content_supply','test_subject',$1,'request_agent_run',
+                 10000,'auto_execute','no-agent-service test','{}','{}','{}',$4,$1)",
+    )
+    .bind(decision_id)
+    .bind(id)
+    .bind(format!("no-agent-service-{decision_id}"))
+    .bind(now)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_actions
+             (id, workspace_id, decision_id, context, action_kind, subject_kind,
+              subject_id, idempotency_key, payload, status, attempt_count, started_at)
+         VALUES ($1,$2,$3,'content_supply','agent.run.request','test_subject',$3,
+                 $4,$5,'processing',1,$6)",
+    )
+    .bind(action.id.into_uuid())
+    .bind(id)
+    .bind(decision_id)
+    .bind(format!("no-agent-service-{}", action.id))
+    .bind(serde_json::to_value(&action.payload)?)
+    .bind(now)
+    .execute(pool)
+    .await?;
     match repository.execute_action(workspace_id, &action, now).await {
         Err(RepositoryError::ConflictBecause(reason)) => ensure!(
             reason == AutopilotMeasurementKind::NO_AGENT_SERVICE,

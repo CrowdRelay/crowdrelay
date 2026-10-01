@@ -15,6 +15,7 @@ impl PostgresAutopilotRepository {
     ) -> Result<(), RepositoryError> {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            action_recovery::lock_current_attempt(&mut transaction, workspace_id, action).await?;
             match &action.payload {
                 AutopilotActionPayload::ChangeTicketPrice {
                     ticket_type_id,

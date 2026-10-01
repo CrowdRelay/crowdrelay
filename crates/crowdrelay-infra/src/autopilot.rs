@@ -1,5 +1,6 @@
 //! PostgreSQL adapter for the deterministic CrowdRelay Autopilot.
 
+mod action_recovery;
 mod actions;
 mod actions_execution;
 mod capture_plans;

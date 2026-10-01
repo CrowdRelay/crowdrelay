@@ -424,6 +424,13 @@ impl PostgresAutopilotRepository {
             let rows = if runnable.is_empty() {
                 Vec::new()
             } else {
+                action_recovery::close_interrupted_attempts(
+                    &mut transaction,
+                    workspace_id,
+                    &runnable,
+                    now,
+                )
+                .await?;
                 sqlx::query_as::<_, ClaimedActionRow>(
                     r#"
                     WITH claimed AS (
@@ -603,6 +610,7 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         action_id: AutopilotActionId,
+        attempt_number: u32,
         error_kind: &'static str,
         retryable: bool,
         now: OffsetDateTime,
@@ -617,7 +625,9 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                         ELSE 'failed'
                     END,
                     available_at = CASE
-                        WHEN $5 AND attempt_count < 5 THEN $3 + INTERVAL '5 minutes'
+                        WHEN $5 AND attempt_count < 5 THEN $3 + INTERVAL '1 minute' *
+                            CASE attempt_count WHEN 1 THEN 5 WHEN 2 THEN 10
+                                 WHEN 3 THEN 20 ELSE 40 END
                         ELSE available_at
                     END,
                     started_at = CASE
@@ -630,6 +640,7 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
                     END,
                     last_error_kind = $4
                 WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
+                  AND attempt_count = $6
                 RETURNING attempt_count
                 "#,
             )
@@ -638,6 +649,7 @@ impl AutopilotActionRepository for PostgresAutopilotRepository {
             .bind(now)
             .bind(error_kind)
             .bind(retryable)
+            .bind(i32::try_from(attempt_number).map_err(|_| RepositoryError::Unexpected)?)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
