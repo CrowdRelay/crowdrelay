@@ -29,8 +29,18 @@ import re
 import unittest
 from pathlib import Path
 
+try:
+    from rust_source_tree import read_rust_module
+except ImportError:  # pragma: no cover - runner always has scripts on sys.path
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from rust_source_tree import read_rust_module
+
 ROOT = Path(__file__).resolve().parents[1]
-CANDIDATES = ROOT / "crates" / "crowdrelay-application" / "src" / "autopilot" / "evaluate" / "candidates_lifecycle.rs"
+# The evaluator splits its candidate builders across include! chunks; read the
+# module root so a later split does not silently zero the emitted-key set.
+EVALUATE_MODULE = "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 CONTRACT = ROOT / "n8n" / "crowdrelay-executor-contract.md"
 EXECUTION = ROOT / "crates" / "crowdrelay-infra" / "src" / "autopilot" / "actions_execution.rs"
 TENANT_SETTINGS = ROOT / "crates" / "crowdrelay-infra" / "src" / "tenant_settings.rs"
@@ -39,7 +49,7 @@ WORKFLOW = ROOT / "n8n" / "examples" / "autopilot-fan-lifecycle.example.json"
 
 def emitted_keys() -> set[str]:
     """The template keys the brain can put on the wire."""
-    text = CANDIDATES.read_text(encoding="utf-8")
+    text = read_rust_module(ROOT, EVALUATE_MODULE)
     return set(re.findall(r'LifecycleTemplate::\w+\s*=>\s*"([a-z0-9._]+)"', text))
 
 
@@ -60,7 +70,7 @@ class TheVocabularyIsPublished(unittest.TestCase):
         self.assertGreaterEqual(
             len(keys),
             6,
-            "found almost no lifecycle template keys in candidates_lifecycle.rs; the match "
+            "found almost no lifecycle template keys under evaluate.rs; the match "
             "arm shape changed and this contract is no longer reading it",
         )
 

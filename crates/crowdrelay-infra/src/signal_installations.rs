@@ -61,10 +61,10 @@ pub async fn record_installation(
 /// is identified — shipped. Nothing ever wrote `fan_id`, so the numerator was
 /// zero by construction and the funnel could only ever read 0%.
 ///
-/// Called from the push-endpoint registration, which is the moment an install
-/// stops being anonymous: `/v1/me/push/endpoints` requires a fan session and its
-/// request already carries the app's `installation_id`, so both halves are in
-/// hand there and nowhere earlier.
+/// Called from the push-endpoint registration and from
+/// `/v1/me/signal/installations` — both are the moment an install stops being
+/// anonymous: each requires a fan session and carries the app's own
+/// `installation_id`, so both halves are in hand there and nowhere earlier.
 ///
 /// Set only while `fan_id` is null. The column answers "did this install ever
 /// convert", and the first identification is what converted it — a device later
