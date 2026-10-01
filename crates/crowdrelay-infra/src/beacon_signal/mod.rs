@@ -8,6 +8,7 @@
 
 mod admin;
 pub mod import;
+pub mod partner_link;
 mod release_copy;
 mod signal;
 

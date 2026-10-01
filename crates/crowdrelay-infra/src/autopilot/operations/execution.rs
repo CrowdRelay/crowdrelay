@@ -1091,6 +1091,7 @@ pub(in crate::autopilot) async fn execute_agent_run(
     prompt: &str,
     _priority: u8,
     tier: crowdrelay_brain::AgentTier,
+    subject_event_id: Option<uuid::Uuid>,
     _now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     // `agent_service_tasks` belongs to the agent service — no migration here
@@ -1149,6 +1150,10 @@ pub(in crate::autopilot) async fn execute_agent_run(
         "source": "autopilot",
         "action_id": action_id.into_uuid(),
         "trace_id": trace_id,
+        // The task's pinned subject. Outcome validation binds candidates to
+        // THIS event rather than trusting a UUID mentioned in prompt prose —
+        // prompt text is a request, this is the record of what was asked.
+        "subject_event_id": subject_event_id,
     }))
     .execute(&mut **tx)
     .await

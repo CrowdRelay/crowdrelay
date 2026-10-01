@@ -1,7 +1,6 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 
 use uuid::Uuid;
-
 use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
@@ -81,7 +80,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use super::{
-    evidence_ledger::EvidenceLedger, model::*, policy_config::*, ports::AutopilotDecisionRepository,
+    evidence_ledger::EvidenceLedger, model::*, policy_config::*,
+    ports::{AutopilotDecisionRepository, LoadedCausalModel},
 };
 mod beacons;
 mod booking_supply;
@@ -187,6 +187,8 @@ where
             touched_this_cycle: &mut touched_this_cycle,
         };
         let mut report = AutopilotCycleReport::default();
+
+        let loaded_causal_model = self.load_cycle_causal_model(&policies, &mut report).await?;
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
             // Registered before the arm runs so a context that produced
@@ -679,15 +681,14 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
-                    let snapshots = self
-                        .repository
-                        .load_beacon_campaign_snapshots(self.workspace_id, now)
-                        .await?;
-                    for snapshot in snapshots {
-                        if let Some(candidate) = beacon_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut limits, &mut report).await?;
-                        }
-                    }
+                    self.evaluate_beacon_campaigns(
+                        &policy,
+                        loaded_causal_model.as_ref(),
+                        &mut limits,
+                        &mut report,
+                        now,
+                    )
+                    .await?;
                     let invites = self
                         .repository
                         .load_beacon_invite_snapshots(self.workspace_id, now)
@@ -853,9 +854,13 @@ where
                     }
                 }
                 AutopilotContext::GrowthIntelligence => {
+                    let Some(loaded_model) = loaded_causal_model.as_ref() else {
+                        return Err(RepositoryError::Unexpected.into());
+                    };
                     self.evaluate_growth_intelligence_context(
                         &policy,
                         &evidence,
+                        loaded_model,
                         now,
                         &mut limits,
                         &mut report,
@@ -918,6 +923,9 @@ where
             }
         }
 
+        self.checkpoint_cycle_causal_model(loaded_causal_model.as_ref(), &mut report)
+            .await;
+
         Ok(report)
     }
 
@@ -977,6 +985,8 @@ include!("evaluate/candidates_drop_surge.rs");
 include!("evaluate/candidates_reply_rescue.rs");
 include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");
+include!("evaluate/causal_cycle.rs");
+include!("evaluate/beacon_learning.rs");
 include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/tests_booking.rs");

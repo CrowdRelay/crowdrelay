@@ -28,19 +28,40 @@ pub async fn admin_beacon_network(
     };
     let pending_candidates = match sqlx::query_as::<_, DiscoveredBeaconView>(
         r#"
-        SELECT id,display_name,beacon_kind,contact_email,destination_url,source_url,
-               verified,accepts_outreach,do_not_contact,metadata
-        FROM beacons
-        WHERE workspace_id=$1
+        SELECT beacon.id,beacon.display_name,beacon.beacon_kind,beacon.contact_email,
+               beacon.destination_url,beacon.source_url,
+               beacon.verified,beacon.accepts_outreach,beacon.do_not_contact,beacon.metadata,
+               beacon.metadata->'event_network_scout'->>'why_fit' AS why_fit,
+               beacon.metadata->'event_network_scout'->'evidence'->>'snippet' AS evidence_snippet,
+               beacon.metadata->'network_review' AS network_review,
+               COALESCE(
+                   (SELECT jsonb_agg(jsonb_build_object(
+                            'event_id', m.event_id,
+                            'title', match_event.title,
+                            'starts_at', match_event.starts_at,
+                            'matched_at', m.matched_at,
+                            'matched_count', m.matched_count)
+                            ORDER BY m.matched_at DESC)
+                    FROM beacon_event_matches m
+                    JOIN events match_event
+                      ON match_event.workspace_id=m.workspace_id
+                     AND match_event.id=m.event_id
+                    WHERE m.workspace_id=beacon.workspace_id
+                      AND m.beacon_id=beacon.id),
+                   '[]'::jsonb
+               ) AS matched_events,
+               'review_candidate'::text AS next_step
+        FROM beacons beacon
+        WHERE beacon.workspace_id=$1
           -- Every research ingress belongs on the same review queue: the
           -- legacy discovery executor, researched-contact import, and Brain's
           -- event-network scout all arrive unverified/non-contactable. Finding
           -- a public page is evidence of identity/relevance, never permission
           -- to contact it.
-          AND (metadata ? 'network_discovery_run_id' OR metadata ? 'imported_from' OR metadata ? 'event_network_scout')
-          AND active AND NOT do_not_contact
-          AND (NOT verified OR NOT accepts_outreach)
-        ORDER BY created_at DESC,id DESC
+          AND (beacon.metadata ? 'network_discovery_run_id' OR beacon.metadata ? 'imported_from' OR beacon.metadata ? 'event_network_scout')
+          AND beacon.active AND NOT beacon.do_not_contact
+          AND (NOT beacon.verified OR NOT beacon.accepts_outreach)
+        ORDER BY beacon.created_at DESC,beacon.id DESC
         LIMIT 300
         "#,
     )
@@ -58,7 +79,27 @@ pub async fn admin_beacon_network(
         r#"
         SELECT beacon.id,beacon.display_name,beacon.beacon_kind,beacon.contact_email,
                beacon.destination_url,beacon.source_url,beacon.verified,beacon.accepts_outreach,
-               beacon.do_not_contact,beacon.metadata
+               beacon.do_not_contact,beacon.metadata,
+               beacon.metadata->'event_network_scout'->>'why_fit' AS why_fit,
+               beacon.metadata->'event_network_scout'->'evidence'->>'snippet' AS evidence_snippet,
+               beacon.metadata->'network_review' AS network_review,
+               COALESCE(
+                   (SELECT jsonb_agg(jsonb_build_object(
+                            'event_id', m.event_id,
+                            'title', match_event.title,
+                            'starts_at', match_event.starts_at,
+                            'matched_at', m.matched_at,
+                            'matched_count', m.matched_count)
+                            ORDER BY m.matched_at DESC)
+                    FROM beacon_event_matches m
+                    JOIN events match_event
+                      ON match_event.workspace_id=m.workspace_id
+                     AND match_event.id=m.event_id
+                    WHERE m.workspace_id=beacon.workspace_id
+                      AND m.beacon_id=beacon.id),
+                   '[]'::jsonb
+               ) AS matched_events,
+               'send_invite'::text AS next_step
         FROM beacons beacon
         LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
@@ -271,6 +312,7 @@ pub async fn admin_beacon_network_action(
         "import_researched" => import_researched(&state, &headers, idempotency_key).await,
         "import_submithub" => import_submithub(&state, &headers, payload, idempotency_key).await,
         "approve" => approve_candidate(&state, &headers, payload, idempotency_key).await,
+        "partner_link" => partner_link(&state, &headers, payload, idempotency_key).await,
         "queue_invites" => queue_invites(&state, &headers, payload, idempotency_key).await,
         _ => BeaconSignalError::BadRequest.response(request_id_value),
     }
@@ -604,6 +646,71 @@ async fn approve_candidate(
         StatusCode::OK,
         json!({"beaconId": beacon_id, "verified": true, "acceptsOutreach": true}),
     )
+}
+
+/// Mints the per-partner tracked link a scout-pilot partner is handed.
+///
+/// One (beacon, event) pair owns one `/l/` URL for the life of the pilot, so
+/// a replayed request returns the link the partner already has instead of
+/// splitting clicks across mints. Minting requires the beacon to have passed
+/// operator approval — a tracked link is a launched action, not a research
+/// artifact. The write lives in `crowdrelay-infra` like every other network
+/// action.
+async fn partner_link(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    payload: AdminNetworkActionRequest,
+    idempotency_key: String,
+) -> Response {
+    let request_id_value = request_id(headers);
+    let Some(beacon_id) = payload.beacon_id else {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    };
+    let base = state
+        .acquisition
+        .public_site_base_url()
+        .as_str()
+        .trim_end_matches('/')
+        .to_owned();
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::beacon_signal::partner_link::mint_partner_link(
+        state.ticketing.pool(),
+        workspace_id,
+        beacon_id,
+        payload.event_id,
+        payload.destination_url.as_deref(),
+        &format!("{base}/events"),
+        &idempotency_key,
+        request_id_value.as_deref(),
+    )
+    .await
+    {
+        Ok(Ok(minted)) => private_json(
+            StatusCode::OK,
+            json!({
+                "beaconId": minted.beacon_id,
+                "eventId": minted.event_id,
+                "slug": minted.slug,
+                "url": format!("{base}{}", minted.path),
+                "destinationUrl": minted.destination_url,
+                "alreadyExisted": minted.already_existed,
+            }),
+        ),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::BeaconNotFound
+            | crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::EventNotFound,
+        )) => BeaconSignalError::NotFound.response(request_id_value),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::BeaconNotApproved,
+        )) => BeaconSignalError::Conflict.response(request_id_value),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::DestinationRequired,
+        )) => BeaconSignalError::BadRequest.response(request_id_value),
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik partner link mint failed");
+            BeaconSignalError::Unavailable.response(request_id_value)
+        }
+    }
 }
 
 async fn preview_invites(

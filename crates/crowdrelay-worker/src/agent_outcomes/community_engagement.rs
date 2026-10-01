@@ -26,12 +26,16 @@ struct CommunityPostSourceRow {
 }
 
 impl AgentOutcomeWorker {
+    /// (template_id, prompt, metadata) of the agent task that produced this
+    /// outcome. Metadata carries the task's recorded evidence — what the
+    /// context builder actually handed the model — which grounding checks
+    /// validate against; prompt prose is a request, not evidence.
     async fn community_producing_task(
         &self,
         outcome: &ValidatedOutcome,
-    ) -> Option<(String, String)> {
+    ) -> Option<(String, String, Value)> {
         sqlx::query_as(
-            "SELECT template_id, prompt FROM agent_service_tasks WHERE workspace_id=$1 AND id=$2",
+            "SELECT template_id, prompt, metadata FROM agent_service_tasks WHERE workspace_id=$1 AND id=$2",
         )
         .bind(outcome.workspace_id)
         .bind(outcome.task_id)

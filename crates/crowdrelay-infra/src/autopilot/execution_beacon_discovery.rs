@@ -149,6 +149,7 @@ pub(super) async fn execute_beacon_discovery(
         &prompt,
         3,
         crowdrelay_brain::AgentTier::Premium,
+        Some(event_id.into_uuid()),
         now,
     )
     .await?;

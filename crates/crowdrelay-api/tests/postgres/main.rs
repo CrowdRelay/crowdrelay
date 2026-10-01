@@ -4,6 +4,7 @@
 // target with --ignored; every test below stays #[ignore]d.
 
 mod attestation_anchor;
+mod beacon_network_scout;
 mod campaign_throttle;
 mod common;
 mod concert_scan_split;

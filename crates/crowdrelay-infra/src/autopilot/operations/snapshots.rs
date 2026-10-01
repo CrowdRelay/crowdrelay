@@ -445,6 +445,7 @@ struct BeaconDiscoveryRow {
     event_starts_at: OffsetDateTime,
     known_local_beacons: i64,
     last_discovery_at: Option<OffsetDateTime>,
+    last_search_status: Option<String>,
     in_flight: bool,
 }
 
@@ -453,7 +454,35 @@ pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
     workspace_id: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<Vec<BeaconDiscoverySnapshot>, RepositoryError> {
-    let rows = sqlx::query_as::<_, BeaconDiscoveryRow>(
+    // `agent_service_tasks` is owned by the agents service — a database the
+    // service was never provisioned on has no such relation, and the query
+    // must still run there (the status column simply reads NULL). Relation
+    // resolution happens at prepare, so the tolerance has to sit in the
+    // query text, not a WHERE clause.
+    let search_status_source =
+        if sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap_or(false)
+        {
+            // The health of the last scout run for this event. A task that
+            // failed before writing search metadata still counts as failed:
+            // no answer was produced either way. The evaluator retries an
+            // incomplete search sooner instead of mistaking it for a real
+            // market answer.
+            "(SELECT COALESCE(task.metadata->'search'->>'status',
+                          CASE WHEN task.status='failed' THEN 'failed' END)
+          FROM agent_service_tasks task
+          WHERE task.workspace_id=event.workspace_id
+            AND task.template_id='event-network-scout'
+            AND task.metadata->>'subject_event_id' = event.id::text
+            AND task.status IN ('completed','failed')
+          ORDER BY task.created_at DESC
+          LIMIT 1)"
+        } else {
+            "NULL::text"
+        };
+    let rows = sqlx::query_as::<_, BeaconDiscoveryRow>(&format!(
         r#"
         SELECT event.id AS event_id, event.starts_at AS event_starts_at,
                (SELECT count(*)::bigint
@@ -471,6 +500,7 @@ pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
                   AND action.subject_id=event.id
                   AND action.action_kind='beacon.discovery.request'
                   AND action.status='succeeded') AS last_discovery_at,
+               {} AS last_search_status,
                EXISTS (
                    SELECT 1 FROM autopilot_actions action
                    WHERE action.workspace_id=event.workspace_id
@@ -488,7 +518,8 @@ pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
         ORDER BY event.starts_at, event.id
         LIMIT $3
         "#,
-    )
+        search_status_source
+    ))
     .bind(workspace_id.into_uuid())
     .bind(now)
     .bind(MAX_SNAPSHOTS_PER_CONTEXT)
@@ -504,6 +535,15 @@ pub(in crate::autopilot) async fn load_beacon_discovery_snapshots(
                 known_local_beacons: u16::try_from(row.known_local_beacons)
                     .map_err(|_| RepositoryError::Unexpected)?,
                 last_discovery_at: row.last_discovery_at,
+                last_search_status: match row.last_search_status.as_deref() {
+                    Some("ok") => Some(crowdrelay_domain::beacons::ScoutSearchStatus::Ok),
+                    Some("partial") => Some(crowdrelay_domain::beacons::ScoutSearchStatus::Partial),
+                    Some("failed") => Some(crowdrelay_domain::beacons::ScoutSearchStatus::Failed),
+                    // An unrecognized status is not evidence of health —
+                    // absence of a usable signal stays absent, and the
+                    // evaluator treats unknown as "no scout history".
+                    _ => None,
+                },
                 in_flight: row.in_flight,
             })
         })

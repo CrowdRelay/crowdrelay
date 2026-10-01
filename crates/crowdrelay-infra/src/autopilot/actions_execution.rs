@@ -1344,6 +1344,7 @@ impl PostgresAutopilotRepository {
                         prompt,
                         *priority,
                         *tier,
+                        None,
                         now,
                     )
                     .await?;
