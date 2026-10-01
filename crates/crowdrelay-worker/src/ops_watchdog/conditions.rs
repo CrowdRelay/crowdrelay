@@ -361,7 +361,7 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            A live tracked post and a mature measurement window can \
                            teach even when zero fans sign up. Check publication \
                            lineage, measurement status and outcome_basis, then \
-                           replay update counts and checkpoint persistence. \
+                           the replay counters and checkpoint persistence. \
                            This counter covers fan outcomes, not separate platform \
                            metric or treatment-effect learners.",
             }),
