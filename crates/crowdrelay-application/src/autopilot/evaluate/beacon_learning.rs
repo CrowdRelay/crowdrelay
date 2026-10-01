@@ -101,6 +101,64 @@ fn order_ranked_beacon_candidates(
     )
 }
 
+impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
+    async fn evaluate_beacon_campaigns(
+        &self,
+        policy: &AutopilotPolicy,
+        loaded_model: Option<&LoadedCausalModel>,
+        limits: &mut CycleLimits<'_>,
+        report: &mut AutopilotCycleReport,
+        now: OffsetDateTime,
+    ) -> Result<(), AutopilotError> {
+        let snapshots = self
+            .repository
+            .load_beacon_campaign_snapshots(self.workspace_id, now)
+            .await?;
+
+        let Some(loaded_model) = loaded_model else {
+            for snapshot in snapshots {
+                if let Some(candidate) = beacon_candidate(snapshot, policy, now)? {
+                    self.persist(&candidate, limits, report).await?;
+                }
+            }
+            return Ok(());
+        };
+
+        let mut ranked = Vec::with_capacity(snapshots.len());
+        for (original_order, snapshot) in snapshots.into_iter().enumerate() {
+            if let Some(candidate) = beacon_candidate(snapshot, policy, now)? {
+                let AutopilotActionPayload::RequestBeaconOutreach {
+                    beacon_id,
+                    template_key,
+                    ..
+                } = &candidate.action
+                else {
+                    return Err(RepositoryError::Unexpected.into());
+                };
+                ranked.push(rank_beacon_candidate(
+                    candidate,
+                    original_order,
+                    template_key,
+                    &format!("beacon:{beacon_id}"),
+                    &loaded_model.model,
+                ));
+            }
+        }
+
+        let (ordered, reordered) = order_ranked_beacon_candidates(ranked);
+        if reordered {
+            report.gi_dispatch_log.push(
+                "brain decision influenced by learning: Beacon due-ask order changed by North-Star value"
+                    .into(),
+            );
+        }
+        for candidate in ordered {
+            self.persist(&candidate, limits, report).await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod beacon_learning_tests {
     use super::*;
