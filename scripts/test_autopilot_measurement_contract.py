@@ -118,10 +118,13 @@ class AutopilotMeasurementContract(unittest.TestCase):
 
         # Proximal Beacon signals remain exact and per-action: one reply and
         # distinct people, never event-wide traffic borrowed by every target.
-        self.assertIn("BeaconOutreachReply14d", scheduling)
+        self.assertIn("BeaconOutreachReplyQuality14d", scheduling)
         self.assertIn("BeaconOutreachUniqueVisitors14d", scheduling)
         self.assertIn("COUNT(DISTINCT click.anonymous_visitor_id)", observation)
         self.assertIn("reply.action='record_autopilot_beacon_reply'", observation)
+        self.assertIn("WHEN 'interested' THEN 1.0", observation)
+        self.assertIn("WHEN 'declined' THEN -1.0", observation)
+        self.assertIn("WHEN 'do_not_contact' THEN -1.0", observation)
         self.assertIn("newer.action_kind='beacon.outreach.request'", observation)
         self.assertIn("JOIN autopilot_execution_reports AS receipt", observation)
         self.assertIn("receipt.status='succeeded'", observation)
