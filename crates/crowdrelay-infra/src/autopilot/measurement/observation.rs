@@ -15,6 +15,7 @@ pub(super) mod attributed_fans;
 mod campaigns;
 mod content_synergy;
 pub(super) mod harm;
+mod release_lift;
 
 use super::super::*;
 use super::dispatch_reached_an_audience;
@@ -26,6 +27,17 @@ pub(super) async fn observe(
     measurement: &ClaimedAutopilotMeasurement,
     now: OffsetDateTime,
 ) -> Result<f64, RepositoryError> {
+    observe_with_metrics(pool, workspace_id, measurement, now)
+        .await
+        .map(|observed| observed.value)
+}
+
+pub(super) async fn observe_with_metrics(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    measurement: &ClaimedAutopilotMeasurement,
+    now: OffsetDateTime,
+) -> Result<crowdrelay_application::autopilot::AutopilotMeasurementObservation, RepositoryError> {
     // A dispatch whose post is still a draft has no outcome to
     // observe. Measuring it anyway records the fans an unpublished
     // post did not attract as a real zero, and the brain reads that as
@@ -99,6 +111,9 @@ pub(super) async fn observe(
         return Err(RepositoryError::ConflictBecause(
             AutopilotMeasurementKind::NO_AGENT_SERVICE,
         ));
+    }
+    if measurement.kind == AutopilotMeasurementKind::ReleaseChannelLift14d {
+        return release_lift::observe(pool, workspace_id, measurement, now).await;
     }
     let observed = match measurement.kind {
             AutopilotMeasurementKind::TicketRevenue72h => sqlx::query_scalar::<_, f64>(
@@ -463,55 +478,8 @@ pub(super) async fn observe(
                 .await
                 .map_err(map_sqlx)?
             }
-            // The release's own series lifted over the fourteen days before
-            // the milestone ran: per series, the increase across the post
-            // window minus the increase across the pre window. Both windows
-            // are bounded — the pre start must sit inside the month before
-            // the anchor or the baseline is months-stale, and the post end
-            // must reach the last third of the window or a feed that stalled
-            // at anchor+1h reports a one-hour wobble as the fourteen-day
-            // lift. A series that cannot anchor both windows contributes
-            // nothing — a partial baseline is not a zero.
-            AutopilotMeasurementKind::ReleaseChannelLift14d => {
-                // No COALESCE here: when no series anchored both windows the
-                // SUM is NULL, and a fabricated 0.0 would read as "the release
-                // moved nothing" when the truth is "nothing was measurable".
-                sqlx::query_scalar::<_, Option<f64>>(
-                    r#"
-                    SELECT SUM(post_end - 2 * pre_end + pre_start)::double precision
-                    FROM (
-                        SELECT
-                            (SELECT p.value FROM growth_metric_points p
-                             WHERE p.series_id = s.id
-                               AND p.captured_at >= $3::timestamptz - INTERVAL '28 days'
-                               AND p.captured_at < $3::timestamptz - INTERVAL '14 days'
-                             ORDER BY p.captured_at DESC LIMIT 1) AS pre_start,
-                            (SELECT p.value FROM growth_metric_points p
-                             WHERE p.series_id = s.id AND p.captured_at < $3
-                             ORDER BY p.captured_at DESC LIMIT 1) AS pre_end,
-                            (SELECT p.value FROM growth_metric_points p
-                             WHERE p.series_id = s.id
-                               AND p.captured_at >= $3::timestamptz + INTERVAL '10 days'
-                               AND p.captured_at < $3::timestamptz + INTERVAL '14 days'
-                             ORDER BY p.captured_at DESC LIMIT 1) AS post_end
-                        FROM growth_metric_series AS s
-                        WHERE s.workspace_id=$1 AND s.subject_kind='release_plan'
-                          AND s.subject_id=$2 AND s.active
-                    ) AS lifts
-                    WHERE pre_start IS NOT NULL AND pre_end IS NOT NULL
-                      AND post_end IS NOT NULL
-                    "#,
-                )
-                .bind(workspace_id.into_uuid())
-                .bind(measurement.subject_id)
-                .bind(measurement.action_finished_at)
-                .fetch_one(pool)
-                .await
-                .map_err(map_sqlx)?
-                .ok_or(RepositoryError::ConflictBecause(
-                    AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA,
-                ))?
-            }
+            // Dimensioned release series are handled before this scalar match.
+            AutopilotMeasurementKind::ReleaseChannelLift14d => return Err(RepositoryError::Unexpected),
             AutopilotMeasurementKind::CampaignTicketConversion14d => {
                 campaigns::ticket_conversions(pool, workspace_id, measurement.subject_id)
                     .await?
@@ -866,7 +834,7 @@ pub(super) async fn observe(
             }
         };
     if observed.is_finite() {
-        Ok(observed)
+        Ok(crowdrelay_application::autopilot::AutopilotMeasurementObservation::scalar(observed))
     } else {
         Err(RepositoryError::Unexpected)
     }

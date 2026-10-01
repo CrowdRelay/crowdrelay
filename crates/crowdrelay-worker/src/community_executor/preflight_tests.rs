@@ -6,7 +6,30 @@ mod promotion_preflight_tests {
     #[ignore = "requires a disposable PostgreSQL database"]
     async fn community_preflight_checks_membership_rules_and_credentials_without_sending()
     -> Result<(), Box<dyn std::error::Error>> {
-        let pool = sqlx::PgPool::connect(&std::env::var("CROWDRELAY_TEST_DATABASE_URL")?).await?;
+        // A foreign-table shape is part of this proof, so give it a private
+        // namespace. Other native fixtures may own an older public shape.
+        let database_url = std::env::var("CROWDRELAY_TEST_DATABASE_URL")?;
+        let admin = sqlx::PgPool::connect(&database_url).await?;
+        let schema = format!("preflight_{}", Uuid::now_v7().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await?;
+        let search_path = format!("{schema},public");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(move |connection, _| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('search_path', $1, false)")
+                        .bind(search_path)
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await?;
+        let result = async {
+
         let ws = WorkspaceId::new();
         let place = Uuid::now_v7();
         let target = Uuid::now_v7();
@@ -98,6 +121,12 @@ mod promotion_preflight_tests {
             Some("community_readiness_missing"),
             "a queued Reddit post also respects a later fit refusal"
         );
-        Ok(())
+        Ok::<(), Box<dyn std::error::Error>>(())
+        }.await;
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await?;
+        result
     }
 }
