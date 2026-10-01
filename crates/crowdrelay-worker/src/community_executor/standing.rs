@@ -106,8 +106,12 @@ impl CommunityExecutorWorker {
         }
         if !autonomy_proven(&history, now) {
             return Ok(Some(
-                "held: unattended Reddit posting is not earned yet — publish and observe                  at least three posts manually first; a clean account is not evidence                  that the machine understands the room"
-                    .to_owned(),
+                concat!(
+                    "held: unattended Reddit posting is not earned yet — publish and observe ",
+                    "at least three posts manually first; a clean account is not evidence ",
+                    "that the machine understands the room"
+                )
+                .to_owned(),
             ));
         }
         if community_removed_us(&history, &normalized_subreddit(&action.subreddit), now) {

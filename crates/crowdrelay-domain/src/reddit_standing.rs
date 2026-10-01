@@ -180,8 +180,7 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
 /// observes for removals. Only then may automation take over.
 #[must_use]
 pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
-    history.iter().filter(|post| survived(post, now)).count()
-        >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
+    history.iter().filter(|post| survived(post, now)).count() >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
 }
 
 /// Whether a community's moderators (or its AutoModerator) removed one of our
