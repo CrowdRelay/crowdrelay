@@ -563,7 +563,7 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
             -- Only raise when current sales are below 70% of historical pace.
             WHERE comparison.historical_average > 0
               AND comparison.paid_tickets * 10_000 < comparison.historical_average * 7_000
-        )
+        ), debts AS (
         SELECT * FROM quiet_relationships
         UNION ALL
         SELECT * FROM skipped_levers
@@ -577,6 +577,8 @@ pub(in crate::autopilot) async fn load_growth_debt_observations(
         SELECT * FROM calendar_routing_conflicts
         UNION ALL
         SELECT * FROM ticket_sales_behind_pace
+        )
+        SELECT * FROM debts
         -- Structural debts report idle_hours = 0 forever; pure recency order
         -- would seat them behind every stale contact and they would never be
         -- read at all. Structural kinds first, then by idleness.

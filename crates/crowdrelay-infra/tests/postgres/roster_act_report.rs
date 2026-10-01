@@ -187,7 +187,9 @@ async fn the_quarters_record_lands_under_the_right_act() -> Result<(), Box<dyn s
 }
 
 async fn run_report(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let now = OffsetDateTime::now_utc();
+    // The report takes an explicit as-of time. Keep its ten-day show history
+    // inside the current quarter, including runs on the quarter's first day.
+    let now = OffsetDateTime::now_utc().replace_day(20)?;
     let org = organization(pool, "roster-label").await?;
     let act = workspace(pool, "the-act", Some(org)).await?;
     let labelmate = workspace(pool, "labelmate", Some(org)).await?;

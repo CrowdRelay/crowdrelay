@@ -617,12 +617,16 @@ async fn load_snapshot(
                 count(*) FILTER (
                     WHERE c.status='active'
                        OR (c.status='cooldown'
-                           AND (c.last_validated_at IS NULL
-                                OR c.last_validated_at < now() - interval '6 hours'))
+                           -- A legacy schema cannot prove that cooldown
+                           -- expired. Keep that credential unavailable.
+                           AND to_jsonb(c) ? 'last_validated_at'
+                           AND ((to_jsonb(c)->>'last_validated_at')::timestamptz IS NULL
+                                OR (to_jsonb(c)->>'last_validated_at')::timestamptz
+                                   < now() - interval '6 hours'))
                 )::bigint,
                 (SELECT c2.status FROM agent_service_credentials c2
                  WHERE c2.workspace_id=$1 AND c2.provider='reddit-browser'),
-                (SELECT left(c3.last_validation_error, 200) FROM agent_service_credentials c3
+                (SELECT left(to_jsonb(c3)->>'last_validation_error', 200) FROM agent_service_credentials c3
                  WHERE c3.workspace_id=$1 AND c3.provider='reddit-browser')
             FROM agent_service_credentials c
             WHERE c.workspace_id=$1 AND c.provider='reddit-browser'

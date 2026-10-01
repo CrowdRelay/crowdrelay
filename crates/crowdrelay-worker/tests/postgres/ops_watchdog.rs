@@ -133,6 +133,16 @@ async fn create_credentials_table(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await
     .context("create foreign credentials table")?;
+    // Other suite fixtures create an earlier shape of this foreign table.
+    // IF NOT EXISTS above does not upgrade their columns.
+    sqlx::query(
+        "ALTER TABLE agent_service_credentials
+         ADD COLUMN IF NOT EXISTS last_validated_at timestamptz,
+         ADD COLUMN IF NOT EXISTS last_validation_error text",
+    )
+    .execute(pool)
+    .await
+    .context("complete foreign credentials fixture")?;
     Ok(())
 }
 
@@ -153,25 +163,65 @@ async fn active_alerts(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Vec<S
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_missing_credentials_table_does_not_blind_the_watchdog() -> Result<()> {
-    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
-        .await
-        .expect("connect to the migrated suite database");
+    let isolated = common::isolated_database("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let db = &isolated.pool;
 
-    async {
-        let ws = workspace(&db).await?;
-        queued_draft(&db, ws).await?;
-        // No create_credentials_table call — the relation does not exist.
+    let result = async {
+        let ws = workspace(db).await?;
+        queued_draft(db, ws).await?;
+        let absent: bool =
+            sqlx::query_scalar("SELECT to_regclass('agent_service_credentials') IS NULL")
+                .fetch_one(db)
+                .await?;
+        assert!(
+            absent,
+            "this proof requires a genuinely absent foreign table"
+        );
         let transitions = watchdog(db.clone(), ws).run_once().await?;
-        let alerts = active_alerts(&db, ws).await?;
+        let alerts = active_alerts(db, ws).await?;
         assert!(
             alerts.contains(&"publishing.session_dead".to_owned()),
             "a queued draft with no credential service at all is a dead \
              session — got {alerts:?}"
         );
         assert!(transitions > 0, "the cycle ran and recorded the alert");
+        // An older foreign schema must not blind all unrelated conditions.
+        // Unknown cooldown age cannot be treated as permission to post.
+        sqlx::query(
+            "CREATE TABLE agent_service_credentials (
+             id uuid PRIMARY KEY DEFAULT gen_random_uuid(), workspace_id uuid NOT NULL,
+             provider text NOT NULL, status text NOT NULL)",
+        )
+        .execute(db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_service_credentials(workspace_id,provider,status)
+             VALUES($1,'reddit-browser','cooldown')",
+        )
+        .bind(ws.into_uuid())
+        .execute(db)
+        .await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        assert!(
+            active_alerts(db, ws)
+                .await?
+                .contains(&"publishing.session_dead".to_owned())
+        );
+        sqlx::query("UPDATE agent_service_credentials SET status='active' WHERE workspace_id=$1")
+            .bind(ws.into_uuid())
+            .execute(db)
+            .await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        assert!(
+            !active_alerts(db, ws)
+                .await?
+                .contains(&"publishing.session_dead".to_owned())
+        );
         Ok(())
     }
-    .await
+    .await;
+    isolated.drop().await?;
+    result
 }
 
 /// With the table present, an `invalid` credential beside queued drafts

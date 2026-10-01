@@ -9,26 +9,21 @@ async fn load_failed_relay_tasks(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<HashMap<Uuid, Vec<RelayLaneFailure>>, RepositoryError> {
-    if !sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
-        .fetch_one(&repo.pool)
-        .await
-        .map_err(map_sqlx)?
-    {
+    let Some(completion) = task_completion_projection(&repo.pool).await? else {
         return Ok(HashMap::new());
-    }
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, i64, OffsetDateTime)>(
-        r#"
+    };
+    let sql = r#"
         SELECT action.subject_id,
                split_part(action.idempotency_key, ':', 3)::uuid AS source_id,
                count(*)::bigint,
                max(COALESCE(task.completed_at, task.created_at))
         FROM autopilot_actions action
         JOIN LATERAL (
-            SELECT task.status, task.created_at, task.completed_at
-            FROM agent_service_tasks task
-            WHERE task.workspace_id = action.workspace_id
-              AND task.metadata->>'action_id' = action.id::text
-            ORDER BY task.created_at DESC, task.id DESC
+            SELECT t.status, t.created_at, __TASK_COMPLETED_AT__
+            FROM agent_service_tasks t
+            WHERE t.workspace_id = action.workspace_id
+              AND t.metadata->>'action_id' = action.id::text
+            ORDER BY t.created_at DESC, t.id DESC
             LIMIT 1
         ) task ON true
         WHERE action.workspace_id = $1
@@ -40,22 +35,20 @@ async fn load_failed_relay_tasks(
           AND split_part(action.idempotency_key, ':', 2) = 'relay'
           AND split_part(action.idempotency_key, ':', 4) = 'community'
         GROUP BY action.subject_id, source_id
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(&repo.pool)
-    .await
-    .map_err(map_sqlx)?;
+        "#
+    .replace("__TASK_COMPLETED_AT__", completion);
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, i64, OffsetDateTime)>(&sql)
+        .bind(workspace_id.into_uuid())
+        .fetch_all(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
     let mut failures: HashMap<Uuid, Vec<RelayLaneFailure>> = HashMap::new();
     for (target, source, count, last_failed_at) in rows {
-        failures
-            .entry(target)
-            .or_default()
-            .push(RelayLaneFailure {
-                source_id: ContentSourceId::from_uuid(source),
-                failures: u32::try_from(count).unwrap_or(u32::MAX),
-                last_failed_at,
-            });
+        failures.entry(target).or_default().push(RelayLaneFailure {
+            source_id: ContentSourceId::from_uuid(source),
+            failures: u32::try_from(count).unwrap_or(u32::MAX),
+            last_failed_at,
+        });
     }
     Ok(failures)
 }
@@ -181,8 +174,7 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                     .find(|existing| existing.source_id == failure.source_id)
                 {
                     existing.failures = existing.failures.saturating_add(failure.failures);
-                    existing.last_failed_at =
-                        existing.last_failed_at.max(failure.last_failed_at);
+                    existing.last_failed_at = existing.last_failed_at.max(failure.last_failed_at);
                 } else {
                     relay_failures.push(failure);
                 }

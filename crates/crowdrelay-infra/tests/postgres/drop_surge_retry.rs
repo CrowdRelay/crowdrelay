@@ -34,9 +34,48 @@ async fn drop_surge_task_failures_are_target_scoped_and_never_counted_twice()
         sqlx::query(
             "CREATE TABLE agent_service_tasks (
                 id UUID PRIMARY KEY, workspace_id UUID NOT NULL, status TEXT NOT NULL,
-                metadata JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                completed_at TIMESTAMPTZ)",
+                metadata JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
         ).execute(pool).await?;
+        // The foreign table can exist without completed_at. Both readers
+        // must retain genuine failure receipts and tenant/latest-task gates.
+        let legacy_created = time::OffsetDateTime::now_utc().replace_nanosecond(0)?
+            - time::Duration::minutes(40);
+        for workspace in [ws, WorkspaceId::new()] {
+            sqlx::query("INSERT INTO agent_service_tasks(id,workspace_id,status,metadata,created_at)
+                         VALUES($1,$2,'failed',$3,$4)")
+                .bind(Uuid::now_v7()).bind(workspace.into_uuid())
+                .bind(serde_json::json!({"action_id":dispatch})).bind(legacy_created)
+                .execute(pool).await?;
+        }
+        let legacy = repo.load_content_supply_snapshots(ws, time::OffsetDateTime::now_utc()).await?;
+        assert_eq!(legacy[0].drop_surge_failures.len(), 1);
+        assert_eq!(legacy[0].drop_surge_failures[0].failures, 1);
+        assert_eq!(legacy[0].drop_surge_failures[0].last_failed_at, legacy_created);
+        sqlx::query("UPDATE autopilot_actions SET idempotency_key=$2 WHERE id=$1")
+            .bind(dispatch).bind(format!("action:relay:{source}:community:{first}"))
+            .execute(pool).await?;
+        let targets = repo.load_relay_community_targets(ws).await?;
+        let failed = &targets.iter().find(|t| t.target_id.into_uuid()==first)
+            .ok_or("legacy relay target")?.relay_failures;
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].failures, 1);
+        assert_eq!(failed[0].last_failed_at, legacy_created);
+        sqlx::query("INSERT INTO agent_service_tasks(id,workspace_id,status,metadata,created_at)
+                     VALUES($1,$2,'completed',$3,$4)")
+            .bind(Uuid::now_v7()).bind(ws.into_uuid())
+            .bind(serde_json::json!({"action_id":dispatch}))
+            .bind(legacy_created + time::Duration::minutes(1)).execute(pool).await?;
+        let targets = repo.load_relay_community_targets(ws).await?;
+        assert!(targets.iter().find(|t| t.target_id.into_uuid()==first)
+            .ok_or("legacy relay target")?.relay_failures.is_empty());
+        sqlx::query("UPDATE autopilot_actions SET idempotency_key=$2 WHERE id=$1")
+            .bind(dispatch).bind(format!("action:drop_surge:{source}:community:{first}"))
+            .execute(pool).await?;
+        assert!(repo.load_content_supply_snapshots(ws, time::OffsetDateTime::now_utc())
+            .await?[0].drop_surge_failures.is_empty());
+        sqlx::query("DELETE FROM agent_service_tasks").execute(pool).await?;
+        sqlx::query("ALTER TABLE agent_service_tasks ADD COLUMN completed_at timestamptz")
+            .execute(pool).await?;
         let task = |workspace: WorkspaceId, action: Uuid, status: &'static str, minutes: i32| async move {
             sqlx::query(
                 "INSERT INTO agent_service_tasks (id,workspace_id,status,metadata,created_at,completed_at)

@@ -1,5 +1,6 @@
 //! Split PostgreSQL Autopilot adapter implementation.
 
+mod fan_windows;
 mod observation;
 mod readiness;
 
@@ -70,40 +71,20 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
-            let rows = sqlx::query_as::<_, ClaimedMeasurementRow>(
-                r#"
-                WITH selected AS (
-                    SELECT id
-                    FROM autopilot_measurements
-                    WHERE workspace_id = $1
-                      AND status = 'pending'
-                      AND due_at <= $2
-                      AND available_at <= $2
-                      AND attempt_count < 3
-                    ORDER BY due_at, id
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT $3
-                )
-                UPDATE autopilot_measurements AS measurement
-                SET status = 'processing',
-                    attempt_count = measurement.attempt_count + 1,
-                    started_at = $2,
-                    finished_at = NULL,
-                    last_error_kind = NULL
-                FROM selected
-                WHERE measurement.id = selected.id
-                RETURNING measurement.id, measurement.action_id, measurement.measurement_kind,
-                          measurement.subject_id, measurement.baseline_value,
-                          measurement.action_finished_at, measurement.due_at,
-                          measurement.attempt_count AS attempt_number
-                "#,
+            let with_tasks = sqlx::query_scalar::<_, bool>(
+                "SELECT to_regclass('agent_service_tasks') IS NOT NULL",
             )
-            .bind(workspace_id.into_uuid())
-            .bind(now)
-            .bind(i64::from(limit.min(100)))
-            .fetch_all(&mut *transaction)
+            .fetch_one(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            let claim_sql = fan_windows::claim_sql(with_tasks);
+            let rows = sqlx::query_as::<_, ClaimedMeasurementRow>(&claim_sql)
+                .bind(workspace_id.into_uuid())
+                .bind(now)
+                .bind(i64::from(limit.min(100)))
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(map_sqlx)?;
             // Parse while the claim transaction is still open. A DB/Rust enum
             // drift must never commit a whole batch as `processing` and strand the
             // valid rows behind stale-recovery. Quarantine only the unsupported row.

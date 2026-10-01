@@ -372,9 +372,25 @@ jobs:
             causal_checkpoint_does_not_consume_an_unread_measurement \
             a_busy_strategy_writer_does_not_block_the_growth_learner \
             legacy_cursor_upgrade_preserves_existing_learning \
+            separate_horizons_survive_checkpoint_restart_and_teach_durability_once \
+            malformed_context_is_preserved_but_cannot_teach_a_fabricated_cell \
+            a_malformed_only_batch_advances_without_legacy_fallback_or_repeated_work \
+            immature_fan_windows_do_not_spend_attempts_or_block_ready_work \
+            durable_fans_wait_for_the_last_arrival_in_a_late_published_cohort \
+            a_future_conversion_does_not_teach_an_acquisition_that_has_not_happened \
             two_acts_arrivals_become_one_sample \
             video_promotion \
             autopilot_relay_loader \
+            autopilot_release_tier \
+            autopilot_outreach_engine \
+            autopilot_archive_wave \
+            autopilot_show_growth_retry \
+            autopilot_past_show_sources \
+            autopilot_relay_pacing \
+            a_keyless_action_on_a_source_does_not_break_the_supply_read \
+            a_starved_booking_pipeline_requests_target_discovery \
+            concert_checkin_alone_can_activate_a_consented_recent_fan \
+            the_quarters_record_lands_under_the_right_act \
             a_content_artifact_receipt_writes_the_envelope_and_growth_measurements \
             a_failed_artifact_is_retried_under_a_new_key
           cargo test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
@@ -387,6 +403,7 @@ jobs:
             sheet_intake \
             video_promotion_links \
             community_tracked_links \
+            ops_watchdog \
             source_refresh_preserves_promotion_policy_campaign_and_request
           cargo test --locked --all-features --package crowdrelay-infra --test peer_act_seed_postgres -- --ignored --test-threads=1 \
             a_band_sheet_lands_as_attributed_peer_facts

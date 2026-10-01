@@ -30,6 +30,8 @@
 use super::*;
 
 mod baseline;
+#[cfg(test)]
+mod bridge_lifecycle_tests;
 mod causal_cursor;
 mod channel_yield;
 mod community_targets;
@@ -1418,7 +1420,7 @@ async fn full_replay(
     let (evidence, read_cursor) =
         super::evidence::load_growth_evidence_with_cursor(repo, workspace_id, None).await?;
     let evidence_replayed = u32::try_from(evidence.len()).unwrap_or(u32::MAX);
-    if !evidence.is_empty() {
+    if !evidence.is_empty() || read_cursor.is_some() {
         let mut model = CausalModel::default();
         apply_evidence_to_model(&mut model, &evidence);
         causal_cursor::advance(&mut model, read_cursor);
