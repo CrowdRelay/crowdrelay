@@ -29,6 +29,10 @@ class BeaconLearnedSelectionContract(unittest.TestCase):
         self.assertIn("growth_intelligence_enabled", cycle)
         self.assertIn("beacon_enabled", cycle)
         self.assertIn("checkpoint_cycle_causal_model", evaluate)
+        self.assertLess(
+            evaluate.index("checkpoint_cycle_causal_model"),
+            evaluate.index("for policy in policies.into_iter()"),
+        )
         self.assertIn("save_brain_state_checkpoint", cycle)
 
     def test_shared_gi_model_keeps_nested_inputs_borrowed(self) -> None:
