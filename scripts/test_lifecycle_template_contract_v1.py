@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CANDIDATES = ROOT / "crates" / "crowdrelay-application" / "src" / "autopilot" / "evaluate" / "candidates.rs"
+CANDIDATES = ROOT / "crates" / "crowdrelay-application" / "src" / "autopilot" / "evaluate" / "candidates_lifecycle.rs"
 CONTRACT = ROOT / "n8n" / "crowdrelay-executor-contract.md"
 EXECUTION = ROOT / "crates" / "crowdrelay-infra" / "src" / "autopilot" / "actions_execution.rs"
 TENANT_SETTINGS = ROOT / "crates" / "crowdrelay-infra" / "src" / "tenant_settings.rs"
@@ -60,7 +60,7 @@ class TheVocabularyIsPublished(unittest.TestCase):
         self.assertGreaterEqual(
             len(keys),
             6,
-            "found almost no lifecycle template keys in candidates.rs; the match "
+            "found almost no lifecycle template keys in candidates_lifecycle.rs; the match "
             "arm shape changed and this contract is no longer reading it",
         )
 

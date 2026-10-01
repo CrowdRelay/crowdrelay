@@ -481,7 +481,6 @@ async fn the_catalogue_is_pitched_in_one_wave_of_composed_letters()
             "the printed CTA must resolve to this catalogue"
         );
         assert!(!body.contains("https://open.spotify.example/album/echoes"));
-
     }
     Ok(())
 }
@@ -1122,10 +1121,7 @@ async fn a_show_opportunity_writes_the_show_letter_to_local_contacts_only()
         body.contains("gramy koncert: Gorzów Wielkopolski, MagnetOffOn."),
         "{body}"
     );
-    assert!(
-        body.contains("Bilety: https://band.example/l/"),
-        "{body}"
-    );
+    assert!(body.contains("Bilety: https://band.example/l/"), "{body}");
     let ticket_is_live: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM smart_links

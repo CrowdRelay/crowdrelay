@@ -379,12 +379,21 @@ async fn only_live_workspace_redirects_may_leave_in_a_letter()
     .await?;
     live_link(&pool, other_workspace, "foreign").await?;
     live_link(&pool, workspace_id, "inactive").await?;
-    sqlx::query("UPDATE smart_links SET active = false WHERE workspace_id = $1 AND slug = 'inactive'")
-        .bind(workspace_id)
-        .execute(&pool)
-        .await?;
+    sqlx::query(
+        "UPDATE smart_links SET active = false WHERE workspace_id = $1 AND slug = 'inactive'",
+    )
+    .bind(workspace_id)
+    .execute(&pool)
+    .await?;
 
-    for slug in ["missing", "foreign", "inactive", "bad.slug", "site/extra", ""] {
+    for slug in [
+        "missing",
+        "foreign",
+        "inactive",
+        "bad.slug",
+        "site/extra",
+        "",
+    ] {
         let target_id = target(&pool, workspace_id, city_id).await?;
         let action_id = outreach_action(
             &pool,

@@ -224,7 +224,8 @@ class FanActivationContract(unittest.TestCase):
         # Two codes split one fan's referrals across two identities and make
         # the ledger wrong.
         candidates = read(
-            ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/candidates.rs"
+            ROOT
+            / "crates/crowdrelay-application/src/autopilot/evaluate/candidates_lifecycle.rs"
         )
         self.assertIn('format!("action:referral-code:{}", snapshot.fan_id)', candidates)
         actions = read(
