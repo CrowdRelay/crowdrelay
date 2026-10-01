@@ -34,6 +34,19 @@ pub enum AutopilotMeasurementKind {
     ShowGrowthSurfaceClicks7d,
     ShowGrowthAttributedTicketOrders7d,
     GrassrootsActivationReplies14d,
+    /// Whether the exact named Beacon contacted by this action replied inside
+    /// fourteen days. This is deliberately per action/Beacon, not per event:
+    /// one local partner's answer must never make every other contact look
+    /// successful.
+    BeaconOutreachReply14d,
+    /// Distinct anonymous visitors who crossed a smart link owned by this
+    /// exact Beacon outreach action. People, not raw clicks: refreshes and
+    /// repeated taps from one browser do not make a relationship look larger.
+    BeaconOutreachUniqueVisitors14d,
+    /// Fans whose canonical last-tracked-click conversion is owned by this
+    /// exact Beacon outreach action. This is the North-Star outcome of the
+    /// relationship lane; a reply or click is useful only as an earlier rung.
+    BeaconOutreachFanAcquisition14d,
     /// Fan count delta in the 14 days after an agent dispatch. Measures
     /// whether the worker's intelligence gathering actually aggregated
     /// new fans into the fanbase.
@@ -204,6 +217,9 @@ impl AutopilotMeasurementKind {
             Self::ShowGrowthSurfaceClicks7d => "show_growth_surface_clicks_7d",
             Self::ShowGrowthAttributedTicketOrders7d => "show_growth_attributed_ticket_orders_7d",
             Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
+            Self::BeaconOutreachReply14d => "beacon_outreach_reply_14d",
+            Self::BeaconOutreachUniqueVisitors14d => "beacon_outreach_unique_visitors_14d",
+            Self::BeaconOutreachFanAcquisition14d => "beacon_outreach_fan_acquisition_14d",
             Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
             Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
             Self::IncrementalFanGrowth3d => "incremental_fan_growth_3d",
@@ -288,6 +304,9 @@ impl AutopilotMeasurementKind {
             Self::ContentFanAcquisition7d => Some("content_fan_acquisitions"),
             Self::ArtifactOutcome7d => Some("artifact_posts"),
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
+            Self::BeaconOutreachReply14d => Some("beacon_outreach_replies"),
+            Self::BeaconOutreachUniqueVisitors14d => Some("beacon_outreach_unique_visitors"),
+            Self::BeaconOutreachFanAcquisition14d => Some("beacon_outreach_fan_acquisitions"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
             Self::ScannerDiscoveryQuality14d => Some("scanner_discoveries"),
