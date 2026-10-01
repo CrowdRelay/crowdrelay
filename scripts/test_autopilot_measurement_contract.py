@@ -77,6 +77,7 @@ class AutopilotMeasurementContract(unittest.TestCase):
             "crates/crowdrelay-infra/src/autopilot/execution_beacon.rs"
         )
         scheduling = text("crates/crowdrelay-infra/src/autopilot/execution.rs")
+        dispatch = text("crates/crowdrelay-infra/src/autopilot/execution_dispatch.rs")
         attribution = text(
             "crates/crowdrelay-infra/src/autopilot/measurement/observation/attributed_fans.rs"
         )
@@ -100,6 +101,13 @@ class AutopilotMeasurementContract(unittest.TestCase):
         ):
             self.assertIn(kind, scheduling)
         self.assertNotIn("BeaconOutreachFanAcquisition14d", scheduling)
+
+        # Resolving a measurement is not learning unless the action owns the
+        # prediction/evidence envelope the causal replay updates. Beacon phase
+        # templates are separate causal identities; the person remains target.
+        self.assertIn("AutopilotActionPayload::RequestBeaconOutreach", dispatch)
+        self.assertIn("template_key.clone()", dispatch)
+        self.assertIn('format!("beacon:{beacon_id}")', dispatch)
 
         # The generic fan observer must treat a successfully delivered
         # action-owned redirect as a live acquisition surface.
