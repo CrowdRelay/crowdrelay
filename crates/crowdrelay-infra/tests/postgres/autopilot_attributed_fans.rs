@@ -136,6 +136,46 @@ async fn observe(f: &Fixture, measurement: &ClaimedAutopilotMeasurement) -> f64 
         .expect("an instrumented lineage is measurable")
 }
 
+/// A non-post delivery lane can own its redirect directly.
+///
+/// Named Beacon outreach has no publication row. Before action-owned smart
+/// links, the canonical fan observer saw no live tracked post and abandoned
+/// the measurement as `NO_TRACKED_LINK`, so a real fan from a partner email
+/// could never teach the primary fan posterior.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_action_owned_link_is_a_live_fan_growth_surface_without_a_post() {
+    let f = setup().await.expect("fixture");
+    let finished = f.now - time::Duration::days(14);
+    let action = insert_dispatch(&f, "lineage:owned-link", finished).await;
+    sqlx::query(
+        r#"INSERT INTO smart_links
+           (workspace_id, slug, destination_url, active, action_id, channel_source)
+           VALUES ($1,'beacon-owned','https://example.test/show',true,$2,'beacon')"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .execute(&f.pool)
+    .await
+    .expect("owned smart link");
+
+    let converted = finished + time::Duration::days(2);
+    converted_fan(&f, action, converted, converted, "active").await;
+
+    let measurement = queue_measurement(
+        &f,
+        action,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.0,
+        finished,
+    )
+    .await;
+    assert!(
+        (observe(&f, &measurement).await - 1.0).abs() < f64::EPSILON,
+        "an action-owned redirect must feed the same canonical fan learner as a posted link"
+    );
+}
+
 /// A child sharing the measured action's trace carries its fans up.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
