@@ -98,11 +98,25 @@ mod promotion_preflight_tests {
             .bind(reddit_place).bind(ws.into_uuid()).execute(&pool).await?;
         sqlx::query("INSERT INTO agent_outreach_targets(id,workspace_id,target_kind,display_name,platform,subreddit,place_id,status,screening_verdict) VALUES($1,$2,'community','Metal Test','reddit','metaltest',$3,'promoted','admitted')")
             .bind(reddit_target).bind(ws.into_uuid()).bind(reddit_place).execute(&pool).await?;
-        let mut reddit_action = action.clone();
-        reddit_action.target_id = Some(reddit_target);
-        reddit_action.platform = "reddit".to_owned();
-        reddit_action.subreddit = "metaltest".to_owned();
-        reddit_action.place_url = None;
+        let reddit_action = ClaimedAction {
+            id: Uuid::now_v7(),
+            action_id: Uuid::now_v7(),
+            claimed_from: "pending".to_owned(),
+            target_id: Some(reddit_target),
+            platform: "reddit".to_owned(),
+            subreddit: "metaltest".to_owned(),
+            place_url: None,
+            title: "Video".to_owned(),
+            body: "Grounded community context".to_owned(),
+            smart_link: None,
+            image_url: None,
+            media_id: None,
+            source_url: None,
+            relay_source_id: None,
+            trace_id: None,
+            causation_id: None,
+            decision_id: None,
+        };
 
         assert_eq!(
             executor.preflight_community_send(&reddit_action).await?,
