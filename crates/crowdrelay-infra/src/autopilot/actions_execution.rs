@@ -100,6 +100,49 @@ impl PostgresAutopilotRepository {
                         } else {
                             (None, None)
                         };
+                    // The install ask carries a tracked link to the Signal
+                    // page — the click is the only measurement the ask has.
+                    // A linkless ask is refused rather than sent, for the same
+                    // reason a referral invite without a URL is.
+                    let install_url =
+                        if template_key == "crowdrelay.fan.signal_install_ask.v1" {
+                            let brand = crate::tenant_settings::TenantSettingsRepository::new(
+                                self.pool.clone(),
+                            )
+                            .brand_settings(workspace_id.into_uuid())
+                            .await
+                            .map_err(map_sqlx)?;
+                            let locale = fan.2.as_deref().unwrap_or_default();
+                            let destination = brand.signal_page_url(locale).ok_or(
+                                RepositoryError::ConflictBecause(
+                                    "signal install ask refused: tenant has no member site URL",
+                                ),
+                            )?;
+                            let slug = if locale.starts_with("pl") {
+                                "signal-install-pl"
+                            } else {
+                                "signal-install"
+                            };
+                            // Channel identity is safe to set: this slug is the
+                            // ask's own, shared with no other surface.
+                            let link = crate::tracked_links::ensure_smart_link_in_tx(
+                                &mut transaction,
+                                workspace_id.into_uuid(),
+                                slug,
+                                &destination,
+                                brand.site_root(),
+                                Some("email"),
+                                Some("signal-install-ask"),
+                            )
+                            .await
+                            .map_err(map_sqlx)?
+                            .ok_or(RepositoryError::ConflictBecause(
+                                "signal install ask refused: destination is not a printable URL",
+                            ))?;
+                            Some(link.as_str().to_owned())
+                        } else {
+                            None
+                        };
                     emit_outward_action(
                         &mut transaction,
                         workspace_id,
@@ -122,6 +165,7 @@ impl PostgresAutopilotRepository {
                                 "locale": fan.2,
                                 "referral_code": referral_code,
                                 "referral_url": referral_url,
+                                "install_url": install_url,
                             },
                         }),
                     )

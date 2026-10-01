@@ -174,8 +174,18 @@ fn lifecycle_candidate(
         LifecycleTemplate::ReturningFanThankYou => "crowdrelay.fan.returning_thanks.v1",
         LifecycleTemplate::ReferralThankYou => "crowdrelay.fan.referral_thanks.v1",
         LifecycleTemplate::ReferralInvite => "crowdrelay.fan.referral_invite.v1",
+        LifecycleTemplate::SignalInstallAsk => "crowdrelay.fan.signal_install_ask.v1",
     };
-    let disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    let mut disposition = disposition(policy.autonomy_level, confidence, policy.minimum_confidence);
+    // The install ask is a new outward surface and its copy is unproven: every
+    // send of it waits for a person until a later revision earns the same
+    // trust the welcome and thank-yous carry. Only ever tightens — Observe and
+    // Recommend keep their answer.
+    if template == LifecycleTemplate::SignalInstallAsk
+        && matches!(disposition, PolicyDisposition::AutoExecute)
+    {
+        disposition = PolicyDisposition::RequireApproval;
+    }
     let subject = ActionSubject::Fan(snapshot.fan_id);
     Ok(Some(DecisionCandidate {
         context: policy.context,
