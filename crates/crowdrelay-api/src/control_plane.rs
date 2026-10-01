@@ -332,6 +332,23 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/content/videos/{source_id}/curator-queue/{candidate_id}/sent",
             post(crate::curator_queue::curator_dm_sent),
         )
+        // The beacon lane: outward beacon asks sit in PENDING_ROUTE — no n8n
+        // route carries them, so a person sends each one from their own
+        // client. `prepare` verifies the partner, mints the tracked links and
+        // claims the action for the operator; `sent` files the terminal
+        // receipt so the ask lands `succeeded` on real evidence.
+        .route(
+            "/v1/control-plane/beacon-asks",
+            get(crate::beacon_asks::beacon_ask_queue),
+        )
+        .route(
+            "/v1/control-plane/beacon-asks/{action_id}/prepare",
+            post(crate::beacon_asks::beacon_ask_prepare),
+        )
+        .route(
+            "/v1/control-plane/beacon-asks/{action_id}/sent",
+            post(crate::beacon_asks::beacon_ask_sent),
+        )
         .route(
             "/v1/control-plane/autopilot/team-opportunities/{opportunity_id}/terms",
             post(crate::autopilot::record_team_opportunity_terms),

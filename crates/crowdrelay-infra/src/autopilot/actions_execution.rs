@@ -724,77 +724,15 @@ impl PostgresAutopilotRepository {
                     event_id,
                     requested_count,
                 } => {
-                    // Re-read under the same guards the rule used at decision
-                    // time: hours passed since then, and a partner who went
-                    // cold or a show that moved must not receive yesterday's
-                    // ask. The ask travels with the facts it was built on.
-                    let target = sqlx::query_as::<_, (String, String, String, String, OffsetDateTime)>(
-                        r#"
-                        SELECT beacon.display_name, beacon.contact_email,
-                               event.title, event.slug, event.starts_at
-                        FROM beacons AS beacon
-                        JOIN events AS event
-                          ON event.workspace_id = beacon.workspace_id AND event.id = $3
-                        LEFT JOIN beacon_campaigns AS campaign
-                          ON campaign.workspace_id = beacon.workspace_id
-                         AND campaign.beacon_id = beacon.id
-                         AND campaign.event_id = event.id
-                        WHERE beacon.workspace_id = $1 AND beacon.id = $2
-                          AND beacon.version = $4
-                          AND beacon.active AND beacon.verified AND beacon.accepts_outreach
-                          AND NOT beacon.do_not_contact
-                          AND beacon.contact_email IS NOT NULL
-                          AND event.status = 'published'
-                          -- Same stale-yes guard as the outreach send: an
-                          -- answer the booker wrote after approval must gate
-                          -- the batch too.
-                          AND COALESCE(campaign.status, 'candidate') NOT IN ('declined','suppressed','closed')
-                          AND (campaign.deferred_until IS NULL OR campaign.deferred_until <= $5)
-                        FOR SHARE OF beacon, event, campaign
-                        "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(beacon_id.into_uuid())
-                    .bind(event_id.into_uuid())
-                    .bind(beacon_version)
-                    .bind(now)
-                    .fetch_optional(&mut *transaction)
-                    .await
-                    .map_err(map_sqlx)?
-                    .ok_or(RepositoryError::Conflict)?;
-                    // The ask travels; the codes stay here. Invite codes are
-                    // issued by the workspace's own machinery when the partner
-                    // answers yes, so every signup they produce is attributed
-                    // and consented by construction — neither the executor
-                    // nor the partner invents either.
-                    emit_outward_action(
+                    execute_beacon_invite_batch(
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "crowdrelay.beacon.invite_batch_requested",
-                        format!("beacon:{beacon_id}"),
-                        "verified beacon partner, accepts outreach — invite batch for its community",
-                        json!({
-                            "action_id": action.id,
-                            "beacon_id": beacon_id,
-                            "beacon_version": beacon_version,
-                            "event_id": event_id,
-                            "requested_count": requested_count,
-                            "beacon_name": target.0,
-                            "contact_email": target.1,
-                            "event": {
-                                "title": target.2,
-                                "slug": target.3,
-                                "starts_at": crowdrelay_domain::wire_time::Wire(&target.4),
-                            },
-                            "callback_path": "/v1/admin/beacons",
-                            "invite_contract": {
-                                "codes_issued_by_crowdrelay": true,
-                                "never_purchase_or_bot_invites": true,
-                                "only_their_own_community": true,
-                                "one_batch_per_beacon_per_show": true
-                            }
-                        }),
+                        *beacon_id,
+                        *beacon_version,
+                        *event_id,
+                        *requested_count,
+                        now,
                     )
                     .await?;
                 }
