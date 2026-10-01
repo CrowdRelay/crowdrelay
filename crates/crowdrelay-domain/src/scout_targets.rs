@@ -46,10 +46,20 @@ fn normalise(cell: &str) -> String {
 #[must_use]
 pub fn is_scout_meta_targets(header: &[String]) -> bool {
     let has = |needle: &str| header.iter().any(|cell| normalise(cell) == needle);
-    has("name")
+    let human_scout = has("name")
         && has("category")
         && has("dedupe_key")
-        && (has("public_url_username") || has("public_url") || has("public_contact"))
+        && (has("public_url_username") || has("public_url") || has("public_contact"));
+    // `crowdrelay-db/database.xlsx` carries the same durable network nodes
+    // under the Festival Organizers header. It is an operator-owned registry,
+    // not a contact dump: claim it here so organisers become promoter beacons
+    // and can participate in the event → organiser → next-event graph.
+    let github_organizers = has("organization")
+        && has("type")
+        && has("city")
+        && has("verification")
+        && (has("website") || has("email"));
+    human_scout || github_organizers
 }
 
 /// The scout's `Category` prose → a roster kind. Phrases like
@@ -58,7 +68,10 @@ pub fn is_scout_meta_targets(header: &[String]) -> bool {
 /// land, and only genuinely unknown kinds refuse.
 fn kind_for(raw: &str) -> Option<BeaconKind> {
     let text = raw.trim().to_lowercase();
-    let word = if text.contains("festiv") || text.contains("promoter") || text.contains("organizer")
+    let word = if text.contains("festiv")
+        || text.contains("promoter")
+        || text.contains("organizer")
+        || text.contains("organiser")
     {
         "promoter"
     } else if text.contains("venue") || text.contains("club") {
@@ -131,6 +144,14 @@ fn score_basis_points(value: &str) -> Option<i32> {
     Some((value * 100.0).round().clamp(0.0, 10000.0) as i32)
 }
 
+fn verified_for(value: &str) -> bool {
+    let value = value.trim().to_ascii_uppercase();
+    value.contains("VERIFIED")
+        || value.starts_with("CONFIRMED_CURRENT")
+        || value.starts_with("CONFIRMED_HISTORICAL")
+        || value == "CONFIRMED"
+}
+
 /// Reads one grid as the scout `META_TARGETS` tab, or declines it.
 ///
 /// `None` means the header is not this sheet's — the caller tries its
@@ -173,14 +194,23 @@ pub fn extract_scout_meta_targets(grid: &[Vec<String>]) -> Option<BeaconSeedRepo
             continue;
         }
         let sheet_row = offset + 2;
-        let name = cell!(row, "name");
+        let github_organizer = index.contains_key("organization");
+        let name = if github_organizer {
+            cell!(row, "organization")
+        } else {
+            cell!(row, "name")
+        };
         if name.is_empty() {
             report
                 .refusals
                 .push((sheet_row, BeaconRefusal::MissingName));
             continue;
         }
-        let raw_category = cell!(row, "category");
+        let raw_category = if github_organizer {
+            cell!(row, "type")
+        } else {
+            cell!(row, "category")
+        };
         let Some(kind) = kind_for(raw_category) else {
             report.refusals.push((
                 sheet_row,
@@ -188,13 +218,21 @@ pub fn extract_scout_meta_targets(grid: &[Vec<String>]) -> Option<BeaconSeedRepo
             ));
             continue;
         };
-        let email = cell!(row, "public_contact");
-        let email = looks_emailish(email).then(|| email.to_owned());
-        let url_raw = cell!(row, "public_url_username");
-        let url_raw = if url_raw.is_empty() {
-            cell!(row, "public_url")
+        let email_raw = if github_organizer {
+            cell!(row, "email")
         } else {
-            url_raw
+            cell!(row, "public_contact")
+        };
+        let email = looks_emailish(email_raw).then(|| email_raw.to_owned());
+        let url_raw = if github_organizer {
+            cell!(row, "website")
+        } else {
+            let username = cell!(row, "public_url_username");
+            if username.is_empty() {
+                cell!(row, "public_url")
+            } else {
+                username
+            }
         };
         let destination_url =
             clean(url_raw).filter(|v| v.starts_with("http://") || v.starts_with("https://"));
@@ -204,24 +242,39 @@ pub fn extract_scout_meta_targets(grid: &[Vec<String>]) -> Option<BeaconSeedRepo
                 .push((sheet_row, BeaconRefusal::MissingRoute));
             continue;
         }
-        let status = cell!(row, "status");
+        let verification = if github_organizer {
+            cell!(row, "verification")
+        } else {
+            cell!(row, "status")
+        };
+        let verified = verified_for(verification);
+        let city = if github_organizer {
+            clean(cell!(row, "city"))
+        } else {
+            city_of(cell!(row, "region"))
+        };
+        let relevance = if github_organizer {
+            cell!(row, "relevance_score")
+        } else {
+            cell!(row, "relevance")
+        };
         report.beacons.push(SeededBeacon {
             display_name: name.to_owned(),
             kind,
             raw_kind: raw_category.to_owned(),
-            city: city_of(cell!(row, "region")),
+            city,
             email,
             destination_url,
             source_url: None,
             active: None,
-            // Only a verification verdict asserts the row was checked —
-            // "Verified public" marks it; workflow statuses claim nothing.
-            verified: status.to_lowercase().contains("verified").then_some(true),
+            // Only an explicit verification verdict asserts the row was
+            // checked. Workflow labels such as TARGET/NEW claim nothing.
+            verified: verified.then_some(true),
             accepts_outreach: None,
             do_not_contact: None,
             relationship_score: None,
-            relevance_basis_points: score_basis_points(cell!(row, "relevance")),
-            confidence_basis_points: None,
+            relevance_basis_points: score_basis_points(relevance),
+            confidence_basis_points: verified.then_some(8_500),
         });
     }
     Some(report)
@@ -242,6 +295,21 @@ mod tests {
         "Why useful",
         "Dedupe Key",
         "Checked",
+    ];
+
+    const GITHUB_ORGANIZER_HEADER: &[&str] = &[
+        "Organization",
+        "Type",
+        "Country",
+        "Region",
+        "City",
+        "Website",
+        "Email",
+        "Role/Fit",
+        "Verification",
+        "Relevance_Score",
+        "Dedupe_Key",
+        "Source_Checked",
     ];
 
     fn grid(header: &[&str], rows: &[&[&str]]) -> Vec<Vec<String>> {
@@ -273,6 +341,43 @@ mod tests {
         // A contact list claims nothing either.
         let contacts = grid(&["Name", "Email"], &[&["Somebody", "a@b.c"]]);
         assert!(extract_scout_meta_targets(&contacts).is_none());
+    }
+
+    #[test]
+    fn github_festival_organizer_becomes_verified_promoter_beacon() {
+        let report = extract_scout_meta_targets(&grid(
+            GITHUB_ORGANIZER_HEADER,
+            &[&[
+                "OFFLINE Entertainment UG / NEXUS",
+                "Festival promoter / rock-metal convention organizer",
+                "Germany",
+                "Saxony",
+                "Leipzig",
+                "https://www.nerd-rock-festival.com/",
+                "hype@offline-entertainment.de",
+                "Runs NEXUS and its Titanium Stage",
+                "CONFIRMED_CURRENT — official site checked",
+                "88",
+                "offline-entertainment-nexus|org",
+                "2026-10-01",
+            ]],
+        ))
+        .expect("github organizer header claims");
+        assert_eq!(report.beacons.len(), 1);
+        let beacon = &report.beacons[0];
+        assert_eq!(beacon.kind, BeaconKind::Promoter);
+        assert_eq!(beacon.city.as_deref(), Some("Leipzig"));
+        assert_eq!(
+            beacon.email.as_deref(),
+            Some("hype@offline-entertainment.de")
+        );
+        assert_eq!(
+            beacon.destination_url.as_deref(),
+            Some("https://www.nerd-rock-festival.com/")
+        );
+        assert_eq!(beacon.verified, Some(true));
+        assert_eq!(beacon.relevance_basis_points, Some(8_800));
+        assert_eq!(beacon.confidence_basis_points, Some(8_500));
     }
 
     #[test]

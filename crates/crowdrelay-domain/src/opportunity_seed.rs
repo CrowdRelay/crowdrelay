@@ -96,6 +96,13 @@ pub struct SeededOpportunity {
     pub strategic_value_basis_points: i32,
     pub deadline: Option<Date>,
     pub event_starts_on: Option<Date>,
+    /// Verified one-way road distance supplied by the operator/scout. Absent
+    /// stays absent: the intake never substitutes straight-line distance or a
+    /// band average for a road-cost fact.
+    pub distance_km: Option<i32>,
+    /// Stated nights away when known. Otherwise tour economics applies its own
+    /// overnight-threshold policy once distance is known.
+    pub nights_away: Option<i16>,
     /// `false` when the sheet itself reports the route resolved or closed.
     pub eligible: bool,
     /// Only when the sheet carries an explicit verification verdict.
@@ -248,6 +255,24 @@ fn first_iso_date(value: &str) -> Option<Date> {
 fn score_basis_points(value: &str) -> Option<i32> {
     let value: f64 = value.trim().parse().ok()?;
     Some((value * 100.0).round().clamp(0.0, 10000.0) as i32)
+}
+
+fn bounded_i32(value: &str, max: i32) -> Option<i32> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed: i32 = value.parse().ok()?;
+    (0..=max).contains(&parsed).then_some(parsed)
+}
+
+fn bounded_i16(value: &str, max: i16) -> Option<i16> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed: i16 = value.parse().ok()?;
+    (0..=max).contains(&parsed).then_some(parsed)
 }
 
 /// The band's A–D priority column → `strategic_value_basis_points`, on the
@@ -544,6 +569,28 @@ fn split_country_city(value: &str) -> (Option<String>, Option<String>) {
     }
 }
 
+/// The historical Polish sheet used `Voivodeship` as a Polish-region column.
+/// The GitHub festival registry kept that header for compatibility but Europe
+/// rows now carry `Country / Region` there. Prefer an explicit `Country`
+/// column when the evolved registry supplies one; otherwise recognise a
+/// country prefix before falling back to Poland for an old plain voivodeship.
+fn scout_registry_country(explicit: &str, region: &str) -> String {
+    if let Some(country) = clean(explicit) {
+        return country;
+    }
+    let region = region.trim();
+    if region.is_empty() {
+        return String::new();
+    }
+    if let Some((country, _)) = region.split_once('/') {
+        let country = country.trim();
+        if country_code_for(country).is_some() {
+            return country.to_owned();
+        }
+    }
+    "PL".to_owned()
+}
+
 fn metadata_from(pairs: &[(&str, String)]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (key, value) in pairs {
@@ -620,6 +667,8 @@ fn seed_row(
         email_cell,
         fit,
         strategic,
+        distance_km,
+        nights_away,
         eligible,
         verified,
         metadata,
@@ -657,6 +706,8 @@ fn seed_row(
                 String::new(),
                 priority_bps.unwrap_or(0),
                 priority_bps.unwrap_or(0),
+                None,
+                None,
                 eligible_for(c!("status")),
                 verified_for(c!("verification_status")),
                 metadata,
@@ -690,6 +741,8 @@ fn seed_row(
                 c!("contact_email").to_owned(),
                 score_basis_points(c!("relevance_score")).unwrap_or(0),
                 letter_priority(c!("priority")).unwrap_or(0),
+                bounded_i32(c!("distance_km"), 20_000),
+                bounded_i16(c!("nights_away"), 30),
                 eligible_for(c!("status")),
                 false,
                 metadata,
@@ -697,7 +750,20 @@ fn seed_row(
         }
         OpportunityDialect::ScoutPl => {
             let title = c!("name").to_owned();
+            let verification = if c!("verification").is_empty() {
+                c!("verification_status")
+            } else {
+                c!("verification")
+            };
+            let email = if !c!("contact_email").is_empty() {
+                c!("contact_email")
+            } else if !c!("public_contact").is_empty() {
+                c!("public_contact")
+            } else {
+                c!("email")
+            };
             let metadata = metadata_from(&[
+                ("country", c!("country").to_owned()),
                 ("voivodeship", c!("voivodeship").to_owned()),
                 ("sheet_status", c!("current_status").to_owned()),
                 ("next_cycle", c!("next_cycle").to_owned()),
@@ -705,14 +771,23 @@ fn seed_row(
                 ("economics", c!("economics").to_owned()),
                 ("virya_history", c!("virya_history").to_owned()),
                 ("next_action", c!("next_action").to_owned()),
+                ("submission_method", c!("submission_method").to_owned()),
+                ("free_to_apply", c!("free_to_apply").to_owned()),
+                ("routing_source", c!("routing_source").to_owned()),
+                ("why_fit", c!("why_fit").to_owned()),
+                ("red_flags", c!("red_flags").to_owned()),
+                ("dedupe_key", c!("dedupe_key").to_owned()),
+                ("source_checked", c!("source_checked").to_owned()),
+                ("verification", verification.to_owned()),
                 ("evidence", c!("evidence").to_owned()),
             ]);
-            // A `Voivodeship` column only exists on the Polish scout's sheet —
-            // its presence is itself the country claim.
-            let country = if c!("voivodeship").is_empty() {
-                String::new()
+            let country = scout_registry_country(c!("country"), c!("voivodeship"));
+            let verified = if verification.is_empty() {
+                // Backward compatibility for the original Polish registry,
+                // whose status cell sometimes carried the verification verdict.
+                verified_for(c!("current_status"))
             } else {
-                "PL".to_owned()
+                verified_for(verification)
             };
             (
                 title.clone(),
@@ -723,11 +798,13 @@ fn seed_row(
                 c!("application_deadline").to_owned(),
                 c!("event_date").to_owned(),
                 c!("source_url").to_owned(),
-                String::new(),
-                0,
-                0,
+                email.to_owned(),
+                score_basis_points(c!("relevance_score")).unwrap_or(0),
+                letter_priority(c!("priority")).unwrap_or(0),
+                bounded_i32(c!("distance_km"), 20_000),
+                bounded_i16(c!("nights_away"), 30),
                 eligible_for(c!("current_status")),
-                verified_for(c!("current_status")),
+                verified,
                 metadata,
             )
         }
@@ -762,6 +839,8 @@ fn seed_row(
                 c!("public_contact").to_owned(),
                 score_basis_points(c!("relevance_score")).unwrap_or(0),
                 letter_priority(c!("priority")).unwrap_or(0),
+                bounded_i32(c!("distance_km"), 20_000),
+                bounded_i16(c!("nights_away"), 30),
                 eligible_for(c!("status")),
                 false,
                 metadata,
@@ -788,10 +867,16 @@ fn seed_row(
         country_code,
         city,
         fit_basis_points: fit,
-        confidence_basis_points: 2_500,
+        // A definitive verification verdict in an operator-owned registry is
+        // strong evidence. Rows without that explicit verdict remain cautious
+        // at the historical 2500 floor; presence in a sheet alone proves
+        // neither freshness nor routability.
+        confidence_basis_points: if verified { 8_500 } else { 2_500 },
         strategic_value_basis_points: strategic,
         deadline: first_iso_date(&deadline_cell),
         event_starts_on: first_iso_date(&event_cell),
+        distance_km,
+        nights_away,
         eligible,
         verified_destination: verified,
         metadata,
@@ -923,6 +1008,37 @@ mod tests {
         "Evidence",
     ];
 
+    const REGISTRY_HEADER: &[&str] = &[
+        "Name",
+        "Organizer",
+        "Type",
+        "Country",
+        "Voivodeship",
+        "City",
+        "Current_Status",
+        "Event_Date",
+        "Application_Deadline",
+        "Next_Cycle",
+        "Eligibility",
+        "Economics",
+        "VIRYA_History",
+        "Next_Action",
+        "Source_URL",
+        "Evidence",
+        "Contact_Email",
+        "Submission_Method",
+        "Relevance_Score",
+        "Priority",
+        "Verification",
+        "Dedupe_Key",
+        "Source_Checked",
+        "Why_Fit",
+        "Red_Flags",
+        "Distance_Km",
+        "Nights_Away",
+        "Routing_Source",
+    ];
+
     const EN_HEADER: &[&str] = &[
         "Name",
         "Type",
@@ -1044,6 +1160,65 @@ mod tests {
         // The Public Contact cell also stages as a drive contact.
         assert_eq!(report.contacts.len(), 1);
         assert_eq!(report.contacts[0].email, "application@euroblast.net");
+    }
+
+    #[test]
+    fn github_registry_europe_row_keeps_country_score_route_and_verification() {
+        let mut row = vec![""; REGISTRY_HEADER.len()];
+        row[0] = "NEXUS 2027 — Titanium Stage / Band Application";
+        row[1] = "OFFLINE Entertainment UG / NEXUS";
+        row[2] = "Festival / rock-metal stage application";
+        row[3] = "Germany";
+        row[4] = "Germany / Saxony";
+        row[5] = "Leipzig";
+        row[6] = "Ręczne zgłoszenie";
+        row[7] = "2027-09-17 to 2027-09-19";
+        row[14] = "https://www.nerd-rock-festival.com/kopie-von-stage-act-anmeldung";
+        row[16] = "hype@offline-entertainment.de";
+        row[17] = "Official stage-act application";
+        row[18] = "88";
+        row[19] = "B";
+        row[20] = "CONFIRMED_CURRENT — official application route checked";
+        row[21] = "nexus-leipzig|2027|virya";
+        row[22] = "Official NEXUS pages; checked 2026-10-01";
+        row[23] = "Close routing and dedicated rock/metal stage";
+        row[25] = "356";
+        row[26] = "1";
+        row[27] = "Verified road-route source";
+
+        let report = extract_opportunity_sheet(&grid(REGISTRY_HEADER, &[&row])).unwrap();
+        let opp = &report.rows[0];
+        assert_eq!(report.dialect, Some(OpportunityDialect::ScoutPl));
+        assert_eq!(opp.country_code.as_deref(), Some("DE"));
+        assert_eq!(opp.city.as_deref(), Some("Leipzig"));
+        assert_eq!(opp.fit_basis_points, 8_800);
+        assert_eq!(opp.strategic_value_basis_points, 6_500);
+        assert_eq!(opp.confidence_basis_points, 8_500);
+        assert_eq!(opp.distance_km, Some(356));
+        assert_eq!(opp.nights_away, Some(1));
+        assert_eq!(opp.metadata["routing_source"], "Verified road-route source");
+        assert!(opp.verified_destination);
+        assert!(opp.eligible);
+        assert_eq!(
+            opp.contact_email.as_deref(),
+            Some("hype@offline-entertainment.de")
+        );
+        assert_eq!(report.contacts.len(), 1);
+        assert_eq!(opp.metadata["dedupe_key"], "nexus-leipzig|2027|virya");
+    }
+
+    #[test]
+    fn github_registry_legacy_country_region_does_not_turn_germany_into_poland() {
+        let mut row = vec![""; PL_HEADER.len()];
+        row[0] = "Old Europe Registry Row";
+        row[1] = "Organizer";
+        row[2] = "Festival";
+        row[3] = "Germany / Saxony";
+        row[4] = "Leipzig";
+        row[5] = "Monitor";
+        row[13] = "https://example.test/application";
+        let report = extract_opportunity_sheet(&grid(PL_HEADER, &[&row])).unwrap();
+        assert_eq!(report.rows[0].country_code.as_deref(), Some("DE"));
     }
 
     #[test]

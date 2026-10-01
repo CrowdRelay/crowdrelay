@@ -52,6 +52,20 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
             "Next_Action",
             "Source_URL",
             "Evidence",
+            "Country",
+            "Contact_Email",
+            "Submission_Method",
+            "Free_To_Apply",
+            "Relevance_Score",
+            "Priority",
+            "Verification",
+            "Dedupe_Key",
+            "Source_Checked",
+            "Why_Fit",
+            "Red_Flags",
+            "Distance_Km",
+            "Nights_Away",
+            "Routing_Source",
         ],
         &[
             "Euroblast Festival — zgłoszenie",
@@ -69,6 +83,20 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
             "Apply via site",
             "https://www.euroblast.net/en/contact/",
             "",
+            "Germany",
+            "application@euroblast.net",
+            "Official site",
+            "Yes",
+            "95",
+            "A",
+            "CONFIRMED_CURRENT — official application route",
+            "euroblast|band-application|virya",
+            "Official site; checked 2026-10-01",
+            "Top-tier genre fit",
+            "",
+            "694",
+            "1",
+            "Verified road-route source",
         ],
         &[
             "KozyNostra Rock Fest — Przegląd Zespołów",
@@ -85,6 +113,20 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
             "",
             "Verify next cycle",
             "https://kozynostra.pl/",
+            "",
+            "Poland",
+            "",
+            "Monitor next official call",
+            "UNKNOWN",
+            "70",
+            "B",
+            "CONFIRMED_HISTORICAL — 2026 closed",
+            "kozynostra|2026|virya",
+            "Official historical source",
+            "Historical fit",
+            "",
+            "",
+            "",
             "",
         ],
     ]);
@@ -160,6 +202,28 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
         "the PL rows did not both seed"
     );
     assert_eq!(harvest.opportunity_refusals, 0);
+    let (country_code, distance_km, nights_away, fit, strategic, verified): (
+        Option<String>,
+        Option<i32>,
+        Option<i16>,
+        i32,
+        i32,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT country_code, distance_km, nights_away, fit_basis_points, \
+                strategic_value_basis_points, verified_destination \
+         FROM team_opportunities \
+         WHERE workspace_id = $1 AND external_key = 'url:euroblast.net/en/contact'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(country_code.as_deref(), Some("DE"));
+    assert_eq!(distance_km, Some(694));
+    assert_eq!(nights_away, Some(1));
+    assert_eq!(fit, 9_500);
+    assert_eq!(strategic, 9_000);
+    assert!(verified);
     assert_eq!(harvest.scout_meta_sheets, 1, "META_TARGETS was not claimed");
     assert_eq!(harvest.beacons_imported, 1, "META_TARGETS did not import");
     assert_eq!(
@@ -281,6 +345,33 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
     assert_eq!(
         harvest.opportunities_refreshed, 1,
         "the cross-file duplicate should refresh, not insert"
+    );
+
+    // The later registry sighting enriches the existing opportunity metadata
+    // rather than losing its dedupe/evidence keys on the conflict path.
+    let dedupe_key: Option<String> = sqlx::query_scalar(
+        "SELECT metadata->>'dedupe_key' FROM team_opportunities \
+         WHERE workspace_id = $1 AND external_key = 'url:euroblast.net/en/contact'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        dedupe_key.as_deref(),
+        Some("euroblast|band-application|virya"),
+        "registry metadata did not enrich the existing opportunity"
+    );
+    let routing: (Option<i32>, Option<i16>) = sqlx::query_as(
+        "SELECT distance_km, nights_away FROM team_opportunities \
+         WHERE workspace_id = $1 AND external_key = 'url:euroblast.net/en/contact'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        routing,
+        (Some(694), Some(1)),
+        "a thinner refresh erased routing facts"
     );
 
     // Three rows total — the same destination URL asserted by two

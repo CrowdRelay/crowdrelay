@@ -17,9 +17,11 @@
 //! sheet mints identifiers in its own namespace.
 //!
 //! The conflict arm copies `import_opportunities.rs` semantics exactly:
-//! contact details, deadlines and scores refresh; `status`, `eligible`
-//! and `metadata` never do — a stale snapshot must not reopen a row the
-//! loop already acted on, and must not erase what an operator corrected.
+//! contact details, deadlines and scores refresh; `status` and `eligible`
+//! never do — a stale snapshot must not reopen a row the loop already acted on.
+//! Registry metadata is merged additively with existing runtime metadata winning
+//! on key collisions, so new evidence/dedupe fields can enrich an old row without
+//! erasing operator/runtime corrections.
 
 use crowdrelay_domain::opportunity_seed::SeededOpportunity;
 use serde_json::{Value, json};
@@ -142,9 +144,9 @@ impl PostgresOpportunitySeedRepository {
                  organization, destination_url, contact_email, country_code,
                  fit_basis_points, confidence_basis_points,
                  strategic_value_basis_points, verified_destination,
-                 deadline, event_starts_at, eligible, metadata, status,
-                 source_observed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'new',$18)
+                 deadline, event_starts_at, distance_km, nights_away,
+                 eligible, metadata, status, source_observed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'new',$20)
             ON CONFLICT (workspace_id, source, external_key) DO UPDATE SET
                 -- Contact details and dates are what a re-import is for:
                 -- the sheet is the band's live record and CrowdRelay's
@@ -158,6 +160,11 @@ impl PostgresOpportunitySeedRepository {
                 country_code = COALESCE(EXCLUDED.country_code, team_opportunities.country_code),
                 deadline = COALESCE(EXCLUDED.deadline, team_opportunities.deadline),
                 event_starts_at = COALESCE(EXCLUDED.event_starts_at, team_opportunities.event_starts_at),
+                -- Routing facts are operator/scout evidence. They fill blanks
+                -- but never replace a value the tour-cost lane or operator
+                -- already established.
+                distance_km = COALESCE(team_opportunities.distance_km, EXCLUDED.distance_km),
+                nights_away = COALESCE(team_opportunities.nights_away, EXCLUDED.nights_away),
                 fit_basis_points = EXCLUDED.fit_basis_points,
                 confidence_basis_points = EXCLUDED.confidence_basis_points,
                 -- The sheet fills a blank strategic value but never
@@ -174,10 +181,11 @@ impl PostgresOpportunitySeedRepository {
                 source_observed_at = COALESCE(
                     EXCLUDED.source_observed_at,
                     team_opportunities.source_observed_at),
-                -- `status`, `eligible` and `metadata` are deliberately
-                -- absent: status is the loop's record of what it did,
-                -- eligibility may have been corrected by an operator, and
-                -- metadata may carry enrichment the sheet does not know.
+                -- Status and eligibility are the loop/operator's record and
+                -- never reopen from a registry refresh. Metadata does enrich:
+                -- registry keys fill gaps, while existing runtime/operator keys
+                -- win collisions so a sheet cannot erase learned state.
+                metadata = EXCLUDED.metadata || team_opportunities.metadata,
                 updated_at = now(),
                 version = team_opportunities.version + 1
             RETURNING (xmax = 0)
@@ -198,6 +206,8 @@ impl PostgresOpportunitySeedRepository {
         .bind(row.verified_destination)
         .bind(row.deadline.map(at_midnight))
         .bind(row.event_starts_on.map(at_midnight))
+        .bind(row.distance_km)
+        .bind(row.nights_away)
         .bind(row.eligible)
         .bind(metadata(row, source_file))
         .bind(observed_at)

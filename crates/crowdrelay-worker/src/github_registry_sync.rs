@@ -31,11 +31,12 @@ use crate::sheet_intake::{SHEET_INTAKE_REVISION, harvest_grids, parse_xlsx_sheet
 
 /// The workbook is refreshed on the operator's schedule — a research pass
 /// lands each morning — so one sync at 12:00 Europe/Warsaw (safely after
-/// the 08:00–09:00 update window) is the whole cadence. Boot still runs an
-/// immediate catch-up so a worker down at noon does not miss the day, and
-/// a `github_registry` NOTIFY forces an early sync — no endpoint emits one
-/// today; it is a manual (`psql NOTIFY`) wake channel only.
+/// the 08:00–09:00 update window) remains the canonical daily checkpoint.
+/// Boot runs an immediate catch-up and `github_registry` NOTIFY forces an
+/// early sync. A cheap hourly SHA-only poll caps stale state when a wake is
+/// missed: unchanged files cost only the contents listing and are not downloaded.
 const SYNC_ZONE: &str = "Europe/Warsaw";
+const MISSED_WAKE_MAX_STALENESS: Duration = Duration::from_secs(60 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "CrowdRelay/1.0 (github registry sync)";
 /// A registry workbook is megabytes, never gigabytes — the cap keeps a
@@ -224,7 +225,8 @@ impl GithubRegistrySyncWorker {
         self.sync_cycle().await;
 
         loop {
-            let wait = duration_until_next_sync(OffsetDateTime::now_utc());
+            let wait = duration_until_next_sync(OffsetDateTime::now_utc())
+                .min(MISSED_WAKE_MAX_STALENESS);
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
