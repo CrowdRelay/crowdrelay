@@ -79,12 +79,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{
-    evidence_ledger::EvidenceLedger,
-    model::*,
-    policy_config::*,
-    ports::{AutopilotDecisionRepository, LoadedCausalModel},
-};
+use super::ports::{AutopilotDecisionRepository, LoadedCausalModel};
+use super::{evidence_ledger::EvidenceLedger, model::*, policy_config::*};
 mod beacons;
 mod booking_supply;
 mod commercial;
