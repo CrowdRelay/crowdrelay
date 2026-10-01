@@ -23,6 +23,12 @@ const TEST_SECRET: &[u8] = b"outbox-e2e-secret-32-bytes-long!!";
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const TEST_TIMEOUT: Duration = Duration::from_secs(12);
+/// An event type outside the outbox eligibility gate. This proof is about
+/// signing, framing and durability, not recipient consent: since #406
+/// `fan.created` is consent-gated, so a fixture with no fan behind it is
+/// (correctly) refused as `recipient_ineligible`. The gate itself is proven
+/// in `outbox::repository`'s own tests.
+const TEST_EVENT_TYPE: &str = "proof.anchor.confirmed";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_OUTBOX_TEST_DATABASE_URL and a disposable PostgreSQL database"]
@@ -159,7 +165,7 @@ async fn seed_fixture(pool: &PgPool, fixture: FixtureIds, endpoint_url: &str) ->
         VALUES (
             $1,
             $2,
-            'fan.created',
+            $3,
             1,
             '{"fixture":"signed-delivery"}',
             'request-outbox-e2e',
@@ -169,6 +175,7 @@ async fn seed_fixture(pool: &PgPool, fixture: FixtureIds, endpoint_url: &str) ->
     )
     .bind(fixture.event_id)
     .bind(fixture.workspace_id)
+    .bind(TEST_EVENT_TYPE)
     .execute(&mut *transaction)
     .await
     .context("insert fixture outbox event")?;
@@ -310,7 +317,7 @@ fn verify_request(request: &CapturedRequest, fixture: FixtureIds) -> Result<()> 
         "event ID header does not match persisted event"
     );
     ensure!(
-        header(request, CROWDRELAY_EVENT_TYPE)? == "fan.created",
+        header(request, CROWDRELAY_EVENT_TYPE)? == TEST_EVENT_TYPE,
         "event type header does not match persisted event"
     );
     ensure!(
@@ -335,7 +342,7 @@ fn verify_request(request: &CapturedRequest, fixture: FixtureIds) -> Result<()> 
         "envelope ID does not match header"
     );
     ensure!(
-        envelope.get("type") == Some(&json!("fan.created")),
+        envelope.get("type") == Some(&json!(TEST_EVENT_TYPE)),
         "envelope type does not match header"
     );
     ensure!(
