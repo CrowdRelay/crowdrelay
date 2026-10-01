@@ -127,19 +127,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let mut ranked = Vec::with_capacity(snapshots.len());
         for (original_order, snapshot) in snapshots.into_iter().enumerate() {
             if let Some(candidate) = beacon_candidate(snapshot, policy, now)? {
-                let AutopilotActionPayload::RequestBeaconOutreach {
-                    beacon_id,
-                    template_key,
-                    ..
-                } = &candidate.action
-                else {
-                    return Err(RepositoryError::Unexpected.into());
+                let (template_id, target_key) = match &candidate.action {
+                    AutopilotActionPayload::RequestBeaconOutreach {
+                        beacon_id,
+                        template_key,
+                        ..
+                    } => (template_key.clone(), format!("beacon:{beacon_id}")),
+                    _ => return Err(RepositoryError::Unexpected.into()),
                 };
                 ranked.push(rank_beacon_candidate(
                     candidate,
                     original_order,
-                    template_key,
-                    &format!("beacon:{beacon_id}"),
+                    &template_id,
+                    &target_key,
                     &loaded_model.model,
                 ));
             }
