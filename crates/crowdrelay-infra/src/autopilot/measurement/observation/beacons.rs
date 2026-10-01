@@ -18,8 +18,9 @@ pub(super) async fn reply_14d(
     // the latest one.
     //
     // The NOT EXISTS applies the same ownership rule booking uses: if another
-    // successful Beacon outreach to the same person/show finished after this
-    // action but before the reply, the reply belongs to that newer send.
+    // provider-confirmed Beacon outreach to the same person/show landed after
+    // this action but before the reply, the reply belongs to that newer send.
+    // A merely dispatched follow-up cannot steal credit from a delivered ask.
     sqlx::query_scalar::<_, f64>(
         r#"
         SELECT CASE WHEN EXISTS (
@@ -41,15 +42,19 @@ pub(super) async fn reply_14d(
               AND NOT EXISTS (
                   SELECT 1
                   FROM autopilot_actions AS newer
+                  JOIN autopilot_execution_reports AS receipt
+                    ON receipt.workspace_id=newer.workspace_id
+                   AND receipt.action_id=newer.id
+                   AND receipt.status='succeeded'
+                   AND receipt.provider_reference IS NOT NULL
                   WHERE newer.workspace_id=original.workspace_id
                     AND newer.id <> original.id
                     AND newer.action_kind='beacon.outreach.request'
-                    AND newer.status='succeeded'
                     AND newer.subject_kind='beacon'
                     AND newer.subject_id=reply.target_id
                     AND newer.payload->>'event_id'=original.payload->>'event_id'
-                    AND newer.finished_at > $4
-                    AND newer.finished_at
+                    AND receipt.occurred_at > $4
+                    AND receipt.occurred_at
                         <= (reply.details->>'occurred_at')::timestamptz
               )
         ) THEN 1.0::double precision ELSE 0.0::double precision END
