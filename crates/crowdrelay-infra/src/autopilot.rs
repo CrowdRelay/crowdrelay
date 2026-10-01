@@ -802,6 +802,7 @@ include!("autopilot/execution.rs");
 include!("autopilot/execution_beacon.rs");
 include!("autopilot/execution_latarnik.rs");
 include!("autopilot/execution_beacon_discovery.rs");
+include!("autopilot/beacon_lane.rs");
 include!("autopilot/execution_dispatch.rs");
 include!("autopilot/execution_outcomes.rs");
 include!("autopilot/execution_preflight.rs");

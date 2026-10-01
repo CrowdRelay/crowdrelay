@@ -149,6 +149,10 @@ pub struct CheckinResult {
     pub created: bool,
     pub checked_in_at: OffsetDateTime,
     pub identity: CheckinIdentity,
+    /// The fan behind this check-in, exposed so the response layer can mint
+    /// their referral link for the scan-confirmation screen — after commit,
+    /// so a mint failure can never fail a confirmed scan.
+    pub fan_id: Uuid,
 }
 
 /// Repository port for concert QR write operations.

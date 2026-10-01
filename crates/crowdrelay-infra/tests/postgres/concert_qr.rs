@@ -148,9 +148,9 @@ async fn email_claim_creates_pending_fan_checkin_and_confirmation() -> Result<()
     assert!(result.created);
     assert_eq!(result.identity, CheckinIdentity::EmailClaim);
 
-    let (status, identity_source): (String, String) = sqlx::query_as(
+    let (status, identity_source, checkin_fan_id): (String, String, Uuid) = sqlx::query_as(
         r#"
-        SELECT f.status, c.identity_source
+        SELECT f.status, c.identity_source, c.fan_id
         FROM concert_checkins c JOIN fans f ON f.id = c.fan_id AND f.workspace_id = c.workspace_id
         WHERE c.workspace_id = $1 AND c.event_id = $2
         "#,
@@ -161,6 +161,9 @@ async fn email_claim_creates_pending_fan_checkin_and_confirmation() -> Result<()
     .await?;
     assert_eq!(status, "pending");
     assert_eq!(identity_source, "email_claim");
+    // The response layer mints the share link off this id — it must be the
+    // fan the check-in row belongs to, not another identity edge.
+    assert_eq!(result.fan_id, checkin_fan_id);
 
     let consent_count: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM fan_consents WHERE workspace_id = $1 AND purpose = 'marketing' AND granted AND source = 'concert_checkin'",

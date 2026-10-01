@@ -24,7 +24,9 @@ MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 PORTS = ROOT / "crates/crowdrelay-application/src/autopilot/ports.rs"
 SNAPSHOTS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs"
 EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution.rs"
-ACTIONS_EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
+# The invite_batch arm lives in execution_beacon.rs — the human-send lane
+# shares its preparation, so the emission moved with it.
+ACTIONS_EXECUTION = ROOT / "crates/crowdrelay-infra/src/autopilot/execution_beacon.rs"
 CONTRACT_DOC = ROOT / "n8n/crowdrelay-executor-contract.md"
 
 
@@ -62,12 +64,12 @@ class BeaconInviteContract(unittest.TestCase):
         self.assertIn("#[serde(default)]", self.domain.split("pub struct BeaconInvitePolicy", 1)[0])
 
     def test_codes_are_ours_so_signups_are_attributable(self) -> None:
-        emission = read(ACTIONS_EXECUTION).split(
-            "crowdrelay.beacon.invite_batch_requested", 1
-        )[1][:2000]
-        self.assertIn('"codes_issued_by_crowdrelay": true', emission)
-        self.assertIn('"never_purchase_or_bot_invites": true', emission)
-        self.assertIn('"only_their_own_community": true', emission)
+        emission = read(ACTIONS_EXECUTION)
+        self.assertIn("crowdrelay.beacon.invite_batch_requested", emission)
+        contract = emission.split('"invite_contract": {', 1)[1].split("}", 1)[0]
+        self.assertIn('"codes_issued_by_crowdrelay": true', contract)
+        self.assertIn('"never_purchase_or_bot_invites": true', contract)
+        self.assertIn('"only_their_own_community": true', contract)
 
     def test_executor_capability_is_advertised_and_mapped(self) -> None:
         # The payload→capability mapping lives in execution_capabilities.rs

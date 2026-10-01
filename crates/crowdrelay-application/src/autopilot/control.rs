@@ -352,6 +352,11 @@ pub struct ChiefOfStaffOpportunity {
     pub needs_approval: bool,
 }
 
+/// How many fans a channel must have produced before its numbers are read
+/// as evidence rather than luck. Still here or gone, both count — a channel
+/// that produced twenty departures has demonstrated exactly what it produces.
+pub const MIN_CHANNEL_EVIDENCE_FANS: u32 = 4;
+
 /// How one acquisition channel actually performed.
 ///
 /// Signups and activated fans are reported side by side and never merged,
@@ -366,12 +371,19 @@ pub struct ChannelPerformance {
     /// Signed up, consented, and did something meaningful in the last 30 days.
     pub activated_30d: u32,
     /// Activated out of signed up, in basis points. `None` when there are no
-    /// signups to divide by — a rate from an empty denominator is not a zero.
+    /// signups to divide by — a rate from an empty denominator is not a zero —
+    /// and `None` when fewer than `MIN_CHANNEL_EVIDENCE_FANS` stayed, because
+    /// a rate over three people is luck wearing a percentage.
     ///
     /// Read it beside `departed`. The denominator is the people who stayed,
     /// so a channel that lost nine of every ten arrivals can still show a
     /// perfect rate over the one who remained.
     pub activation_basis_points: Option<u32>,
+    /// Did this channel put at least `MIN_CHANNEL_EVIDENCE_FANS` fans in
+    /// front of the readout — still here or departed, both count. When it
+    /// did not, every derived number is suppressed and the honest answer is
+    /// "insufficient evidence", which is not the same statement as zero.
+    pub sufficient_evidence: bool,
     /// People who arrived through this channel and have since gone —
     /// unsubscribed, or suppressed (bounced, complained, or deleted their
     /// account). Counted, never named: a deleted account is a number here
@@ -424,6 +436,9 @@ pub struct UnattributedGroup {
     /// Arrived, then left — the same count `ChannelPerformance::departed`
     /// carries, for the people we cannot attribute to a channel.
     pub departed: u32,
+    /// Same floor as `ChannelPerformance::sufficient_evidence` — an
+    /// unattributed block of three fans is insufficient evidence too.
+    pub sufficient_evidence: bool,
 }
 
 /// The band's vehicles and rates, as an operator reads and edits them.

@@ -81,7 +81,18 @@ class AcquisitionChannelContract(unittest.TestCase):
 
     def test_a_rate_from_an_empty_denominator_is_not_a_zero(self) -> None:
         self.assertIn("activation_basis_points: Option<u32>", read(APP))
-        self.assertIn("(signups > 0).then(", self.loader)
+        self.assertIn("(signups >= MIN_CHANNEL_EVIDENCE_FANS).then(", self.loader)
+
+    def test_a_thin_channel_is_insufficient_evidence_not_a_number(self) -> None:
+        # Fewer than four fans produced is luck, not signal — the flag rides
+        # the row so the console can say "insufficient evidence" rather than
+        # print a percentage over three people.
+        entry = read(APP).split("pub struct ChannelPerformance {", 1)[1].split("}", 1)[0]
+        self.assertIn("pub sufficient_evidence: bool", entry)
+        self.assertIn("MIN_CHANNEL_EVIDENCE_FANS: u32 = 4", read(APP))
+        group = read(APP).split("pub struct UnattributedGroup {", 1)[1].split("}", 1)[0]
+        self.assertIn("pub sufficient_evidence: bool", group)
+        self.assertIn("produced >= MIN_CHANNEL_EVIDENCE_FANS", self.loader)
 
     def test_the_unattributable_part_stays_in_view(self) -> None:
         # A report that hides its unknowns is how a large attribution gap goes
