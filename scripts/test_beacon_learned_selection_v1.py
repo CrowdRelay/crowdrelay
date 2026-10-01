@@ -31,6 +31,12 @@ class BeaconLearnedSelectionContract(unittest.TestCase):
         self.assertIn("checkpoint_cycle_causal_model", evaluate)
         self.assertIn("save_brain_state_checkpoint", cycle)
 
+    def test_shared_gi_model_keeps_nested_inputs_borrowed(self) -> None:
+        gi = read(GI)
+
+        self.assertIn("&causal_model.calibration.y30_interval", gi)
+        self.assertIn("&causal_model.value_exchange", gi)
+
     def test_beacon_ranking_reads_the_same_causal_identity_as_its_envelope(self) -> None:
         beacon = read(BEACON)
         envelope = read(ENVELOPE)
