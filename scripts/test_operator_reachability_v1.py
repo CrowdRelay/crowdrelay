@@ -65,11 +65,6 @@ ROUTE_FILES = [
 # how you record a decision; leaving a route out of both this list and the
 # control plane is how the check tells you nobody made one.
 EXPECTED_ADMIN_ONLY: dict[str, str] = {
-    # The organic-funnel readout (#443) is served on the admin surface only; the
-    # console has no page for it yet. Recorded as a decision so the gap is a
-    # named one: when the console gains the page, give it a control-plane twin
-    # and delete this entry.
-    "GET ops/organic-funnel": "admin readout only until the console has an organic-funnel page",
     # Financial records. Finalising ticket-sale accounting and exporting the
     # documents re-check the admin key inside every handler.
     "GET accounting/profile": "financial records stay on the admin credential",
