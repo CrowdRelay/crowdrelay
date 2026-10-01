@@ -6,25 +6,35 @@
 
 use super::*;
 
-pub(super) async fn reply_14d(
+pub(super) async fn reply_quality_14d(
     pool: &sqlx::PgPool,
     workspace_id: WorkspaceId,
     measurement: &ClaimedAutopilotMeasurement,
 ) -> Result<f64, RepositoryError> {
-    // Reply ingress already writes an immutable operator_actions row carrying
-    // the Beacon, event, disposition and actual occurred_at. Read that ledger
+    // Reply ingress writes an immutable operator_actions row carrying the
+    // Beacon, event, disposition and actual occurred_at. Read that ledger
     // rather than beacon_campaigns.updated_at/last_reply_at: a conversation
     // can have more than one reply and the mutable campaign row only keeps
     // the latest one.
     //
-    // The NOT EXISTS applies the same ownership rule booking uses: if another
-    // provider-confirmed Beacon outreach to the same person/show landed after
-    // this action but before the reply, the reply belongs to that newer send.
-    // A merely dispatched follow-up cannot steal credit from a delivered ask.
+    // Quality is signed: a positive relationship answer earns +1, a refusal
+    // earns -1, an acknowledgement with unknown intent earns 0, and silence
+    // earns 0. "Somebody answered" is not automatically success.
+    //
+    // Latest-touch ownership matches booking semantics. If a newer
+    // provider-confirmed Beacon outreach to the same person/show landed before
+    // the reply, the reply belongs to that newer send. A merely dispatched
+    // follow-up cannot steal credit from a delivered ask.
     sqlx::query_scalar::<_, f64>(
         r#"
-        SELECT CASE WHEN EXISTS (
-            SELECT 1
+        SELECT COALESCE((
+            SELECT CASE reply.details->>'disposition'
+                WHEN 'interested' THEN 1.0::double precision
+                WHEN 'partner' THEN 1.0::double precision
+                WHEN 'declined' THEN -1.0::double precision
+                WHEN 'do_not_contact' THEN -1.0::double precision
+                ELSE 0.0::double precision
+            END
             FROM operator_actions AS reply
             JOIN autopilot_actions AS original
               ON original.workspace_id=reply.workspace_id
@@ -57,7 +67,11 @@ pub(super) async fn reply_14d(
                     AND receipt.occurred_at
                         <= (reply.details->>'occurred_at')::timestamptz
               )
-        ) THEN 1.0::double precision ELSE 0.0::double precision END
+            ORDER BY (reply.details->>'occurred_at')::timestamptz DESC,
+                     reply.created_at DESC,
+                     reply.id DESC
+            LIMIT 1
+        ), 0.0::double precision)
         "#,
     )
     .bind(workspace_id.into_uuid())
