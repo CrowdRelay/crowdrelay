@@ -171,11 +171,12 @@ async fn resolve_with_metrics(
     observed: AutopilotMeasurementObservation,
 ) {
     sqlx::query(
-        "UPDATE autopilot_measurements SET status='processing', started_at=now() \
+        "UPDATE autopilot_measurements SET status='processing', started_at=now(), attempt_count=$3 \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(measurement.id.into_uuid())
+    .bind(i32::try_from(measurement.attempt_number).expect("attempt"))
     .execute(&f.pool)
     .await
     .expect("processing");

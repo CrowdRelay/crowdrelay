@@ -658,6 +658,7 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
     .execute(&f.pool)
     .await
     .expect("reprocess");
+    let measurement = ClaimedAutopilotMeasurement {attempt_number:3,..measurement};
     f.repository
         .fail_measurement(
             f.workspace_id,
@@ -746,12 +747,13 @@ async fn unobserved_harm_writes_no_keys() {
     .expect("event");
 
     let action_id = insert_dispatch(&f, "opp-harm-none", event_id, anchor).await;
-    let measurement = claimed(
+    let mut measurement = claimed(
         action_id,
         uuid::Uuid::now_v7(),
         anchor,
         anchor + time::Duration::days(7),
     );
+    measurement.attempt_number = 3;
     sqlx::query(
         r#"INSERT INTO autopilot_measurements
            (id, workspace_id, action_id, measurement_kind, subject_id,
