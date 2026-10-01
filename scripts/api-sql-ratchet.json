@@ -38,7 +38,7 @@
     "crates/crowdrelay-api/src/staff_sessions.rs": 2,
     "crates/crowdrelay-api/src/synesthesia/rewards.rs": 2,
     "crates/crowdrelay-api/src/synesthesia/run_lifecycle.rs": 2,
-    "crates/crowdrelay-api/src/ticketing/payments.rs": 4,
+    "crates/crowdrelay-api/src/ticketing/payments.rs": 3,
     "crates/crowdrelay-api/src/ticketing/reservations.rs": 5,
     "crates/crowdrelay-api/src/ticketing/validation.rs": 3
   }

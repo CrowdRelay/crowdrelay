@@ -318,7 +318,9 @@ impl PostgresFanPrivacyRepository {
     }
 
     async fn erase_contact_intents(
-        tx: &mut Transaction<'_, Postgres>, workspace_id: Uuid, fan_id: Uuid,
+        tx: &mut Transaction<'_, Postgres>,
+        workspace_id: Uuid,
+        fan_id: Uuid,
     ) -> Result<(), FanPrivacyError> {
         let event_ids = sqlx::query_scalar::<_, Uuid>(r#"
             UPDATE outbox_events AS event

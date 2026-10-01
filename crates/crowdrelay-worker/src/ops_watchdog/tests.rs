@@ -89,6 +89,9 @@ mod tests {
             social_autopost_platforms_setting: None,
             // No videos to score: both video conditions stay quiet.
             video_cards: Json(Vec::new()),
+            // The capture page is configured, so capture-channel clicks in a
+            // test do not raise `fans.capture_disabled` unless asked to.
+            capture_page_configured: true,
         }
     }
 

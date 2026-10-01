@@ -773,6 +773,29 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // The capture page is the only step between a tracked click and
+            // a fan, and it is off by default: unset, a capture-channel link
+            // redirects straight to YouTube, where nobody can be asked to
+            // join. Critical because the loss is silent and total — every
+            // click that should have met a signup form goes past it, and
+            // nothing errors. Fires only when such clicks actually arrived,
+            // so a deployment with no capture traffic is not paged for a
+            // switch that would change nothing.
+            key: "fans.capture_disabled",
+            severity: "critical",
+            summary: "Capture-channel clicks bypass the /watch signup page because it is not configured",
+            active: !snapshot.capture_page_configured
+                && capture_clicks_7d(snapshot).is_some_and(|clicks| clicks > 0),
+            details: json!({
+                "capture_clicks_7d": capture_clicks_7d(snapshot),
+                "remedy": "set CROWDRELAY_WATCH_PAGE_ORIGIN to the tenant site \
+                           origin (for Virya, https://virya.music) in the \
+                           production env file and restart api and worker; \
+                           then follow one capture-channel smart link and \
+                           confirm it lands on /watch rather than YouTube.",
+            }),
+        },
+        Condition {
             // A draft parked `awaiting_manual_post` on a platform the tenant
             // configured for autopost is the executor having failed — the
             // lane was supposed to publish it itself. Parked on a platform
