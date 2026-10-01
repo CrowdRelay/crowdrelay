@@ -529,7 +529,7 @@ async fn load_evidence_with_cursor<'e>(
         .max();
     let evidence: Vec<GrowthEvidence> = rows
         .into_iter()
-        .map(|row| {
+        .filter_map(|row| {
             // A defaulted context is not an absent one. `subreddit_type` is the
             // audience level of the causal hierarchy, and `context_hash` — the
             // exploration memory's key — is built from `days_to_event`,
@@ -548,10 +548,10 @@ async fn load_evidence_with_cursor<'e>(
                         action_id = ?row.action_id,
                         workspace_id = %workspace_id.into_uuid(),
                         "stored dispatch context could not be parsed; this outcome \
-                         will teach the default context, which is a real cell of the \
-                         hierarchy and not this row's"
+                         is excluded from learning; the stored row is preserved \
+                         and its read watermark is consumed"
                     );
-                    DispatchContext::default()
+                    return None;
                 }
             };
             // An unknown channel reads as `Other`, which is the widest bucket
@@ -599,7 +599,7 @@ async fn load_evidence_with_cursor<'e>(
                     crowdrelay_brain::ExecutionStatus::Unknown
                 })
             });
-            GrowthEvidence {
+            Some(GrowthEvidence {
                 workspace_id: workspace_id.into_uuid(),
                 opportunity_id: row.opportunity_id,
                 action_id: row.action_id,
@@ -663,7 +663,7 @@ async fn load_evidence_with_cursor<'e>(
                     })
                     .unwrap_or_default(),
                 outcome_basis: crowdrelay_brain::OutcomeBasis::parse(&row.outcome_basis),
-            }
+            })
         })
         .collect();
     Ok((evidence, read_cursor))

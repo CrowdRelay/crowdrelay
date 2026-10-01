@@ -1283,3 +1283,4 @@ async fn one_fan_with_three_devices_is_one_signal_install() -> Result<(), Box<dy
 
 include!("autopilot_world_model_postgres/community_targets.rs");
 include!("autopilot_world_model_postgres/metacognition.rs");
+include!("autopilot_world_model_postgres/learning_feedback.rs");

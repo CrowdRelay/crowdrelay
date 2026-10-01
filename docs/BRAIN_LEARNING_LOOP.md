@@ -307,8 +307,25 @@ transactional write. Its own observation cursor advances with its posterior;
 a different learner's save cannot drop its pending observations. New no-op
 horizons advance the scan watermark without increasing confidence. Causal state
 carries its consumed measurement cursor too, rather than using the later save
-time. Legacy checkpoints missing only cursor metadata retain their accumulated\nbeliefs and resume from their historical watermark. Timestamp cursors still\nrequire ordered commits: an arbitrary late commit
+time. Legacy checkpoints missing only cursor metadata retain their accumulated
+beliefs and resume from their historical watermark. Timestamp cursors still
+require ordered commits: an arbitrary late commit
 older than a consumed watermark requires a transactional horizon inbox to recover.
+
+A Y14/Y30 pair teaches the durability bridge when its last horizon arrives,
+in either order. It does not require both measurements to arrive in one cycle.
+The two effects must still use matching contrast definitions. A newer unrelated
+metric cannot repeat a pair whose horizon timestamps were already consumed.
+Malformed context rows are preserved but excluded from all evidence learners;
+the raw read watermark advances so they do not poison a real default-context
+cell or cause repeated empty recovery scans.
+
+Fan measurements are claimed only after their publication-anchored window
+matures. The bounded locked claim batch moves an immature 3/14-day window, or
+the 14-day acquisition plus 30-day survival window, to its readiness time
+without spending a failed attempt. A ready sibling can still be claimed.
+`durable_fan_growth_30d` counts account survival; meaningful engagement is a
+distinct outcome and must not be inferred from account status alone.
 
 `growth_intelligence/metacognition.rs` owns the compact assessment checkpoint.
 The completed evaluator submits an observation, while preview only projects it.

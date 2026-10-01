@@ -11,7 +11,7 @@
 //! The fan kinds are effects whose counterfactual is zero by construction:
 //! they count fans traced to the action (`attributed_fans`).
 
-mod attributed_fans;
+pub(super) mod attributed_fans;
 mod campaigns;
 mod content_synergy;
 pub(super) mod harm;

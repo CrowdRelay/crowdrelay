@@ -519,34 +519,30 @@ pub(super) fn apply_evidence_to_model_with_contrast(
                     y30_fans,
                 );
             }
-            // Y14→Y30 bridge: update when both outcomes are available.
-            //
-            // Both sides must carry the same contrast. `y30_fans` has the
-            // control arm's mean subtracted, so feeding a raw Y14 against it
-            // fits a slope between two differently-defined quantities — and
-            // that slope is what carries a Y14 effect across to Y30 in the
-            // bridged regime. A regression is only a transformation between the
-            // things it was fitted on.
-            //
-            // "Same contrast" therefore means both horizons are contrasted or
-            // neither is. Falling back to `0.0` on one side satisfied the
-            // sentence above only when the control mean happened to exist;
-            // where it did not, the pair was exactly the mismatch this comment
-            // forbids. A pair we cannot define consistently is not weak
-            // evidence for the slope, it is evidence for a different slope, so
-            // it is skipped rather than downweighted.
-            // Per-horizon gating: the bridge updates only when both the
-            // 14d and 30d horizons are new in this batch. A bridge update
-            // from a stale Y14 and a new Y30 (or vice versa) would fit a
-            // slope from two differently-timed observations.
-            if horizon_is_new(ev.replayed_14d_at, ev.resolved_at)
-                && let Some(outcome_y14) = ev.observed_incremental_fans
-                && y14_contrast.is_some() == y30_contrast.is_some()
-            {
-                let paired_y14 = outcome_y14 - y14_contrast.unwrap_or(0.0);
-                model.update_bridge(paired_y14, y30_fans);
-                bridge_updates += 1;
-            }
+        }
+
+        // A pair becomes observable when its LAST horizon arrives. Requiring
+        // both horizons to be new together excluded the normal Y14-then-Y30
+        // lifecycle. The same action's two windows are precisely the pair the
+        // bridge is fitted on; different arrival times are not different units.
+        // Gate on pair completion, independently of either treatment posterior,
+        // so reverse arrival order works too and later metric-only deltas do not
+        // repeat it. Legacy timestamps retain the resolved_at fallback.
+        let pair_completed_at = ev
+            .replayed_14d_at
+            .or(ev.resolved_at)
+            .max(ev.replayed_30d_at.or(ev.resolved_at));
+        if horizon_is_new(pair_completed_at, None)
+            && let (Some(y14), Some(y30)) = (ev.observed_incremental_fans, ev.y30_outcome())
+            // Fit two effects with the same contrast definition. A missing
+            // control on one side must not silently become a zero control.
+            && y14_contrast.is_some() == y30_contrast.is_some()
+        {
+            model.update_bridge(
+                y14 - y14_contrast.unwrap_or(0.0),
+                y30 - y30_contrast.unwrap_or(0.0),
+            );
+            bridge_updates += 1;
         }
     }
 

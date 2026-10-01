@@ -13,6 +13,7 @@ mod autopilot_approve_revision;
 mod autopilot_archive_wave;
 mod autopilot_attention_budget;
 mod autopilot_attributed_fans;
+mod autopilot_attributed_fans_windows;
 mod autopilot_attribution_outbox;
 mod autopilot_autonomy_guardrail;
 mod autopilot_beacon_discovery;

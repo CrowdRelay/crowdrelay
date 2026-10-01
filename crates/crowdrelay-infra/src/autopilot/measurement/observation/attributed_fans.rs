@@ -103,7 +103,7 @@ pub(super) async fn observe_attributed_fans(
 /// When the lineage's first tracked post went live; NULL when none did.
 /// `posted_at` is the "was live" fact in all four ledgers — a draft, a failed
 /// send or a row awaiting a manual post has none.
-const FIRST_TRACKED_POST: &str = r#"
+pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST: &str = r#"
     WITH lineage AS (
         SELECT $2::uuid AS action_id
         UNION
@@ -138,7 +138,7 @@ const FIRST_TRACKED_POST: &str = r#"
 "#;
 
 /// [`FIRST_TRACKED_POST`] with the agent-outcome branch of the lineage.
-const FIRST_TRACKED_POST_WITH_TASKS: &str = r#"
+pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST_WITH_TASKS: &str = r#"
     WITH lineage AS (
         SELECT $2::uuid AS action_id
         UNION
@@ -203,9 +203,11 @@ const ATTRIBUTED_FANS: &str = r#"
       AND conversion.action_id IN (SELECT action_id FROM lineage)
       AND conversion.occurred_at >= $3
       AND conversion.occurred_at < $3 + make_interval(days => $4)
+      AND conversion.occurred_at <= $6
+      AND fan.created_at <= $6
       AND fan.status <> 'suppressed'
       AND (NOT $5 OR (fan.status = 'active'
-                      AND fan.created_at + INTERVAL '30 days' <= $6))
+                      AND conversion.occurred_at + INTERVAL '30 days' <= $6))
 "#;
 
 /// [`ATTRIBUTED_FANS`] with the agent-outcome branch of the lineage.
@@ -238,7 +240,9 @@ const ATTRIBUTED_FANS_WITH_TASKS: &str = r#"
       AND conversion.action_id IN (SELECT action_id FROM lineage)
       AND conversion.occurred_at >= $3
       AND conversion.occurred_at < $3 + make_interval(days => $4)
+      AND conversion.occurred_at <= $6
+      AND fan.created_at <= $6
       AND fan.status <> 'suppressed'
       AND (NOT $5 OR (fan.status = 'active'
-                      AND fan.created_at + INTERVAL '30 days' <= $6))
+                      AND conversion.occurred_at + INTERVAL '30 days' <= $6))
 "#;

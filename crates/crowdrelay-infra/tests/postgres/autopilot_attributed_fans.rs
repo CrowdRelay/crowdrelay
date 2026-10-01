@@ -29,7 +29,12 @@ async fn child_action(f: &Fixture, label: &str) -> uuid::Uuid {
     child
 }
 
-async fn live_post(f: &Fixture, action_id: uuid::Uuid, slug: &str, posted_at: OffsetDateTime) {
+pub(crate) async fn live_post(
+    f: &Fixture,
+    action_id: uuid::Uuid,
+    slug: &str,
+    posted_at: OffsetDateTime,
+) {
     sqlx::query(
         r#"INSERT INTO community_posts
            (workspace_id, action_id, subreddit, title, body, status, posted_at, smart_link)
@@ -45,7 +50,7 @@ async fn live_post(f: &Fixture, action_id: uuid::Uuid, slug: &str, posted_at: Of
 }
 
 /// A fan converted through `action_id`'s link at `at`, created at `created`.
-async fn converted_fan(
+pub(crate) async fn converted_fan(
     f: &Fixture,
     action_id: uuid::Uuid,
     at: OffsetDateTime,
