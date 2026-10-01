@@ -1,7 +1,7 @@
 //! Publication maturity is queue scheduling, not a failure to retry three times.
 
 use crate::autopilot_attributed_fans::{
-    converted_fan, live_post, marketing_consent, meaningful_session,
+    converted_fan, live_post, marketing_consent, meaningful_session, outcome_child,
 };
 use crate::autopilot_measurement_spine::{insert_dispatch, queue_measurement, setup};
 use crowdrelay_application::autopilot::{AutopilotMeasurementKind, AutopilotMeasurementRepository};
@@ -279,4 +279,171 @@ async fn content_measurements_await_a_post_that_can_still_publish() {
         .await
         .expect("claim after post death");
     assert_eq!(claimed.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn every_fan_horizon_waits_for_publishable_posts_without_spending_attempts() {
+    for status in ["pending", "posting", "rate_limited", "awaiting_manual_post"] {
+        let f = setup().await.expect("fixture");
+        let now = f.now.replace_nanosecond(0).expect("whole second");
+        let finished = now - time::Duration::days(60);
+        let action = insert_dispatch(&f, &format!("window:waiting-{status}"), finished).await;
+        pending_post(&f, action, status).await;
+        let mut held = Vec::new();
+        for kind in [
+            AutopilotMeasurementKind::AgentRunFanGrowth3d,
+            AutopilotMeasurementKind::IncrementalFanGrowth3d,
+            AutopilotMeasurementKind::AgentRunFanGrowth14d,
+            AutopilotMeasurementKind::IncrementalFanGrowth14d,
+            AutopilotMeasurementKind::DurableFanGrowth30d,
+        ] {
+            held.push(queue_measurement(&f, action, kind, 0.0, finished).await);
+        }
+        let ready = queue_measurement(
+            &f,
+            action,
+            AutopilotMeasurementKind::ArtifactOutcome7d,
+            0.0,
+            finished,
+        )
+        .await;
+        let claimed = f
+            .repository
+            .claim_due_measurements(f.workspace_id, 100, now)
+            .await
+            .expect("claim");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, ready.id);
+        for measurement in held {
+            let row: (String, i32, String, time::OffsetDateTime) = sqlx::query_as(
+                "SELECT status, attempt_count, last_error_kind, due_at
+                 FROM autopilot_measurements WHERE workspace_id=$1 AND id=$2",
+            )
+            .bind(f.workspace_id.into_uuid())
+            .bind(measurement.id.into_uuid())
+            .fetch_one(&f.pool)
+            .await
+            .expect("deferred");
+            assert_eq!(row.0, "pending");
+            assert_eq!(row.1, 0);
+            assert_eq!(row.2, "awaiting_publication");
+            assert_eq!(row.3, now + time::Duration::hours(6));
+        }
+    }
+}
+
+async fn pending_post(
+    f: &crate::autopilot_measurement_spine::Fixture,
+    action: uuid::Uuid,
+    status: &str,
+) {
+    sqlx::query(
+        "INSERT INTO community_posts
+             (workspace_id, action_id, subreddit, title, body, status, smart_link)
+         VALUES ($1,$2,'r/lineage','t','b',$3,'/l/window-pending')",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .bind(status)
+    .execute(&f.pool)
+    .await
+    .expect("pending post");
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_outcome_child_published_later_keeps_the_parents_fan_measurement_alive() {
+    let f = setup().await.expect("fixture");
+    let now = f.now.replace_nanosecond(0).expect("whole second");
+    let finished = now - time::Duration::days(60);
+    let root = insert_dispatch(&f, "window:outcome-parent", finished).await;
+    let child = outcome_child(&f, root, "window:outcome-child").await;
+    pending_post(&f, child, "awaiting_manual_post").await;
+    let held = queue_measurement(
+        &f,
+        root,
+        AutopilotMeasurementKind::IncrementalFanGrowth3d,
+        0.0,
+        finished,
+    )
+    .await;
+    assert!(
+        f.repository
+            .claim_due_measurements(f.workspace_id, 100, now)
+            .await
+            .expect("await outcome publication")
+            .is_empty()
+    );
+    let posted = now + time::Duration::hours(1);
+    sqlx::query(
+        "UPDATE community_posts SET status='posted', posted_at=$3
+         WHERE workspace_id=$1 AND action_id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(child)
+    .bind(posted)
+    .execute(&f.pool)
+    .await
+    .expect("publish child");
+    let converted = posted + time::Duration::days(1);
+    converted_fan(&f, child, converted, converted, "active").await;
+    assert!(
+        f.repository
+            .claim_due_measurements(f.workspace_id, 100, now + time::Duration::hours(6))
+            .await
+            .expect("wait full fan window")
+            .is_empty()
+    );
+    let mature = posted + time::Duration::days(3);
+    let claimed = f
+        .repository
+        .claim_due_measurements(f.workspace_id, 100, mature)
+        .await
+        .expect("mature claim");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, held.id);
+    assert_eq!(claimed[0].attempt_number, 1);
+    assert_eq!(
+        f.repository
+            .observe_measurement(f.workspace_id, &claimed[0], mature)
+            .await
+            .expect("attributed child fan"),
+        1.0
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn terminal_or_unrelated_posts_cannot_keep_a_fan_measurement_waiting() {
+    let status = "failed";
+    let f = setup().await.expect("fixture");
+    let now = f.now.replace_nanosecond(0).expect("whole second");
+    let finished = now - time::Duration::days(60);
+    let root = insert_dispatch(&f, &format!("window:terminal-{status}"), finished).await;
+    let child = outcome_child(&f, root, &format!("window:dead-child-{status}")).await;
+    pending_post(&f, child, status).await;
+    let other = insert_dispatch(&f, "window:unrelated-pending", finished).await;
+    pending_post(&f, other, "pending").await;
+    queue_measurement(
+        &f,
+        root,
+        AutopilotMeasurementKind::IncrementalFanGrowth3d,
+        0.0,
+        finished,
+    )
+    .await;
+    let claimed = f
+        .repository
+        .claim_due_measurements(f.workspace_id, 100, now)
+        .await
+        .expect("nothing in lineage can publish");
+    assert_eq!(claimed.len(), 1);
+    assert!(matches!(
+        f.repository
+            .observe_measurement(f.workspace_id, &claimed[0], now)
+            .await,
+        Err(crowdrelay_application::RepositoryError::ConflictBecause(reason))
+            if reason == AutopilotMeasurementKind::NO_TRACKED_LINK
+    ));
 }

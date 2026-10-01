@@ -236,7 +236,41 @@ async fn a_child_created_from_the_runs_outcome_carries_its_fans_to_the_run() {
     let f = setup().await.expect("fixture");
     let started = f.now - time::Duration::days(14);
     let run = insert_dispatch(&f, "lineage:outcome", started).await;
-    let child = child_action(&f, "lineage:outcome-child").await;
+    let child = outcome_child(&f, run, "lineage:outcome-child").await;
+    live_post(
+        &f,
+        child,
+        "outcome-child",
+        started + time::Duration::hours(2),
+    )
+    .await;
+    let converted = started + time::Duration::days(2);
+    converted_fan(&f, child, converted, converted, "active").await;
+
+    let measurement = queue_measurement(
+        &f,
+        run,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.8,
+        started,
+    )
+    .await;
+    assert!(
+        (observe(&f, &measurement).await - 1.0).abs() < f64::EPSILON,
+        "the outcome's action is the run's lineage"
+    );
+}
+
+/// A child reachable only through task metadata, with a separate trace.
+pub(crate) async fn outcome_child(f: &Fixture, run: uuid::Uuid, label: &str) -> uuid::Uuid {
+    let child = child_action(f, label).await;
+    sqlx::query("UPDATE autopilot_actions SET trace_id=$2 WHERE workspace_id=$1 AND id=$3")
+        .bind(f.workspace_id.into_uuid())
+        .bind(uuid::Uuid::now_v7())
+        .bind(child)
+        .execute(&f.pool)
+        .await
+        .expect("independent child trace");
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS agent_service_tasks (
                id uuid PRIMARY KEY,
@@ -281,28 +315,7 @@ async fn a_child_created_from_the_runs_outcome_carries_its_fans_to_the_run() {
     .execute(&f.pool)
     .await
     .expect("outcome");
-    live_post(
-        &f,
-        child,
-        "outcome-child",
-        started + time::Duration::hours(2),
-    )
-    .await;
-    let converted = started + time::Duration::days(2);
-    converted_fan(&f, child, converted, converted, "active").await;
-
-    let measurement = queue_measurement(
-        &f,
-        run,
-        AutopilotMeasurementKind::IncrementalFanGrowth14d,
-        0.8,
-        started,
-    )
-    .await;
-    assert!(
-        (observe(&f, &measurement).await - 1.0).abs() < f64::EPSILON,
-        "the outcome's action is the run's lineage"
-    );
+    child
 }
 
 /// The window opens when the first tracked post went live. A draft published

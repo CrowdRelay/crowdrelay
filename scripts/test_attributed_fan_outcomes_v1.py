@@ -75,6 +75,20 @@ def sql_constants(source: str) -> dict[str, str]:
 
 
 class AttributedFanOutcomes(unittest.TestCase):
+    def test_publication_waiting_uses_the_same_lineage_as_live_observation(self) -> None:
+        waiting = sql_constants(
+            (ROOT / "crates/crowdrelay-infra/src/autopilot/measurement/fan_windows.rs").read_text()
+        )
+        observed = sql_constants(ATTRIBUTED.read_text())
+        for suffix in ["", "_WITH_TASKS"]:
+            live = observed["FIRST_TRACKED_POST" + suffix]
+            pending = waiting["OPEN_LINEAGE_POST" + suffix]
+            self.assertEqual(
+                live.split("SELECT MIN(post.posted_at)", 1)[0].strip(),
+                pending.split("SELECT EXISTS", 1)[0].strip(),
+                f"{suffix}: a publication cannot disappear between waiting and observation",
+            )
+
     def test_the_attributed_kinds_are_the_five_fan_kinds(self) -> None:
         self.assertEqual(attributed_kinds(), EXPECTED)
 
