@@ -1,7 +1,6 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 
 use uuid::Uuid;
-
 use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
