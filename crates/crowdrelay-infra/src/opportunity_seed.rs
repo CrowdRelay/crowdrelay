@@ -144,9 +144,9 @@ impl PostgresOpportunitySeedRepository {
                  organization, destination_url, contact_email, country_code,
                  fit_basis_points, confidence_basis_points,
                  strategic_value_basis_points, verified_destination,
-                 deadline, event_starts_at, eligible, metadata, status,
-                 source_observed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'new',$18)
+                 deadline, event_starts_at, distance_km, nights_away,
+                 eligible, metadata, status, source_observed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'new',$20)
             ON CONFLICT (workspace_id, source, external_key) DO UPDATE SET
                 -- Contact details and dates are what a re-import is for:
                 -- the sheet is the band's live record and CrowdRelay's
@@ -160,6 +160,11 @@ impl PostgresOpportunitySeedRepository {
                 country_code = COALESCE(EXCLUDED.country_code, team_opportunities.country_code),
                 deadline = COALESCE(EXCLUDED.deadline, team_opportunities.deadline),
                 event_starts_at = COALESCE(EXCLUDED.event_starts_at, team_opportunities.event_starts_at),
+                -- Routing facts are operator/scout evidence. They fill blanks
+                -- but never replace a value the tour-cost lane or operator
+                -- already established.
+                distance_km = COALESCE(team_opportunities.distance_km, EXCLUDED.distance_km),
+                nights_away = COALESCE(team_opportunities.nights_away, EXCLUDED.nights_away),
                 fit_basis_points = EXCLUDED.fit_basis_points,
                 confidence_basis_points = EXCLUDED.confidence_basis_points,
                 -- The sheet fills a blank strategic value but never
@@ -201,6 +206,8 @@ impl PostgresOpportunitySeedRepository {
         .bind(row.verified_destination)
         .bind(row.deadline.map(at_midnight))
         .bind(row.event_starts_on.map(at_midnight))
+        .bind(row.distance_km)
+        .bind(row.nights_away)
         .bind(row.eligible)
         .bind(metadata(row, source_file))
         .bind(observed_at)
