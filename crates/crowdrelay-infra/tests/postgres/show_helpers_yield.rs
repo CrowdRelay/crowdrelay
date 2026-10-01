@@ -38,7 +38,7 @@ async fn seed_earlier_community_touch(
             (workspace_id, action_id, target_id, subreddit, title, body,
              smart_link, status, posted_at)
          VALUES ($1,$2,$3,'r/earlier-touch','show','body',$4,'posted',
-                 now() - interval '4 days')",
+                 now() - interval '52 days')",
     )
     .bind(workspace_id)
     .bind(action_id)
@@ -49,7 +49,7 @@ async fn seed_earlier_community_touch(
     sqlx::query(
         "INSERT INTO click_events
             (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
-         VALUES ($1,$2,$3,now() - interval '3 days')",
+         VALUES ($1,$2,$3,now() - interval '51 days')",
     )
     .bind(workspace_id)
     .bind(link_id)

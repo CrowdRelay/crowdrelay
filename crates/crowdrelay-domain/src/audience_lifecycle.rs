@@ -56,7 +56,7 @@ pub struct FanLifecyclePolicy {
     pub minimum_hours_after_synesthesia: u32,
     pub marketing_cooldown_hours: u32,
     pub dormant_after_days: u32,
-    /// Days after signup before a fan who has referred nobody is asked to.
+    /// Minimum signup age before an engaged fan who has referred nobody is asked to.
     ///
     /// Not zero: the welcome lands first and an invite in the same breath reads
     /// as a transaction rather than a welcome.
@@ -260,10 +260,18 @@ pub fn evaluate_fan_lifecycle(
     // The ask. Placed after the welcome so it is never a fan's first contact,
     // and before dormancy so it reaches somebody still paying attention.
     //
-    // Bounded by a window rather than by a "an asked" flag because nothing records
-    // one. Outside the window the fan is left alone: someone who has invited
-    // nobody in two weeks has given an answer.
-    if snapshot.qualified_referrals == 0
+    // A welcome receipt and elapsed time are not evidence of a useful
+    // experience. Require a real fan action before asking them to share.
+    let engaged = snapshot
+        .last_paid_ticket_at
+        .into_iter()
+        .chain(snapshot.last_event_interest_at)
+        .chain(snapshot.synesthesia_completed_at)
+        .any(|at| at >= snapshot.created_at && at <= now);
+    // Bounded by a window rather than by an "asked" flag: outside the
+    // window the fan is left alone, including fans with no observed activity.
+    if engaged
+        && snapshot.qualified_referrals == 0
         && snapshot.last_marketing_touch_at.is_some()
         && now - snapshot.created_at >= Duration::days(i64::from(policy.referral_invite_after_days))
         && now - snapshot.created_at < Duration::days(i64::from(policy.referral_invite_until_days))
@@ -569,6 +577,7 @@ mod tests {
         // Welcomed six days ago: inside the ask window, past the cooldown.
         snapshot.created_at = now() - Duration::days(6);
         snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        snapshot.last_event_interest_at = Some(now() - Duration::days(1));
         assert!(matches!(
             evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::RequestMessage {
@@ -576,6 +585,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_welcome_and_signup_age_alone_never_trigger_referral_invites() {
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(6);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        for activity in [
+            None,
+            Some(now() + Duration::hours(1)),
+            Some(snapshot.created_at - Duration::hours(1)),
+        ] {
+            snapshot.last_event_interest_at = activity;
+            assert!(!matches!(
+                evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+                FanLifecycleDecision::RequestMessage {
+                    template: LifecycleTemplate::ReferralInvite,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

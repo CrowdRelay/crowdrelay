@@ -250,7 +250,7 @@ async fn signup_fan_opts(
         workspace_id,
         email: NormalizedEmail::parse(&email)?,
         display_name: Some("Attribution test fan".to_owned()),
-        city_slug: city_slug.clone(),
+        city_slug: Some(city_slug.clone()),
         locale: Some("pl-PL".to_owned()),
         campaign_id: Some(campaign_id),
         visitor_id: Some(visitor_id),

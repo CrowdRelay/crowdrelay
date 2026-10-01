@@ -557,12 +557,19 @@ impl PostgresAcquisitionRepository {
             .await?;
         self.append_consent(&mut transaction, workspace_id, fan_upsert.fan.id, command)
             .await?;
-        let city_id = self
-            .resolve_city(&mut transaction, signup.city_slug())
-            .await?;
-        let city_interest_created = self
-            .insert_city_interest(&mut transaction, workspace_id, fan_upsert.fan.id, city_id)
-            .await?;
+        if let Some(city_slug) = signup.city_slug() {
+            let city_id = self.resolve_city(&mut transaction, city_slug).await?;
+            let city_interest_created = self
+                .insert_city_interest(&mut transaction, workspace_id, fan_upsert.fan.id, city_id)
+                .await?;
+            if !fan_upsert.became_active
+                && fan_upsert.fan.status == FanStatus::Active
+                && city_interest_created
+            {
+                self.increment_city_aggregate(&mut transaction, workspace_id, city_id)
+                    .await?;
+            }
+        }
         if fan_upsert.became_active {
             self.increment_city_aggregates_for_fan(
                 &mut transaction,
@@ -570,9 +577,6 @@ impl PostgresAcquisitionRepository {
                 fan_upsert.fan.id,
             )
             .await?;
-        } else if fan_upsert.fan.status == FanStatus::Active && city_interest_created {
-            self.increment_city_aggregate(&mut transaction, workspace_id, city_id)
-                .await?;
         }
 
         let claimed_referral = self

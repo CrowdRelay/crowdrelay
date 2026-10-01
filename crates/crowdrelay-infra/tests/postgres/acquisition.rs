@@ -302,7 +302,7 @@ async fn community_conversion_occurred_at_uses_fan_created_at()
         workspace_id,
         email: NormalizedEmail::parse(&email)?,
         display_name: Some("Conv test fan".to_owned()),
-        city_slug: city_slug.clone(),
+        city_slug: Some(city_slug.clone()),
         locale: Some("pl-PL".to_owned()),
         campaign_id: Some(campaign_id),
         visitor_id: Some(visitor_id),
@@ -498,7 +498,7 @@ async fn community_conversion_stamps_the_promoted_sources_format()
         workspace_id,
         email: NormalizedEmail::parse(&email)?,
         display_name: Some("Format test fan".to_owned()),
-        city_slug: city_slug.clone(),
+        city_slug: Some(city_slug.clone()),
         locale: Some("pl-PL".to_owned()),
         campaign_id: Some(campaign_id),
         visitor_id: Some(visitor_id),
@@ -911,3 +911,4 @@ async fn redirect_context_is_scoped_to_verified_communities_and_owned_videos()
 include!("acquisition/helpers.rs");
 include!("acquisition/attribution.rs");
 include!("acquisition/attribution_channels.rs");
+include!("acquisition/email_first.rs");

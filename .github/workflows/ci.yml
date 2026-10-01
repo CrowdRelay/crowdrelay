@@ -351,6 +351,8 @@ jobs:
           cargo test --locked --all-features --package crowdrelay-infra --test postgres -- --ignored --test-threads=1 \
             click_writes_interaction_and_signup_links_it_to_the_fan \
             fan_arrival_writes_provenance_not_only_acquisition \
+            email_first_capture_confirms_without_a_city_and_preserves_attribution \
+            each_workspace_sees_its_own_candidates_and_the_shared_cold_rooms \
             single_action_attribution_is_exact \
             unlabelled_link_records_interaction_but_never_converts \
             what_left_and_what_never_did \
@@ -396,6 +398,8 @@ jobs:
           cargo test --locked --all-features --package crowdrelay-api --test postgres -- --ignored --test-threads=1 \
             an_attestation_is_anchored_once_and_the_anchor_says_so
           # Lib-module proofs that are not their own test target.
+          cargo test --locked --all-features --package crowdrelay-infra --lib -- --ignored --test-threads=1 \
+            social_performance_keeps_mature_retention_separate_from_new_arrivals
           cargo test --locked --all-features --package crowdrelay-worker --lib -- --ignored --test-threads=1 \
             postgres_outbox_round_trip \
             community_preflight_checks_membership_rules_and_credentials_without_sending

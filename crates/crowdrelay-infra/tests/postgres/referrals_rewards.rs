@@ -313,7 +313,7 @@ fn signup_command(
         workspace_id,
         email: NormalizedEmail::parse(email)?,
         display_name: None,
-        city_slug: CitySlug::parse("wroclaw")?,
+        city_slug: Some(CitySlug::parse("wroclaw")?),
         locale: Some("pl".to_owned()),
         campaign_id: None,
         visitor_id: None,

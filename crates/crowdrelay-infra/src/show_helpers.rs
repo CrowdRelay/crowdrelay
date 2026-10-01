@@ -137,6 +137,9 @@ pub struct CommunityCandidate {
     /// within seven days of a tracked click. Earlier touches do not get a
     /// second acquisition credit for the same fan.
     pub fans_acquired_90d: Option<u64>,
+    /// Active, consented fans with a meaningful action after a full 30-day window.
+    /// Immature acquisitions cannot contribute to this count.
+    pub fans_retained_30d: Option<u64>,
 }
 
 /// A room the shared registry knows in this city that this tenant has never
@@ -666,19 +669,30 @@ pub async fn who_can_help(
     // granularity, since a community carries a `country_code` and nothing
     // finer. `country` is the field name in the response so nobody mistakes
     // the match for city-local.
-    match sqlx::query_as::<_, (Uuid, String, String, String, String, String, i64, i64, i64)>(
+    match sqlx::query_as::<_, (Uuid, String, String, String, String, String, i64, i64, i64, i64)>(
         r#"
         SELECT target.id, target.community_name, target.platform, target.url,
                target.self_promo_policy, target.country_code,
                COALESCE(yield.measured_posts, 0)::bigint,
                COALESCE(yield.tracked_clicks, 0)::bigint,
-               COALESCE(yield.fans_acquired, 0)::bigint
+               COALESCE(yield.fans_acquired, 0)::bigint,
+               COALESCE(yield.fans_retained, 0)::bigint
         FROM community_outreach_targets AS target
         LEFT JOIN LATERAL (
             SELECT
                 COUNT(DISTINCT post.id)::bigint AS measured_posts,
                 COUNT(DISTINCT click.id)::bigint AS tracked_clicks,
-                COUNT(DISTINCT conversion.fan_id)::bigint AS fans_acquired
+                COUNT(DISTINCT conversion.fan_id)::bigint AS fans_acquired,
+                COUNT(DISTINCT conversion.fan_id) FILTER (
+                    WHERE fan.status = 'active'
+                      AND consent.granted
+                      AND conversion.occurred_at <= now() - INTERVAL '30 days'
+                      AND fan_has_meaningful_action_between(
+                          fan.workspace_id, fan.id, fan.normalized_email,
+                          GREATEST(now() - INTERVAL '30 days', conversion.occurred_at + INTERVAL '30 days'),
+                          now()
+                      )
+                )::bigint AS fans_retained
             FROM community_posts AS post
             JOIN smart_links AS link
               ON link.workspace_id = post.workspace_id
@@ -698,6 +712,14 @@ pub async fn who_can_help(
              AND conversion.occurred_at >= click.occurred_at
              AND conversion.occurred_at < click.occurred_at + INTERVAL '7 days'
              AND conversion.occurred_at <= now()
+            LEFT JOIN fans AS fan
+              ON fan.workspace_id = conversion.workspace_id AND fan.id = conversion.fan_id
+            LEFT JOIN LATERAL (
+                SELECT latest.granted FROM fan_consents AS latest
+                WHERE latest.workspace_id = fan.workspace_id AND latest.fan_id = fan.id
+                  AND latest.purpose = 'marketing' AND latest.recorded_at <= now()
+                ORDER BY latest.recorded_at DESC, latest.id DESC LIMIT 1
+            ) AS consent ON true
             WHERE post.workspace_id = target.workspace_id
               AND post.target_id = target.id
               AND post.status = 'posted'
@@ -708,6 +730,7 @@ pub async fn who_can_help(
           AND target.country_code = $2
           AND target.active
         ORDER BY
+            COALESCE(yield.fans_retained, 0) DESC,
             COALESCE(yield.fans_acquired, 0) DESC,
             COALESCE(yield.tracked_clicks, 0) DESC,
             target.priority DESC,
@@ -739,6 +762,7 @@ pub async fn who_can_help(
                         measured_posts,
                         tracked_clicks,
                         fans_acquired,
+                        fans_retained,
                     )| {
                         let measured_posts_90d = u32::try_from(measured_posts).unwrap_or(u32::MAX);
                         CommunityCandidate {
@@ -753,6 +777,8 @@ pub async fn who_can_help(
                                 .then_some(tracked_clicks.max(0) as u64),
                             fans_acquired_90d: (measured_posts_90d > 0)
                                 .then_some(fans_acquired.max(0) as u64),
+                            fans_retained_30d: (measured_posts_90d > 0)
+                                .then_some(fans_retained.max(0) as u64),
                         }
                     },
                 )

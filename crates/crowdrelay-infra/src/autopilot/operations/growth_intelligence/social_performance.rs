@@ -15,6 +15,9 @@ struct SocialPerformanceRow {
     reach: Option<String>,
     fans_acquired: i64,
     fans_activated_within_30d: i64,
+    fans_observed_30d: i64,
+    fans_retained_30d: i64,
+    retention_window_complete: bool,
 }
 
 pub(super) async fn load_social_content_history(
@@ -26,8 +29,8 @@ pub(super) async fn load_social_content_history(
     // scorecard's first-party attribution: action -> last-tracked-click
     // conversion -> fan. Only posts that actually acquired at least one fan
     // ride the prompt, bounded to five examples from the same 60-day window.
-    // Activated fans outrank signup-only examples. Historical activity in the
-    // acquisition window survives a later return outside that window.
+    // Retained fans outrank signup-only examples. Historical activity in each
+    // observation window survives a later return outside that window.
     let social_rows: Vec<SocialPerformanceRow> = sqlx::query_as(
         r#"
         SELECT source.metadata->>'platform' AS platform,
@@ -43,7 +46,21 @@ pub(super) async fn load_social_content_history(
                          fan.created_at,
                          LEAST($2, fan.created_at + interval '30 days')
                      )
-               )::bigint AS fans_activated_within_30d
+               )::bigint AS fans_activated_within_30d,
+               count(DISTINCT provenance.fan_id) FILTER (
+                   WHERE provenance.occurred_at <= $2 - interval '30 days'
+               )::bigint AS fans_observed_30d,
+               count(DISTINCT provenance.fan_id) FILTER (
+                   WHERE fan.status = 'active'
+                     AND consent.granted
+                     AND provenance.occurred_at <= $2 - interval '30 days'
+                     AND fan_has_meaningful_action_between(
+                         fan.workspace_id, fan.id, fan.normalized_email,
+                         GREATEST($2 - interval '30 days', provenance.occurred_at + interval '30 days'),
+                         $2
+                     )
+               )::bigint AS fans_retained_30d,
+               source.occurred_at <= $2 - interval '44 days' AS retention_window_complete
         FROM content_sources AS source
         JOIN autopilot_actions AS action
           ON action.workspace_id = source.workspace_id
@@ -82,9 +99,9 @@ pub(super) async fn load_social_content_history(
                  source.metadata->>'media_type', source.metadata->>'body',
                  source.metadata->>'reach', source.occurred_at
         HAVING count(DISTINCT provenance.fan_id) > 0
-        ORDER BY fans_activated_within_30d DESC, fans_acquired DESC,
-                 source.occurred_at DESC
-        LIMIT 5
+        ORDER BY fans_retained_30d DESC, fans_activated_within_30d DESC,
+                 fans_acquired DESC, source.occurred_at DESC
+        LIMIT 30
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -93,7 +110,7 @@ pub(super) async fn load_social_content_history(
     .await
     .map_err(map_sqlx)?;
 
-    Ok(social_rows
+    let mut history: Vec<SocialContentPerformance> = social_rows
         .into_iter()
         .map(|row| {
             let reach = parse_social_count(row.reach.as_deref())
@@ -118,7 +135,16 @@ pub(super) async fn load_social_content_history(
                 fans_acquired,
                 fans_activated_within_30d,
                 fan_conversion_per_1000_reach,
+                fans_observed_30d: u32::try_from(row.fans_observed_30d.max(0)).unwrap_or(u32::MAX),
+                fans_retained_30d: u32::try_from(row.fans_retained_30d.max(0)).unwrap_or(u32::MAX),
+                retention_window_complete: row.retention_window_complete,
             }
         })
-        .collect())
+        .collect();
+    history.sort_by_key(|post| std::cmp::Reverse(post.evidence_rank()));
+    history.truncate(5);
+    Ok(history)
 }
+
+#[cfg(test)]
+mod tests;

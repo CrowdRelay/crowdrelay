@@ -38,6 +38,35 @@ pub struct SocialContentPerformance {
     pub fans_acquired: u32,
     pub fans_activated_within_30d: u32,
     pub fan_conversion_per_1000_reach: Option<u32>,
+    /// Conversion cohorts old enough for a full 30-day retention observation.
+    pub fans_observed_30d: u32,
+    pub fans_retained_30d: u32,
+    /// False while late conversions can still enter the 30-day observation.
+    pub retention_window_complete: bool,
+}
+
+impl SocialContentPerformance {
+    /// A retention rate is evidence only after the window and denominator mature.
+    #[must_use]
+    pub fn retained_fans_per_1000_reach(&self) -> Option<u32> {
+        let reach = self.reach.filter(|reach| *reach >= 100)?;
+        if !self.retention_window_complete || self.fans_observed_30d < 4 {
+            return None;
+        }
+        Some(u32::try_from(u64::from(self.fans_retained_30d) * 1_000 / reach).unwrap_or(u32::MAX))
+    }
+
+    /// Proven retained fans beat raw volume. Missing rates are not measured zeroes.
+    #[must_use]
+    pub fn evidence_rank(&self) -> (bool, u32, u32, u32, u32) {
+        (
+            self.fans_retained_30d > 0,
+            self.retained_fans_per_1000_reach().unwrap_or(0),
+            self.fans_retained_30d,
+            self.fans_activated_within_30d,
+            self.fans_acquired,
+        )
+    }
 }
 
 /// A snapshot of one worker template's dispatch state.
@@ -390,3 +419,6 @@ impl GrowthIntelligencePolicy {
         self.template_costs.get(template_id).copied().unwrap_or(1.0)
     }
 }
+
+#[cfg(test)]
+mod social_performance_tests;
