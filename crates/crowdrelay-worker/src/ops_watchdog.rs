@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 30 conditions. The count and this list are
+//! The watchdog monitors 31 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -43,6 +43,15 @@
 //! - `delivery.event_refused` — refused deliveries carrying no named
 //!   recipient: stale consumer contracts and unrouted internal events in the
 //!   same cancelled-instead-of-dead blind spot. Warning, not critical.
+//! - `outreach.untracked_link_sent` — an outbound letter reached the send
+//!   ledger carrying a URL that is not the tenant's own redirect. The typed
+//!   composers and the emission gate refuse these, so a counted row means
+//!   something bypassed both — a hand-edited draft, an executor rewrite, a
+//!   payload written before the gate existed. A bare destination click leaves
+//!   no `click_events` row: the channel that sent it teaches the brain
+//!   nothing, which is how 111 outreach emails once produced zero
+//!   attributable fans. Critical, because the bypass is invisible everywhere
+//!   else by construction.
 //! - `growth.unscoreable_live_opportunities` — the brain scored live
 //!   opportunities and denied every one. Read off its own denied decisions, not
 //!   off a guess at why: the first version counted rows missing strategic value
