@@ -6,6 +6,7 @@
 mod agent_decision_trace;
 mod agent_outcome_guards;
 mod agent_run_assignment;
+mod beacon_candidate_scout;
 mod bootstrap_team_idempotence;
 mod city_geocoding;
 mod common;

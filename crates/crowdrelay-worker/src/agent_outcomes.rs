@@ -434,7 +434,7 @@ impl AgentOutcomeWorker {
         let producing_task = self.community_producing_task(outcome).await;
         let producing_template = producing_task
             .as_ref()
-            .map(|(template, _)| template.as_str());
+            .map(|(template, _, _)| template.as_str());
         let mut tx = self.pool.begin().await?;
         let decision_id = Uuid::now_v7();
 
@@ -525,7 +525,7 @@ impl AgentOutcomeWorker {
         if let Some(target_id) = community_target_id
             && let Some(pinned) = producing_task
                 .as_ref()
-                .and_then(|(_, prompt)| pinned_community_uuid(prompt, "target_id"))
+                .and_then(|(_, prompt, _)| pinned_community_uuid(prompt, "target_id"))
             && pinned != target_id
         {
             return Err(OutcomeRejection::UnvettedCommunity { target_id }.into());
@@ -730,7 +730,7 @@ impl AgentOutcomeWorker {
                     .and_then(|s| Uuid::parse_str(s).ok());
                 if let Some(pinned) = producing_task
                     .as_ref()
-                    .and_then(|(_, prompt)| pinned_community_uuid(prompt, "source_id"))
+                    .and_then(|(_, prompt, _)| pinned_community_uuid(prompt, "source_id"))
                     && source_uuid != Some(pinned)
                 {
                     return Err(OutcomeRejection::UnsourcedPost {

@@ -68,6 +68,21 @@ struct DiscoveredBeaconView {
     accepts_outreach: bool,
     do_not_contact: bool,
     metadata: Value,
+    /// Why the scout judged this node a fit for the event it researched.
+    /// None for candidates that arrived through other ingresses.
+    why_fit: Option<String>,
+    /// The snippet of source text the model actually saw — the proof behind
+    /// the match, so review does not have to trust the model's own summary.
+    evidence_snippet: Option<String>,
+    /// What the reviewer already concluded, when a review happened.
+    network_review: Option<Value>,
+    /// Every show this beacon has been matched to, newest first. One node
+    /// relevant to three consecutive events is a relationship with history,
+    /// not three discoveries.
+    matched_events: Value,
+    /// The one operator action this row is waiting on, derived from state —
+    /// `review_candidate`, `send_invite`, `awaiting_reply`, `partner_active`.
+    next_step: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -128,6 +143,12 @@ pub struct AdminNetworkActionRequest {
     ttl_days: Option<i32>,
     radius_km: Option<i32>,
     locale: Option<String>,
+    /// The show a partner link is being minted for. Only present when
+    /// `action` is `partner_link`.
+    event_id: Option<Uuid>,
+    /// Where the partner's link should land. Defaults to the event's public
+    /// page when `event_id` is given.
+    destination_url: Option<String>,
     /// Parsed rows from a SubmitHub Activity CSV. Only present when
     /// `action` is `import_submithub`.
     csv_rows: Option<Vec<SubmithubCsvRow>>,

@@ -208,6 +208,18 @@ pub enum BeaconOutreachPhase {
     PostShowThanks,
 }
 
+/// How the last scout run's searches went. `Ok` means the market was
+/// actually checked; `Partial`/`Failed` mean coverage is incomplete or the
+/// search never ran — the evaluator retries those sooner because the answer
+/// is not in yet. `None` means no scout task has completed for the event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoutSearchStatus {
+    Ok,
+    Partial,
+    Failed,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct BeaconDiscoverySnapshot {
     pub event_id: EventId,
@@ -216,6 +228,7 @@ pub struct BeaconDiscoverySnapshot {
     pub known_local_beacons: u16,
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_discovery_at: Option<OffsetDateTime>,
+    pub last_search_status: Option<ScoutSearchStatus>,
     pub in_flight: bool,
 }
 
@@ -269,6 +282,12 @@ pub struct BeaconCampaignPolicy {
     pub minimum_local_beacons: u16,
     /// Do not repeatedly re-scout the same market while external discovery is fresh.
     pub discovery_refresh_days: u32,
+    /// Re-scout sooner when the last run's searches did not complete:
+    /// a failed or partial search is not an answer about the market, so the
+    /// full refresh window would only hide a broken connector for two weeks.
+    /// Must stay below `discovery_refresh_days` or failed runs never get the
+    /// shorter retry.
+    pub discovery_retry_after_failed_search_days: u32,
     /// Activated fans a city needs before it is worth scouting for scene nodes
     /// without a show booked there. Measured in people who did something, not
     /// signups: a hundred dormant accounts is not a warm city.
@@ -295,6 +314,7 @@ impl Default for BeaconCampaignPolicy {
             discovery_lead_days: 60,
             minimum_local_beacons: 8,
             discovery_refresh_days: 14,
+            discovery_retry_after_failed_search_days: 3,
             // Ten active people in a city is a scene worth asking about and a
             // number a band can reach organically. Higher would mean never
             // scouting until the city no longer needs it.
@@ -356,9 +376,20 @@ pub fn evaluate_beacon_discovery(
     if snapshot.known_local_beacons >= policy.minimum_local_beacons {
         return BeaconDiscoveryDecision::Hold(BeaconDiscoveryHoldReason::EnoughKnown);
     }
-    if snapshot.last_discovery_at.is_some_and(|at| {
-        at > now || now - at < Duration::days(i64::from(policy.discovery_refresh_days))
-    }) {
+    // A failed or partial search is not a market answer — the shorter retry
+    // window applies so a broken connector cannot freeze scouting for the
+    // full refresh period. A completed-but-empty search keeps the full
+    // window: that IS the answer, and re-scouting buys nothing.
+    let refresh_days = match snapshot.last_search_status {
+        Some(ScoutSearchStatus::Partial | ScoutSearchStatus::Failed) => {
+            policy.discovery_retry_after_failed_search_days
+        }
+        Some(ScoutSearchStatus::Ok) | None => policy.discovery_refresh_days,
+    };
+    if snapshot
+        .last_discovery_at
+        .is_some_and(|at| at > now || now - at < Duration::days(i64::from(refresh_days)))
+    {
         return BeaconDiscoveryDecision::Hold(BeaconDiscoveryHoldReason::RecentlyScouted);
     }
 
@@ -553,6 +584,8 @@ const fn valid_policy(policy: BeaconCampaignPolicy) -> bool {
         && policy.minimum_local_beacons <= 50
         && policy.discovery_refresh_days > 0
         && policy.discovery_refresh_days <= policy.discovery_lead_days
+        && policy.discovery_retry_after_failed_search_days > 0
+        && policy.discovery_retry_after_failed_search_days < policy.discovery_refresh_days
         && policy.initial_lead_days >= policy.collaboration_lead_days
         && policy.collaboration_lead_days >= policy.local_push_lead_days
         && policy.local_push_lead_days > 0
@@ -603,6 +636,7 @@ mod tests {
             event_starts_at: now() + Duration::days(55),
             known_local_beacons: 3,
             last_discovery_at: None,
+            last_search_status: None,
             in_flight: false,
         };
         assert!(matches!(
@@ -622,6 +656,7 @@ mod tests {
             event_starts_at: now() + Duration::days(50),
             known_local_beacons: policy.minimum_local_beacons,
             last_discovery_at: None,
+            last_search_status: None,
             in_flight: false,
         };
         assert_eq!(
@@ -670,6 +705,57 @@ mod tests {
             above_floor.basis_points(),
             8_000,
             "500bp above the policy floor should add exactly 500bp"
+        );
+    }
+
+    #[test]
+    fn a_failed_search_retries_sooner_than_a_completed_one() {
+        let policy = BeaconCampaignPolicy::default();
+        let base = BeaconDiscoverySnapshot {
+            event_id: EventId::new(),
+            event_starts_at: now() + Duration::days(50),
+            known_local_beacons: 0,
+            last_discovery_at: Some(now() - Duration::days(5)),
+            last_search_status: None,
+            in_flight: false,
+        };
+        // Five days ago, search ran fine: still inside the 14-day refresh.
+        let ok = BeaconDiscoverySnapshot {
+            last_search_status: Some(ScoutSearchStatus::Ok),
+            ..base
+        };
+        assert_eq!(
+            evaluate_beacon_discovery(ok, policy, now()),
+            BeaconDiscoveryDecision::Hold(BeaconDiscoveryHoldReason::RecentlyScouted)
+        );
+        // Same five days, but the searches never completed: the answer is
+        // not in, so the shorter retry window has already elapsed.
+        let failed = BeaconDiscoverySnapshot {
+            last_search_status: Some(ScoutSearchStatus::Failed),
+            ..base
+        };
+        assert!(matches!(
+            evaluate_beacon_discovery(failed, policy, now()),
+            BeaconDiscoveryDecision::Request { .. }
+        ));
+        let partial = BeaconDiscoverySnapshot {
+            last_search_status: Some(ScoutSearchStatus::Partial),
+            ..base
+        };
+        assert!(matches!(
+            evaluate_beacon_discovery(partial, policy, now()),
+            BeaconDiscoveryDecision::Request { .. }
+        ));
+        // Inside the retry window even a failed run does not re-fire — the
+        // connector may simply be down, and hammering it helps nobody.
+        let just_failed = BeaconDiscoverySnapshot {
+            last_discovery_at: Some(now() - Duration::days(1)),
+            last_search_status: Some(ScoutSearchStatus::Failed),
+            ..base
+        };
+        assert_eq!(
+            evaluate_beacon_discovery(just_failed, policy, now()),
+            BeaconDiscoveryDecision::Hold(BeaconDiscoveryHoldReason::RecentlyScouted)
         );
     }
 
