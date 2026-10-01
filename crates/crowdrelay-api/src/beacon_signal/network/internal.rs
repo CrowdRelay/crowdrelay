@@ -207,6 +207,14 @@ pub async fn internal_ingest_discovered_beacons(
             .execute(&mut *tx)
             .await
             {
+                if error
+                    .as_database_error()
+                    .is_some_and(|database| database.is_foreign_key_violation())
+                {
+                    // A city_id the workspace does not have is a bad
+                    // candidate, not a platform failure.
+                    return BeaconSignalError::BadRequest.response(request_id_value);
+                }
                 tracing::warn!(%error, "Latarnik discovery candidate insert failed");
                 return BeaconSignalError::Unavailable.response(request_id_value);
             }

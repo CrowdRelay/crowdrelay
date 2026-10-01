@@ -220,6 +220,7 @@ async fn discovery_request_seeds_non_sibling_bill_mates_and_the_venue()
     assert_eq!(template_id, "event-network-scout");
     assert_eq!(tier, "premium");
     assert_eq!(metadata["action_id"], action_id.to_string());
+    assert_eq!(metadata["subject_event_id"], event_id.to_string());
     assert!(prompt.contains(&event_id.to_string()));
     assert!(prompt.contains(&city_id.to_string()));
     assert!(prompt.contains("Seed City"));

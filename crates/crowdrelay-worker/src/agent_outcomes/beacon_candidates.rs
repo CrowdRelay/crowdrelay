@@ -74,9 +74,8 @@ fn evidence_contacts(task_metadata: &Value) -> std::collections::HashSet<String>
 }
 
 /// The decision's subject pair for a beacon-candidate outcome: the new beacon
-/// when the outcome carries an item, the outcome itself when it does not (the
-/// quality guard refuses an itemless candidate before the transaction opens;
-/// the second arm only keeps the pair total).
+/// when the outcome carries an item, the outcome itself when it does not —
+/// the second arm keeps the pair total for the honest-empty envelope row.
 async fn beacon_candidate_subject(
     tx: &mut Transaction<'_, Postgres>,
     outcome: &ValidatedOutcome,

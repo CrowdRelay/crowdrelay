@@ -112,7 +112,7 @@ async fn scout_task(
         r#"
         INSERT INTO agent_service_tasks
             (id, workspace_id, template_id, model_id, prompt, status, tier, metadata)
-        VALUES ($1,$2,$3,'auto','scout brief','succeeded','basic',$4)
+        VALUES ($1,$2,$3,'auto','scout brief','completed','basic',$4)
         "#,
     )
     .bind(id)

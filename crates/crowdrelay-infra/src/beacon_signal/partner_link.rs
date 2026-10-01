@@ -48,8 +48,13 @@ pub enum PartnerLinkRefusal {
     BeaconNotApproved,
     /// `event_id` was given but no such event exists in the workspace.
     EventNotFound,
-    /// `destination_url` is required when no `event_id` is given.
+    /// `destination_url` is required when no `event_id` is given, or the
+    /// supplied one is not a usable https URL.
     DestinationRequired,
+    /// The idempotency key was already consumed — a replayed mint returns
+    /// the deterministic slug without this, but a key reused against a
+    /// different partner must not merge silently into one audit row.
+    IdempotencyConflict,
 }
 
 /// Mint (or fetch) the partner's tracked link in one transaction.
@@ -117,10 +122,16 @@ pub async fn mint_partner_link(
 
     let destination = match destination_url {
         Some(url) => {
-            // Operator-supplied destinations must be https — they point the
-            // partner's audience somewhere arbitrary.
+            // Operator-supplied destinations must be usable https URLs —
+            // they point the partner's audience somewhere arbitrary, and a
+            // hostless or malformed string would mint a live link that 302s
+            // to nowhere.
             let url = url.trim();
-            if !url.starts_with("https://") || url.len() > 2048 {
+            let usable = url.len() <= 2048
+                && url::Url::parse(url).ok().is_some_and(|parsed| {
+                    parsed.scheme() == "https" && parsed.host_str().is_some()
+                });
+            if !usable {
                 return Ok(Err(PartnerLinkRefusal::DestinationRequired));
             }
             url.to_owned()
@@ -174,10 +185,12 @@ pub async fn mint_partner_link(
     if already_existed {
         // Repoint the destination if the operator passed a different one —
         // the link is the partner's, what it points at is the campaign's.
+        // `active` is left alone: a replayed mint must not silently
+        // re-enable a link the operator switched off.
         sqlx::query(
             r#"
             UPDATE smart_links
-            SET destination_url = $3, active = true, updated_at = now()
+            SET destination_url = $3, updated_at = now()
             WHERE workspace_id = $1 AND slug = $2
               AND destination_url <> $3
             "#,
@@ -222,7 +235,7 @@ pub async fn mint_partner_link(
     .execute(&mut *tx)
     .await?;
 
-    record_operator_action(
+    let recorded = record_operator_action(
         &mut tx,
         workspace_id,
         OperatorActionRecord {
@@ -241,6 +254,9 @@ pub async fn mint_partner_link(
         },
     )
     .await?;
+    if !recorded {
+        return Ok(Err(PartnerLinkRefusal::IdempotencyConflict));
+    }
 
     tx.commit().await?;
     Ok(Ok(PartnerLinkMinted {
