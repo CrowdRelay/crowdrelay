@@ -13,7 +13,7 @@
 //! `posted_at` forward, in both directions — a post that went live before
 //! its action closed does not get a window that starts late.
 //!
-//! Content kinds also wait for publication itself, unlike the fan kinds:
+//! All seven kinds wait for publication itself:
 //! a lineage whose posts are all still publishable (pending, posting,
 //! rate-limited, awaiting a manual post) is re-checked on a short clock
 //! rather than claimed and abandoned as `no_tracked_link` — an abandoned
@@ -37,6 +37,45 @@ pub(in crate::autopilot::measurement) const OPEN_LINEAGE_POST: &str = r#"
           ON child.workspace_id = root.workspace_id
          AND child.trace_id = root.trace_id
         WHERE root.workspace_id = $1 AND root.id = $2
+    )
+    SELECT EXISTS (
+        SELECT 1 FROM community_posts
+        WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status IN ('pending', 'posting', 'rate_limited', 'awaiting_manual_post')
+        UNION ALL
+        SELECT 1 FROM social_posts
+        WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status IN ('pending', 'posting', 'rate_limited', 'awaiting_manual_post')
+        UNION ALL
+        SELECT 1 FROM telegram_posts
+        WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status IN ('pending', 'posting', 'rate_limited', 'awaiting_manual_post')
+        UNION ALL
+        SELECT 1 FROM discord_posts
+        WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status IN ('pending', 'posting', 'rate_limited', 'awaiting_manual_post')
+    )
+"#;
+
+/// The same open-post predicate with the production agent-outcome lineage.
+pub(in crate::autopilot::measurement) const OPEN_LINEAGE_POST_WITH_TASKS: &str = r#"
+    WITH lineage AS (
+        SELECT $2::uuid AS action_id
+        UNION
+        SELECT child.id
+        FROM autopilot_actions AS root
+        JOIN autopilot_actions AS child
+          ON child.workspace_id = root.workspace_id
+         AND child.trace_id = root.trace_id
+        WHERE root.workspace_id = $1 AND root.id = $2
+        UNION
+        SELECT outcome.processed_action_id
+        FROM agent_outcomes AS outcome
+        JOIN agent_service_tasks AS task ON task.id = outcome.task_id
+        WHERE outcome.workspace_id = $1
+          AND outcome.processed_action_id IS NOT NULL
+          AND task.workspace_id = $1
+          AND task.metadata->>'action_id' = $2::text
     )
     SELECT EXISTS (
         SELECT 1 FROM community_posts
@@ -81,7 +120,12 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
         FIRST_TRACKED_POST
     }
     .replace("$2", "selected.action_id");
-    let open_post = OPEN_LINEAGE_POST.replace("$2", "selected.action_id");
+    let open_post = if with_tasks {
+        OPEN_LINEAGE_POST_WITH_TASKS
+    } else {
+        OPEN_LINEAGE_POST
+    }
+    .replace("$2", "selected.action_id");
 
     format!(
         r#"
@@ -115,7 +159,8 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
                            -- so the observer answers no_tracked_link.
                            ELSE NULL
                        END
-                       ELSE CASE WHEN tracked.first_live IS NOT NULL THEN
+                       ELSE CASE
+                         WHEN tracked.first_live IS NOT NULL THEN
                            GREATEST(tracked.first_live, selected.action_finished_at)
                            + make_interval(days => CASE selected.measurement_kind
                                WHEN 'agent_run_fan_growth_3d' THEN 3
@@ -123,6 +168,9 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
                                WHEN 'durable_fan_growth_30d' THEN 44
                                ELSE 14
                              END)
+                         WHEN open_post.still_open
+                             THEN $2 + INTERVAL '{REPUBLICATION_CHECK}'
+                         ELSE NULL
                        END
                    END AS ready_at,
                    CASE
@@ -133,7 +181,11 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
                                THEN 'awaiting_publication'
                            ELSE 'awaiting_publication_window'
                        END
-                       ELSE 'awaiting_attributed_fan_window'
+                       ELSE CASE
+                           WHEN tracked.first_live IS NULL AND open_post.still_open
+                               THEN 'awaiting_publication'
+                           ELSE 'awaiting_attributed_fan_window'
+                       END
                    END AS defer_reason
             FROM selected
             LEFT JOIN LATERAL (

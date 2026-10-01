@@ -378,9 +378,7 @@ jobs:
             separate_horizons_survive_checkpoint_restart_and_teach_durability_once \
             malformed_context_is_preserved_but_cannot_teach_a_fabricated_cell \
             a_malformed_only_batch_advances_without_legacy_fallback_or_repeated_work \
-            immature_fan_windows_do_not_spend_attempts_or_block_ready_work \
-            durable_fans_wait_for_the_last_arrival_in_a_late_published_cohort \
-            a_future_conversion_does_not_teach_an_acquisition_that_has_not_happened \
+            autopilot_attributed_fans \
             two_acts_arrivals_become_one_sample \
             video_promotion \
             autopilot_relay_loader \
