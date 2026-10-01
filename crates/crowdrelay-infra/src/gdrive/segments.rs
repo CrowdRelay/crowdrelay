@@ -45,10 +45,19 @@ pub struct StagedFanContact {
 /// the cut is the provider, not a substring. `last_inbound_at` is the
 /// second signal: an address that already wrote to the band is a fan
 /// whatever provider it sits on.
+///
+/// A row whose sheet names an organisation is an organisation contact
+/// whatever mailbox it uses, and that outranks both signals. Measured in
+/// production on 2026-10-01: 699 of the 813 rows this cut returned named an
+/// organisation — press, radio, festivals, playlist curators — because Polish
+/// zines and promoters run on gmail and wp.pl, and the ones that "wrote to the
+/// band" were replying to booking mail. Every one of them would have been sent
+/// a fan opt-in invitation by the archive wave.
 const LIKELY_FAN_PREDICATE: &str = "c.fan_outcome = 'staged' \
      AND c.suggested_kind IS NULL \
      AND c.disappeared_at IS NULL \
      AND c.staged_status IS DISTINCT FROM 'inactive' \
+     AND NULLIF(btrim(c.organization), '') IS NULL \
      AND (c.normalized_email ~* '@(gmail|googlemail|wp|o2|onet|interia|hotmail|outlook|live|yahoo|icloud|me|op|tlen|poczta|gazeta|vp|proton|protonmail)\\.' \
           OR c.last_inbound_at IS NOT NULL)";
 
@@ -56,8 +65,9 @@ const LIKELY_ORG_PREDICATE: &str = "c.fan_outcome = 'staged' \
      AND c.suggested_kind IS NULL \
      AND c.disappeared_at IS NULL \
      AND c.staged_status IS DISTINCT FROM 'inactive' \
-     AND c.normalized_email !~* '@(gmail|googlemail|wp|o2|onet|interia|hotmail|outlook|live|yahoo|icloud|me|op|tlen|poczta|gazeta|vp|proton|protonmail)\\.' \
-     AND c.last_inbound_at IS NULL";
+     AND (NULLIF(btrim(c.organization), '') IS NOT NULL \
+          OR (c.normalized_email !~* '@(gmail|googlemail|wp|o2|onet|interia|hotmail|outlook|live|yahoo|icloud|me|op|tlen|poczta|gazeta|vp|proton|protonmail)\\.' \
+              AND c.last_inbound_at IS NULL))";
 
 /// How the review queue reads one staged row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
