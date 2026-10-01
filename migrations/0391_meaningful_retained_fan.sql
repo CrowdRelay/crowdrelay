@@ -10,8 +10,8 @@
 --   * an attributed conversion old enough for a full 30-day maturity window;
 --   * still an active account at observation time;
 --   * currently consented to marketing at observation time; and
---   * observed doing a canonical first-party meaningful action at or after
---     the conversion's 30-day maturity boundary.
+--   * observed doing a canonical first-party meaningful action in the current
+--     30-day activity window, never before the conversion's D30 boundary.
 --
 -- The observation timestamp is explicit so historical measurements are
 -- deterministic and future rows cannot leak into an earlier outcome.
@@ -56,7 +56,10 @@ AS $$
                   fan.workspace_id,
                   fan.id,
                   fan.normalized_email,
-                  p_acquired_at + INTERVAL '30 days',
+                  GREATEST(
+                      p_acquired_at + INTERVAL '30 days',
+                      p_observed_at - INTERVAL '30 days'
+                  ),
                   p_observed_at + INTERVAL '1 microsecond'
               )
         );
