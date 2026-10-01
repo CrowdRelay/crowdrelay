@@ -466,13 +466,39 @@ async fn gate_outward_emission(
         .map_err(map_sqlx)?
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty());
-        let untracked =
-            crowdrelay_domain::untracked_links_in(body, site_root.as_deref());
-        if !untracked.is_empty() {
-            return Err(RepositoryError::ConflictBecause(
-                "letter body carries a URL the ledger cannot see — only \
-                 {site}/l/{slug} links may reach a reader",
-            ));
+        let slugs = crowdrelay_domain::tracked_link::tracked_site_link_slugs_in(
+            body,
+            site_root.as_deref(),
+        )
+        .ok_or(RepositoryError::ConflictBecause(
+            "letter body carries a URL the ledger cannot see — only \
+             {site}/l/{slug} links may reach a reader",
+        ))?;
+        if !slugs.is_empty() {
+            // A shape is not a receipt: a typo, deleted redirect or another
+            // workspace's slug must not send a reader to a dead CTA. Lock
+            // the active rows until emission commits so deactivation cannot
+            // race this preflight. Missing links are not auto-created from
+            // edited copy: there is no trusted destination to mint.
+            let live_slugs = sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT slug
+                FROM smart_links
+                WHERE workspace_id = $1 AND slug = ANY($2) AND active
+                FOR SHARE
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(&slugs)
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if slugs.iter().any(|slug| !live_slugs.contains(slug)) {
+                return Err(RepositoryError::ConflictBecause(
+                    "letter redirect is missing or inactive in this workspace — \
+                     restore its tracked destination before sending",
+                ));
+            }
         }
     }
 
