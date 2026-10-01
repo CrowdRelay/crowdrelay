@@ -109,6 +109,7 @@ pub enum AgentOutcomeError {
 include!("agent_outcomes/rejections.rs");
 
 include!("agent_outcomes/community_ingestion.rs");
+include!("agent_outcomes/beacon_candidates.rs");
 include!("agent_outcomes/quality_guard.rs");
 include!("agent_outcomes/opportunity_findings.rs");
 include!("agent_outcomes/strategy_proposals.rs");
@@ -452,6 +453,19 @@ impl AgentOutcomeWorker {
                 // pair is total.
                 None => ("agent_outcome", outcome.id),
             },
+            OutcomeKind::BeaconCandidates => match &outcome.payload.item {
+                Some(item) => (
+                    "beacon",
+                    insert_beacon_candidate(
+                        &mut tx,
+                        outcome,
+                        item,
+                        producing_task.as_ref().map(|(_, prompt)| prompt.as_str()),
+                    )
+                    .await?,
+                ),
+                None => ("agent_outcome", outcome.id),
+            },
             _ => ("agent_outcome", outcome.id),
         };
 
@@ -626,6 +640,7 @@ impl AgentOutcomeWorker {
         // which for a poster template would even seed an empty post row.
         let action_id = if outcome.kind.disposition() == "require_approval"
             && outcome.kind != OutcomeKind::OpportunityFindings
+            && outcome.kind != OutcomeKind::BeaconCandidates
             && outcome.kind != OutcomeKind::StrategyProposals
             && outcome.payload.item.is_some()
         {

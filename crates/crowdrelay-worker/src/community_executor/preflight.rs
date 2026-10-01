@@ -15,21 +15,52 @@ impl CommunityExecutorWorker {
         action: &ClaimedAction,
     ) -> Result<Option<&'static str>, CommunityExecutorError> {
         if action.platform == "reddit" {
-            let fit: bool = sqlx::query_scalar(
-                r#"SELECT EXISTS(SELECT 1 FROM agent_outreach_targets target
-                    WHERE target.workspace_id=$1 AND target.id=$2
-                      AND target.status='promoted' AND target.screening_verdict='admitted'
-                      AND COALESCE(NULLIF(target.platform,''),'reddit')='reddit'
-                      AND (target.place_id IS NULL OR EXISTS(SELECT 1 FROM discovery_places place
-                          WHERE place.id=target.place_id AND place.workspace_id=target.workspace_id
-                            AND place.status='active' AND place.membership_state NOT IN ('rejected','not_a_fit')))
-                      AND NOT EXISTS(SELECT 1 FROM discovery_place_rules rules
-                          WHERE rules.place_id=target.place_id AND rules.self_promo_ratio_percent=0))"#,
-            ).bind(self.workspace_id.into_uuid()).bind(action.target_id).fetch_one(&self.pool).await?;
-            return Ok(if fit {
+            // Reddit is not a special bypass around the community contract.
+            // Before automation can publish, the target must still be admitted,
+            // its place must still be usable, and the moderators' own rules
+            // must have been measured recently. Missing/stale rules or a
+            // manual-only condition (flair/mod approval) park the draft for a
+            // person instead of gambling the account's standing.
+            let state: Option<(bool, bool, bool)> = sqlx::query_as(
+                r#"SELECT
+                        (target.place_id IS NULL
+                         OR (place.id IS NOT NULL
+                             AND place.status='active'
+                             AND place.membership_state NOT IN ('rejected','not_a_fit'))) AS place_ready,
+                        COALESCE(rules.self_promo_ratio_percent, 100) > 0 AS promotion_allowed,
+                        COALESCE(
+                            rules.verified_at >= now() - interval '30 days'
+                            AND NOT rules.requires_approval,
+                            false
+                        ) AS rules_ready
+                   FROM agent_outreach_targets target
+                   LEFT JOIN discovery_places place
+                     ON place.id=target.place_id
+                    AND place.workspace_id=target.workspace_id
+                   LEFT JOIN discovery_place_rules rules
+                     ON rules.place_id=target.place_id
+                   WHERE target.workspace_id=$1 AND target.id=$2
+                     AND target.status='promoted'
+                     AND target.screening_verdict='admitted'
+                     AND COALESCE(NULLIF(target.platform,''),'reddit')='reddit'"#,
+            )
+            .bind(self.workspace_id.into_uuid())
+            .bind(action.target_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some((place_ready, promotion_allowed, rules_ready)) = state else {
+                return Ok(Some("community_readiness_missing"));
+            };
+            if !place_ready {
+                return Ok(Some("community_readiness_missing"));
+            }
+            if !promotion_allowed {
+                return Ok(Some("community_self_promotion_not_allowed"));
+            }
+            return Ok(if rules_ready {
                 None
             } else {
-                Some("community_readiness_missing")
+                Some("community_rules_need_manual_verification_or_approval")
             });
         }
         let place: Option<(String, String, bool, bool)> = sqlx::query_as(

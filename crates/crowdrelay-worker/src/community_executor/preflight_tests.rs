@@ -88,6 +88,71 @@ mod promotion_preflight_tests {
         sqlx::query("INSERT INTO agent_service_credentials(workspace_id,provider,credential_type,encrypted_value) VALUES($1,'forum:forum.example','test','test-only-not-a-credential')")
             .bind(ws.into_uuid()).execute(&pool).await?;
         assert_eq!(executor.preflight_community_send(&action).await?, None);
+
+        // Reddit must not auto-publish merely because the target is admitted.
+        // Its own measured rules are a prerequisite, and stale/manual-only
+        // rules park the post for a person rather than risking a removal.
+        let reddit_place = Uuid::now_v7();
+        let reddit_target = Uuid::now_v7();
+        sqlx::query("INSERT INTO discovery_places(id,workspace_id,place_kind,platform,name,url,membership_state) VALUES($1,$2,'subreddit','reddit','Metal Test','https://www.reddit.com/r/metaltest','joined')")
+            .bind(reddit_place).bind(ws.into_uuid()).execute(&pool).await?;
+        sqlx::query("INSERT INTO agent_outreach_targets(id,workspace_id,target_kind,display_name,platform,subreddit,place_id,status,screening_verdict) VALUES($1,$2,'community','Metal Test','reddit','metaltest',$3,'promoted','admitted')")
+            .bind(reddit_target).bind(ws.into_uuid()).bind(reddit_place).execute(&pool).await?;
+        let reddit_action = ClaimedAction {
+            id: Uuid::now_v7(),
+            action_id: Uuid::now_v7(),
+            claimed_from: "pending".to_owned(),
+            target_id: Some(reddit_target),
+            platform: "reddit".to_owned(),
+            subreddit: "metaltest".to_owned(),
+            place_url: None,
+            title: "Video".to_owned(),
+            body: "Grounded community context".to_owned(),
+            smart_link: None,
+            image_url: None,
+            media_id: None,
+            source_url: None,
+            relay_source_id: None,
+            trace_id: None,
+            causation_id: None,
+            decision_id: None,
+        };
+
+        assert_eq!(
+            executor.preflight_community_send(&reddit_action).await?,
+            Some("community_rules_need_manual_verification_or_approval"),
+            "unmeasured subreddit rules must never be an auto-publish permission"
+        );
+        sqlx::query("INSERT INTO discovery_place_rules(place_id,verified_at,self_promo_ratio_percent,requires_approval,rules_summary) VALUES($1,now(),10,true,'Self promotion :: flair is required')")
+            .bind(reddit_place).execute(&pool).await?;
+        assert_eq!(
+            executor.preflight_community_send(&reddit_action).await?,
+            Some("community_rules_need_manual_verification_or_approval"),
+            "a flair/mod gate belongs to a human"
+        );
+        sqlx::query("UPDATE discovery_place_rules SET requires_approval=false WHERE place_id=$1")
+            .bind(reddit_place).execute(&pool).await?;
+        assert_eq!(
+            executor.preflight_community_send(&reddit_action).await?,
+            None,
+            "fresh measured rules that permit promotion unlock the lane"
+        );
+        sqlx::query("UPDATE discovery_place_rules SET verified_at=now()-interval '31 days' WHERE place_id=$1")
+            .bind(reddit_place).execute(&pool).await?;
+        assert_eq!(
+            executor.preflight_community_send(&reddit_action).await?,
+            Some("community_rules_need_manual_verification_or_approval"),
+            "stale rules are not permission to publish"
+        );
+        sqlx::query("UPDATE discovery_place_rules SET verified_at=now(),self_promo_ratio_percent=0 WHERE place_id=$1")
+            .bind(reddit_place).execute(&pool).await?;
+        let reddit_refusal = executor
+            .preflight_community_send(&reddit_action)
+            .await?
+            .expect("promotion-ban rules refuse the post");
+        assert_eq!(reddit_refusal, "community_self_promotion_not_allowed");
+        assert!(community_preflight_refused(reddit_refusal));
+
         sqlx::query("UPDATE discovery_place_rules SET requires_approval=true WHERE place_id=$1")
             .bind(place)
             .execute(&pool)

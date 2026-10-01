@@ -56,6 +56,24 @@ pub struct VideoScorecardView {
     /// The account's Reddit standing the way the executor reads it — a halted
     /// account is why `RedditHalted` shows in `missing`.
     pub reddit: VideoRedditStanding,
+    /// The publication-measurement lifecycle of this video's posts, counted
+    /// per stage — `awaiting_publication`, `no_tracked_link`, `maturing`,
+    /// `mature_zero`, `conversions`, plus the pipeline-gap readings
+    /// `never_published`, `no_measurement`, `measurement_failed`. Empty when
+    /// the video has no posts yet. A card whose posts all read `maturing`
+    /// has not told the learner anything — it is not a zero.
+    pub measurement_stages: Vec<PublicationStageSummary>,
+}
+
+/// One stage bucket of a video's publication-measurement pipeline.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublicationStageSummary {
+    /// The stage text — same vocabulary the ops queue aggregates.
+    pub stage: String,
+    /// Posts of this video sitting in the stage.
+    pub posts: u64,
+    /// Of those, how many already carry the learner's outcome row.
+    pub accepted: u64,
 }
 
 /// The video's tracked-link clicks split by the lane that carried the link.

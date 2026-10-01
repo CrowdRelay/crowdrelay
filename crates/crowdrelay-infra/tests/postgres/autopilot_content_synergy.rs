@@ -202,116 +202,168 @@ async fn content_link_clicks_counts_only_the_posts_own_traffic() {
     assert_eq!(observed, 3.0);
 }
 
-/// The same tracked link must answer the actual North-Star question too:
-/// which distinct fans signed up after clicking this action's content.
-/// Repeat clicks by one visitor and unrelated workspace traffic cannot
-/// inflate the result.
-#[tokio::test]
-#[ignore = "postgres"]
-async fn content_fan_acquisition_counts_distinct_fans_from_the_posts_link() {
-    let f = setup().await.expect("fixture");
-    let workspace = f.workspace_id.into_uuid();
-    let action_id = insert_action(
-        &f,
-        "agent.content.request",
-        serde_json::json!({
-            "kind": "request_agent_content",
-            "task_id": uuid::Uuid::now_v7(),
-            "draft": {"platform": "instagram", "text": "new single out", "cta_url": "https://virya.test/join"},
-        }),
+/// One fan row plus the canonical conversion row the ledger writes at
+/// signup — `record_community_conversion`'s exact shape, seeded directly so
+/// the test exercises the read path the production reader shares.
+async fn insert_credited_fan(
+    f: &Fixture,
+    action_id: uuid::Uuid,
+    slug: &str,
+    email: &str,
+    status: &str,
+    signed_up_at: OffsetDateTime,
+) {
+    let fan_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status, created_at)
+         VALUES ($1,$2,$3,$4) RETURNING id",
     )
-    .await;
-    let link_id = insert_smart_link(&f, "fan-post-link").await;
-    let other_link = insert_smart_link(&f, "fan-other-link").await;
+    .bind(f.workspace_id.into_uuid())
+    .bind(email)
+    .bind(status)
+    .bind(signed_up_at)
+    .fetch_one(&f.pool)
+    .await
+    .expect("fan");
     sqlx::query(
-        r#"INSERT INTO social_posts
-           (workspace_id, action_id, platform, content, smart_link, smart_link_id,
-            status, posted_at)
-           VALUES ($1,$2,'instagram','{}'::jsonb,'/l/fan-post-link',$3,'posted',$4)"#,
+        "INSERT INTO fan_provenance_events
+         (workspace_id, fan_id, event_kind, channel, source_target, action_id,
+          attribution_method, attribution_confidence, occurred_at)
+         VALUES ($1,$2,'conversion','instagram',$3,$4,'last_tracked_click',1.0,$5)",
     )
-    .bind(workspace)
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(slug)
     .bind(action_id)
-    .bind(link_id)
-    .bind(f.now - time::Duration::days(13))
+    .bind(signed_up_at)
     .execute(&f.pool)
     .await
-    .expect("social post");
+    .expect("conversion");
+}
 
+/// The canonical rule: a person who clicked post A and then post B before
+/// signing up converted once, and the ledger credits B — the last tracked
+/// click. The measurement must agree with the ledger exactly: A reads zero
+/// (a real measured zero — the post was live and tracked), B reads one.
+/// Repeat clicks, suppressed fans and other-workspace traffic cannot
+/// inflate either.
+#[tokio::test]
+#[ignore = "postgres"]
+async fn content_fan_acquisition_credits_only_the_last_clicked_post() {
+    let f = setup().await.expect("fixture");
+    let workspace = f.workspace_id.into_uuid();
     let anchor = f.now - time::Duration::days(14);
-    for (ordinal, link, visitor, click_day, signup_day) in [
-        (1, link_id, uuid::Uuid::now_v7(), 1, 2),
-        (2, link_id, uuid::Uuid::now_v7(), 3, 4),
-        (3, other_link, uuid::Uuid::now_v7(), 1, 2),
-    ] {
+    let posted = f.now - time::Duration::days(13);
+
+    // Post A and post B, each owned by its own action.
+    let mut action_ids = Vec::new();
+    for slug in ["post-a", "post-b"] {
+        let action_id = insert_action(
+            &f,
+            "agent.content.request",
+            serde_json::json!({
+                "kind": "request_agent_content",
+                "task_id": uuid::Uuid::now_v7(),
+                "draft": {"platform": "instagram", "text": slug, "cta_url": "https://virya.test/join"},
+            }),
+        )
+        .await;
+        let link_id = insert_smart_link(&f, slug).await;
         sqlx::query(
-            "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+            r#"INSERT INTO social_posts
+               (workspace_id, action_id, platform, content, smart_link, smart_link_id,
+                status, posted_at)
+               VALUES ($1,$2,'instagram','{}'::jsonb,$3,$4,'posted',$5)"#,
+        )
+        .bind(workspace)
+        .bind(action_id)
+        .bind(format!("/l/{slug}"))
+        .bind(link_id)
+        .bind(posted)
+        .execute(&f.pool)
+        .await
+        .expect("social post");
+        action_ids.push(action_id);
+    }
+    let action_a = action_ids[0];
+    let action_b = action_ids[1];
+
+    // The visitor clicked A's link and then B's before signing up — the
+    // ledger credits B. A keeps the click as journey evidence, not a
+    // conversion.
+    let visitor = uuid::Uuid::now_v7();
+    for (link_slug, day) in [("post-a", 1), ("post-b", 2)] {
+        let link_id: uuid::Uuid =
+            sqlx::query_scalar("SELECT id FROM smart_links WHERE workspace_id = $1 AND slug = $2")
+                .bind(workspace)
+                .bind(link_slug)
+                .fetch_one(&f.pool)
+                .await
+                .expect("link");
+        sqlx::query(
+            "INSERT INTO click_events
+             (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
              VALUES ($1,$2,$3,$4)",
         )
         .bind(workspace)
-        .bind(link)
+        .bind(link_id)
         .bind(visitor)
-        .bind(anchor + time::Duration::days(click_day))
+        .bind(anchor + time::Duration::days(day))
         .execute(&f.pool)
         .await
         .expect("click");
-
-        // One real fan per visitor. The unrelated-link fan must not count.
-        let fan_id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO fans (workspace_id, normalized_email, status)
-             VALUES ($1,$2,'active') RETURNING id",
-        )
-        .bind(workspace)
-        .bind(format!("content-fan-{ordinal}@example.test"))
-        .fetch_one(&f.pool)
-        .await
-        .expect("fan");
-        sqlx::query(
-            "INSERT INTO fan_acquisition_events
-             (workspace_id, fan_id, source, request_id, anonymous_visitor_id, occurred_at)
-             VALUES ($1,$2,'public_signup',$3,$4,$5)",
-        )
-        .bind(workspace)
-        .bind(fan_id)
-        .bind(uuid::Uuid::now_v7())
-        .bind(visitor)
-        .bind(anchor + time::Duration::days(signup_day))
-        .execute(&f.pool)
-        .await
-        .expect("acquisition");
-
-        if link == link_id && ordinal == 1 {
-            // Repeat click by the same visitor; DISTINCT fan_id keeps this at
-            // one acquired fan rather than two.
-            sqlx::query(
-                "INSERT INTO click_events
-                 (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
-                 VALUES ($1,$2,$3,$4)",
-            )
-            .bind(workspace)
-            .bind(link_id)
-            .bind(visitor)
-            .bind(anchor + time::Duration::days(1))
-            .execute(&f.pool)
-            .await
-            .expect("repeat click");
-        }
     }
+    insert_credited_fan(
+        &f,
+        action_b,
+        "post-b",
+        "winner@example.test",
+        "active",
+        anchor + time::Duration::days(3),
+    )
+    .await;
+    // A second fan credited to B — suppressed since: consent withdrawal
+    // removes them from the count entirely.
+    insert_credited_fan(
+        &f,
+        action_b,
+        "post-b",
+        "gone@example.test",
+        "suppressed",
+        anchor + time::Duration::days(4),
+    )
+    .await;
 
-    let observed = f
+    let observed_b = f
         .repository
         .observe_measurement(
             f.workspace_id,
             &measurement(
                 &f,
-                action_id,
+                action_b,
                 AutopilotMeasurementKind::ContentFanAcquisition7d,
-                action_id,
+                action_b,
             ),
             f.now,
         )
         .await
-        .expect("tracked content fan acquisition observes cleanly");
-    assert_eq!(observed, 2.0);
+        .expect("tracked acquisition observes cleanly");
+    assert_eq!(observed_b, 1.0, "only the last-clicked post is credited");
+
+    let observed_a = f
+        .repository
+        .observe_measurement(
+            f.workspace_id,
+            &measurement(
+                &f,
+                action_a,
+                AutopilotMeasurementKind::ContentFanAcquisition7d,
+                action_a,
+            ),
+            f.now,
+        )
+        .await
+        .expect("a tracked post's zero observes cleanly");
+    assert_eq!(observed_a, 0.0, "the earlier click is journey, not credit");
 }
 
 /// A community post carries no `smart_link_id` — only the `/l/{slug}` path
@@ -344,7 +396,7 @@ async fn content_link_clicks_reads_a_community_posts_slug_link() {
     )
     .bind(workspace)
     .bind(action_id)
-    .bind(f.now - time::Duration::days(10))
+    .bind(f.now - time::Duration::days(14))
     .execute(&f.pool)
     .await
     .expect("community post");
@@ -416,7 +468,7 @@ async fn content_link_clicks_reads_telegram_and_discord_link_ids() {
         .bind(workspace)
         .bind(action_id)
         .bind(link_id)
-        .bind(anchor + time::Duration::days(2))
+        .bind(anchor)
         .execute(&f.pool)
         .await
         .unwrap_or_else(|e| panic!("{table} post: {e}"));

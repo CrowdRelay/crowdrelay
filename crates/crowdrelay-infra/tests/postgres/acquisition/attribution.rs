@@ -598,3 +598,92 @@ async fn duplicate_community_posts_picks_most_recently_posted()
     Ok(())
 }
 
+
+// ── Replay: a restarted signup must not double-write the conversion ────
+
+/// A signup retried after a crash — new idempotency key, same visitor and
+/// email — runs the conversion write again. The write-side NOT EXISTS guard
+/// plus the `fan_provenance_one_last_click` index keep the ledger at one
+/// `last_tracked_click` row per fan: replay-safe by construction, not by
+/// callers remembering.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn a_replayed_signup_writes_one_last_click_conversion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_config) = attribution_pool().await?;
+    let suffix = Uuid::now_v7().simple().to_string();
+    let (workspace_id, workspace_slug, city_slug, campaign_id, link_a, _) =
+        seed_attribution_scope(&pool, &suffix).await?;
+    let slug_a = format!("link-a-{suffix}");
+    seed_action_and_post(&pool, workspace_id, link_a, &slug_a, true).await?;
+
+    let visitor_id = VisitorId::new();
+    record_click(
+        &pool,
+        &database_config,
+        workspace_id,
+        &workspace_slug,
+        link_a,
+        &slug_a,
+        campaign_id,
+        visitor_id,
+    )
+    .await?;
+
+    // First signup writes the conversion. The replayed signup — same fan,
+    // new idempotency key — must not add a second last_click row.
+    let fan_id = signup_fan(
+        &pool,
+        &database_config,
+        workspace_id,
+        &workspace_slug,
+        &city_slug,
+        campaign_id,
+        visitor_id,
+        &format!("{suffix}-a"),
+    )
+    .await?;
+    let _replayed = signup_fan(
+        &pool,
+        &database_config,
+        workspace_id,
+        &workspace_slug,
+        &city_slug,
+        campaign_id,
+        visitor_id,
+        &format!("{suffix}-b"),
+    )
+    .await?;
+
+    let last_click_rows: i64 = sqlx::query_scalar(
+        r#"SELECT count(*) FROM fan_provenance_events
+           WHERE workspace_id = $1 AND fan_id = $2
+             AND event_kind = 'conversion'
+             AND attribution_method = 'last_tracked_click'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(last_click_rows, 1, "replay must not multiply the conversion");
+
+    // The storage layer agrees: a direct duplicate insert violates the
+    // partial unique index rather than landing a second credited row.
+    let duplicate = sqlx::query(
+        r#"INSERT INTO fan_provenance_events
+           (workspace_id, fan_id, event_kind, channel, source_target,
+            attribution_method, attribution_confidence, occurred_at)
+           VALUES ($1, $2, 'conversion', 'reddit', 'x',
+                   'last_tracked_click', 1.0, now())"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "the unique index refuses a second last_click conversion"
+    );
+
+    Ok(())
+}

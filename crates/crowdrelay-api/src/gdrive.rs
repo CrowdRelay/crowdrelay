@@ -106,6 +106,12 @@ pub struct DriveContact {
     /// P.6: the matched room's play record across every tenant. `null`
     /// when no venue matched or the read did not run.
     venue_prior: Option<crowdrelay_infra::cross_tenant_priors::VenuePrior>,
+    /// An operator individually confirmed this address is fan material —
+    /// the qualification a registry match or a missing declaration forces.
+    /// `null` means unqualified: a bulk fan promote will not take it.
+    fan_qualified_at: Option<String>,
+    /// The channel the qualification came through (`control_plane`).
+    fan_qualified_by: Option<String>,
 }
 
 /// The registry joins counted over the whole staging population — the page
@@ -154,6 +160,25 @@ pub struct DismissRequest {
     destination: String,
 }
 
+/// `POST /contacts/{id}/qualify` — the operator's individual fan verdict.
+/// `qualified: true` admits the contact to the `likely_fan` population
+/// (registry match and all); `false` lifts a qualification given earlier.
+/// It decides invitation eligibility only — consent still comes from the
+/// double opt-in the promote fires.
+#[derive(Deserialize)]
+pub struct QualifyRequest {
+    qualified: bool,
+}
+
+/// `POST /files/{file_id}/audience` — declares a whole source file
+/// fan-origin (`"fan_origin"`), which is the auto-qualification half of the
+/// segment rule. `null` retracts. Only `fan_origin` exists today: the
+/// declaration that must never be inferred from a filename.
+#[derive(Deserialize)]
+pub struct FileAudienceRequest {
+    audience_role: Option<String>,
+}
+
 fn contact_json(view: crowdrelay_infra::gdrive::DriveContactView) -> DriveContact {
     let row = view.row;
     DriveContact {
@@ -180,6 +205,11 @@ fn contact_json(view: crowdrelay_infra::gdrive::DriveContactView) -> DriveContac
         counterparty_worked_with: row.counterparty_worked_with,
         counterparty_prior: view.counterparty_prior,
         venue_prior: view.venue_prior,
+        fan_qualified_at: row.fan_qualified_at.map(|at| {
+            at.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()
+        }),
+        fan_qualified_by: row.fan_qualified_by,
     }
 }
 
@@ -472,6 +502,16 @@ pub async fn promote_contact(
                 return Problem::service_unavailable(request_id_value)
                     .private()
                     .into_response();
+            }
+            // A per-row promote is the operator's individual confirmation —
+            // record it so the qualification audit does not depend on the
+            // operator clicking qualify first.
+            if contact.fan_qualified_at.is_none()
+                && let Err(error) = repo
+                    .set_fan_qualification(workspace_id, contact_id, true, "control_plane")
+                    .await
+            {
+                tracing::warn!(%error, "gdrive fan qualification stamp failed");
             }
             (
                 StatusCode::OK,
@@ -995,5 +1035,81 @@ pub async fn dismiss_contact(
         )
             .into_response(),
         Err(_) => Problem::bad_request(request_id_value).into_response(),
+    }
+}
+
+/// POST /contacts/{id}/qualify — `{qualified: bool}`. The operator's
+/// individual fan verdict on one staged row: the only qualification a
+/// registry-matched or undeclared contact can earn. Touching
+/// `fan_qualified_at` alone moves the row between `likely_fan` and the
+/// review pile — outcomes and consent are different facts and stay put.
+pub async fn qualify_contact(
+    State(state): State<crate::AppState>,
+    Path(contact_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<QualifyRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let repo = repo(&state);
+    match repo
+        .set_fan_qualification(workspace_id, contact_id, request.qualified, "control_plane")
+        .await
+    {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "fan_qualified_at": row.fan_qualified_at
+                    .map(|at| at.format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default()),
+                "fan_qualified_by": row.fan_qualified_by,
+            })),
+        )
+            .into_response(),
+        Err(_) => Problem::bad_request(request_id_value).into_response(),
+    }
+}
+
+/// POST /files/{file_id}/audience — `{audience_role: "fan_origin"|null}`.
+/// Declares every contact the file contributes as fan-origin — the
+/// auto-qualification half of the segment rule, vetoed per row by an
+/// organisation name or a registry match. `null` retracts. The file must
+/// have been scanned already — you cannot declare a file the connector
+/// has not read.
+pub async fn set_file_audience(
+    State(state): State<crate::AppState>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<FileAudienceRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(request_id_value).into_response();
+    };
+    match request.audience_role.as_deref() {
+        None | Some("fan_origin") => {}
+        Some(_) => return Problem::bad_request(request_id_value).into_response(),
+    }
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let repo = repo(&state);
+    match repo
+        .set_file_audience_role(workspace_id, &file_id, request.audience_role.as_deref())
+        .await
+    {
+        Ok(0) => Problem::bad_request(request_id_value).into_response(),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "file_id": file_id,
+                "audience_role": request.audience_role,
+            })),
+        )
+            .into_response(),
+        Err(_) => Problem::service_unavailable(request_id_value)
+            .private()
+            .into_response(),
     }
 }

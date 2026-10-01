@@ -87,6 +87,95 @@ async fn load_unpublished_drafts(
     .map_err(OpsError::sqlx)
 }
 
+/// One channel's publication-measurement pipeline, counted by stage.
+///
+/// The stage is `publication_stage::PUBLICATION_STAGE_SQL`'s per-post
+/// reading — `awaiting_publication` while the post can still go live,
+/// `no_tracked_link` when it published uninstrumented, `maturing` inside
+/// the seven-day window, `mature_zero`/`conversions` once the canonical
+/// ledger has answered. `accepted` counts the posts whose outcome row the
+/// learner already holds — a mature stage without it is a gap to alarm on,
+/// not a quieter kind of zero.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct PublicationStageChannel {
+    /// A community platform (`reddit`, `lemmy`, `forum`, …), `telegram`,
+    /// `discord`, or a social platform — `instagram`, `facebook`, `x`.
+    channel: String,
+    stage: String,
+    posts: i64,
+    /// Of these, how many already carry an `autopilot_outcomes` row — the
+    /// learner's input. Always all of them under `mature_zero`/`conversions`
+    /// (the outcome commits with the success), so a shortfall anywhere else
+    /// means the pipeline lost a result.
+    accepted: i64,
+}
+
+/// The publication-measurement pipeline per channel — the last 30 days of
+/// posts, one stage each.
+///
+/// The representative measurement is `content_fan_acquisition_7d` when it
+/// exists, else `content_link_clicks_7d`: both share the publication clock,
+/// and the acquisition arm is the one that feeds variant learning. A post
+/// with neither reads `no_measurement`.
+async fn load_publication_stages(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<PublicationStageChannel>, OpsError> {
+    let stage = crowdrelay_infra::publication_stage::PUBLICATION_STAGE_SQL;
+    let sql = format!(
+        r#"
+        SELECT channel, stage, count(*)::bigint AS posts,
+               count(*) FILTER (WHERE accepted)::bigint AS accepted
+        FROM (
+            SELECT DISTINCT ON (post.id)
+                   post.channel,
+                   ({stage}) AS stage,
+                   outcome.id IS NOT NULL AS accepted
+            FROM (
+                SELECT id, workspace_id, action_id, platform AS channel,
+                       status, posted_at, created_at FROM community_posts
+                WHERE workspace_id = $1
+                  AND created_at > now() - INTERVAL '30 days'
+                UNION ALL
+                SELECT id, workspace_id, action_id, platform, status, posted_at, created_at
+                FROM social_posts
+                WHERE workspace_id = $1
+                  AND created_at > now() - INTERVAL '30 days'
+                UNION ALL
+                SELECT id, workspace_id, action_id, 'telegram', status, posted_at, created_at
+                FROM telegram_posts
+                WHERE workspace_id = $1
+                  AND created_at > now() - INTERVAL '30 days'
+                UNION ALL
+                SELECT id, workspace_id, action_id, 'discord', status, posted_at, created_at
+                FROM discord_posts
+                WHERE workspace_id = $1
+                  AND created_at > now() - INTERVAL '30 days'
+            ) AS post
+            LEFT JOIN autopilot_measurements AS measurement
+              ON measurement.workspace_id = post.workspace_id
+             AND measurement.action_id = post.action_id
+             AND measurement.measurement_kind IN
+                 ('content_fan_acquisition_7d', 'content_link_clicks_7d')
+            LEFT JOIN autopilot_outcomes AS outcome
+              ON outcome.workspace_id = measurement.workspace_id
+             AND outcome.measurement_id = measurement.id
+            ORDER BY post.id,
+                     CASE measurement.measurement_kind
+                         WHEN 'content_fan_acquisition_7d' THEN 0 ELSE 1
+                     END
+        ) AS staged
+        GROUP BY channel, stage
+        ORDER BY channel, stage
+        "#,
+    );
+    sqlx::query_as::<_, PublicationStageChannel>(&sql)
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+        .map_err(OpsError::sqlx)
+}
+
 /// The post queue's machine half, per channel.
 ///
 /// `pending`, `posting` and `rate_limited` are in flight — claimed, sending,

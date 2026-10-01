@@ -75,6 +75,7 @@ pub mod promotion_campaign;
 pub mod promotion_policy;
 pub mod proofs;
 pub mod provider_verification;
+pub mod publication_stage;
 pub mod push_preferences;
 pub mod reddit_proxy;
 pub mod referrals;

@@ -43,7 +43,8 @@ deploy_lock_acquire() {
 deploy_lock_release() {
   ssh -T "$ORACLE" 'sudo bash /usr/local/bin/crowdrelay-deploy-lock.sh release' 2>/dev/null || true
 }
-trap deploy_lock_release EXIT
+EXPORT_DIR=""
+trap 'deploy_lock_release; [[ -z "$EXPORT_DIR" ]] || rm -rf "$EXPORT_DIR"' EXIT
 
 require() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
@@ -54,20 +55,55 @@ for command in git gh ssh bash sha256sum; do require "$command"; done
 [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail 'CROWDRELAY_DEPLOY_POLL_SECONDS must be a positive integer'
 
 cd "$ROOT_DIR"
+# The invoking checkout — kept separately because actions mode repoints
+# ROOT_DIR at an exported revision tree that is not a git repository.
+SOURCE_DIR="$ROOT_DIR"
 [[ -f "$CANONICAL" && ! -L "$CANONICAL" ]] || fail "canonical deploy is missing or unsafe: $CANONICAL"
 [[ -f "$BLUEGREEN" && ! -L "$BLUEGREEN" ]] || fail "blue-green deploy is missing or unsafe: $BLUEGREEN"
-[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree must be clean'
-branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-[[ "$branch" == "main" ]] || fail "make deploy must run from main, got=${branch:-detached}"
-
-HEAD_SHA="$(git rev-parse HEAD)"
-[[ -n "$TARGET" ]] || TARGET="$HEAD_SHA"
-[[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || fail 'target must be a full lowercase 40-character SHA'
-[[ "$TARGET" == "$HEAD_SHA" ]] || fail "target must equal local HEAD: target=$TARGET head=$HEAD_SHA"
-REMOTE_MAIN="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-[[ "$REMOTE_MAIN" == "$TARGET" ]] || fail "origin/main mismatch: remote=$REMOTE_MAIN local=$TARGET"
 REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 [[ -n "$REPO" ]] || fail 'cannot resolve GitHub repository'
+REMOTE_MAIN="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+[[ "$REMOTE_MAIN" =~ ^[0-9a-f]{40}$ ]] || fail "cannot resolve origin/main"
+
+if [[ "$IMAGE_SOURCE" == "actions" ]]; then
+  # The deployed payload is a CI-built, digest-pinned image, so the state of
+  # this checkout cannot contaminate it. What the checkout does supply —
+  # helper scripts and the Caddyfile scp'd to the host — must come from the
+  # target revision itself rather than whatever happens to be checked out,
+  # so the deploy exports that revision and runs everything from there.
+  git fetch -q origin main || fail "cannot fetch origin/main"
+  if [[ -z "$TARGET" ]]; then
+    TARGET="$REMOTE_MAIN"
+  else
+    [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || fail 'target must be a full lowercase 40-character SHA'
+    # An explicit target must be a merged commit — on origin/main's history —
+    # so a branch tip that never passed CI can never be deployed this way.
+    git merge-base --is-ancestor "$TARGET" "$REMOTE_MAIN" \
+      || fail "target $TARGET is not on origin/main's history"
+  fi
+  git cat-file -e "$TARGET^{commit}" 2>/dev/null || fail "target $TARGET is not a known commit"
+  EXPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/crowdrelay-deploy.XXXXXX")"
+  git archive "$TARGET" | tar -x -C "$EXPORT_DIR" || fail "cannot export target revision $TARGET"
+  ROOT_DIR="$EXPORT_DIR"
+  BLUEGREEN="$ROOT_DIR/scripts/deploy-bluegreen.sh"
+  CANONICAL="$ROOT_DIR/scripts/deploy-production-safe.sh"
+  LOCK_SCRIPT="$ROOT_DIR/scripts/deploy-lock.sh"
+  for helper in "$CANONICAL" "$BLUEGREEN" "$LOCK_SCRIPT"; do
+    [[ -f "$helper" && ! -L "$helper" ]] || fail "exported target revision is missing deploy helper: $helper"
+  done
+  cd "$ROOT_DIR"
+else
+  # local builds the image from this worktree — a dirty tree or wrong
+  # revision would literally ship, so the strict gates stay.
+  HEAD_SHA="$(git rev-parse HEAD)"
+  [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree must be clean'
+  branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  [[ "$branch" == "main" ]] || fail "local deploy must run from main, got=${branch:-detached}"
+  [[ -n "$TARGET" ]] || TARGET="$HEAD_SHA"
+  [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || fail 'target must be a full lowercase 40-character SHA'
+  [[ "$TARGET" == "$HEAD_SHA" ]] || fail "target must equal local HEAD: target=$TARGET head=$HEAD_SHA"
+  [[ "$REMOTE_MAIN" == "$TARGET" ]] || fail "origin/main mismatch: remote=$REMOTE_MAIN local=$TARGET"
+fi
 
 wait_for_workflow() {
   local workflow="$1" label="$2" deadline run_id last_notice
@@ -410,10 +446,18 @@ case "$IMAGE_SOURCE" in
     ;;
 esac
 
-[[ "$(git rev-parse HEAD)" == "$TARGET" ]] || fail 'local HEAD moved while waiting for release gates'
-[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree changed while waiting for release gates'
-REMOTE_MAIN="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
-[[ "$REMOTE_MAIN" == "$TARGET" ]] || fail "origin/main moved while waiting: remote=$REMOTE_MAIN target=$TARGET"
+if [[ "$IMAGE_SOURCE" == "local" ]]; then
+  [[ "$(git rev-parse HEAD)" == "$TARGET" ]] || fail 'local HEAD moved while waiting for release gates'
+  [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail 'local worktree changed while waiting for release gates'
+fi
+# ls-remote runs against the invoking repo (actions mode cd'd into a plain
+# export dir), so pin it to SOURCE_DIR.
+REMOTE_MAIN="$(git -C "$SOURCE_DIR" ls-remote origin refs/heads/main | awk '{print $1}')"
+if [[ "$IMAGE_SOURCE" == "local" ]]; then
+  [[ "$REMOTE_MAIN" == "$TARGET" ]] || fail "origin/main moved while waiting: remote=$REMOTE_MAIN target=$TARGET"
+elif [[ "$REMOTE_MAIN" != "$TARGET" ]]; then
+  printf 'NOTE: origin/main moved to %s while waiting; deploying requested target %s\n' "$REMOTE_MAIN" "$TARGET"
+fi
 
 TUNNEL_BEFORE="$(control_plane_tunnel_fingerprint)"
 printf 'CONTROL_PLANE_TUNNEL_BASELINE=PASS fingerprint=%s\n' "$TUNNEL_BEFORE"

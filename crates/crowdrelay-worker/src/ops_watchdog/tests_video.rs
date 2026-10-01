@@ -38,6 +38,7 @@ mod video_tests {
                 hold_reason: None,
                 halted_until: None,
             },
+            measurement_stages: Vec::new(),
         }
     }
 

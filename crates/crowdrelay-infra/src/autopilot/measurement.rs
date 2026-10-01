@@ -216,6 +216,27 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
+            // The content funnel's own report: unique visitors, canonical
+            // signups, confirmed, activated and later return as separate
+            // facts beside the learned scalar. Only the signup count feeds
+            // variant selection — the ladder answers "what did the funnel
+            // look like" without letting a seven-day signup impersonate a
+            // durable fan.
+            let fan_ladder = if measurement.kind
+                == AutopilotMeasurementKind::ContentFanAcquisition7d
+            {
+                Some(
+                    observation::content_synergy::fan_ladder(
+                        &self.pool,
+                        workspace_id,
+                        measurement,
+                        now,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let outcome_inserted = sqlx::query(
                 r#"
                 INSERT INTO autopilot_outcomes (
@@ -249,6 +270,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 "measurement_kind": measurement.kind.as_str(),
                 "series_lifts": observation.series_lifts,
                 "scalar_aggregate_is_mixed": observation.series_lifts.len() > 1,
+                "fan_ladder": fan_ladder,
             }))
             .bind(now)
             .execute(&mut *transaction)

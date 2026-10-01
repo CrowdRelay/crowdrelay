@@ -55,6 +55,14 @@ pub async fn load_join_ask_snapshot(
     // folding it in would let unrelated content steer the tenant's own ask.
     // The action also preserves the exact tenant-authored text, so outcomes
     // survive settings reorder and reset honestly when the wording is edited.
+    //
+    // `fans_7d` reads the canonical ledger's own assignment: the
+    // `last_tracked_click` conversion rows `record_conversion` writes, keyed
+    // to this post's action. Any-click joins would credit a fan to every
+    // post they clicked before signing up; the ledger picks exactly one
+    // (the latest click), and this count must agree with it. NULL means the
+    // post has no tracked link — unmeasurable, which the selector keeps
+    // separate from a measured zero.
     let posts = sqlx::query_as::<
         _,
         (
@@ -63,7 +71,7 @@ pub async fn load_join_ask_snapshot(
             OffsetDateTime,
             String,
             Option<OffsetDateTime>,
-            i64,
+            Option<i64>,
         ),
     >(
         r#"
@@ -72,23 +80,24 @@ pub async fn load_join_ask_snapshot(
                post.created_at,
                COALESCE(action.payload->>'text', '') AS text,
                post.posted_at,
-               COALESCE((
-                   SELECT COUNT(DISTINCT acquisition.fan_id)::bigint
-                   FROM click_events AS click
-                   JOIN fan_acquisition_events AS acquisition
-                     ON acquisition.workspace_id = click.workspace_id
-                    AND click.anonymous_visitor_id IS NOT NULL
-                    AND acquisition.anonymous_visitor_id = click.anonymous_visitor_id
-                    AND acquisition.occurred_at >= click.occurred_at
-                    AND acquisition.occurred_at <
-                        post.posted_at + INTERVAL '7 days'
-                   WHERE post.posted_at IS NOT NULL
-                     AND post.smart_link_id IS NOT NULL
-                     AND click.workspace_id = post.workspace_id
-                     AND click.smart_link_id = post.smart_link_id
-                     AND click.occurred_at >= post.posted_at
-                     AND click.occurred_at < post.posted_at + INTERVAL '7 days'
-               ), 0)::bigint AS fans_7d
+               CASE WHEN post.smart_link_id IS NOT NULL
+                    THEN (
+                        SELECT COUNT(DISTINCT conversion.fan_id)::bigint
+                        FROM fan_provenance_events AS conversion
+                        JOIN fans AS fan
+                          ON fan.workspace_id = conversion.workspace_id
+                         AND fan.id = conversion.fan_id
+                         AND fan.status <> 'suppressed'
+                         AND fan.deleted_at IS NULL
+                        WHERE conversion.workspace_id = post.workspace_id
+                          AND conversion.event_kind = 'conversion'
+                          AND conversion.attribution_method = 'last_tracked_click'
+                          AND conversion.action_id = post.action_id
+                          AND conversion.occurred_at >= post.posted_at
+                          AND conversion.occurred_at <
+                              post.posted_at + INTERVAL '7 days'
+                    )
+               END AS fans_7d
         FROM social_posts AS post
         JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id
@@ -109,7 +118,7 @@ pub async fn load_join_ask_snapshot(
             created_at,
             text,
             posted_at,
-            fans_7d: u32::try_from(fans_7d).unwrap_or(u32::MAX),
+            fans_7d: fans_7d.map(|count| u32::try_from(count).unwrap_or(u32::MAX)),
         },
     )
     .collect();

@@ -97,6 +97,8 @@
         /v1/control-plane/discord-posts/* \
         /v1/control-plane/gdrive/contacts \
         /v1/control-plane/gdrive/contacts/* \
+        /v1/control-plane/gdrive/files \
+        /v1/control-plane/gdrive/files/* \
         /v1/control-plane/gdrive/scan \
         /v1/control-plane/listing \
         /v1/control-plane/listing/* \

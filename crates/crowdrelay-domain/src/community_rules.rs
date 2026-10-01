@@ -174,11 +174,16 @@ pub fn classify_self_promo(rule_texts: &[&str]) -> SelfPromoStance {
     SelfPromoStance::Unknown
 }
 
-/// Builds the `rules_summary` a person reads at a glance — the rule titles,
-/// joined, truncated to the column's 4000-char bound.
+/// Builds the `rules_summary` consumed by the drafter and operator.
+///
+/// This must preserve the moderators' actual constraints, not only rule
+/// headings. A heading like "Self promotion" is not enough to tell whether
+/// links are allowed, promotion belongs in a weekly thread, or a flair is
+/// required. The worker therefore passes title + description text here and
+/// we retain it (bounded to the column's 4000-character limit).
 #[must_use]
-pub fn summarize(rule_titles: &[&str]) -> Option<String> {
-    let joined = rule_titles
+pub fn summarize(rule_texts: &[&str]) -> Option<String> {
+    let joined = rule_texts
         .iter()
         .map(|t| t.trim())
         .filter(|t| !t.is_empty())
@@ -259,10 +264,18 @@ mod tests {
     }
 
     #[test]
-    fn summary_joins_titles_and_respects_empty() {
+    fn summary_preserves_rule_constraints_and_respects_empty() {
         assert_eq!(
-            summarize(&["Title format", "", "  ", "No memes"]).as_deref(),
-            Some("Title format || No memes")
+            summarize(&[
+                "Title format :: Use Artist - Track",
+                "",
+                "  ",
+                "Self promotion :: Only in the weekly thread",
+            ])
+            .as_deref(),
+            Some(
+                "Title format :: Use Artist - Track || Self promotion :: Only in the weekly thread"
+            )
         );
         assert_eq!(summarize(&["", " "]), None);
     }

@@ -13,7 +13,7 @@
 
 pub(super) mod attributed_fans;
 mod campaigns;
-mod content_synergy;
+pub(super) mod content_synergy;
 pub(super) mod harm;
 mod release_lift;
 

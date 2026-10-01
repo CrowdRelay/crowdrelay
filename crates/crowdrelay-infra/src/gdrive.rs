@@ -83,6 +83,12 @@ pub struct DriveContactRow {
     pub matched_counterparty: Option<String>,
     /// This workspace's own marks say the band already dealt with them.
     pub counterparty_worked_with: bool,
+    /// An operator individually confirmed this address is fan material —
+    /// the qualification a registry match forces. Permits an invitation;
+    /// says nothing about consent.
+    pub fan_qualified_at: Option<time::OffsetDateTime>,
+    /// The channel that confirmed — `control_plane` today.
+    pub fan_qualified_by: Option<String>,
 }
 
 /// A staged contact plus the cross-tenant priors its addresses and rooms
@@ -133,7 +139,8 @@ pub(super) const CONTACT_SELECT: &str = r#"
            venue.venue_id AS matched_venue_id,
            COALESCE(venue.played_here, false) AS venue_played_here,
            cp.display_name AS matched_counterparty,
-           COALESCE(cp.dealt_with, false) AS counterparty_worked_with
+           COALESCE(cp.dealt_with, false) AS counterparty_worked_with,
+           c.fan_qualified_at, c.fan_qualified_by
     FROM drive_contacts c
     LEFT JOIN LATERAL (
         SELECT v.id AS venue_id, v.display_name,

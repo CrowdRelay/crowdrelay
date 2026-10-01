@@ -611,9 +611,17 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::RequestBeaconDiscovery { event_id, target_count } => {
-                    let event = sqlx::query_as::<_, (String, Option<String>, OffsetDateTime, String, String, Option<String>)>(
+                    let event = sqlx::query_as::<_, (
+                        uuid::Uuid,
+                        String,
+                        Option<String>,
+                        OffsetDateTime,
+                        String,
+                        String,
+                        Option<String>,
+                    )>(
                         r#"
-                        SELECT event.title, event.venue, event.starts_at, city.name,
+                        SELECT city.id, event.title, event.venue, event.starts_at, city.name,
                                city.country_code, city.region
                         FROM events event
                         JOIN cities city ON city.id=event.city_id
@@ -629,12 +637,12 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?
                     .ok_or(RepositoryError::Conflict)?;
-                    // The bill is already known data: every non-sibling act on
-                    // it is a named entity the executor resolves a public
-                    // contact for. Siblings keep the roster path; the venue's
-                    // own channels seed as a `venue` beacon.
-                    // `counterparty_email` stays private — the venue is
-                    // resolved by name.
+
+                    // Known bill-mates and the host venue are seed entities, not
+                    // conclusions. The research agent still has to find public
+                    // evidence and may return nothing for a seed it cannot
+                    // verify. Organization siblings stay on the first-party
+                    // roster path instead of being rediscovered as cold leads.
                     let seed_acts = sqlx::query_scalar::<_, String>(
                         r#"
                         SELECT act.act_name
@@ -668,7 +676,7 @@ impl PostgresAutopilotRepository {
                         })
                         .collect::<Vec<_>>();
                     if let Some(venue) = event
-                        .1
+                        .2
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty() && !seed_acts.iter().any(|name| name == v))
@@ -680,54 +688,66 @@ impl PostgresAutopilotRepository {
                             "evidence": "hosts the show",
                         }));
                     }
-                    emit_external_action(
+
+                    // This used to emit crowdrelay.beacon.discovery_requested
+                    // onto an executor capability with no route. The Brain made
+                    // a good decision and the outbox permanently 422'd it.
+                    // Research is exactly what the agents service already
+                    // executes well, so hand the Brain's event-scoped brief to
+                    // a premium research task instead of inventing another
+                    // external executor.
+                    let brief = json!({
+                        "event": {
+                            "id": event_id,
+                            "city_id": event.0,
+                            "title": event.1,
+                            "venue": event.2,
+                            "starts_at": crowdrelay_domain::wire_time::Wire(&event.3),
+                            "city": event.4,
+                            "country_code": event.5,
+                            "region": event.6,
+                        },
+                        "target_count": target_count,
+                        "seed_entities": seed_entities,
+                        "allowed_kinds": [
+                            "radio", "local_press", "television", "reviewer",
+                            "creator", "photographer", "promoter", "venue",
+                            "scene_partner", "patron", "community"
+                        ],
+                        "priority_source_classes": [
+                            "local_metal_media_and_podcasts",
+                            "independent_radio_and_music_programmes",
+                            "venue_promoter_support_band_networks",
+                            "record_stores_rehearsal_studios_and_music_shops",
+                            "tattoo_alt_fashion_and_scene_businesses",
+                            "student_culture_portals_and_local_event_calendars",
+                            "moderated_metal_communities_and_forums",
+                            "local_live_creators_photographers_and_reviewers",
+                            "local_artists_craftspeople_and_alternative_culture_nodes"
+                        ],
+                        "rules": [
+                            "public sources only",
+                            "every candidate needs a source URL that proves it exists",
+                            "prefer local scene trust and event relevance over generic reach",
+                            "never scrape private member lists or personal contact data",
+                            "do not contact anybody: this task only expands the reviewed local graph",
+                            "communities must respect their published rules",
+                            "a generic local business is not scene-relevant without public evidence"
+                        ]
+                    });
+                    let prompt = format!(
+                        "Build the local growth network around this upcoming show. Find real public people, organizations and communities that can credibly help attendance, local awareness or show execution. Do broad web research rather than relying on a fixed forum list. Return only evidence-backed candidates for the exact event/city in this brief.\n\n{}",
+                        serde_json::to_string_pretty(&brief).map_err(|_| RepositoryError::Unexpected)?
+                    );
+                    operations::execute_agent_run(
                         &mut transaction,
                         workspace_id,
                         action.id,
-                        "crowdrelay.beacon.discovery_requested",
-                        json!({
-                            "action_id": action.id,
-                            "event": {
-                                "id": event_id,
-                                "title": event.0,
-                                "venue": event.1,
-                                "starts_at": crowdrelay_domain::wire_time::Wire(&event.2),
-                                "city": event.3,
-                                "country_code": event.4,
-                                "region": event.5,
-                            },
-                            "target_count": target_count,
-                            "seed_entities": seed_entities,
-                            "discovery_contract": {
-                                "public_sources_only": true,
-                                "require_source_url": true,
-                                "require_verifiable_contact": true,
-                                "deduplicate_before_upsert": true,
-                                "allowed_kinds": [
-                                    "radio", "local_press", "television", "reviewer",
-                                    "creator", "photographer", "promoter", "venue", "scene_partner",
-                                    "patron", "community"
-                                ],
-                                "priority_source_classes": [
-                                    "local_metal_media_and_podcasts",
-                                    "independent_radio_and_music_programmes",
-                                    "venue_promoter_support_band_networks",
-                                    "record_stores_rehearsal_studios_and_music_shops",
-                                    "tattoo_alt_fashion_and_scene_businesses",
-                                    "student_culture_portals_and_local_event_calendars",
-                                    "moderated_metal_communities_and_forums",
-                                    "local_live_creators_photographers_and_reviewers"
-                                ],
-                                "discovery_rules": [
-                                    "prefer_people_and_places_with_existing_local_scene_trust_over_generic_reach",
-                                    "never_treat_generic_local_businesses_as_scene_relevant_without_public_evidence",
-                                    "community_candidates_must_have_public_rules_or_moderator_contact_when_available",
-                                    "do_not_scrape_private_member_lists_or_personal_contact_data"
-                                ],
-                                "callback_path": "/v1/admin/autopilot/beacons",
-                                "gemini_may_summarize_not_verify": true
-                            }
-                        }),
+                        "event-network-scout",
+                        &prompt,
+                        3,
+                        crowdrelay_brain::AgentTier::Premium,
+                        now,
                     )
                     .await?;
                 }

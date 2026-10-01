@@ -140,6 +140,12 @@ struct OperatorAttentionSnapshot {
     /// `unpublished_drafts` so "the system is posting" never reads as
     /// "waiting on you" or vice versa.
     automatic_queue: Vec<AutomaticQueueChannel>,
+    /// Where each recent publication sits in its measurement lifecycle —
+    /// awaiting publication, uninstrumented, maturing, measured zero or
+    /// measured conversions — per channel. A publication that produced
+    /// nobody and one that never went out are different facts, and this
+    /// board is where the difference becomes visible.
+    publication_stages: Vec<PublicationStageChannel>,
     /// Communities the brain has decided it wants to post to and cannot,
     /// because nobody has joined them.
     ///
@@ -332,19 +338,27 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
     let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
     let unanswered =
         run_limited(budget, timeout_duration, load_unanswered_replies(&state.ops));
+    let publication_stages = run_limited(
+        budget,
+        timeout_duration,
+        load_publication_stages(
+            state.ticketing.pool(),
+            state.ticketing.workspace_id().into_uuid(),
+        ),
+    );
 
     let (
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
         automatic_queue,
         blocked_communities, lapsed, failed, notices, rejected,
-        join_ask, unanswered,
+        join_ask, unanswered, publication_stages,
     ) = tokio::join!(
         summary, alerts, dead_outbox, dead_deliveries, dead_push,
         ecosystem, findings, needs_you, brain, unpublished_drafts,
         automatic_queue,
         blocked_communities, lapsed, failed, notices, rejected,
-        join_ask, unanswered,
+        join_ask, unanswered, publication_stages,
     );
 
     let request_id_value = request_id(&headers);
@@ -420,6 +434,10 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
+    let publication_stages = match publication_stages {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
 
     let (needs_you, awaiting_approval) = needs_you;
 
@@ -437,6 +455,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             awaiting_approval,
             unpublished_drafts,
             automatic_queue,
+            publication_stages,
             blocked_communities,
             join_ask_readiness,
             brain,

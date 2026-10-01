@@ -952,11 +952,22 @@ def _apply_access(
     if name in ("ok", "err"):
         # `Result::ok()/err()` → Option<the corresponding half>.
         return f"Option<{inner or strip_wrappers(rust)}>"
-    if name in ("as_deref", "cloned", "copied", "get"):
+    if name in ("cloned", "copied", "get"):
         element = _element_rust(strip_wrappers(rust))
         if element:
             return f"Option<{element}>"
         return f"Option<{strip_wrappers(rust)}>" if inner else None
+    if name == "as_deref":
+        # `Option<Vec<T>>::as_deref()` binds `&[T]` (an array), not `T` —
+        # while `Option<String>::as_deref()` binds `&str`.
+        stripped = strip_wrappers(rust)
+        if m := re.fullmatch(r"(?:Vec|HashSet|BTreeSet|VecDeque)<(.*)>", stripped, re.S):
+            return f"Option<[{m.group(1).strip()}]>"
+        if stripped in ("String", "str"):
+            return "Option<str>"
+        if element := _element_rust(stripped):
+            return f"Option<{element}>"
+        return f"Option<{stripped}>" if inner else None
     if name in ("as_ref", "filter", "iter", "iter_mut", "into_iter"):
         return rust
     if name in ("then", "then_some"):
