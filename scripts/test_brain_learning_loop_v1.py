@@ -47,6 +47,8 @@ NAMED_SYMBOLS = {
     ],
     "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/evidence_replay.rs": [
         "fn control_arm_means<",
+    ],
+    "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/strategy_checkpoint.rs": [
         "async fn apply_evidence_to_stored_strategy_posterior(",
     ],
     "crates/crowdrelay-brain/src/causal_model.rs": [
@@ -213,3 +215,4 @@ if __name__ == "__main__":
     else:
         print("BRAIN_LEARNING_LOOP=FAIL")
         sys.exit(1)
+

@@ -175,7 +175,38 @@ pub(in crate::autopilot) async fn load_growth_evidence(
     workspace_id: WorkspaceId,
     since: Option<OffsetDateTime>,
 ) -> Result<Vec<GrowthEvidence>, RepositoryError> {
-    load_evidence(repo, workspace_id, &EvidenceSelector::ResolvedAfter(since)).await
+    load_evidence(
+        &repo.pool,
+        workspace_id,
+        &EvidenceSelector::ResolvedAfter(since),
+    )
+    .await
+}
+
+pub(super) async fn load_growth_evidence_with_cursor(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    since: Option<OffsetDateTime>,
+) -> Result<(Vec<GrowthEvidence>, Option<OffsetDateTime>), RepositoryError> {
+    load_evidence_with_cursor(
+        &repo.pool,
+        workspace_id,
+        &EvidenceSelector::ResolvedAfter(since),
+    )
+    .await
+}
+
+pub(super) async fn load_growth_evidence_on(
+    connection: &mut sqlx::PgConnection,
+    workspace_id: WorkspaceId,
+    since: Option<OffsetDateTime>,
+) -> Result<(Vec<GrowthEvidence>, Option<OffsetDateTime>), RepositoryError> {
+    load_evidence_with_cursor(
+        connection,
+        workspace_id,
+        &EvidenceSelector::ResolvedAfter(since),
+    )
+    .await
 }
 
 /// Counts, per context, the dispatches whose outcome was actually measured.
@@ -238,58 +269,36 @@ pub(in crate::autopilot) async fn load_control_arm_evidence(
         return Ok(Vec::new());
     }
     load_evidence(
-        repo,
+        &repo.pool,
         workspace_id,
         &EvidenceSelector::ControlArmOf(experiments),
     )
     .await
 }
 
-async fn load_evidence(
-    repo: &PostgresAutopilotRepository,
+async fn load_evidence<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     workspace_id: WorkspaceId,
     selector: &EvidenceSelector<'_>,
 ) -> Result<Vec<GrowthEvidence>, RepositoryError> {
-    let pool = &repo.pool;
+    load_evidence_with_cursor(executor, workspace_id, selector)
+        .await
+        .map(|(evidence, _)| evidence)
+}
+
+async fn load_evidence_with_cursor<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    workspace_id: WorkspaceId,
+    selector: &EvidenceSelector<'_>,
+) -> Result<(Vec<GrowthEvidence>, Option<OffsetDateTime>), RepositoryError> {
     let (since, contrast_experiments) = match selector {
         EvidenceSelector::ResolvedAfter(since) => (*since, None),
         EvidenceSelector::ControlArmOf(experiments) => (None, Some(*experiments)),
     };
 
-    // Diagnostic: check for legacy duplicate experiment assignments.
-    // Migration 0201 added a partial UNIQUE INDEX on
-    // (workspace_id, action_id) that prevents new duplicates, but
-    // legacy rows predating the constraint may still exist. This is a
-    // cheap existence check — EXISTS with LIMIT 1 short-circuits on
-    // the first duplicate group found. The warning is emitted once
-    // per invocation, not per duplicate row.
-    //
-    // This is diagnostic telemetry, not correctness logic:
-    //   - query succeeds + duplicates exist → warn
-    //   - query fails → loader continues normally (false = "could not
-    //     establish duplicates exist", NOT "definitely no duplicates")
-    let has_duplicates: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(
-            SELECT 1
-            FROM experiment_assignments
-            WHERE workspace_id = $1 AND action_id IS NOT NULL
-            GROUP BY workspace_id, action_id
-            HAVING COUNT(*) > 1
-            LIMIT 1
-        )"#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_optional(pool)
-    .await
-    .map(Option::unwrap_or_default)
-    .unwrap_or(false);
-    if has_duplicates {
-        tracing::warn!(
-            workspace_id = %workspace_id.into_uuid(),
-            "legacy duplicate experiment assignments detected — \
-             migration 0201 prevents new ones but legacy data may need manual cleanup"
-        );
-    }
+    // Migration 0201 enforces unique (workspace_id, action_id) assignments.
+    // The lateral lookup below also bounds legacy reads. A per-read GROUP BY
+    // over the assignment history adds linear work even to an empty delta.
 
     /// Evidence row from the database.
     #[derive(sqlx::FromRow)]
@@ -330,14 +339,14 @@ async fn load_evidence(
         replayed_3d_at: Option<OffsetDateTime>,
         replayed_14d_at: Option<OffsetDateTime>,
         replayed_30d_at: Option<OffsetDateTime>,
+        last_partial_resolution_at: Option<OffsetDateTime>,
         observed_metrics: serde_json::Value,
         outcome_basis: String,
         posterior_mean_y30: Option<f64>,
         posterior_std_y30: Option<f64>,
     }
 
-    let rows: Vec<EvidenceRow> = sqlx::query_as(
-        r#"
+    let sql = r#"
         SELECT ge.action_id, ge.opportunity_id, ge.timestamp, ge.audience, ge.target_key,
                ge.creative_family, ge.recipient_id,
                ge.channel, ge.estimated_reach, ge.actual_reach, ge.treatment, ge.propensity,
@@ -351,7 +360,7 @@ async fn load_evidence(
                ge.episode_id, ge.resolved_at,
                ge.experiment_assignment_id, ea.experiment_uuid, ea.final_contamination,
                COALESCE(ge.partial_resolution_count, 0) AS partial_resolution_count,
-               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at,
+               ge.replayed_3d_at, ge.replayed_14d_at, ge.replayed_30d_at, ge.last_partial_resolution_at,
                ge.observed_metrics, ge.outcome_basis,
                posterior.mean_y30 AS posterior_mean_y30,
                posterior.std_y30 AS posterior_std_y30
@@ -482,18 +491,7 @@ async fn load_evidence(
           -- advancing the learner — it is fetching the comparison for rows the
           -- learner is advancing this batch, and that comparison resolved
           -- whenever it resolved.
-          AND CASE WHEN $3::uuid[] IS NULL
-                   THEN ($2::timestamptz IS NULL
-                        OR GREATEST(
-                            ge.resolved_at,
-                            ge.replayed_3d_at,
-                            ge.replayed_14d_at,
-                            ge.replayed_30d_at,
-                            ge.last_partial_resolution_at
-                        ) > $2)
-                   ELSE ge.treatment = 'control'
-                        AND ea.experiment_uuid = ANY($3)
-              END
+          /* evidence_selector */
         ORDER BY GREATEST(
                     ge.resolved_at,
                     ge.replayed_3d_at,
@@ -502,15 +500,33 @@ async fn load_evidence(
                     ge.last_partial_resolution_at
                  ) ASC,
                  ge.timestamp ASC
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(since)
-    .bind(contrast_experiments)
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
+        "#
+    .replace(
+        "/* evidence_selector */",
+        super::evidence_query::selector_predicate(since.is_some(), contrast_experiments.is_some()),
+    );
+    let rows: Vec<EvidenceRow> = sqlx::query_as(&sql)
+        .bind(workspace_id.into_uuid())
+        .bind(since)
+        .bind(contrast_experiments)
+        .fetch_all(executor)
+        .await
+        .map_err(map_sqlx)?;
 
+    let read_cursor = rows
+        .iter()
+        .flat_map(|row| {
+            [
+                row.resolved_at,
+                row.replayed_3d_at,
+                row.replayed_14d_at,
+                row.replayed_30d_at,
+                row.last_partial_resolution_at,
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .max();
     let evidence: Vec<GrowthEvidence> = rows
         .into_iter()
         .map(|row| {
@@ -650,7 +666,7 @@ async fn load_evidence(
             }
         })
         .collect();
-    Ok(evidence)
+    Ok((evidence, read_cursor))
 }
 
 /// Saves a brain state checkpoint (serialized posterior state) for fast
@@ -662,6 +678,14 @@ pub(in crate::autopilot) async fn save_brain_state(
     module: &str,
     state: &serde_json::Value,
 ) -> Result<(), RepositoryError> {
+    if module == "metacognition" {
+        return tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            super::growth_intelligence::metacognition::save(repo, workspace_id, state),
+        )
+        .await
+        .unwrap_or(Err(RepositoryError::Unexpected));
+    }
     let pool = &repo.pool;
     sqlx::query(
         r#"

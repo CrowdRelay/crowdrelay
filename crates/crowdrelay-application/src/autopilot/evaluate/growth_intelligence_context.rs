@@ -1,3 +1,5 @@
+include!("growth_metacognition.rs");
+
 // GrowthIntelligence context arm — extracted from evaluate.rs to keep
 // the orchestrator under the modularity contract line limit.
 impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
@@ -38,18 +40,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let loaded_model = self.repository.load_causal_model(self.workspace_id).await?;
         let belief_origin = loaded_model.belief.clone();
         let causal_model = loaded_model.model;
-        // The state-conditioned strategy posterior is NOT loaded here.
-        //
-        // It is still learned: the infra loader folds resolved growth evidence
-        // into it during the causal model load and owns the write. It reaches
-        // no decision, and this cycle used to load it, thread it through
-        // candidate generation and discard it — which read as a belief
-        // informing generation while nothing consulted it.
-        //
-        // Learning without a consumer is a defensible place to be. Plumbing
-        // without a consumer is not: it is the part that makes a reader
-        // conclude the belief is live. Wiring it up is a deliberate change to
-        // these signatures — see `crowdrelay_brain::strategy_learning`.
+        // The infra loader owns posterior learning; its consumer below uses
+        // the resulting state to refine strategy selection.
         // Load the exploration memory from past dispatch
         // predictions. The brain uses this to compute novelty:
         // unexplored (template, context) pairs get an exploration
@@ -117,11 +109,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     >(state.clone())
                     {
                         Ok(posterior) => {
-                            let posterior_strategy = GrowthStrategy::from_world_model_with_posterior(
-                                &first.world_model,
-                                &posterior,
-                                hysteresis_strategy,
-                            );
+                            let posterior_strategy =
+                                GrowthStrategy::from_world_model_with_posterior(
+                                    &first.world_model,
+                                    &posterior,
+                                    hysteresis_strategy,
+                                );
                             // The proof that learning changed behavior, not
                             // just belief. `hysteresis_strategy` is what the
                             // operator's rules alone would have picked this
@@ -165,8 +158,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // efe_score) so the brain dispatches the best
         // opportunities first. When budget limits kick in,
         // the worst opportunities are the ones that get gated.
-        let mut scored_candidates: Vec<ScoredCandidate> =
-            Vec::with_capacity(snapshots.len());
+        let mut scored_candidates: Vec<ScoredCandidate> = Vec::with_capacity(snapshots.len());
         for snapshot in &snapshots {
             for insight in &snapshot.recent_insights {
                 pending_insights.insert(insight.outcome_id);
@@ -175,8 +167,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // evaluate_growth_intelligence uses) so the novelty
             // lookup matches the context hash that gets recorded.
             let ctx = build_dispatch_context(snapshot, now);
-            let novelty =
-                exploration_memory.novelty(&snapshot.template_id, &context_hash(&ctx));
+            let novelty = exploration_memory.novelty(&snapshot.template_id, &context_hash(&ctx));
             // P0-3: community-engager now returns one candidate per
             // target community. Other templates return 0 or 1.
             let candidates = growth_intelligence_candidate(
@@ -309,19 +300,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         type ExperimentGroup = (String, Vec<(usize, DecisionCandidate, DispatchPrediction)>);
         let mut experiment_groups: Vec<ExperimentGroup> = Vec::new();
         let mut non_experiment_indices: Vec<usize> = Vec::new();
-        for (i, scored) in
-            scored_candidates.iter().enumerate()
-        {
+        for (i, scored) in scored_candidates.iter().enumerate() {
             let template_id = match &scored.candidate.action {
-                AutopilotActionPayload::RequestAgentRun { template_id, .. } => {
-                    template_id.as_str()
-                }
+                AutopilotActionPayload::RequestAgentRun { template_id, .. } => template_id.as_str(),
                 _ => "",
             };
             let is_direct_action = !template_id.is_empty()
                 && !matches!(
                     template_id,
-                    "reddit-scanner" | "telegram-scanner" | "metal-archives-scanner" | "bandcamp-scanner" | "growth-strategist"
+                    "reddit-scanner"
+                        | "telegram-scanner"
+                        | "metal-archives-scanner"
+                        | "bandcamp-scanner"
+                        | "growth-strategist"
                 );
             if !is_direct_action {
                 non_experiment_indices.push(i);
@@ -352,7 +343,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         }
         let mut arm_map: std::collections::HashMap<
             String,
-            (ArmAssignment, crowdrelay_brain::ExperimentDesign, String, f64),
+            (
+                ArmAssignment,
+                crowdrelay_brain::ExperimentDesign,
+                String,
+                f64,
+            ),
         > = std::collections::HashMap::new();
         // Track which scored_candidates indices are control (to be
         // removed from the portfolio pool).
@@ -425,7 +421,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 Ok(d) => {
                     report.gi_dispatch_log.push(format!(
                         "experiment_design_loaded: template={} status={:?} holdout={} units={}",
-                        template_id, d.experiment_status, d.holdout_probability, d.eligible_units.len()
+                        template_id,
+                        d.experiment_status,
+                        d.holdout_probability,
+                        d.eligible_units.len()
                     ));
                     d
                 }
@@ -475,16 +474,17 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 let is_control = effective_holdout > 0.0 && roll < effective_holdout;
                 if is_control {
                     // Control arm: record assignment, no action dispatched.
-                    let assignment = crowdrelay_brain::ExperimentAssignment::from_design_with_realized_holdout(
-                        &design,
-                        &unit_id,
-                        &unit_id,
-                        crowdrelay_brain::TreatmentAssignment::Control,
-                        prediction,
-                        None,
-                        effective_holdout,
-                    )
-                    .with_assigned_at(now);
+                    let assignment =
+                        crowdrelay_brain::ExperimentAssignment::from_design_with_realized_holdout(
+                            &design,
+                            &unit_id,
+                            &unit_id,
+                            crowdrelay_brain::TreatmentAssignment::Control,
+                            prediction,
+                            None,
+                            effective_holdout,
+                        )
+                        .with_assigned_at(now);
                     match self
                         .repository
                         .record_experiment_assignment(
@@ -500,7 +500,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             control_indices.insert(*idx);
                             arm_map.insert(
                                 candidate.decision_key.clone(),
-                                (ArmAssignment::Control, design.clone(), unit_id, effective_holdout),
+                                (
+                                    ArmAssignment::Control,
+                                    design.clone(),
+                                    unit_id,
+                                    effective_holdout,
+                                ),
                             );
                             continue;
                         }
@@ -509,7 +514,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     control_indices.insert(*idx);
                     arm_map.insert(
                         candidate.decision_key.clone(),
-                        (ArmAssignment::Control, design.clone(), unit_id, effective_holdout),
+                        (
+                            ArmAssignment::Control,
+                            design.clone(),
+                            unit_id,
+                            effective_holdout,
+                        ),
                     );
                 } else {
                     // Treatment arm: mark for portfolio. The assignment
@@ -519,7 +529,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     // assignment is recorded with action_id=None.
                     arm_map.insert(
                         candidate.decision_key.clone(),
-                        (ArmAssignment::Treatment, design.clone(), unit_id, effective_holdout),
+                        (
+                            ArmAssignment::Treatment,
+                            design.clone(),
+                            unit_id,
+                            effective_holdout,
+                        ),
                     );
                 }
             }
@@ -594,6 +609,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let sizing_multiplier = snapshots.first().map_or(1.0, |s| {
             s.metacognition.sizing_multiplier() * s.agent_execution_health.sizing_multiplier()
         });
+        record_growth_assessment(&snapshots, sizing_multiplier, report);
         if let Some(first) = snapshots.first()
             && first.agent_execution_health.needs_attention()
         {
@@ -638,9 +654,9 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .replace_portfolio_pool(self.workspace_id, &run.pool, now)
             .await
         {
-            report
-                .gi_dispatch_log
-                .push(format!("portfolio pool write failed; roster read goes stale: {error}"));
+            report.gi_dispatch_log.push(format!(
+                "portfolio pool write failed; roster read goes stale: {error}"
+            ));
         }
         let selected_keys = portfolio::selected_keys(&selection);
         report.gi_candidates = u32::try_from(scored_candidates.len()).unwrap_or(u32::MAX);
@@ -683,7 +699,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             let Some(scored) = scored_candidates.get(*i) else {
                 continue;
             };
-            let is_selected = !selection.do_nothing && selected_keys.contains(&scored.candidate.decision_key);
+            let is_selected =
+                !selection.do_nothing && selected_keys.contains(&scored.candidate.decision_key);
             report.gi_dispatch_log.push(format!(
                 "non_experiment_check: idx={} key={} selected={} do_nothing={}",
                 *i, scored.candidate.decision_key, is_selected, selection.do_nothing
@@ -696,11 +713,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // prediction consistency invariant:
             // prediction_at_decision == prediction_persisted_in_initial_evidence.
             let mut candidate = scored.candidate.clone();
-            attach_decision_provenance(
-                &mut candidate,
-                &decision_provenance,
-                &learning_provenance,
-            );
+            attach_decision_provenance(&mut candidate, &decision_provenance, &learning_provenance);
             let persisted = match self
                 .repository
                 .persist_candidate_with_evidence(
@@ -786,10 +799,10 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         .with_assigned_at(now);
                     let mut candidate = candidate.clone();
                     attach_decision_provenance(
-                &mut candidate,
-                &decision_provenance,
-                &learning_provenance,
-            );
+                        &mut candidate,
+                        &decision_provenance,
+                        &learning_provenance,
+                    );
                     let persisted = match self
                         .repository
                         .persist_treatment_with_assignment(
@@ -822,8 +835,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         Err(e) => return Err(e.into()),
                     };
                     if persisted.quota_throttled {
-                        report.actions_throttled =
-                            report.actions_throttled.saturating_add(1);
+                        report.actions_throttled = report.actions_throttled.saturating_add(1);
                         let stats = report.context_stats(candidate.context);
                         stats.throttled = stats.throttled.saturating_add(1);
                     }
@@ -857,10 +869,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                             };
                             let _ = self
                                 .repository
-                                .record_fan_provenance_event(
-                                    self.workspace_id,
-                                    &exposure,
-                                )
+                                .record_fan_provenance_event(self.workspace_id, &exposure)
                                 .await;
                         }
                         // Only a real action id means this template's prompt
@@ -948,32 +957,23 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 consumed_ids.len(),
             ));
         }
-        // Save the causal model checkpoint for fast startup
-        // with delta replay on the next cycle. This is
-        // best-effort — a failed checkpoint just means the
-        // next cycle does a full replay.
-        //
-        // Best-effort, and no longer silent: a full replay reads every
-        // resolved evidence row the workspace has ever produced, so a
-        // checkpoint that has been failing for weeks is a cycle that has been
-        // getting steadily more expensive with nothing reporting it.
+        // Best-effort persistence. Failure preserves the previous checkpoint;
+        // the next cycle retries its delta (or a bounded initial rebuild).
         if self
             .repository
             .save_brain_state_checkpoint(self.workspace_id, &causal_model)
             .await
             .is_err()
         {
-            report
-                .gi_dispatch_log
-                .push("causal model checkpoint failed; the next cycle replays all evidence".into());
+            report.gi_dispatch_log.push(
+                "causal model checkpoint failed; learning will retry from the previous cursor"
+                    .into(),
+            );
         }
-        // The strategy posterior is deliberately NOT saved here. This cycle
-        // holds it by shared reference and never mutates it, so the write was
-        // a copy of what the load returned — and the load ends in
-        // `unwrap_or_default()`, so a deserialization failure or a read error
-        // turned into an empty posterior that was then written back over
-        // everything the learner had accumulated. One clobber, all history
-        // gone, no error anywhere.
+        self.save_growth_metacognition(&snapshots, now, report)
+            .await;
+        // Strategy learning owns its checkpoint; this evaluator must not
+        // overwrite it with the earlier read used for candidate selection.
         //
         // `apply_evidence_to_stored_strategy_posterior` in the infra loader is
         // the single writer of this key. It runs earlier in this same cycle,
@@ -981,7 +981,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // when it cannot read what is already there.
         Ok(())
     }
-
 }
 
 /// The experiment window for direct-action templates (social-post,
@@ -1225,8 +1224,9 @@ fn idle_exploration_candidate(
         priority: 5,
         tier: crowdrelay_brain::AgentTier::Basic,
     };
-    let cooldown_bucket = (now.unix_timestamp() / 3600 / i64::from(IDLE_EXPLORATION_COOLDOWN_HOURS))
-        * i64::from(IDLE_EXPLORATION_COOLDOWN_HOURS);
+    let cooldown_bucket =
+        (now.unix_timestamp() / 3600 / i64::from(IDLE_EXPLORATION_COOLDOWN_HOURS))
+            * i64::from(IDLE_EXPLORATION_COOLDOWN_HOURS);
     Ok(Some(ScoredCandidate {
         candidate: DecisionCandidate {
             context: policy.context,
@@ -1237,13 +1237,11 @@ fn idle_exploration_candidate(
             // own gated outcomes, so the dispatch does not wait on a prompt
             // approval the operator cannot review. Deny/Observe/Recommend
             // are unchanged by the upgrade.
-            disposition: crowdrelay_domain::autonomy::internal_work_disposition(
-                disposition(
-                    policy.autonomy_level,
-                    Confidence::MAX,
-                    policy.minimum_confidence,
-                ),
-            ),
+            disposition: crowdrelay_domain::autonomy::internal_work_disposition(disposition(
+                policy.autonomy_level,
+                Confidence::MAX,
+                policy.minimum_confidence,
+            )),
             reason: "exploring new horizons — current channels exhausted",
             input_snapshot: serde_json::json!({
                 "brain_state": brain_state.as_str(),

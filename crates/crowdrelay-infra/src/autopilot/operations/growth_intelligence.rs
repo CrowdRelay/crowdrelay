@@ -30,13 +30,16 @@
 use super::*;
 
 mod baseline;
+mod causal_cursor;
 mod channel_yield;
 mod community_targets;
 mod evidence_replay;
 mod exchange;
 mod fatigue;
+pub(super) mod metacognition;
 mod rescans;
 mod social_performance;
+mod strategy_checkpoint;
 use evidence_replay::{
     PosteriorReplay, apply_evidence_to_model, apply_evidence_to_model_with_contrast,
     apply_evidence_to_stored_strategy_posterior,
@@ -1045,20 +1048,18 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
             "change-point detection: regime shift detected in North Star series"
         );
     }
-    // A fresh monitor each cycle, which is why `learning_cycles` and its
-    // siblings are only ever 0 or 1. Nothing in the cycle reads them —
-    // `sizing_multiplier`, `exploration_boost` and `state` all depend on the
-    // assessed state alone — so this is honest for every use inside the brain.
-    // It is not honest on the operator scorecard, which renders
-    // `learning_cycles` off the serialized snapshot as though it counted
-    // history. Making it count would mean persisting the monitor, and this
-    // loader also serves the read-only cycle preview, so the write would
-    // advance the brain's self-history every time somebody looked at it.
-    let metacognition = {
-        let mut monitor = crowdrelay_brain::self_assessment::MetacognitionMonitor::new();
-        monitor.observe(crowdrelay_brain::self_assessment::assess(north_star_days));
-        monitor
-    };
+    // Project the next assessment from one durable checkpoint. This loader
+    // also serves previews, so only the completed evaluator persists it.
+    let checkpoint = metacognition::load(repo, workspace_id).await;
+    let metacognition = checkpoint
+        .advance(
+            &crowdrelay_brain::self_assessment::checkpoint::MetacognitionObservation {
+                metric: north_star.as_str().to_owned(),
+                state: crowdrelay_brain::self_assessment::assess(north_star_days),
+                observed_at_micros: now.unix_timestamp() * 1_000_000 + i64::from(now.microsecond()),
+            },
+        )
+        .monitor;
 
     // Build one snapshot per worker template.
     let templates = worker_templates();
@@ -1245,11 +1246,16 @@ pub(in crate::autopilot) async fn load_causal_model(
                 full_replay_with_origin(repo, workspace_id).await?
             }
             Ok(mut model) => {
+                // Upgrading cursor metadata must preserve accumulated beliefs.
+                // Legacy state resumes at its historical watermark once;
+                // later checkpoints persist only measurement time actually read.
+                let evidence_cursor = model.evidence_cursor.unwrap_or(checkpoint_time);
+                model.evidence_cursor = Some(evidence_cursor);
                 // Load only delta evidence since the checkpoint.
-                let delta = super::evidence::load_growth_evidence(
+                let (delta, read_cursor) = super::evidence::load_growth_evidence_with_cursor(
                     repo,
                     workspace_id,
-                    Some(checkpoint_time),
+                    Some(evidence_cursor),
                 )
                 .await?;
                 // The control arm of every experiment this batch touches,
@@ -1273,8 +1279,9 @@ pub(in crate::autopilot) async fn load_causal_model(
                     &mut model,
                     &delta,
                     &contrast,
-                    Some(checkpoint_time),
+                    Some(evidence_cursor),
                 );
+                causal_cursor::advance(&mut model, read_cursor);
                 // Also apply delta evidence to the strategy posterior so it
                 // stays in sync with the causal model's evidence replay —
                 // including the per-horizon gating, which is why the
@@ -1284,7 +1291,7 @@ pub(in crate::autopilot) async fn load_causal_model(
                     workspace_id,
                     &delta,
                     PosteriorReplay::Delta,
-                    Some(checkpoint_time),
+                    Some(evidence_cursor),
                 )
                 .await;
                 // Attribution: summarize the delta evidence for operator
@@ -1408,11 +1415,13 @@ async fn full_replay(
     use crowdrelay_brain::{CausalModel, DispatchPrediction, PredictionOutcome};
 
     // Try the new growth evidence table first.
-    let evidence = super::evidence::load_growth_evidence(repo, workspace_id, None).await?;
+    let (evidence, read_cursor) =
+        super::evidence::load_growth_evidence_with_cursor(repo, workspace_id, None).await?;
     let evidence_replayed = u32::try_from(evidence.len()).unwrap_or(u32::MAX);
     if !evidence.is_empty() {
         let mut model = CausalModel::default();
         apply_evidence_to_model(&mut model, &evidence);
+        causal_cursor::advance(&mut model, read_cursor);
         // Also replay evidence into the strategy posterior from scratch — this
         // is every row, so it rebuilds rather than accumulates.
         apply_evidence_to_stored_strategy_posterior(

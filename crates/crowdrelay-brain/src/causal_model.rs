@@ -297,6 +297,10 @@ pub struct CausalModel {
     /// the field existed, which read as 0.
     #[serde(default)]
     pub evidence_basis_version: u32,
+    /// Latest measurement included in this state, independent of its save time.
+    /// Absent in legacy checkpoints; the loader rebuilds those once.
+    #[serde(default, with = "crowdrelay_domain::wire_time::option")]
+    pub evidence_cursor: Option<time::OffsetDateTime>,
     /// The effect size worth acting on, in this tenant's outcome units.
     ///
     /// Held here rather than read from [`MEANINGFUL_EFFECT_THRESHOLD`] so the
@@ -553,6 +557,7 @@ impl CausalModel {
         };
         Self {
             evidence_basis_version: EVIDENCE_BASIS_VERSION,
+            evidence_cursor: Some(time::OffsetDateTime::UNIX_EPOCH),
             meaningful_effect_threshold: meaningful_effect,
             expected_signal_per_dispatch: expected_signal,
             fans: HierarchicalNegBinPosterior::new(NegBinPosterior::prior(

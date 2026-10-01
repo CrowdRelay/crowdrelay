@@ -38,27 +38,41 @@ RUST = sorted((ROOT / "crates").rglob("*.rs"))
 # to write it — the owner.
 SINGLE_WRITER_KEYS = {
     "strategy_posterior": (
-        "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/evidence_replay.rs"
+        "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/strategy_checkpoint.rs"
     ),
 }
 
 
-def save_sites(key: str) -> set[str]:
-    """Files containing a `save_brain_state(...)` call naming `key`."""
-    pattern = re.compile(
-        r"save_brain_state\s*\([^;]*?\"" + re.escape(key) + r"\"",
-        re.DOTALL,
+def writes_key(text: str, key: str) -> bool:
+    api_write = re.compile(
+        r"save_brain_state\s*\([^;]*?\"" + re.escape(key) + r"\"", re.DOTALL,
     )
+    # Atomic checkpoint owners may write SQL directly on their transaction.
+    sql_write = re.compile(
+        r"(?:INSERT\s+INTO|UPDATE)\s+brain_state\b[^;]*?'" + re.escape(key) + r"'",
+        re.DOTALL | re.IGNORECASE,
+    )
+    return bool(api_write.search(text) or sql_write.search(text))
+
+
+def save_sites(key: str) -> set[str]:
+    """Files explicitly writing the key through the adapter or direct SQL."""
     hits: set[str] = set()
     for path in RUST:
         if path.name.endswith("_tests.rs") or "/tests/" in str(path):
             continue
-        if pattern.search(path.read_text()):
+        if writes_key(path.read_text(), key):
             hits.add(str(path.relative_to(ROOT)))
     return hits
 
 
 class BrainBeliefOwnership(unittest.TestCase):
+    def test_direct_sql_writers_are_visible_but_reads_are_not(self) -> None:
+        key = "strategy_posterior"
+        self.assertFalse(writes_key("SELECT state FROM brain_state WHERE module='strategy_posterior'", key))
+        self.assertTrue(writes_key("INSERT INTO brain_state(workspace_id,module,state) VALUES($1,'strategy_posterior',$2)", key))
+        self.assertTrue(writes_key("UPDATE brain_state SET state=$2 WHERE module='strategy_posterior'", key))
+
     def test_each_brain_state_key_has_exactly_one_writer(self) -> None:
         for key, owner in SINGLE_WRITER_KEYS.items():
             writers = save_sites(key)
@@ -141,3 +155,4 @@ if __name__ == "__main__":
     else:
         print("BRAIN_BELIEF_OWNERSHIP=FAIL")
         sys.exit(1)
+

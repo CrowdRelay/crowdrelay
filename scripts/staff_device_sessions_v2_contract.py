@@ -44,7 +44,16 @@ checks = {
     ),
     "meta": (
         ROOT / "crates/crowdrelay-api/src/meta.rs",
-        [f"SCHEMA_VERSION: u32 = {max(int(path.name[:4]) for path in (ROOT / 'migrations').glob('[0-9][0-9][0-9][0-9]_*.sql'))}", '"staff_device_sessions_v2"'],
+        ['parse_schema_version(env!("CROWDRELAY_SCHEMA_VERSION"))', '"staff_device_sessions_v2"'],
+    ),
+    "schema_builder": (
+        ROOT / "crates/crowdrelay-api/build.rs",
+        [
+            "read_latest_migration_number(&migrations_dir)",
+            '"cargo:rustc-env=CROWDRELAY_SCHEMA_VERSION={latest}"',
+            "max = Some(max.map_or(num, |m| m.max(num)))",
+            '"cargo:rerun-if-changed=../../migrations"',
+        ],
     ),
     "metrics": (
         ROOT / "crates/crowdrelay-api/src/lib.rs",
@@ -85,3 +94,4 @@ if errors:
         print(f"  - {error}", file=sys.stderr)
     raise SystemExit(1)
 print(f"STAFF_DEVICE_SESSIONS_V2=PASS checks={sum(len(v[1]) for v in checks.values())}")
+
