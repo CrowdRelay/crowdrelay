@@ -368,7 +368,11 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
     .bind(workspace_id)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(routing, (Some(694), Some(1)), "a thinner refresh erased routing facts");
+    assert_eq!(
+        routing,
+        (Some(694), Some(1)),
+        "a thinner refresh erased routing facts"
+    );
 
     // Three rows total — the same destination URL asserted by two
     // dialects in two files is one opportunity.
