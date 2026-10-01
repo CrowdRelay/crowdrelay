@@ -783,6 +783,7 @@ fn etag_matches(candidate: Option<&HeaderValue>, expected: &str) -> bool {
 // referral codes are generated on signup, but the nineteen signed up before
 // the referral ledger existed, and there is no endpoint to backfill them.
 include!("acquisition/admin_links.rs");
+include!("acquisition/join_kit.rs");
 
 #[cfg(test)]
 mod tests {

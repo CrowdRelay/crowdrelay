@@ -19,9 +19,10 @@ use axum::{
 };
 use crowdrelay_application::{
     CheckinCommand, CheckinConsent, ConcertQrError, ConcertQrRepository, CreateCampaignCommand,
-    RevokeCampaignCommand, UpdateCampaignContextCommand,
+    RevokeCampaignCommand, UpdateCampaignContextCommand, UpsertSmartLinkCommand,
 };
-use crowdrelay_domain::{EventSlug, NormalizedEmail, WorkspaceId};
+use crowdrelay_domain::{EventSlug, NormalizedEmail, SmartLinkSlug, WorkspaceId};
+use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -788,33 +789,7 @@ pub async fn update_campaign_context(
 }
 
 fn campaign_view(row: CampaignRow, signing_key: Option<&[u8; 32]>) -> CampaignView {
-    let effective_active =
-        row.active && row.revoked_at.is_none() && row.valid_until > OffsetDateTime::now_utc();
-    let token = if effective_active {
-        signing_key.and_then(|key| sign_token(row.id, row.event_id, row.valid_until, key))
-    } else {
-        None
-    };
-    CampaignView {
-        id: row.id,
-        event_id: row.event_id,
-        event_slug: row.event_slug,
-        event_title: row.event_title,
-        venue: row.venue,
-        starts_at: format_time(row.starts_at),
-        label: row.label,
-        valid_from: format_time(row.valid_from),
-        valid_until: format_time(row.valid_until),
-        max_checkins: row.max_checkins.and_then(|value| u32::try_from(value).ok()),
-        checkin_count: u64::try_from(row.checkin_count).unwrap_or_default(),
-        placement: row.placement,
-        announced_from_stage: row.announced_from_stage,
-        incentive: row.incentive,
-        active: effective_active,
-        revoked_at: row.revoked_at.map(format_time),
-        created_at: format_time(row.created_at),
-        token,
-    }
+    campaign_view_ref(&row, signing_key)
 }
 
 fn format_time(value: OffsetDateTime) -> String {
@@ -889,6 +864,7 @@ mod tests {
 include!("concert_qr/timeline.rs");
 include!("concert_qr/timeline_facts.rs");
 include!("concert_qr/timeline_tests.rs");
+include!("concert_qr/kit.rs");
 include!("concert_qr/scan_view.rs");
 include!("concert_qr/report_view.rs");
 include!("concert_qr/helpers_view.rs");

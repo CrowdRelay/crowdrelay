@@ -92,7 +92,7 @@ install ask: it is a tracked redirect the ledger counts, so send it verbatim or
 the ask teaches nothing.
 The executor renders the named template and sends it.
 
-Eight keys exist. An executor that handles some by name and lets the rest fall
+Nine keys exist. An executor that handles some by name and lets the rest fall
 through to a default is the failure this list exists to prevent: three of these
 were being rendered as the Synesthesia follow-up, including the one that thanks
 somebody for a referral that converted — the payoff of the only compounding
@@ -108,6 +108,7 @@ loop the product has.
 | `crowdrelay.fan.referral_thanks.v1` | A referral they made converted. |
 | `crowdrelay.fan.referral_invite.v1` | Has referred nobody; asks them to. Carries `fan.referral_code` **and the complete tenant-native `fan.referral_url`**. Send `fan.referral_url` verbatim; never construct a hostname or referral path in the executor. |
 | `crowdrelay.fan.signal_install_ask.v1` | Confirmed fan with no Signal install (app or identified web session); asks them to open it. Carries **the complete tracked `fan.install_url`** — the tenant's `/l/` redirect to the Signal page. Send it verbatim; a link the executor rebuilds bypasses the click ledger, and a missing `fan.install_url` is a send-stopper, not a detail to work around. Every send of this template waits for a person's approval in CrowdRelay before it reaches the executor. |
+| `crowdrelay.fan.show_recall.v1` | Checked in at a show within the recall window — the next-day message referencing that night. Carries `fan.show_title` and **the complete tracked `fan.show_url`** — the tenant's `/l/` redirect to the show's own page. Send `fan.show_url` verbatim; a missing `show_url` is a send-stopper. When `fan.install_url` is present the fan had no Signal install at decision time — the recall then doubles as their install ask and the link belongs in the same mail. The scan itself sent nothing; this is the first message that fan hears. Every send waits for a person's approval. |
 
 **Fail on a key you do not know.** A default branch sends the wrong message,
 which is worse than sending none: it is indistinguishable from working, and the

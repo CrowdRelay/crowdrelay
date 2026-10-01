@@ -84,6 +84,13 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::acquisition::admin_list_smart_links)
                 .post(crate::acquisition::admin_create_smart_link),
         )
+        // The join kit is the console's own checklist: which placement links
+        // exist, and what each one returned. The operator pastes the URLs.
+        .route(
+            "/v1/control-plane/join-kit",
+            get(crate::acquisition::admin_join_kit)
+                .post(crate::acquisition::admin_ensure_join_kit),
+        )
         // ── Tickets, show costs and the night's setup ────────────────
         // The sale's configuration stays admin-only: `configure_sale`
         // re-checks the admin key inside the handler, so price and capacity
@@ -125,6 +132,12 @@ pub(crate) fn router(state: crate::AppState) -> Router {
         .route(
             "/v1/control-plane/event-qr/overview",
             get(crate::concert_qr::overview),
+        )
+        // The show kit — three placements plus bill-act links in one call —
+        // is the console's "make this show scannable" button.
+        .route(
+            "/v1/control-plane/event-qr/kits",
+            post(crate::concert_qr::create_qr_kit),
         )
         .route(
             "/v1/control-plane/event-qr/campaigns",
