@@ -196,7 +196,7 @@ fn relationship_research_candidate(
         input_snapshot: serde_json::to_value(&snapshot)?,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestAgentRun {
-            template_id: "contact-research".to_owned(),
+            template_id: "contact-researcher".to_owned(),
             prompt,
             priority: 9,
             tier: crowdrelay_brain::AgentTier::Premium,
