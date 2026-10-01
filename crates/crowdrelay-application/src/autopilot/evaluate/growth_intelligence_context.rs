@@ -617,7 +617,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         }
         // Whether the posterior's spread has earned a say in ranking.
         let uncertainty_gate = crowdrelay_brain::uncertainty_gate::uncertainty_gate(
-            causal_model.calibration.y30_interval,
+            &causal_model.calibration.y30_interval,
         );
         report.gi_dispatch_log.push(uncertainty_gate.summary());
         let run = portfolio::select_portfolio(
@@ -627,7 +627,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             self.workspace_id,
             &experimental_quality,
             sizing_multiplier,
-            causal_model.value_exchange,
+            &causal_model.value_exchange,
             snapshots
                 .first()
                 .and_then(|snapshot| snapshot.world_model.objective.as_ref()),
