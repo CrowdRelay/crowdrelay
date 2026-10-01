@@ -112,6 +112,10 @@ struct Row {
     latest_consent: Option<bool>,
     days_since_last_contact: Option<i64>,
     already_invited: bool,
+    /// The person said no in either ledger: a declined or do-not-contact
+    /// reply on a beacon campaign, or on the outreach target behind the same
+    /// address.
+    declined: bool,
 }
 
 /// The dual-role read, shared by the review page and the approve path's
@@ -139,14 +143,30 @@ const DUAL_ROLE_CORE: &str = r#"
         -- The governor's opt-out binds org-wide: a reply that said stop
         -- anywhere is a stop here too, not a fresh start under another role.
         COALESCE(governor.do_not_contact, false) AS governor_do_not_contact,
-        -- A reply outranks a score, so it is read rather than inferred: any
-        -- beacon campaign on this person that got an answer counts.
-        EXISTS (
-            SELECT 1 FROM beacon_campaigns AS campaign
-            WHERE campaign.workspace_id = beacon.workspace_id
-              AND campaign.beacon_id = beacon.id
-              AND campaign.last_reply_disposition <> 'none'
+        -- A reply outranks a score, so it is read rather than inferred: an
+        -- answer on a beacon campaign, or on the outreach target behind the
+        -- same address, counts. Only an answer that leaves the door open does:
+        -- `declined` and `do_not_contact` used to count as a relationship
+        -- through `<> 'none'`, which would have invited the people who had
+        -- just said no.
+        (
+            EXISTS (
+                SELECT 1 FROM beacon_campaigns AS campaign
+                WHERE campaign.workspace_id = beacon.workspace_id
+                  AND campaign.beacon_id = beacon.id
+                  AND campaign.last_reply_disposition IN ('received', 'interested', 'partner')
+            )
+            OR COALESCE(outreach.replied, false)
         ) AS has_replied,
+        (
+            EXISTS (
+                SELECT 1 FROM beacon_campaigns AS campaign
+                WHERE campaign.workspace_id = beacon.workspace_id
+                  AND campaign.beacon_id = beacon.id
+                  AND campaign.last_reply_disposition IN ('declined', 'do_not_contact')
+            )
+            OR COALESCE(outreach.refused, false)
+        ) AS declined,
         fan.status AS fan_status,
         -- Consent is the newest marketing record and nothing older. A fan
         -- who opted out is `known_but_not_consented`, never "reachable
@@ -160,12 +180,20 @@ const DUAL_ROLE_CORE: &str = r#"
             ORDER BY consent.recorded_at DESC, consent.id DESC
             LIMIT 1
         ) AS latest_consent,
-        -- The governor spans both roles: this is the last time the band
-        -- reached this address for any reason at all.
+        -- The last time the band reached this address for any reason at all:
+        -- the later of the governor's record and the outreach engine's.
+        --
+        -- The governor alone is blind to the outreach engine. Production held
+        -- 56 governor rows against 485 outbound outreach mails in a month, so
+        -- ~120 people the band had mailed repeatedly read as "never contacted"
+        -- and were refused as cold: the invitation lane found nobody to ask.
+        -- `GREATEST` ignores a NULL side, so either ledger alone is enough.
         -- Whole days, floored in SQL: `EXTRACT` returns NUMERIC and the
         -- decode wants an integer answer, not a fraction of a day nobody
         -- reads.
-        FLOOR(EXTRACT(EPOCH FROM ($2 - governor.last_outbound_at)) / 86400)::bigint
+        FLOOR(EXTRACT(EPOCH FROM (
+            $2 - GREATEST(governor.last_outbound_at, outreach.last_at)
+        )) / 86400)::bigint
             AS days_since_last_contact,
         COALESCE(governor.last_context = 'latarnik_invite', false) AS already_invited
     FROM beacons AS beacon
@@ -182,6 +210,17 @@ const DUAL_ROLE_CORE: &str = r#"
     LEFT JOIN contact_governor AS governor
       ON governor.workspace_id = beacon.workspace_id
      AND governor.normalized_contact = lower(btrim(beacon.contact_email))
+    -- The outreach engine's own record of the same address. Aggregated because
+    -- `(workspace_id, contact_email)` is unique only on the raw spelling.
+    LEFT JOIN LATERAL (
+        SELECT max(target.last_outreach_at) AS last_at,
+               bool_or(target.last_reply_disposition IN ('positive', 'received')) AS replied,
+               bool_or(target.last_reply_disposition IN ('declined', 'do_not_contact')
+                       OR target.do_not_contact) AS refused
+        FROM outreach_targets AS target
+        WHERE target.workspace_id = beacon.workspace_id
+          AND lower(btrim(target.contact_email)) = lower(btrim(beacon.contact_email))
+    ) AS outreach ON true
     WHERE beacon.workspace_id = $1
       AND beacon.active
       AND beacon.contact_email IS NOT NULL
@@ -292,7 +331,7 @@ fn row_to_contact(row: &Row, reason_available: bool) -> (DualRoleContact, bool, 
         Some("unsubscribed") | Some("suppressed")
     ) || row.latest_consent == Some(false);
     let opt_in_pending = row.fan_status.as_deref() == Some("pending");
-    let do_not_contact = row.do_not_contact || row.governor_do_not_contact;
+    let do_not_contact = row.do_not_contact || row.governor_do_not_contact || row.declined;
     let standing = ContactStanding {
         display_name: row.display_name.clone(),
         role: row.role.clone(),

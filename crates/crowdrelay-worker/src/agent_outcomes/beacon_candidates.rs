@@ -5,6 +5,24 @@
 // discovery intake. The operator/verification lifecycle decides whether a
 // candidate becomes a relationship.
 
+/// The decision's subject pair for a beacon-candidate outcome: the new beacon
+/// when the outcome carries an item, the outcome itself when it does not (the
+/// quality guard refuses an itemless candidate before the transaction opens;
+/// the second arm only keeps the pair total).
+async fn beacon_candidate_subject(
+    tx: &mut Transaction<'_, Postgres>,
+    outcome: &ValidatedOutcome,
+    producing_task: Option<&(String, String)>,
+) -> Result<(&'static str, Uuid), AgentOutcomeError> {
+    match &outcome.payload.item {
+        Some(item) => {
+            let prompt = producing_task.map(|(_, prompt)| prompt.as_str());
+            Ok(("beacon", insert_beacon_candidate(tx, outcome, item, prompt).await?))
+        }
+        None => Ok(("agent_outcome", outcome.id)),
+    }
+}
+
 async fn insert_beacon_candidate(
     tx: &mut Transaction<'_, Postgres>,
     outcome: &ValidatedOutcome,
