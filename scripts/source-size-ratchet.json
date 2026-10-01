@@ -30,6 +30,7 @@
     "crates/crowdrelay-infra/tests/postgres/autopilot_capture_plans.rs": 1237,
     "crates/crowdrelay-infra/tests/postgres/autopilot_experiment_integrity.rs": 4485,
     "crates/crowdrelay-infra/tests/postgres/autopilot_measurement_spine.rs": 1550,
+    "crates/crowdrelay-infra/tests/postgres/autopilot_outreach_engine.rs": 1205,
     "crates/crowdrelay-infra/tests/postgres/autopilot_plays.rs": 1381,
     "crates/crowdrelay-infra/tests/postgres/autopilot_world_model.rs": 1284,
     "crates/crowdrelay-infra/tests/postgres/events.rs": 1287,
