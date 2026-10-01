@@ -4,8 +4,7 @@
 // may work the same show; one Beacon's reply/click/fan must not teach every
 // other Beacon action that it succeeded.
 
-use super::super::super::*;
-use super::ClaimedAutopilotMeasurement;
+use super::*;
 
 pub(super) async fn reply_14d(
     pool: &sqlx::PgPool,
