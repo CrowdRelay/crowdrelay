@@ -81,9 +81,9 @@ pub struct FanLifecyclePolicy {
     /// Days after signup past which the install ask stops.
     ///
     /// Same bound shape as the referral invite: nothing records that a fan was
-    /// asked, so the window is what keeps "ask once" honest — days 2 to 9 with
-    /// the default 120-hour cooldown admit one, at the edges two. A fan who
-    /// has not opened Signal in that window has answered.
+    /// asked, so the window is what keeps "ask once" honest — days 2 to 9
+    /// against the default 120-hour cooldown admit exactly one. A fan who has
+    /// not opened Signal in that window has answered.
     pub signal_install_ask_until_days: u32,
 }
 
@@ -289,7 +289,7 @@ pub fn evaluate_fan_lifecycle(
     // contact, and before the referral invite: a fan who opens Signal becomes
     // push-reachable, which is worth more to every later ask than an install
     // deferred behind one. Bounded like the referral invite — a window, not
-    // an "asked" flag — so it asks once, at the edges twice, then stops.
+    // an "asked" flag — so it asks once, then stops.
     if !snapshot.has_signal_install
         && snapshot.last_marketing_touch_at.is_some()
         && now - snapshot.created_at

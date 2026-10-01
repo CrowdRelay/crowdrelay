@@ -16,8 +16,9 @@ every number it produced was a true statement about an empty numerator.
 So this gate pins three things:
 
   * `fan_id` has a writer at all, in the layer allowed to hold SQL;
-  * the fan push registration calls it, because that route is the only one
-    holding both an authenticated fan and the app's own installation id;
+  * the fan push registration calls it — it held the only route carrying both
+    an authenticated fan and the app's own installation id until
+    `/v1/me/signal/installations` arrived for push-less surfaces;
   * the call cannot fail the registration, which is the property that makes it
     safe to put a measurement write on a live request path.
 """

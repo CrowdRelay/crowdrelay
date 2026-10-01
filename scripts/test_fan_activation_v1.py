@@ -9,7 +9,11 @@ that stops being enforced.
 
 from pathlib import Path
 import re
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rust_source_tree import read_rust_module
 
 ROOT = Path(__file__).resolve().parents[1]
 DOMAIN = ROOT / "crates/crowdrelay-domain/src/fan_activation.rs"
@@ -223,9 +227,10 @@ class FanActivationContract(unittest.TestCase):
     def test_a_fan_can_never_hold_two_referral_codes(self) -> None:
         # Two codes split one fan's referrals across two identities and make
         # the ledger wrong.
-        candidates = read(
-            ROOT
-            / "crates/crowdrelay-application/src/autopilot/evaluate/candidates_lifecycle.rs"
+        # The evaluator splits candidates across include! chunks — read the
+        # module root so the assertion follows whichever chunk holds it.
+        candidates = read_rust_module(
+            ROOT, "crates/crowdrelay-application/src/autopilot/evaluate.rs"
         )
         self.assertIn('format!("action:referral-code:{}", snapshot.fan_id)', candidates)
         actions = read(

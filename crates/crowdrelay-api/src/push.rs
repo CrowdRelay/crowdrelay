@@ -728,7 +728,10 @@ async fn push_enabled(state: &crate::AppState) -> Result<bool, crate::ecosystem:
     crate::ecosystem::feature_enabled(state, "push_delivery_enabled").await
 }
 
-fn valid_installation_id(value: &str) -> bool {
+/// One column, one rule: `signal_installations.installation_id` is the same
+/// identifier `fan_push_endpoints` CHECKs at 8..=160, so the install surfaces
+/// accept exactly the ids the push table can hold.
+pub(crate) fn valid_installation_id(value: &str) -> bool {
     (8..=MAX_INSTALLATION_ID).contains(&value.len())
         && value
             .bytes()

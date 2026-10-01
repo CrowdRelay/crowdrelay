@@ -301,7 +301,7 @@ paths:
               additionalProperties: false
               required: [installation_id, platform]
               properties:
-                installation_id: { type: string, minLength: 1, maxLength: 128 }
+                installation_id: { type: string, minLength: 8, maxLength: 160 }
                 platform: { type: string, enum: [android, ios, desktop, web] }
                 app_version: { type: string, maxLength: 32 }
       responses:
@@ -1084,8 +1084,8 @@ paths:
               properties:
                 installation_id:
                   type: string
-                  minLength: 1
-                  maxLength: 128
+                  minLength: 8
+                  maxLength: 160
                 platform:
                   type: string
                   enum: [android, ios, desktop, web]
