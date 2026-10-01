@@ -478,11 +478,27 @@ pub(super) async fn schedule_effect_measurement(
                     0.0,
                     now + time::Duration::days(14),
                 ));
+                // Fan value uses the canonical North-Star learner rather than
+                // a Beacon-only counter. The action-owned smart link makes
+                // attribution exact, and the generic fan observer feeds the
+                // same Y3/Y14/Y30 posteriors every other acquisition lane uses.
                 plans.push((
-                    AutopilotMeasurementKind::BeaconOutreachFanAcquisition14d,
+                    AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                    beacon_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(3),
+                ));
+                plans.push((
+                    AutopilotMeasurementKind::IncrementalFanGrowth14d,
                     beacon_id.into_uuid(),
                     0.0,
                     now + time::Duration::days(14),
+                ));
+                plans.push((
+                    AutopilotMeasurementKind::DurableFanGrowth30d,
+                    beacon_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(44),
                 ));
             }
         }
