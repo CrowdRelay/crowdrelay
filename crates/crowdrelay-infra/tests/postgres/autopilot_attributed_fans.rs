@@ -146,6 +146,25 @@ async fn observe(f: &Fixture, measurement: &ClaimedAutopilotMeasurement) -> f64 
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn an_action_owned_link_is_a_live_fan_growth_surface_without_a_post() {
     let f = setup().await.expect("fixture");
+    // Production shares this foreign table with the agent service. Its
+    // presence selects FIRST_TRACKED_POST_WITH_TASKS, so the regression must
+    // exercise that branch rather than only the agent-less fallback.
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS agent_service_tasks (
+               id uuid PRIMARY KEY,
+               workspace_id uuid NOT NULL,
+               template_id text NOT NULL,
+               model_id text NOT NULL,
+               prompt text NOT NULL,
+               status text NOT NULL DEFAULT 'queued',
+               tier text NOT NULL DEFAULT 'basic',
+               metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+               created_at timestamptz NOT NULL DEFAULT now()
+           )"#,
+    )
+    .execute(&f.pool)
+    .await
+    .expect("foreign task table");
     let finished = f.now - time::Duration::days(14);
     let action = insert_dispatch(&f, "lineage:owned-link", finished).await;
     sqlx::query(
