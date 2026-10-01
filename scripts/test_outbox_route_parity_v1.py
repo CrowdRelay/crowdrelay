@@ -69,7 +69,6 @@ INTERNAL_ONLY: set[str] = {
 # landing in the route map must leave this list.
 PENDING_ROUTE: set[str] = {
     "amplification.campaign_due",
-    "crowdrelay.beacon.discovery_requested",
     "crowdrelay.beacon.invite_batch_requested",
     "crowdrelay.beacon.invite_delivery_requested",
     "crowdrelay.beacon.network_discovery_requested",
