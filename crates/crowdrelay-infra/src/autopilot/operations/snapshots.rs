@@ -1051,12 +1051,21 @@ pub(in crate::autopilot) async fn load_beacon_invite_snapshots(
               AND action.action_kind = 'beacon.invite_batch.request'
               AND action.status IN ('awaiting_approval', 'queued', 'processing', 'succeeded')
         ) AS last_ask ON true
+        LEFT JOIN beacon_campaigns AS campaign
+          ON campaign.workspace_id = beacon.workspace_id
+         AND campaign.beacon_id = beacon.id
+         AND campaign.event_id = event.id
         WHERE beacon.workspace_id = $1
           AND beacon.active
           AND beacon.verified
           AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
+          -- The pair ledger binds invites the same way it binds outreach:
+          -- a declined or deferred pair must not mint an invite batch that
+          -- lands a week later either.
+          AND COALESCE(campaign.status, 'candidate') NOT IN ('declined','suppressed','closed')
+          AND (campaign.deferred_until IS NULL OR campaign.deferred_until <= $2)
         ORDER BY beacon.id, event.id, event.starts_at
         LIMIT $3
         "#,

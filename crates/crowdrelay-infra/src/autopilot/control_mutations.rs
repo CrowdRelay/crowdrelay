@@ -407,12 +407,14 @@ impl PostgresAutopilotRepository {
                         // one" — write it on the pair ledger or the next
                         // cycle re-recommends the same ask and the queue
                         // teaches nothing. The decline is operator-made, not
-                        // the partner's reply.
+                        // the partner's reply, and the ask's deterministic
+                        // key is released with it.
                         crate::beacon_signal::outreach_state::stamp_operator_decline(
                             &mut transaction,
                             workspace_id.into_uuid(),
                             beacon_id.into_uuid(),
                             event_id.into_uuid(),
+                            Some(action_id.into_uuid()),
                         )
                         .await
                         .map_err(map_sqlx)?;

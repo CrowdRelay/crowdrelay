@@ -682,19 +682,29 @@ impl PostgresAutopilotRepository {
                         FROM beacons AS beacon
                         JOIN events AS event
                           ON event.workspace_id = beacon.workspace_id AND event.id = $3
+                        LEFT JOIN beacon_campaigns AS campaign
+                          ON campaign.workspace_id = beacon.workspace_id
+                         AND campaign.beacon_id = beacon.id
+                         AND campaign.event_id = event.id
                         WHERE beacon.workspace_id = $1 AND beacon.id = $2
                           AND beacon.version = $4
                           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
                           AND NOT beacon.do_not_contact
                           AND beacon.contact_email IS NOT NULL
                           AND event.status = 'published'
-                        FOR SHARE OF beacon, event
+                          -- Same stale-yes guard as the outreach send: an
+                          -- answer the booker wrote after approval must gate
+                          -- the batch too.
+                          AND COALESCE(campaign.status, 'candidate') NOT IN ('declined','suppressed','closed')
+                          AND (campaign.deferred_until IS NULL OR campaign.deferred_until <= $5)
+                        FOR SHARE OF beacon, event, campaign
                         "#,
                     )
                     .bind(workspace_id.into_uuid())
                     .bind(beacon_id.into_uuid())
                     .bind(event_id.into_uuid())
                     .bind(beacon_version)
+                    .bind(now)
                     .fetch_optional(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?

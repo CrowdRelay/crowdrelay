@@ -270,9 +270,15 @@ fn private_json<T: Serialize>(status: StatusCode, body: T) -> Response {
     (status, [(CACHE_CONTROL, PRIVATE_NO_STORE)], Json(body)).into_response()
 }
 
+/// Every verb on this surface audits through `operator_actions`, whose
+/// CHECK admits printable ASCII 8–128 — anything else used to reach the
+/// database and answer 500 for what was a malformed header.
 fn idempotency_key(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("idempotency-key")?.to_str().ok()?.trim();
-    if value.is_empty() || value.len() > 200 {
+    if value.len() < 8
+        || value.len() > 128
+        || !value.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
+    {
         None
     } else {
         Some(value.to_owned())

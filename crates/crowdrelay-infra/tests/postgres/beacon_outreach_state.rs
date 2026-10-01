@@ -211,6 +211,72 @@ async fn pair_in_due_set(
     }))
 }
 
+/// The invite-batch ask for the same pair — a second lane reading the same
+/// ledger. Carries the deterministic key a real cycle would mint so the
+/// re-key test below exercises the real constraint.
+async fn pending_invite_ask(
+    f: &Fixture,
+    beacon_id: Uuid,
+    beacon_version: i64,
+    event_id: Uuid,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let decision_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO autopilot_decisions
+           (id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+           VALUES ($1,$2,$3,'beacon','beacon',$4,'request_beacon_invite_batch',9000,
+                   'require_approval','seeded invite ask','{}','{}','{}',now(),$1)"#,
+    )
+    .bind(decision_id)
+    .bind(f.workspace_id)
+    .bind(format!("decision-{decision_id}"))
+    .bind(beacon_id)
+    .execute(&f.pool)
+    .await?;
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"INSERT INTO autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, action_class)
+           VALUES ($1,$2,$3,'beacon','beacon.invite_batch.request','beacon',$4,$5,$6,
+                   'awaiting_approval','third_party')"#,
+    )
+    .bind(action_id)
+    .bind(f.workspace_id)
+    .bind(decision_id)
+    .bind(beacon_id)
+    .bind(format!("action:beacon-invite:{beacon_id}:{event_id}"))
+    .bind(json!({
+        "kind": "request_beacon_invite_batch",
+        "beacon_id": beacon_id,
+        "event_id": event_id,
+        "beacon_version": beacon_version,
+        "requested_count": 10,
+    }))
+    .execute(&f.pool)
+    .await?;
+    Ok(action_id)
+}
+
+async fn pair_in_invite_due_set(
+    f: &Fixture,
+    beacon_id: Uuid,
+    event_id: Uuid,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let snapshots = f
+        .repository
+        .load_beacon_invite_snapshots(
+            WorkspaceId::from_uuid(f.workspace_id),
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    Ok(snapshots.iter().any(|snapshot| {
+        snapshot.beacon_id.into_uuid() == beacon_id && snapshot.event_id.into_uuid() == event_id
+    }))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_defer_holds_the_pair_out_of_the_due_set_until_it_lapses()
@@ -551,5 +617,325 @@ async fn a_consumed_answer_key_conflicts_instead_of_merging()
     ));
     let (status, _, _) = campaign_row(&f, beacon_id, event_id).await?;
     assert_eq!(status, "candidate", "the refused replay leaves no mark");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_invite_lane_obeys_the_same_ledger() -> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let (beacon_id, _beacon_version, event_id) = pair(&f, 30).await?;
+    assert!(
+        pair_in_invite_due_set(&f, beacon_id, event_id).await?,
+        "a fresh verified pair must be in the invite due set before the answer"
+    );
+
+    outreach_state::defer_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_id,
+        event_id,
+        7,
+        "test-invite-defer",
+        None,
+    )
+    .await?
+    .map_err(|refusal| format!("defer refused: {refusal:?}"))?;
+    assert!(
+        !pair_in_invite_due_set(&f, beacon_id, event_id).await?,
+        "a deferred pair must leave the invite due set too — the ledger is one"
+    );
+
+    // Defer lapsed → the pair is due again for invites as for outreach.
+    sqlx::query(
+        "UPDATE beacon_campaigns SET deferred_until = now() - INTERVAL '1 hour'
+         WHERE workspace_id = $1 AND beacon_id = $2 AND event_id = $3",
+    )
+    .bind(f.workspace_id)
+    .bind(beacon_id)
+    .bind(event_id)
+    .execute(&f.pool)
+    .await?;
+    assert!(pair_in_invite_due_set(&f, beacon_id, event_id).await?);
+
+    outreach_state::decline_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_id,
+        event_id,
+        None,
+        "test-invite-decline",
+        None,
+    )
+    .await?
+    .map_err(|refusal| format!("decline refused: {refusal:?}"))?;
+    assert!(
+        !pair_in_invite_due_set(&f, beacon_id, event_id).await?,
+        "a declined pair must not mint an invite batch next cycle"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_invite_ask_approved_before_the_answer_cannot_send()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let (beacon_id, beacon_version, event_id) = pair(&f, 30).await?;
+    let action_id = pending_invite_ask(&f, beacon_id, beacon_version, event_id).await?;
+    sqlx::query(
+        "UPDATE autopilot_actions
+         SET status = 'queued', approved_at = now(), approved_by = 'operator:test',
+             available_at = now()
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(action_id)
+    .execute(&f.pool)
+    .await?;
+
+    outreach_state::decline_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_id,
+        event_id,
+        Some("not for this show"),
+        "test-decline-invite-stale",
+        None,
+    )
+    .await?
+    .map_err(|refusal| format!("decline refused: {refusal:?}"))?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(
+            WorkspaceId::from_uuid(f.workspace_id),
+            8,
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|candidate| candidate.id.into_uuid() == action_id)
+        .expect("the approved invite ask is claimable");
+    let outcome = f
+        .repository
+        .execute_action(
+            WorkspaceId::from_uuid(f.workspace_id),
+            action,
+            OffsetDateTime::now_utc(),
+        )
+        .await;
+    assert!(
+        outcome.is_err(),
+        "a declined pair must fail the invite send-time re-check"
+    );
+    let emitted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM outbox_events
+         WHERE workspace_id = $1 AND payload->>'action_id' = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(action_id.to_string())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(emitted, 0, "a refused invite batch emits nothing");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_answered_pair_can_raise_the_ask_again() -> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let (beacon_id, beacon_version, event_id) = pair(&f, 30).await?;
+    let action_id = pending_invite_ask(&f, beacon_id, beacon_version, event_id).await?;
+    let base_key = format!("action:beacon-invite:{beacon_id}:{event_id}");
+
+    outreach_state::defer_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_id,
+        event_id,
+        7,
+        "test-remint-defer",
+        None,
+    )
+    .await?
+    .map_err(|refusal| format!("defer refused: {refusal:?}"))?;
+    assert_eq!(action_status(&f, action_id).await?, "cancelled");
+    let dead_key: String = sqlx::query_scalar(
+        "SELECT idempotency_key FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert!(
+        dead_key.starts_with(&format!("{base_key}:operator:")),
+        "the cancelled ask must release its deterministic key, got {dead_key}"
+    );
+
+    // The defer lapses, the cycle re-evaluates the pair and mints a fresh ask
+    // under the same deterministic key — the dead row must not swallow it.
+    sqlx::query(
+        "UPDATE beacon_campaigns SET deferred_until = now() - INTERVAL '1 hour'
+         WHERE workspace_id = $1 AND beacon_id = $2 AND event_id = $3",
+    )
+    .bind(f.workspace_id)
+    .bind(beacon_id)
+    .bind(event_id)
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO autopilot_actions
+           (id, workspace_id, decision_id, context, action_kind, subject_kind,
+            subject_id, idempotency_key, payload, status, action_class)
+           VALUES ($1,$2,
+                   (SELECT decision_id FROM autopilot_actions WHERE id = $3),
+                   'beacon','beacon.invite_batch.request','beacon',$4,$5,
+                   $6,'awaiting_approval','third_party')"#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.workspace_id)
+    .bind(action_id)
+    .bind(beacon_id)
+    .bind(&base_key)
+    .bind(json!({
+        "kind": "request_beacon_invite_batch",
+        "beacon_id": beacon_id,
+        "event_id": event_id,
+        "beacon_version": beacon_version,
+        "requested_count": 10,
+    }))
+    .execute(&f.pool)
+    .await
+    .expect("a lapsed defer must let the same deterministic key mint again");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_replayed_answer_replays_without_a_second_transition()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let (beacon_id, _beacon_version, event_id) = pair(&f, 30).await?;
+    let key = format!("answer-key-{}", &Uuid::now_v7().simple().to_string()[20..]);
+
+    let first = outreach_state::defer_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_id,
+        event_id,
+        5,
+        &key,
+        None,
+    )
+    .await?
+    .expect("first answer lands");
+    assert!(!first.replayed);
+    let (_, deferred_until, _) = campaign_row(&f, beacon_id, event_id).await?;
+
+    // A network retry of the same answer on the same pair must return the
+    // stored outcome — not stretch the window by another five days.
+    let replay = outreach_state::defer_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_id,
+        event_id,
+        5,
+        &key,
+        None,
+    )
+    .await?
+    .expect("the same answer on the same pair replays");
+    assert!(replay.replayed, "a retry is a replay, not a refusal");
+    assert_eq!(replay.cancelled_actions, 0);
+    let (_, replayed_until, _) = campaign_row(&f, beacon_id, event_id).await?;
+    assert_eq!(
+        deferred_until, replayed_until,
+        "a replayed defer must not move the window"
+    );
+    let audit: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM operator_actions
+         WHERE workspace_id = $1 AND idempotency_key = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(&key)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(audit, 1, "a replay writes no second audit row");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_same_key_on_another_pair_conflicts() -> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let (beacon_a, _, event_a) = pair(&f, 30).await?;
+    let (beacon_b, _, event_b) = pair(&f, 25).await?;
+    let key = format!("answer-key-{}", &Uuid::now_v7().simple().to_string()[20..]);
+
+    outreach_state::defer_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_a,
+        event_a,
+        5,
+        &key,
+        None,
+    )
+    .await?
+    .expect("first answer lands");
+
+    // Same key, different event — a key collision, not a replay.
+    let conflict = outreach_state::defer_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_a,
+        event_b,
+        5,
+        &key,
+        None,
+    )
+    .await?;
+    assert!(matches!(
+        conflict,
+        Err(OutreachStateRefusal::IdempotencyConflict)
+    ));
+
+    // Same key, different beacon — same refusal.
+    let conflict = outreach_state::decline_beacon_outreach(
+        &f.pool,
+        f.workspace_id,
+        beacon_b,
+        event_a,
+        None,
+        &key,
+        None,
+    )
+    .await?;
+    assert!(matches!(
+        conflict,
+        Err(OutreachStateRefusal::IdempotencyConflict)
+    ));
+
+    // The refused writes left no mark on either untouched pair.
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM beacon_campaigns
+         WHERE workspace_id = $1 AND event_id = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(event_b)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(rows, 0);
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM beacon_campaigns
+         WHERE workspace_id = $1 AND beacon_id = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(beacon_b)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(rows, 0);
     Ok(())
 }

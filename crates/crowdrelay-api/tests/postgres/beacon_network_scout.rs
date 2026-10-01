@@ -487,6 +487,38 @@ async fn a_pending_ask_surfaces_its_ranking_and_answers_the_booker()
     .await?;
     assert!(deferred.is_some_and(|until| until > time::OffsetDateTime::now_utc()));
 
+    // A retry of the same answer under the same key replays the stored
+    // outcome — it does not stretch the window and it does not write a
+    // second audit row.
+    let (status, replay) = post(
+        &app,
+        json!({"action": "defer", "beaconId": beacon_id, "eventId": event_id, "deferDays": 14}),
+        &format!("defer-{beacon_id}"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "a retry replays: {replay}");
+    assert_eq!(replay["replayed"].as_bool(), Some(true));
+    let deferred_after: Option<time::OffsetDateTime> = sqlx::query_scalar(
+        "SELECT deferred_until FROM beacon_campaigns
+         WHERE workspace_id = $1 AND beacon_id = $2 AND event_id = $3",
+    )
+    .bind(workspace_uuid)
+    .bind(beacon_id)
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(deferred, deferred_after);
+
+    // The same key under another verb on another pair is a collision, not
+    // a replay — 409, not a silent merge.
+    let (status, _) = post(
+        &app,
+        json!({"action": "decline", "beaconId": beacon_id, "eventId": event_id}),
+        &format!("defer-{beacon_id}"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+
     // The deferred ask no longer sits on the card stack.
     let view = get(&app).await?;
     assert!(

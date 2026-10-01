@@ -479,6 +479,7 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                   AND COALESCE(engagement.status,'eligible') NOT IN ('completed','declined')
                   AND engagement.last_notified_at IS NULL
                   AND COALESCE(campaign.status,'candidate') NOT IN ('declined','suppressed','closed')
+                  AND (campaign.deferred_until IS NULL OR campaign.deferred_until <= now())
             ), ranked AS (
                 SELECT * FROM candidates
                 WHERE distance_km <= radius_km

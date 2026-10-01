@@ -40,6 +40,10 @@ pub struct OutreachStateChanged {
     /// `closed`): the answer is recorded on the audit ledger but does not
     /// demote a relationship that already went further.
     pub preserved_stronger_state: bool,
+    /// True when the idempotency key was already consumed by this same
+    /// answer on this same pair — the stored outcome is replayed rather
+    /// than a second transition applied.
+    pub replayed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +107,12 @@ async fn cancel_pending_asks(
     let cancelled = sqlx::query(
         r#"
         UPDATE autopilot_actions
-        SET status = 'cancelled', finished_at = now()
+        SET status = 'cancelled', finished_at = now(),
+            -- Beacon asks carry a deterministic key; a cancelled row holding
+            -- it would swallow every later mint (`ON CONFLICT DO NOTHING`)
+            -- and a lapsed defer could never re-raise. Suffix the dead row
+            -- so the base key is free when the pair is due again.
+            idempotency_key = idempotency_key || ':operator:' || id::text
         WHERE workspace_id = $1
           AND status = 'awaiting_approval'
           AND action_kind = ANY($2)
@@ -125,12 +134,15 @@ async fn cancel_pending_asks(
 /// Stamp the operator's decline on the pair ledger from inside an existing
 /// transaction — the approval-queue cancel path uses this so a cancelled
 /// ask cannot re-appear next cycle as a missing row. Stronger states
-/// (`partner`, `closed`, `suppressed`) keep theirs.
+/// (`partner`, `closed`, `suppressed`) keep theirs. The cancelled action's
+/// deterministic key is released so a pair the partner later warms to can
+/// mint the same ask again.
 pub(crate) async fn stamp_operator_decline(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: Uuid,
     beacon_id: Uuid,
     event_id: Uuid,
+    cancelled_action_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -139,7 +151,15 @@ pub(crate) async fn stamp_operator_decline(
         ) VALUES ($1, $2, $3, 'declined', 'operator')
         ON CONFLICT (workspace_id, beacon_id, event_id) DO UPDATE SET
             status = 'declined',
-            declined_via = 'operator'
+            -- The partner's own "no" is stronger provenance than the
+            -- booker's bookkeeping; a later operator answer never
+            -- rewrites who declined.
+            declined_via = CASE
+                WHEN beacon_campaigns.declined_via = 'partner_reply'
+                THEN 'partner_reply'
+                ELSE 'operator'
+            END,
+            deferred_until = NULL
         WHERE beacon_campaigns.status NOT IN ('partner','closed','suppressed')
         "#,
     )
@@ -148,7 +168,83 @@ pub(crate) async fn stamp_operator_decline(
     .bind(event_id)
     .execute(&mut **tx)
     .await?;
+    if let Some(action_id) = cancelled_action_id {
+        // A cancelled row that keeps the deterministic key swallows every
+        // later mint (`ON CONFLICT DO NOTHING`).
+        sqlx::query(
+            "UPDATE autopilot_actions \
+             SET idempotency_key = idempotency_key || ':operator:' || id::text \
+             WHERE workspace_id = $1 AND id = $2 AND status = 'cancelled'",
+        )
+        .bind(workspace_id)
+        .bind(action_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
+}
+
+/// Probe the audit ledger for a consumed key, inside the transaction that
+/// is about to write the answer. The same key on the same verb and pair
+/// replays the stored outcome without a second transition; the same key on
+/// a different verb or pair is a reuse the ledger refuses to merge.
+enum KeyProbe {
+    Free,
+    Replayed(OutreachStateChanged),
+    Conflict,
+}
+
+async fn probe_operator_key(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    action: &str,
+    beacon_id: Uuid,
+    event_id: Uuid,
+    idempotency_key: &str,
+) -> Result<KeyProbe, sqlx::Error> {
+    let existing = sqlx::query_as::<_, (String, Uuid, Option<String>)>(
+        "SELECT action, target_id, details->>'event_id' \
+         FROM operator_actions WHERE workspace_id = $1 AND idempotency_key = $2",
+    )
+    .bind(workspace_id)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((recorded_action, target_id, recorded_event)) = existing else {
+        return Ok(KeyProbe::Free);
+    };
+    if recorded_action != action
+        || target_id != beacon_id
+        || recorded_event.as_deref() != Some(event_id.to_string().as_str())
+    {
+        return Ok(KeyProbe::Conflict);
+    }
+    // Replay answers with the pair's current ledger state instead of
+    // re-applying the transition — a re-sent defer must not stretch the
+    // window by another `days`.
+    let row = sqlx::query_as::<_, (String, Option<OffsetDateTime>)>(
+        "SELECT status, deferred_until FROM beacon_campaigns \
+         WHERE workspace_id = $1 AND beacon_id = $2 AND event_id = $3",
+    )
+    .bind(workspace_id)
+    .bind(beacon_id)
+    .bind(event_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (status, deferred_until) = row.unwrap_or_else(|| ("candidate".to_owned(), None));
+    let preserved = matches!(
+        status.as_str(),
+        "declined" | "suppressed" | "partner" | "closed"
+    );
+    Ok(KeyProbe::Replayed(OutreachStateChanged {
+        beacon_id,
+        event_id,
+        status,
+        deferred_until,
+        cancelled_actions: 0,
+        preserved_stronger_state: preserved,
+        replayed: true,
+    }))
 }
 
 /// `defer`: hold the pair out of the due set until `now + days`, without
@@ -167,6 +263,23 @@ pub async fn defer_beacon_outreach(
         return Ok(Err(OutreachStateRefusal::BadDeferDays));
     }
     let mut tx = pool.begin().await?;
+    match probe_operator_key(
+        &mut tx,
+        workspace_id,
+        "beacon_outreach_defer",
+        beacon_id,
+        event_id,
+        idempotency_key,
+    )
+    .await?
+    {
+        KeyProbe::Replayed(changed) => {
+            tx.commit().await?;
+            return Ok(Ok(changed));
+        }
+        KeyProbe::Conflict => return Ok(Err(OutreachStateRefusal::IdempotencyConflict)),
+        KeyProbe::Free => {}
+    }
     if let Err(refusal) = check_pair(&mut tx, workspace_id, beacon_id, event_id).await {
         return Ok(Err(refusal));
     }
@@ -232,6 +345,7 @@ pub async fn defer_beacon_outreach(
         deferred_until: row.1,
         cancelled_actions,
         preserved_stronger_state: preserved,
+        replayed: false,
     }))
 }
 
@@ -249,6 +363,23 @@ pub async fn decline_beacon_outreach(
     request_id: Option<&str>,
 ) -> Result<Result<OutreachStateChanged, OutreachStateRefusal>, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    match probe_operator_key(
+        &mut tx,
+        workspace_id,
+        "beacon_outreach_decline",
+        beacon_id,
+        event_id,
+        idempotency_key,
+    )
+    .await?
+    {
+        KeyProbe::Replayed(changed) => {
+            tx.commit().await?;
+            return Ok(Ok(changed));
+        }
+        KeyProbe::Conflict => return Ok(Err(OutreachStateRefusal::IdempotencyConflict)),
+        KeyProbe::Free => {}
+    }
     if let Err(refusal) = check_pair(&mut tx, workspace_id, beacon_id, event_id).await {
         return Ok(Err(refusal));
     }
@@ -260,13 +391,15 @@ pub async fn decline_beacon_outreach(
         ) VALUES ($1, $2, $3, 'declined', 'operator', $4)
         ON CONFLICT (workspace_id, beacon_id, event_id) DO UPDATE SET
             status = CASE
-                WHEN beacon_campaigns.status IN ('partner','closed')
+                WHEN beacon_campaigns.status IN ('partner','closed','suppressed')
                 THEN beacon_campaigns.status
                 ELSE 'declined'
             END,
             declined_via = CASE
-                WHEN beacon_campaigns.status IN ('partner','closed')
+                WHEN beacon_campaigns.status IN ('partner','closed','suppressed')
                 THEN beacon_campaigns.declined_via
+                WHEN beacon_campaigns.declined_via = 'partner_reply'
+                THEN 'partner_reply'
                 ELSE 'operator'
             END,
             notes = COALESCE($4, beacon_campaigns.notes),
@@ -312,7 +445,7 @@ pub async fn decline_beacon_outreach(
     }
 
     tx.commit().await?;
-    let preserved = matches!(status.as_str(), "partner" | "closed");
+    let preserved = matches!(status.as_str(), "partner" | "closed" | "suppressed");
     Ok(Ok(OutreachStateChanged {
         beacon_id,
         event_id,
@@ -320,5 +453,6 @@ pub async fn decline_beacon_outreach(
         deferred_until: None,
         cancelled_actions,
         preserved_stronger_state: preserved,
+        replayed: false,
     }))
 }

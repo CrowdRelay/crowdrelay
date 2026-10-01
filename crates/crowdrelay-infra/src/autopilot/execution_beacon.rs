@@ -163,6 +163,47 @@ pub(super) async fn execute_beacon_outreach(
         crowdrelay_domain::beacons::BeaconOutreachPhase::LocalPush => "local_push",
         crowdrelay_domain::beacons::BeaconOutreachPhase::PostShowThanks => "post_show_thanks",
     };
+    // Claim the pair before anything is built on the approval: the
+    // re-check above has no campaign row to lock when the pair is new, so
+    // a defer/decline or partner reply committing between the check and
+    // this write would otherwise be stomped by the send. The guarded
+    // upsert is the check made durable — it inserts or locks the row, and
+    // an answer that landed first makes it return nothing.
+    sqlx::query_scalar::<_, String>(
+        r#"
+        INSERT INTO beacon_campaigns (
+            workspace_id, beacon_id, event_id, status, last_phase,
+            last_outreach_at, followup_count
+        ) VALUES ($1,$2,$3,'contacted',$4,$5,1)
+        ON CONFLICT (workspace_id, beacon_id, event_id) DO UPDATE
+        SET status = CASE
+                WHEN beacon_campaigns.status IN ('interested','partner')
+                THEN beacon_campaigns.status
+                ELSE 'contacted'
+            END,
+            last_phase = EXCLUDED.last_phase,
+            last_outreach_at = EXCLUDED.last_outreach_at,
+            -- A sent ask is no longer deferred, and the new status is never
+            -- 'declined', so the decline provenance has to clear or the
+            -- CHECK forbids the row.
+            deferred_until = NULL,
+            declined_via = NULL,
+            followup_count = beacon_campaigns.followup_count + 1
+        WHERE beacon_campaigns.status NOT IN ('declined','suppressed','closed')
+          AND (beacon_campaigns.deferred_until IS NULL
+               OR beacon_campaigns.deferred_until <= $5)
+        RETURNING status
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(beacon_id.into_uuid())
+    .bind(event_id.into_uuid())
+    .bind(phase_key)
+    .bind(now)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .ok_or(RepositoryError::Conflict)?;
     let show_url = ensure_beacon_action_link(
         transaction,
         workspace_id,
@@ -230,36 +271,6 @@ pub(super) async fn execute_beacon_outreach(
         }),
     )
     .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO beacon_campaigns (
-            workspace_id, beacon_id, event_id, status, last_phase,
-            last_outreach_at, followup_count
-        ) VALUES ($1,$2,$3,'contacted',$4,$5,1)
-        ON CONFLICT (workspace_id, beacon_id, event_id) DO UPDATE
-        SET status = CASE
-                WHEN beacon_campaigns.status IN ('interested','partner')
-                THEN beacon_campaigns.status
-                ELSE 'contacted'
-            END,
-            last_phase = EXCLUDED.last_phase,
-            last_outreach_at = EXCLUDED.last_outreach_at,
-            -- A sent ask is no longer deferred, and the new status is never
-            -- 'declined', so the decline provenance has to clear or the
-            -- CHECK forbids the row.
-            deferred_until = NULL,
-            declined_via = NULL,
-            followup_count = beacon_campaigns.followup_count + 1
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(beacon_id.into_uuid())
-    .bind(event_id.into_uuid())
-    .bind(phase_key)
-    .bind(now)
-    .execute(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
     Ok(())
 }
 
