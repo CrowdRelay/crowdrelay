@@ -1,3 +1,5 @@
+use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
+
 pub(super) async fn schedule_effect_measurement(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -673,11 +675,26 @@ pub(super) async fn schedule_effect_measurement(
             // acquires fans directly. Measuring them on fan growth would
             // credit them for fans acquired by other workers (credit
             // leakage + polluted posteriors).
-            let is_scanner = template_id == "reddit-scanner"
-                || template_id == "telegram-scanner"
-                || template_id == "metal-archives-scanner"
-                || template_id == "bandcamp-scanner";
-            let is_strategist = template_id == "growth-strategist";
+            // Reach classification already exists in WorkerTemplate; use it
+            // instead of maintaining another partial list here. The old list
+            // forgot fanbase-scout and strategy-consult, so two intelligence
+            // workers were measured as if they directly acquired fans.
+            let known_template = WorkerTemplate::parse(template_id);
+            let is_relationship_research = template_id == "contact-research";
+            let is_intelligence = is_relationship_research
+                || known_template.is_some_and(|template| {
+                    template.audience() == TemplateAudience::Intelligence
+                });
+            let is_discovery_intelligence = known_template.is_some_and(|template| {
+                matches!(
+                    template,
+                    WorkerTemplate::RedditScanner
+                        | WorkerTemplate::TelegramScanner
+                        | WorkerTemplate::MetalArchivesScanner
+                        | WorkerTemplate::BandcampScanner
+                        | WorkerTemplate::FanbaseScout
+                )
+            });
             // Fast feedback: 1-hour outcome quality checkpoint for EVERY
             // agent dispatch. The brain learns whether the worker produced
             // a valid, grounded, processed outcome within an hour — not days.
@@ -690,7 +707,7 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::hours(1),
             ));
-            if !is_scanner && !is_strategist {
+            if !is_intelligence {
                 // Direct-action workers (community-engager, social-post,
                 // signal-inviter, press-pitch) can acquire fans directly, so
                 // they are measured on the fans traced to them — 14 days and
@@ -751,11 +768,13 @@ pub(super) async fn schedule_effect_measurement(
                 baseline_installs_1d,
                 now + time::Duration::days(1),
             ));
-            } else {
-                // Scanner/strategist: measure proximal outcome, not fan
-                // growth. The scanner discovers communities, the
-                // strategist produces insights — neither acquires fans.
-                let kind = if is_scanner {
+            } else if !is_relationship_research {
+                // Intelligence workers are judged on the thing they actually
+                // produce. Discovery workers (including fanbase-scout) are
+                // discovery; advisory workers (growth-strategist and
+                // strategy-consult) are insights. Neither receives fan credit
+                // or fan blame for downstream actions taken by somebody else.
+                let kind = if is_discovery_intelligence {
                     AutopilotMeasurementKind::ScannerDiscoveryQuality14d
                 } else {
                     AutopilotMeasurementKind::StrategistInsightQuality14d
@@ -763,16 +782,10 @@ pub(super) async fn schedule_effect_measurement(
                 plans.push((
                     kind,
                     action_id.into_uuid(),
-                    0.0, // baseline: no targets/insights existed before
+                    0.0,
                     now + time::Duration::days(14),
                 ));
-                // Fast checkpoint: 1-hour proximal outcome. The scanner
-                // discovers targets and the strategist produces insights
-                // within minutes — waiting 14 days for the proximal count
-                // is absurd. The 14-day measurement stays for downstream
-                // engagement, but this gives the brain next-cycle feedback
-                // on worker quality.
-                let fast_kind = if is_scanner {
+                let fast_kind = if is_discovery_intelligence {
                     AutopilotMeasurementKind::ScannerDiscoveryQuality1h
                 } else {
                     AutopilotMeasurementKind::StrategistInsightQuality1h
@@ -784,6 +797,11 @@ pub(super) async fn schedule_effect_measurement(
                     now + time::Duration::hours(1),
                 ));
             }
+            // contact-research gets only AgentRunOutcomeQuality1h above.
+            // Its durable product is a validated PersonalHook written minutes
+            // later. Giving it a 3/14/44-day fan-growth score would punish
+            // internal learning for not contacting anybody and teach the Brain
+            // exactly the wrong lesson.
         }
         // Community engagement: measure whether the posts produced
         // meaningful engagement (upvotes, comments) rather than just
