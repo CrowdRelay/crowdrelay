@@ -6,12 +6,17 @@
 
 struct RankedBeaconCandidate {
     candidate: DecisionCandidate,
+    /// Relationship work keeps the calendar's urgency. Learning may reorder
+    /// peers for the same event/time, never pull a later show ahead of an
+    /// earlier one just because its historical Y30 is higher.
+    event_starts_at: OffsetDateTime,
     original_order: usize,
     rank_value: f64,
 }
 
 fn rank_beacon_candidate(
     mut candidate: DecisionCandidate,
+    event_starts_at: OffsetDateTime,
     original_order: usize,
     template_id: &str,
     target_key: &str,
@@ -54,6 +59,7 @@ fn rank_beacon_candidate(
             serde_json::json!({
                 "template_id": template_id,
                 "target_key": target_key,
+                "event_starts_at": event_starts_at.to_string(),
                 "rank_value_y30_fans": rank_value,
                 "expected_incremental_y30": value.expected_incremental_y30,
                 "uncertainty": value.uncertainty,
@@ -70,6 +76,7 @@ fn rank_beacon_candidate(
 
     RankedBeaconCandidate {
         candidate,
+        event_starts_at,
         original_order,
         rank_value,
     }
@@ -80,13 +87,16 @@ fn order_ranked_beacon_candidates(
 ) -> (Vec<DecisionCandidate>, bool) {
     let original: Vec<usize> = candidates.iter().map(|item| item.original_order).collect();
 
-    // Highest expected fan value first. original_order is an explicit tie
-    // breaker so a cold model whose priors are equal preserves the repository's
-    // deterministic ordering exactly.
+    // Calendar urgency first, learned North-Star value second. The repository
+    // already orders Beacon work by event time; preserving that first key stops
+    // a strong historical posterior for a six-weeks-away show from consuming
+    // scarce third-party/approval budget ahead of today's relationship work.
+    // Within the same event time, higher expected Y30 wins. Cold/equal priors
+    // retain the repository's deterministic order.
     candidates.sort_by(|left, right| {
-        right
-            .rank_value
-            .total_cmp(&left.rank_value)
+        left.event_starts_at
+            .cmp(&right.event_starts_at)
+            .then_with(|| right.rank_value.total_cmp(&left.rank_value))
             .then_with(|| left.original_order.cmp(&right.original_order))
     });
 
@@ -126,6 +136,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
 
         let mut ranked = Vec::with_capacity(snapshots.len());
         for (original_order, snapshot) in snapshots.into_iter().enumerate() {
+            let event_starts_at = snapshot.event_starts_at;
             if let Some(candidate) = beacon_candidate(snapshot, policy, now)? {
                 let (template_id, target_key) = match &candidate.action {
                     AutopilotActionPayload::RequestBeaconOutreach {
@@ -137,6 +148,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 };
                 ranked.push(rank_beacon_candidate(
                     candidate,
+                    event_starts_at,
                     original_order,
                     &template_id,
                     &target_key,
@@ -184,20 +196,18 @@ mod beacon_learning_tests {
         }
     }
 
+    fn ranked(key: &str, order: usize, fan_value: f64, event_day: i64) -> RankedBeaconCandidate {
+        RankedBeaconCandidate {
+            candidate: candidate(key),
+            event_starts_at: OffsetDateTime::UNIX_EPOCH + time::Duration::days(event_day),
+            original_order: order,
+            rank_value: fan_value,
+        }
+    }
+
     #[test]
     fn equal_priors_preserve_repository_order() {
-        let ranked = vec![
-            RankedBeaconCandidate {
-                candidate: candidate("a"),
-                original_order: 0,
-                rank_value: 2.0,
-            },
-            RankedBeaconCandidate {
-                candidate: candidate("b"),
-                original_order: 1,
-                rank_value: 2.0,
-            },
-        ];
+        let ranked = vec![ranked("a", 0, 2.0, 10), ranked("b", 1, 2.0, 10)];
         let (ordered, changed) = order_ranked_beacon_candidates(ranked);
         assert!(!changed);
         assert_eq!(ordered[0].decision_key, "a");
@@ -205,22 +215,27 @@ mod beacon_learning_tests {
     }
 
     #[test]
-    fn learned_fan_value_reorders_only_due_candidates() {
+    fn learned_fan_value_reorders_peers_for_the_same_event_time() {
         let ranked = vec![
-            RankedBeaconCandidate {
-                candidate: candidate("lower"),
-                original_order: 0,
-                rank_value: 0.4,
-            },
-            RankedBeaconCandidate {
-                candidate: candidate("higher"),
-                original_order: 1,
-                rank_value: 1.7,
-            },
+            ranked("lower", 0, 0.4, 10),
+            ranked("higher", 1, 1.7, 10),
         ];
         let (ordered, changed) = order_ranked_beacon_candidates(ranked);
         assert!(changed);
         assert_eq!(ordered[0].decision_key, "higher");
         assert_eq!(ordered[1].decision_key, "lower");
     }
+
+    #[test]
+    fn later_show_never_jumps_urgent_relationship_work_for_higher_y30() {
+        let ranked = vec![
+            ranked("urgent", 0, 0.1, 10),
+            ranked("later-high-y30", 1, 50.0, 40),
+        ];
+        let (ordered, changed) = order_ranked_beacon_candidates(ranked);
+        assert!(!changed, "learning must not reorder across event urgency");
+        assert_eq!(ordered[0].decision_key, "urgent");
+        assert_eq!(ordered[1].decision_key, "later-high-y30");
+    }
+
 }
