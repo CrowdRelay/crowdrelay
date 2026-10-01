@@ -531,7 +531,12 @@ pub async fn confirm_fan(
             (SET_COOKIE, cookie),
         ],
         Json(FanConfirmationResponse {
-            capture_context: capture_context.and_then(|v| serde_json::from_value::<crowdrelay_domain::acquisition::FanCaptureContext>(v).ok()).filter(|c| c.is_valid()),
+            capture_context: capture_context
+                .and_then(|v| {
+                    serde_json::from_value::<crowdrelay_domain::acquisition::FanCaptureContext>(v)
+                        .ok()
+                })
+                .filter(|c| c.is_valid()),
             fan_id: result.fan_id,
             status: result.status,
             referral_url,

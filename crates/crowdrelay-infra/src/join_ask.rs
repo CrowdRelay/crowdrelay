@@ -72,6 +72,7 @@ pub async fn load_join_ask_snapshot(
             String,
             Option<OffsetDateTime>,
             Option<i64>,
+            Option<serde_json::Value>,
         ),
     >(
         r#"
@@ -97,11 +98,12 @@ pub async fn load_join_ask_snapshot(
                           AND conversion.occurred_at <
                               post.posted_at + INTERVAL '7 days'
                     )
-               END AS fans_7d
+               END AS fans_7d, decision.input_snapshot->'capture_context' AS capture_context
         FROM social_posts AS post
         JOIN autopilot_actions AS action
           ON action.workspace_id = post.workspace_id
          AND action.id = post.action_id
+        LEFT JOIN autopilot_decisions decision ON decision.workspace_id=action.workspace_id AND decision.id=action.decision_id
         WHERE post.workspace_id = $1
           AND action.action_kind = 'social.join_ask.publish'
         ORDER BY post.created_at
@@ -112,7 +114,8 @@ pub async fn load_join_ask_snapshot(
     .await?
     .into_iter()
     .map(
-        |(platform, status, created_at, text, posted_at, fans_7d)| JoinAskPostRow {
+        |(platform, status, created_at, text, posted_at, fans_7d, context)| JoinAskPostRow {
+            capture_context: context.and_then(|v| serde_json::from_value(v).ok()),
             platform,
             status,
             created_at,
@@ -138,6 +141,7 @@ pub async fn load_join_ask_snapshot(
     .await?;
 
     Ok(JoinAskSnapshot {
+        capture_context: config.capture_context,
         variants: config.variants,
         cadence_days: config.cadence_days,
         platforms: config.platforms,

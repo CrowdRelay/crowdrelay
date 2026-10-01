@@ -658,7 +658,10 @@ async fn terminal_failure_keeps_the_harm_it_observed() {
     .execute(&f.pool)
     .await
     .expect("reprocess");
-    let measurement = ClaimedAutopilotMeasurement {attempt_number:3,..measurement};
+    let measurement = ClaimedAutopilotMeasurement {
+        attempt_number: 3,
+        ..measurement
+    };
     f.repository
         .fail_measurement(
             f.workspace_id,

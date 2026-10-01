@@ -81,7 +81,8 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .fetch_one(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
-            late_publication_recovery::recover(&mut transaction, workspace_id, with_tasks, now).await?;
+            late_publication_recovery::recover(&mut transaction, workspace_id, with_tasks, now)
+                .await?;
             let claim_sql = fan_windows::claim_sql(with_tasks);
             let rows = sqlx::query_as::<_, ClaimedMeasurementRow>(&claim_sql)
                 .bind(workspace_id.into_uuid())
@@ -837,7 +838,10 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .bind(now)
                 .bind(retryable)
                 .bind(error_kind)
-                .bind(i32::try_from(measurement.attempt_number).map_err(|_| RepositoryError::Unexpected)?)
+                .bind(
+                    i32::try_from(measurement.attempt_number)
+                        .map_err(|_| RepositoryError::Unexpected)?,
+                )
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;

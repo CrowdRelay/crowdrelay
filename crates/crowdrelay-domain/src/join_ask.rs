@@ -132,6 +132,8 @@ pub fn parse_image_url(raw: &str) -> Option<String> {
 /// no words is the feature switched off, not a half-configured one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JoinAskConfig {
+    /// First-signup navigation promise, scoped to this offer.
+    pub capture_context: Option<crate::acquisition::FanCaptureContext>,
     pub variants: Vec<String>,
     pub cadence_days: u16,
     pub platforms: Vec<String>,
@@ -153,6 +155,7 @@ impl JoinAskConfig {
     #[must_use]
     pub fn unconfigured() -> Self {
         Self {
+            capture_context: None,
             variants: Vec::new(),
             cadence_days: DEFAULT_JOIN_ASK_CADENCE_DAYS,
             platforms: DEFAULT_JOIN_ASK_PLATFORMS
@@ -168,6 +171,8 @@ impl JoinAskConfig {
 /// ledger the cadence check and the variant rotation both read.
 #[derive(Clone, Debug, Serialize)]
 pub struct JoinAskPostRow {
+    /// First-signup navigation promise, scoped to this offer.
+    pub capture_context: Option<crate::acquisition::FanCaptureContext>,
     pub platform: String,
     pub status: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -196,6 +201,8 @@ pub struct JoinAskPostRow {
 /// not an error.
 #[derive(Clone, Debug, Serialize)]
 pub struct JoinAskSnapshot {
+    /// First-signup navigation promise, scoped to this offer.
+    pub capture_context: Option<crate::acquisition::FanCaptureContext>,
     /// The operator's own texts, trimmed and non-empty by the writer's
     /// validation. Rotation reads `prior_count % variants.len()`.
     pub variants: Vec<String>,
@@ -458,7 +465,8 @@ fn choose_variant(
     let mature_before = now - time::Duration::days(JOIN_ASK_OUTCOME_DAYS);
 
     for post in &snapshot.posts {
-        if post.platform != platform
+        if post.capture_context != snapshot.capture_context
+            || post.platform != platform
             || post.status != "posted"
             || post
                 .posted_at
@@ -597,8 +605,8 @@ pub fn evaluate_join_ask(snapshot: &JoinAskSnapshot, now: OffsetDateTime) -> Joi
                 .cloned()
                 .unwrap_or_default(),
             cta_url: format!(
-                "{}/signal?utm_source={platform}&utm_medium=join_ask&utm_campaign=join_ask_w{iso_week:02}",
-                base.trim_end_matches('/')
+                "{}/signal?utm_source={platform}&utm_medium=join_ask&utm_campaign=join_ask_w{iso_week:02}{}",
+                base.trim_end_matches('/'), capture_query(snapshot.capture_context.as_ref())
             ),
             week_key: week_key.clone(),
             image_url: snapshot.image_url.clone(),
@@ -626,6 +634,7 @@ mod tests {
 
     fn snapshot() -> JoinAskSnapshot {
         JoinAskSnapshot {
+            capture_context: None,
             variants: vec!["join us".to_owned(), "come along".to_owned()],
             cadence_days: 7,
             platforms: vec!["facebook".to_owned(), "instagram".to_owned()],
@@ -652,6 +661,7 @@ mod tests {
     fn a_live_post_inside_the_window_holds_the_platform() {
         let mut snapshot = snapshot();
         snapshot.posts.push(JoinAskPostRow {
+            capture_context: None,
             platform: "facebook".to_owned(),
             status: "posted".to_owned(),
             created_at: datetime!(2026-09-20 10:00 UTC),
@@ -674,6 +684,7 @@ mod tests {
     fn a_post_older_than_the_cadence_does_not_hold() {
         let mut snapshot = snapshot();
         snapshot.posts.push(JoinAskPostRow {
+            capture_context: None,
             platform: "facebook".to_owned(),
             status: "posted".to_owned(),
             created_at: datetime!(2026-09-10 10:00 UTC),
@@ -792,6 +803,7 @@ mod tests {
         let mut snapshot = snapshot();
         for index in 0..3 {
             snapshot.posts.push(JoinAskPostRow {
+                capture_context: None,
                 platform: "facebook".to_owned(),
                 status: "posted".to_owned(),
                 created_at: datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index),
@@ -811,6 +823,7 @@ mod tests {
     /// platforms, so this is what every new tenant looks like on day one.
     fn cold_snapshot() -> JoinAskSnapshot {
         JoinAskSnapshot {
+            capture_context: None,
             variants: Vec::new(),
             cadence_days: DEFAULT_JOIN_ASK_CADENCE_DAYS,
             platforms: DEFAULT_JOIN_ASK_PLATFORMS
@@ -888,6 +901,7 @@ mod tests {
         // it teaches the operator to stop reading the list.
         let mut snapshot = snapshot();
         snapshot.posts.push(JoinAskPostRow {
+            capture_context: None,
             platform: "facebook".to_owned(),
             status: "posted".to_owned(),
             created_at: datetime!(2026-09-20 10:00 UTC),
@@ -976,6 +990,7 @@ mod tests {
         fans_7d: Option<u32>,
     ) -> JoinAskPostRow {
         JoinAskPostRow {
+            capture_context: None,
             platform: platform.to_owned(),
             status: "posted".to_owned(),
             created_at: posted_at,
@@ -1118,3 +1133,5 @@ mod tests {
         assert_eq!(ask.variant_fans, 0);
     }
 }
+
+include!("join_ask_capture_context.rs");

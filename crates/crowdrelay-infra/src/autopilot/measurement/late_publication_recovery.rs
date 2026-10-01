@@ -1,11 +1,20 @@
 //! Reopen only never-observed publication failures; learned evidence is immutable.
 use super::super::*;
 use super::observation::attributed_fans::{FIRST_TRACKED_POST, FIRST_TRACKED_POST_WITH_TASKS};
-pub(super) async fn recover(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, workspace: WorkspaceId,
-    with_tasks: bool, now: OffsetDateTime) -> Result<(), RepositoryError> {
-    let first_live = if with_tasks { FIRST_TRACKED_POST_WITH_TASKS } else { FIRST_TRACKED_POST }
-        .replace("$2", "candidate.action_id");
-    let sql = format!(r#"
+pub(super) async fn recover(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace: WorkspaceId,
+    with_tasks: bool,
+    now: OffsetDateTime,
+) -> Result<(), RepositoryError> {
+    let first_live = if with_tasks {
+        FIRST_TRACKED_POST_WITH_TASKS
+    } else {
+        FIRST_TRACKED_POST
+    }
+    .replace("$2", "candidate.action_id");
+    let sql = format!(
+        r#"
         WITH candidates AS MATERIALIZED (
             SELECT m.id,m.action_id,m.finished_at FROM autopilot_measurements m
             WHERE m.workspace_id=$1 AND m.status='failed' AND m.last_error_kind=$3
@@ -35,8 +44,14 @@ pub(super) async fn recover(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, work
             UPDATE growth_evidence e SET resolved_at=NULL,replayed_3d_at=NULL,replayed_14d_at=NULL,replayed_30d_at=NULL
             WHERE e.workspace_id=$1 AND e.action_id IN (SELECT action_id FROM revived) RETURNING e.action_id
         ) UPDATE dispatch_predictions p SET resolved_at=NULL WHERE p.workspace_id=$1 AND p.action_id IN (SELECT action_id FROM revived)
-    "#);
-    sqlx::query(&sql).bind(workspace.into_uuid()).bind(now).bind(AutopilotMeasurementKind::NO_TRACKED_LINK)
-        .execute(&mut **tx).await.map_err(map_sqlx)?;
+    "#
+    );
+    sqlx::query(&sql)
+        .bind(workspace.into_uuid())
+        .bind(now)
+        .bind(AutopilotMeasurementKind::NO_TRACKED_LINK)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx)?;
     Ok(())
 }

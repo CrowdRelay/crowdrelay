@@ -5,7 +5,10 @@ use axum::{
 
 pub(crate) fn router() -> Router<crate::AppState> {
     Router::new()
-        .route("/v1/admin/ops/organic-funnel", get(crate::ops::organic_funnel))
+        .route(
+            "/v1/admin/ops/organic-funnel",
+            get(crate::ops::organic_funnel),
+        )
         .route("/v1/admin/ops/summary", get(crate::ops::summary))
         .route(
             "/v1/admin/ops/operations/{request_id}",

@@ -27,10 +27,24 @@ pub struct OrganicFunnelRow {
     pub diagnosis: String,
 }
 
-pub async fn read(pool: &PgPool, workspace: Uuid, action: Option<Uuid>, campaign: Option<Uuid>,
-    days: i32, limit: i64, now: OffsetDateTime) -> Result<Vec<OrganicFunnelRow>,sqlx::Error> {
-    sqlx::query_as(FUNNEL_SQL).bind(workspace).bind(action).bind(campaign)
-        .bind(days.clamp(1,90)).bind(limit.clamp(1,100)).bind(now).fetch_all(pool).await
+pub async fn read(
+    pool: &PgPool,
+    workspace: Uuid,
+    action: Option<Uuid>,
+    campaign: Option<Uuid>,
+    days: i32,
+    limit: i64,
+    now: OffsetDateTime,
+) -> Result<Vec<OrganicFunnelRow>, sqlx::Error> {
+    sqlx::query_as(FUNNEL_SQL)
+        .bind(workspace)
+        .bind(action)
+        .bind(campaign)
+        .bind(days.clamp(1, 90))
+        .bind(limit.clamp(1, 100))
+        .bind(now)
+        .fetch_all(pool)
+        .await
 }
 
 const FUNNEL_SQL: &str = r#"

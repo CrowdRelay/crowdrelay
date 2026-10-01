@@ -62,6 +62,7 @@ fn join_ask_candidate(
         disposition,
         reason: "weekly join ask; tenant-authored wording selected from first-party fan outcomes",
         input_snapshot: serde_json::json!({
+            "capture_context": snapshot.capture_context,
             "platform": ask.platform,
             "week": ask.week_key,
             "variant_index": ask.variant_index,

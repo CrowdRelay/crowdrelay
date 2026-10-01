@@ -46,6 +46,11 @@ async fn initial_signup_metadata_is_atomic_idempotent_and_not_anonymous_authorit
         format!("request-{suffix}"),
     )?;
     let safe = SignupMetadata {
+        capture_context: Some(crowdrelay_domain::acquisition::FanCaptureContext {
+            offer: Some(crowdrelay_domain::acquisition::CaptureOffer::Shows),
+            event_slug: Some("real-show".into()),
+            video_id: None,
+        }),
         nearby_gigs: Some((true, 150)),
         utm_campaign: Some("safe".into()),
         ..Default::default()
@@ -61,7 +66,22 @@ async fn initial_signup_metadata_is_atomic_idempotent_and_not_anonymous_authorit
         .bind(workspace.into_uuid()).bind(captured.fan_id.into_uuid()).fetch_one(&pool).await
     };
     assert_eq!(snapshot().await?, (true, 150, "safe".into()));
+    let context: serde_json::Value = sqlx::query_scalar(
+        "SELECT context FROM fan_capture_contexts WHERE workspace_id=$1 AND fan_id=$2",
+    )
+    .bind(workspace.into_uuid())
+    .bind(captured.fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        context,
+        serde_json::json!({"offer":"shows","event_slug":"real-show"})
+    );
     let malicious = SignupMetadata {
+        capture_context: Some(crowdrelay_domain::acquisition::FanCaptureContext {
+            offer: Some(crowdrelay_domain::acquisition::CaptureOffer::Releases),
+            ..Default::default()
+        }),
         nearby_gigs: Some((false, 25)),
         utm_campaign: Some("injected".into()),
         ..Default::default()
@@ -81,6 +101,17 @@ async fn initial_signup_metadata_is_atomic_idempotent_and_not_anonymous_authorit
             .is_none()
     );
     assert_eq!(snapshot().await?, (true, 150, "safe".into()));
+    let context: serde_json::Value = sqlx::query_scalar(
+        "SELECT context FROM fan_capture_contexts WHERE workspace_id=$1 AND fan_id=$2",
+    )
+    .bind(workspace.into_uuid())
+    .bind(captured.fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        context,
+        serde_json::json!({"offer":"shows","event_slug":"real-show"})
+    );
     let token: String = sqlx::query_scalar("SELECT payload->>'confirmation_token' FROM outbox_events WHERE workspace_id=$1 AND event_type='fan.confirmation_requested' ORDER BY created_at LIMIT 1")
         .bind(workspace.into_uuid()).fetch_one(&pool).await?;
     let lifecycle = PostgresFanLifecycleRepository::new(
@@ -131,5 +162,16 @@ async fn initial_signup_metadata_is_atomic_idempotent_and_not_anonymous_authorit
         Err(RepositoryError::Conflict)
     ));
     assert_eq!(snapshot().await?, (true, 150, "safe".into()));
+    let context: serde_json::Value = sqlx::query_scalar(
+        "SELECT context FROM fan_capture_contexts WHERE workspace_id=$1 AND fan_id=$2",
+    )
+    .bind(workspace.into_uuid())
+    .bind(captured.fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        context,
+        serde_json::json!({"offer":"shows","event_slug":"real-show"})
+    );
     Ok(())
 }

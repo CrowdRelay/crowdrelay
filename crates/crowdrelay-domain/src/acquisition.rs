@@ -407,8 +407,12 @@ impl FanSignup {
         {
             return Err(FanSignupError::InvalidNearbyRadius);
         }
-        if self.initial_metadata.as_ref().and_then(|m| m.capture_context.as_ref())
-            .is_some_and(|c| !c.is_valid()) {
+        if self
+            .initial_metadata
+            .as_ref()
+            .and_then(|m| m.capture_context.as_ref())
+            .is_some_and(|c| !c.is_valid())
+        {
             return Err(FanSignupError::InvalidCaptureContext);
         }
         if !self.consent.granted() {

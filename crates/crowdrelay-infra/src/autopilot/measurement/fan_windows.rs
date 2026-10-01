@@ -114,6 +114,8 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
     // static SQL substitution, not a value interpolation: tenant/id/time stay
     // bound. The second placeholder in the observer names the measured action;
     // in this correlated query it names the selected row's action instead.
+    let content_posts =
+        super::observation::content_synergy::POSTED_LINKS.replace("$2", "selected.action_id");
     let first_live = if with_tasks {
         FIRST_TRACKED_POST_WITH_TASKS
     } else {
@@ -149,8 +151,8 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
                            -- The publication's own clock: seven days from the
                            -- post's real `posted_at`, whatever the action's
                            -- finish time was.
-                           WHEN tracked.first_live IS NOT NULL
-                               THEN tracked.first_live + INTERVAL '7 days'
+                           WHEN content_window.last_live IS NOT NULL
+                               THEN content_window.last_live + INTERVAL '7 days'
                            -- Still publishable: check again shortly rather
                            -- than abandoning a post that may land tomorrow.
                            WHEN open_post.still_open
@@ -191,6 +193,7 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
             LEFT JOIN LATERAL (
                 /* first_tracked_post */
             ) AS tracked(first_live) ON true
+            LEFT JOIN LATERAL (SELECT MAX(posted_at) FROM (/* content_posts */) content_posts) AS content_window(last_live) ON true
             LEFT JOIN LATERAL (
                 /* open_lineage_post */
             ) AS open_post(still_open) ON true
@@ -226,5 +229,6 @@ pub(super) fn claim_sql(with_tasks: bool) -> String {
     "#,
     )
     .replace("/* first_tracked_post */", &first_live)
+    .replace("/* content_posts */", &content_posts)
     .replace("/* open_lineage_post */", &open_post)
 }
