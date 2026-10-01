@@ -194,6 +194,8 @@ class TeamAutopilotsContract(unittest.TestCase):
     def test_beacon_identity_dedup_keeps_distinct_email_less_scene_partners(self):
         migration = text("migrations/0053_beacon_identity_dedup.sql")
         ingress = text("crates/crowdrelay-infra/src/autopilot/operations/ingress/beacons.rs")
+        # The scout's brief lives in its own executor file; it moved out of the
+        # dispatch `match` to keep `actions_execution.rs` under the size ratchet.
         actions = text(
             "crates/crowdrelay-infra/src/autopilot/execution_beacon_discovery.rs"
         )

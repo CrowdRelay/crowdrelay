@@ -12,7 +12,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
-use crowdrelay_infra::latarnik::{InviteError, approve_latarnik_invite, dual_role_review};
+use crowdrelay_infra::latarnik::{
+    InviteError, approve_latarnik_invite, dual_role_review, preview_latarnik_invite,
+};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -76,6 +78,55 @@ pub async fn dual_role_contacts(
             .into_response(),
         Err(error) => {
             tracing::warn!(%error, "dual-role contact read failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/control-plane/contacts/{beacon_id}/latarnik-invite/preview`
+///
+/// The letter this person would receive, composed by the same code and checked
+/// by the same rules as the approval, and **not queued**. The `POST` below is
+/// the approval itself (it queues the action as already approved), so the only
+/// way to approve what was read is to read it first. A refusal comes back as
+/// `{"refused": "<sentence>"}` exactly as it does from the `POST`.
+pub async fn preview_invite(
+    State(state): State<crate::AppState>,
+    Path(beacon_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(beacon_id) = Uuid::parse_str(&beacon_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    match preview_latarnik_invite(
+        &state.database,
+        state.ops.workspace_id().into_uuid(),
+        beacon_id,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(preview) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(preview),
+        )
+            .into_response(),
+        Err(InviteError::NotFound) => Problem::not_found(request_id(&headers))
+            .private()
+            .into_response(),
+        Err(InviteError::Refused(sentence)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "refused": sentence })),
+        )
+            .into_response(),
+        Err(InviteError::Database(error)) => {
+            tracing::warn!(%error, "latarnik invite preview failed");
             Problem::service_unavailable(request_id(&headers))
                 .private()
                 .into_response()

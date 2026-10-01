@@ -150,20 +150,6 @@ pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST: &str = r#"
           AND link.active
           AND action.status='succeeded'
           AND action.finished_at IS NOT NULL
-        UNION ALL
-        -- Non-post delivery lanes bind the redirect directly to the action.
-        -- finished_at is the delivery-success anchor; link.created_at can be
-        -- earlier while the external executor is still working.
-        SELECT action.finished_at AS posted_at
-        FROM smart_links AS link
-        JOIN autopilot_actions AS action
-          ON action.workspace_id=link.workspace_id
-         AND action.id=link.action_id
-        WHERE link.workspace_id=$1
-          AND link.action_id IN (SELECT action_id FROM lineage)
-          AND link.active
-          AND action.status='succeeded'
-          AND action.finished_at IS NOT NULL
     ) AS post
 "#;
 
@@ -207,6 +193,20 @@ pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST_WITH_TASKS: &str 
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+        UNION ALL
+        -- Non-post delivery lanes bind the redirect directly to the action.
+        -- finished_at is the delivery-success anchor; link.created_at can be
+        -- earlier while the external executor is still working.
+        SELECT action.finished_at AS posted_at
+        FROM smart_links AS link
+        JOIN autopilot_actions AS action
+          ON action.workspace_id=link.workspace_id
+         AND action.id=link.action_id
+        WHERE link.workspace_id=$1
+          AND link.action_id IN (SELECT action_id FROM lineage)
+          AND link.active
+          AND action.status='succeeded'
+          AND action.finished_at IS NOT NULL
     ) AS post
 "#;
 

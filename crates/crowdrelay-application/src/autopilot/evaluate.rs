@@ -1,6 +1,5 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 
-use uuid::Uuid;
 use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
@@ -78,11 +77,10 @@ use crowdrelay_domain::{
 use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
-use super::{
-    evidence_ledger::EvidenceLedger, model::*, policy_config::*,
-    ports::{AutopilotDecisionRepository, LoadedCausalModel},
-};
+use super::ports::{AutopilotDecisionRepository, LoadedCausalModel};
+use super::{evidence_ledger::EvidenceLedger, model::*, policy_config::*};
 mod beacons;
 mod booking_supply;
 mod commercial;
@@ -189,6 +187,9 @@ where
         let mut report = AutopilotCycleReport::default();
 
         let loaded_causal_model = self.load_cycle_causal_model(&policies, &mut report).await?;
+        // Checkpoint replay before unrelated contexts can abort; the model is read-only below.
+        self.checkpoint_cycle_causal_model(loaded_causal_model.as_ref(), &mut report)
+            .await;
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
             // Registered before the arm runs so a context that produced
@@ -922,9 +923,6 @@ where
                 }
             }
         }
-
-        self.checkpoint_cycle_causal_model(loaded_causal_model.as_ref(), &mut report)
-            .await;
 
         Ok(report)
     }

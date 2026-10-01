@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Read each invitation before it goes.
+
+The "also hear the dates" letter (P.1) is the band's own answer to mailing a
+list: one person, one reason, once, in a colleague's register. The write that
+sends it, ``POST /v1/control-plane/contacts/{beacon_id}/latarnik-invite``, is
+the approval itself: it queues the letter as already approved and the mail
+leaves after a short hold window. So the only honest way to use it is to read
+the letter first. This tool does exactly that, one person at a time.
+
+    CROWDRELAY_CONTROL_PLANE_API_KEY=... scripts/latarnik_review.py list
+    CROWDRELAY_CONTROL_PLANE_API_KEY=... scripts/latarnik_review.py review --limit 10
+
+``review`` needs a terminal. For every person it fetches the preview (the same
+composer and the same refusals as the send, nothing queued), prints the whole
+letter, and asks. Nothing is sent unless you answer ``s`` *and* then type
+``tak``. There is no flag that skips either question, and no batch mode: the
+server has none on purpose, and a session is capped at ``MAX_PER_SESSION``.
+
+Standard library only. The key is read from the environment and never printed.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from typing import Any, Callable, Iterable
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from latarnik_operator import OperatorError, env, request_json  # noqa: E402
+
+MAX_PER_SESSION = 25
+DEFAULT_PER_SESSION = 10
+KEY_NAME = "CROWDRELAY_CONTROL_PLANE_API_KEY"
+
+
+def cp_request(method: str, path: str, *, idempotency_key: str | None = None) -> Any:
+    return request_json(
+        method,
+        f"control-plane/{path.lstrip('/')}",
+        bearer=env(KEY_NAME),
+        idempotency_key=idempotency_key,
+    )
+
+
+def invitable(review: dict[str, Any]) -> list[dict[str, Any]]:
+    """The people who may be asked right now, strongest relationship first."""
+    rows = [row for row in review.get("contacts", []) if row.get("invitable")]
+    return sorted(
+        rows,
+        key=lambda row: (-int(row.get("relationship_score") or 0), str(row.get("display_name"))),
+    )
+
+
+def render_letter(preview: dict[str, Any]) -> str:
+    """The whole letter, with who it is going to and why, exactly as sent."""
+    rule = "-" * 72
+    lines = [
+        rule,
+        f"Do:      {preview['recipient_name']} <{preview['recipient_email']}>",
+        f"Rola:    {preview.get('role', '')}"
+        + (f", {preview['city']}" if preview.get("city") else ""),
+        f"Powod:   {preview.get('reason', '')}",
+        f"Temat:   {preview['subject']}",
+        rule,
+        preview["body"].rstrip(),
+        rule,
+    ]
+    return "\n".join(lines)
+
+
+def review_loop(
+    rows: Iterable[dict[str, Any]],
+    *,
+    limit: int,
+    get_preview: Callable[[str], dict[str, Any]],
+    send: Callable[[str], Any],
+    ask: Callable[[str], str],
+    out: Callable[[str], None],
+) -> dict[str, int]:
+    """One person at a time. Sends only on ``s`` followed by ``tak``."""
+    if not 1 <= limit <= MAX_PER_SESSION:
+        raise OperatorError(f"--limit must be between 1 and {MAX_PER_SESSION}")
+    counts = {"sent": 0, "skipped": 0, "refused": 0}
+    shown = 0
+    for row in rows:
+        if shown >= limit:
+            break
+        beacon_id = row["beacon_id"]
+        preview = get_preview(beacon_id)
+        if "refused" in preview:
+            # The list is a snapshot; the preview re-reads everything. A person
+            # who stopped being askable since is skipped with the server's reason.
+            out(f"POMINIETY {row.get('display_name')}: {preview['refused']}")
+            counts["refused"] += 1
+            continue
+        shown += 1
+        out(render_letter(preview))
+        answer = ask("[s]wyslij  [n]astepny  [q]uit > ").strip().lower()
+        if answer == "q":
+            break
+        if answer != "s":
+            counts["skipped"] += 1
+            continue
+        confirm = ask(f"Wyslac do {preview['recipient_email']}? Wpisz tak > ").strip().lower()
+        if confirm != "tak":
+            out("Nie wyslano.")
+            counts["skipped"] += 1
+            continue
+        result = send(beacon_id)
+        if isinstance(result, dict) and "refused" in result:
+            out(f"ODMOWA: {result['refused']}")
+            counts["refused"] += 1
+        else:
+            out("W kolejce. List wyjdzie po krotkim oknie wstrzymania; da sie go jeszcze cofnac.")
+            counts["sent"] += 1
+    return counts
+
+
+def command_list(_: argparse.Namespace) -> int:
+    review = cp_request("GET", "contacts/dual-role")
+    rows = invitable(review)
+    print(
+        f"Wszyscy: {review.get('total')}  juz w srodku: {review.get('already_hear_the_dates')}  "
+        f"do zaproszenia teraz: {review.get('invitable_now')}"
+    )
+    for row in rows:
+        print(
+            f"{row['beacon_id']}  {row.get('relationship_score'):>3}  "
+            f"{row.get('role', ''):<12} {row.get('city') or '-':<18} {row.get('display_name')}"
+        )
+    return 0
+
+
+def command_review(args: argparse.Namespace) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise OperatorError("review needs a terminal: every letter is read and confirmed by a person")
+    review = cp_request("GET", "contacts/dual-role")
+    rows = invitable(review)
+    print(f"Do zaproszenia teraz: {len(rows)}. W tej sesji najwyzej {args.limit}.")
+    counts = review_loop(
+        rows,
+        limit=args.limit,
+        get_preview=lambda beacon_id: cp_request(
+            "GET", f"contacts/{beacon_id}/latarnik-invite/preview"
+        ),
+        send=lambda beacon_id: cp_request(
+            "POST",
+            f"contacts/{beacon_id}/latarnik-invite",
+            # One stable key per person: the server's once-ever rule and the
+            # ledger's replay both hang off it, so a re-run can never ask twice.
+            idempotency_key=f"latarnik-{beacon_id}",
+        ),
+        ask=input,
+        out=print,
+    )
+    print(f"Wyslane: {counts['sent']}  pominiete: {counts['skipped']}  odmowy: {counts['refused']}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("list", help="who may be asked now (read only)").set_defaults(run=command_list)
+    review = sub.add_parser("review", help="read each letter, send only what you confirm")
+    review.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_PER_SESSION,
+        help=f"letters to show this session (1-{MAX_PER_SESSION})",
+    )
+    review.set_defaults(run=command_review)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.run(args)
+    except OperatorError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
