@@ -47,6 +47,8 @@ mod tests {
             orphaned_publishing_actions_all_time: 0,
             refused_growth_deliveries: 0,
             refused_other_deliveries: 0,
+            // No letter sent carried a link the ledger cannot see.
+            untracked_letter_sends_24h: 0,
             unscoreable_live_opportunities: 0,
             duplicate_community_drafts: 0,
             relentless_degraded_phases: None,

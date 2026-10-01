@@ -68,6 +68,69 @@ pub(crate) struct OutreachPitch {
     pub source: &'static str,
     pub title: String,
     pub url: String,
+    /// The release plan the pitch is, when it is one — its listen link mints
+    /// campaign-bound through `ensure_release_tracked_link`, not bare.
+    pub release_id: Option<crowdrelay_domain::ReleasePlanId>,
+    /// The plan's own `source_key`, when the pitch is a plan — the key
+    /// `release_link_slug` names the canonical link from, so the letter
+    /// carries the same link the release milestones printed.
+    pub source_key: Option<String>,
+}
+
+impl OutreachPitch {
+    /// The tracked link a letter prints for this pitch.
+    ///
+    /// A plan pitch carries the release's canonical `release-{key}` link — the
+    /// same row the release milestones mint, so clicks from the letter and
+    /// clicks from the announcement aggregate on one link and one campaign. A
+    /// catalogue pitch gets `release-catalogue-{id}` instead. `Ok(None)` —
+    /// the letter then refuses or shortens rather than printing a URL the
+    /// ledger cannot see — when the tenant has no member site or the listen
+    /// URL is not a safe redirect target.
+    pub(crate) async fn tracked_link(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace_id: Uuid,
+        site_root: Option<&str>,
+    ) -> Result<Option<crowdrelay_domain::TrackedLink>, RepositoryError> {
+        let key = self.source_key.as_deref().unwrap_or(&self.subject_key);
+        let Some(slug) = operations::release_link_slug(key)
+            .and_then(|slug| crowdrelay_domain::SmartLinkSlug::parse(slug).ok())
+        else {
+            return Ok(None);
+        };
+        if let Some(release_id) = self.release_id {
+            // `ensure_release_tracked_link` no-ops on a non-http listen URL —
+            // a letter must never print a link whose row was never written,
+            // so the same gate runs here before the link is built.
+            if !operations::is_http_url(&self.url) {
+                return Ok(None);
+            }
+            // Campaign-bound: the release's own mint path keeps the link the
+            // milestones' audiences already click.
+            operations::ensure_release_tracked_link(
+                transaction,
+                crowdrelay_domain::WorkspaceId::from_uuid(workspace_id),
+                release_id,
+                key,
+                &self.title,
+                Some(&self.url),
+            )
+            .await?;
+            return Ok(site_root.map(|root| crowdrelay_domain::TrackedLink::for_site(root, &slug)));
+        }
+        crate::tracked_links::ensure_smart_link_in_tx(
+            transaction,
+            workspace_id,
+            slug.as_str(),
+            &self.url,
+            site_root,
+            Some("email"),
+            Some("pitch"),
+        )
+        .await
+        .map_err(map_sqlx)
+    }
 }
 
 /// The pitch every outreach letter carries: an operator's release plan with
@@ -77,8 +140,8 @@ pub(crate) async fn outreach_pitch(
     connection: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> Result<Option<OutreachPitch>, RepositoryError> {
-    let plan = sqlx::query_as::<_, (Uuid, String, String)>(
-        "SELECT id, title, listen_url FROM release_plans
+    let plan = sqlx::query_as::<_, (Uuid, String, String, String)>(
+        "SELECT id, title, listen_url, source_key FROM release_plans
          WHERE workspace_id = $1 AND active
            AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> ''
          ORDER BY release_at DESC, id
@@ -88,13 +151,15 @@ pub(crate) async fn outreach_pitch(
     .fetch_optional(&mut *connection)
     .await
     .map_err(map_sqlx)?;
-    if let Some((id, title, url)) = plan {
+    if let Some((id, title, url, source_key)) = plan {
         return Ok(Some(OutreachPitch {
             subject_kind: "release",
             subject_key: format!("release:{id}"),
             source: "release_autopilot",
             title,
             url,
+            release_id: Some(crowdrelay_domain::ReleasePlanId::from_uuid(id)),
+            source_key: Some(source_key),
         }));
     }
     let catalogue = sqlx::query_as::<_, (Uuid, String, String)>(
@@ -121,6 +186,8 @@ pub(crate) async fn outreach_pitch(
         source: "catalogue_autopilot",
         title,
         url,
+        release_id: None,
+        source_key: None,
     }))
 }
 

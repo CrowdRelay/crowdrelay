@@ -633,6 +633,7 @@ async fn fan_arrival_writes_provenance_not_only_acquisition()
         &crowdrelay_infra::acquisition::ArrivalContext {
             source_target: Some(format!("krakow-{suffix}")),
             campaign_id: Some(campaign_id.into_uuid()),
+            anonymous_visitor_id: None,
         },
     )
     .await?;

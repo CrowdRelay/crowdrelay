@@ -657,6 +657,7 @@ impl PostgresConcertQrRepository {
                     &crate::acquisition::ArrivalContext {
                         source_target: Some(command.event_slug.clone()),
                         campaign_id: Some(command.campaign_id),
+                        anonymous_visitor_id: command.anonymous_visitor_id,
                     },
                 )
                 .await

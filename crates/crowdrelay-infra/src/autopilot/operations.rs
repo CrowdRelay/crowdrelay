@@ -137,7 +137,7 @@ async fn task_completion_projection(
 /// here turns a malformed URL into a CHECK violation that wedges the whole
 /// milestone ladder on every retry, and a stricter one (`starts_with`, which
 /// is case-sensitive) silently drops a valid `HTTPS://` URL.
-fn is_http_url(url: &str) -> bool {
+pub(in crate::autopilot) fn is_http_url(url: &str) -> bool {
     url.get(..7)
         .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
         || url

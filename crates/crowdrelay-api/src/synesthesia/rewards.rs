@@ -179,6 +179,7 @@ pub async fn enter_reward_draw(
         &token_hash,
         email.as_str(),
         &payload,
+        attribution_visitor(&headers).map(|visitor| visitor.into_uuid()),
     )
     .await;
     match result {
@@ -207,6 +208,7 @@ async fn enter_reward_draw_inner(
     token_hash: &[u8],
     normalized_email: &str,
     payload: &RewardEntryRequest,
+    anonymous_visitor_id: Option<Uuid>,
 ) -> Result<(), SynesthesiaError> {
     let Some((run_id, campaign_slug)) = sqlx::query_as::<_, (Uuid, String)>(
         r#"
@@ -290,6 +292,7 @@ async fn enter_reward_draw_inner(
                 &crowdrelay_infra::acquisition::ArrivalContext {
                     source_target: Some(format!("synesthesia_run:{run_id}")),
                     campaign_id: None,
+                    anonymous_visitor_id,
                 },
             )
             .await

@@ -110,6 +110,11 @@ pub struct CheckinCommand {
     /// session: an unverified address must not authenticate as the fan behind
     /// it, so the follow-up is always an emailed token instead.
     pub email: Option<String>,
+    /// The first-party anonymous visitor id the scanning browser carried —
+    /// the same id a `/l/` or `/go/` click recorded — so a scan that creates
+    /// the fan joins their acquisition row back to the link that sent them.
+    /// `None` when the scan arrived untracked; never minted here.
+    pub anonymous_visitor_id: Option<Uuid>,
     pub consent: Option<CheckinConsent>,
     pub now: OffsetDateTime,
     pub request_id: Option<String>,

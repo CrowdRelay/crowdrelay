@@ -280,9 +280,13 @@ pub struct SenderIdentity {
     /// Where the act is from, when the tenant has said. Absent means the
     /// sentence stops earlier.
     pub home_city: Option<String>,
-    /// The public site, from `member_site_base_url`. Absent means no link line
-    /// rather than a link to nowhere.
-    pub site_url: Option<String>,
+    /// A tracked link that resolves to the act's public site — the caller
+    /// ensures the `smart_links` row (canonical slug `site`) against
+    /// `member_site_base_url` and prints `{site}/l/site`. A bare origin is
+    /// refused by the type: a link nobody can count is a link that teaches
+    /// the brain nothing. Absent means no link line rather than a link to
+    /// nowhere.
+    pub site_url: Option<crate::tracked_link::TrackedLink>,
 }
 
 /// The longest style phrase a letter will carry. Past this it is a
@@ -690,15 +694,13 @@ fn introduction(sender: &SenderIdentity, act: &str, language: LetterLanguage) ->
 }
 
 fn site_line(sender: &SenderIdentity, language: LetterLanguage) -> Option<String> {
-    sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|site| match language {
+    sender.site_url.as_ref().map(|site| {
+        let site = site.as_str();
+        match language {
             LetterLanguage::English => format!("Music: {site}"),
             LetterLanguage::Polish => format!("Muzyka: {site}"),
-        })
+        }
+    })
 }
 
 /// Capitalises the first character and leaves the rest alone.
@@ -726,12 +728,19 @@ fn truncate(subject: &str) -> String {
 mod tests {
     use super::*;
 
+    fn tracked_site() -> crate::tracked_link::TrackedLink {
+        crate::tracked_link::TrackedLink::for_site(
+            "https://virya.music",
+            &crate::SmartLinkSlug::parse("site").unwrap(),
+        )
+    }
+
     fn sender() -> SenderIdentity {
         SenderIdentity {
             act_name: "Virya".to_owned(),
             style: Some("modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.music/".to_owned()),
+            site_url: Some(tracked_site()),
         }
     }
 

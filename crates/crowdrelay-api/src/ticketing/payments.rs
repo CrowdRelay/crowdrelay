@@ -521,6 +521,10 @@ async fn process_paid_order(
                     &crowdrelay_infra::acquisition::ArrivalContext {
                         source_target: Some(format!("ticket_order:{}", order.id)),
                         campaign_id: None,
+                        // A Stripe webhook carries no browser — the buyer's
+                        // attribution cookie is unreachable here, so the
+                        // honest answer is untracked, not a guess.
+                        anonymous_visitor_id: None,
                     },
                 )
                 .await

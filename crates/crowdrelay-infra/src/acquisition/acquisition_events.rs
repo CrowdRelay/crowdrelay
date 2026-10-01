@@ -328,6 +328,13 @@ pub struct ArrivalContext {
     pub source_target: Option<String>,
     /// The campaign the arrival belongs to, when the caller holds one.
     pub campaign_id: Option<Uuid>,
+    /// The first-party anonymous visitor id the request carried, when the
+    /// arrival path has a browser to carry one. A scan or claim that followed
+    /// a tracked click holds the same id the click recorded, which is what
+    /// lets the acquisition row join the fan back to the link that sent them.
+    /// `None` for paths with no browser in them — a Stripe webhook or a CSV
+    /// import — where the honest answer is "untracked", not a guess.
+    pub anonymous_visitor_id: Option<Uuid>,
 }
 
 /// Records a fan's arrival from a path that is not `POST /v1/fans` — a QR
@@ -366,13 +373,14 @@ pub async fn record_fan_arrival(
     sqlx::query(
         r#"
         INSERT INTO fan_acquisition_events (
-            workspace_id, fan_id, source, request_id, occurred_at
+            workspace_id, fan_id, anonymous_visitor_id, source, request_id, occurred_at
         )
-        VALUES ($1, $2, $3, $4, now())
+        VALUES ($1, $2, $3, $4, $5, now())
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(fan_id.into_uuid())
+    .bind(context.anonymous_visitor_id)
     .bind(source)
     .bind(request_id)
     .execute(&mut **transaction)

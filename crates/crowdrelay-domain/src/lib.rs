@@ -161,6 +161,7 @@ pub mod team_approval_token;
 pub mod team_operations;
 pub mod tour_economics;
 pub mod trace;
+pub mod tracked_link;
 pub mod value_tier;
 pub mod values;
 pub mod venue_evidence;
@@ -216,6 +217,7 @@ pub use referrals::{
     QualifiedReferral, ReferralProgress, ReferralStatus, RewardDrawPrizeKind, WeightedDrawEntry,
 };
 pub use trace::{CausationId, TraceContext, TraceId};
+pub use tracked_link::{TrackedLink, TrackedLinkRefusal, untracked_links_in};
 pub use values::{
     CitySlug, CountryCode, CountryCodeError, DestinationUrl, DestinationUrlError, EventSlug,
     NormalizedEmail, NormalizedEmailError, ReferralCode, ReferralCodeError, SlugError,

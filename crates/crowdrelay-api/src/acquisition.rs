@@ -109,7 +109,10 @@ pub struct AcquisitionState {
     click_submitter: ClickSubmitter,
     click_metrics_reader: ClickMetricsReader,
     public_site_base_url: Url,
-    secure_cookies: bool,
+    /// `pub(crate)` so sibling route modules that mark a browser — the
+    /// concert-QR check-in sets the attribution cookie on its scan — build
+    /// the same cookie shape under the same secure flag.
+    pub(crate) secure_cookies: bool,
     acquisition_repository: Arc<dyn AcquisitionRepository>,
     watch_origin: Option<Url>,
 }
@@ -713,7 +716,10 @@ fn fan_session_cookie(token: &FanSessionToken, secure: bool) -> String {
     )
 }
 
-fn attribution_cookie(visitor_id: VisitorId, secure: bool) -> String {
+/// Builds the first-party attribution cookie value — `pub(crate)` so the
+/// check-in handler marks a scanning browser with the same cookie shape the
+/// smart-link redirect sets.
+pub(crate) fn attribution_cookie(visitor_id: VisitorId, secure: bool) -> String {
     let secure_attribute = if secure { "; Secure" } else { "" };
     format!(
         "{ATTRIBUTION_COOKIE}={visitor_id}; Max-Age={ATTRIBUTION_COOKIE_MAX_AGE_SECONDS}; \

@@ -432,6 +432,7 @@ async fn checkin_against_another_fans_ticket_order_records_a_candidate() -> Resu
         expires_at: campaign_valid_until.unix_timestamp(),
         session_token: None,
         email: Some("checker@example.com".to_owned()),
+        anonymous_visitor_id: None,
         consent: None,
         now: OffsetDateTime::now_utc(),
         request_id: Some("req-cand".to_owned()),

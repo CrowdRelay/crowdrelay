@@ -22,7 +22,11 @@ use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{Problem, acquisition::fan_session_from_headers, request_id};
+use crate::{
+    Problem,
+    acquisition::{attribution_visitor, fan_session_from_headers},
+    request_id,
+};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
 const CAMPAIGN_SLUG: &str = "virya-synesthesia-album-v1";

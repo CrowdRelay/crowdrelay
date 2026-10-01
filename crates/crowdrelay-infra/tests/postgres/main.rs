@@ -108,6 +108,7 @@ mod mobile_fan;
 mod night;
 mod org_attention_budget;
 mod outreach_mail;
+mod outward_link_gate;
 mod peer_acts;
 mod place_url_canonical;
 mod referrals_rewards;

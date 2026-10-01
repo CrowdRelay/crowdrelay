@@ -161,13 +161,8 @@ fn initial(input: &BookingLetterInput<'_>, city: &str, act: &str) -> BookingLett
         ),
     });
     lines.push(String::new());
-    if let Some(site) = input
-        .sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(link) = &input.sender.site_url {
+        let site = link.as_str();
         lines.push(match input.language {
             LetterLanguage::English => format!("More about us: {site}"),
             LetterLanguage::Polish => format!("Więcej o nas: {site}"),
@@ -270,13 +265,17 @@ fn truncate(value: String, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracked_link::TrackedLink;
 
     fn sender() -> SenderIdentity {
         SenderIdentity {
             act_name: "VIRYA".to_owned(),
             style: Some("modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.music".to_owned()),
+            site_url: Some(TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("site").unwrap(),
+            )),
         }
     }
 

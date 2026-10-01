@@ -107,6 +107,7 @@ fn command(
         expires_at: fixture.expires_at,
         session_token,
         email,
+        anonymous_visitor_id: None,
         consent,
         now: OffsetDateTime::now_utc(),
         request_id: Some(format!("req-{}", Uuid::now_v7())),
@@ -138,6 +139,11 @@ async fn email_claim_creates_pending_fan_checkin_and_confirmation() -> Result<()
         }),
     );
     cmd.event_slug = slug;
+    // A scanner who clicked a tracked link on the way in carries the visitor
+    // id the click recorded — the acquisition row must keep it, or the
+    // check-in is invisible to the click→fan join the channel readout runs.
+    let visitor_id = Uuid::now_v7();
+    cmd.anonymous_visitor_id = Some(visitor_id);
     let result = repo.check_in(&cmd).await?;
     assert!(result.created);
     assert_eq!(result.identity, CheckinIdentity::EmailClaim);
@@ -195,8 +201,9 @@ async fn email_claim_creates_pending_fan_checkin_and_confirmation() -> Result<()
 
     // The scan is how this fan arrived — provenance must say so, or the
     // channel-ROI readout counts the room as invisible rather than measured.
-    let (source, request_id): (String, String) = sqlx::query_as(
-        "SELECT fae.source, fae.request_id FROM fan_acquisition_events fae \
+    let (source, request_id, recorded_visitor): (String, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT fae.source, fae.request_id, fae.anonymous_visitor_id \
+         FROM fan_acquisition_events fae \
          JOIN concert_checkins c ON c.fan_id = fae.fan_id AND c.workspace_id = fae.workspace_id \
          WHERE fae.workspace_id = $1 AND c.event_id = $2",
     )
@@ -206,6 +213,12 @@ async fn email_claim_creates_pending_fan_checkin_and_confirmation() -> Result<()
     .await?;
     assert_eq!(source, "concert_qr");
     assert_eq!(request_id, cmd.request_id.as_deref().unwrap());
+    assert_eq!(
+        recorded_visitor,
+        Some(visitor_id),
+        "the scan's visitor id must land on the acquisition row — without it \
+         a clicked-and-scanned fan reads as untracked"
+    );
     Ok(())
 }
 

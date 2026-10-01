@@ -29,6 +29,7 @@ use crate::outreach_letter::{
     MAX_SUBJECT, OutreachLetter, format_show_date_en, format_show_date_pl, greeting_pl,
     introduction, introduction_pl, salutation_name, sign_off, sign_off_pl, truncate,
 };
+use crate::tracked_link::TrackedLink;
 
 /// Everything a show letter is composed from. Every field is a fact the
 /// event row or the registry holds; nothing here is inferred.
@@ -44,11 +45,13 @@ pub struct ShowPitchInput<'a> {
     pub city: &'a str,
     /// The room, when the event row names one.
     pub venue: Option<&'a str>,
-    /// Where to buy a ticket, when the event row carries a link.
-    pub ticket_url: Option<&'a str>,
-    /// The newest listen link, when there is one. A show letter stands on
-    /// its date; the link is supporting material, not the subject.
-    pub listen_url: Option<&'a str>,
+    /// Where to buy a ticket — a tracked redirect built from the event
+    /// row's link, so a recipient's click is attributable to the letter.
+    pub ticket_url: Option<TrackedLink>,
+    /// The newest listen link, when there is one — tracked for the same
+    /// reason. A show letter stands on its date; the link is supporting
+    /// material, not the subject.
+    pub listen_url: Option<TrackedLink>,
 }
 
 /// Why a show letter could not be composed.
@@ -145,8 +148,8 @@ pub fn compose_show_pitch_letter(
         return Err(ShowPitchRefusal::NoCity);
     }
     let venue = input.venue.map(str::trim).filter(|v| !v.is_empty());
-    let tickets = input.ticket_url.map(str::trim).filter(|v| !v.is_empty());
-    let listen = input.listen_url.map(str::trim).filter(|v| !v.is_empty());
+    let tickets = input.ticket_url.as_ref().map(TrackedLink::as_str);
+    let listen = input.listen_url.as_ref().map(TrackedLink::as_str);
     match input.language {
         LetterLanguage::English => {
             let ask = ask_en(input.target_kind).ok_or(ShowPitchRefusal::NoShowAsk)?;
@@ -271,7 +274,10 @@ mod tests {
             act_name: "Virya".to_owned(),
             style: Some("metalcore, modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.music".to_owned()),
+            site_url: Some(TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("site").unwrap(),
+            )),
         }
     }
 
@@ -290,8 +296,14 @@ mod tests {
             show_date: Date::from_calendar_date(2026, time::Month::October, 17).unwrap(),
             city: "Gorzów Wielkopolski",
             venue: Some("MagnetOffOn"),
-            ticket_url: Some("https://tickets.example/virya-gorzow"),
-            listen_url: Some("https://open.spotify.com/album/x"),
+            ticket_url: Some(TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("tickets-gorzow").unwrap(),
+            )),
+            listen_url: Some(TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("album-x").unwrap(),
+            )),
         }
     }
 
@@ -322,7 +334,7 @@ mod tests {
         assert!(
             letter
                 .body
-                .contains("Tickets: https://tickets.example/virya-gorzow")
+                .contains("Tickets: https://virya.music/l/tickets-gorzow")
         );
         assert!(!letter.body.contains("submit"), "{}", letter.body);
         assert!(!letter.body.contains("review"), "{}", letter.body);

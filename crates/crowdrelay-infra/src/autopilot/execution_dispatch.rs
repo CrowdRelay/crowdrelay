@@ -425,6 +425,40 @@ async fn gate_outward_emission(
     let evidence = crowdrelay_domain::outward_evidence::OutwardEvidence::from_payload(payload)
         .map_err(|refusal| RepositoryError::ConflictBecause(refusal.message()))?;
 
+    // The tracked-link backstop, scoped to stranger outreach — the class this
+    // rule exists for. Composers make an untracked URL unrepresentable —
+    // `TrackedLink` is the only link a letter can carry — so what reaches
+    // this check is a bypass: a draft persisted before the gate, or a body a
+    // person edited after approval. Either way the send refuses: the one
+    // thing a pitch must never do is ask a stranger to click a link the
+    // ledger cannot count. Owned-audience broadcasts are exempt — an event
+    // announcement may legitimately carry the ticketing provider's own URL,
+    // which is not ours to wrap in a redirect.
+    if class == crowdrelay_domain::action_class::ActionClass::ThirdParty
+        && let Some(body) = payload
+            .get("draft")
+            .and_then(|draft| draft.get("body"))
+            .and_then(Value::as_str)
+    {
+        let site_root = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty());
+        let untracked =
+            crowdrelay_domain::untracked_links_in(body, site_root.as_deref());
+        if !untracked.is_empty() {
+            return Err(RepositoryError::ConflictBecause(
+                "letter body carries a URL the ledger cannot see — only \
+                 {site}/l/{slug} links may reach a reader",
+            ));
+        }
+    }
+
     // `last_contact_at` is measured, never claimed: the newest outward touch
     // on this subject, read from the durable action rows. A first contact
     // reads `NULL` — the honest answer to "when did we last reach them".
