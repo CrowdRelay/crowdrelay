@@ -839,6 +839,8 @@ fn seed_row(
                 c!("public_contact").to_owned(),
                 score_basis_points(c!("relevance_score")).unwrap_or(0),
                 letter_priority(c!("priority")).unwrap_or(0),
+                bounded_i32(c!("distance_km"), 20_000),
+                bounded_i16(c!("nights_away"), 30),
                 eligible_for(c!("status")),
                 false,
                 metadata,
