@@ -108,6 +108,8 @@
         /v1/control-plane/representation/approach \
         /v1/control-plane/booking-agents \
         /v1/control-plane/booking-agents/* \
+        /v1/control-plane/beacon-asks \
+        /v1/control-plane/beacon-asks/* \
 
 	handle /healthz/ready {
 		rewrite * /v1/health/ready
