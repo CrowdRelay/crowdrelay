@@ -443,3 +443,91 @@ async fn unknown_action(pool: &PgPool, workspace_id: WorkspaceId) -> Result<Uuid
     .context("insert unknown action")?;
     Ok(action_id)
 }
+
+/// An action under an open operator claim is a human mid-send — the missing
+/// receipt is the point of the beacon human lane, not a gap to relabel, and
+/// webhook state must not resolve the row out from under the person holding
+/// it. Once the claim closes the ordinary sweeps resume and close the loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_open_operator_claim_is_not_a_receipt_gap() -> Result<()> {
+    use crowdrelay_infra::autopilot::OPERATOR_EXECUTOR_ID;
+
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+        let action_id = emitted_action_without_receipt(&db, ws).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO autopilot_execution_claims
+                (workspace_id, action_id, executor_id, claim_token, status, claimed_at)
+            VALUES ($1,$2,$3,$4,'claimed',now())
+            "#,
+        )
+        .bind(ws.into_uuid())
+        .bind(action_id)
+        .bind(OPERATOR_EXECUTOR_ID)
+        .bind(Uuid::now_v7())
+        .execute(&db)
+        .await
+        .context("insert open operator claim")?;
+
+        // The gap sweep leaves the action alone — `succeeded` is the state
+        // the lane keeps it in while the letter waits on a person.
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(action_status(&db, action_id).await?, "succeeded");
+
+        // The resolve sweep is fenced the same way: even sat in `unknown`
+        // (the state the gap sweep would have given it without the claim),
+        // delivered evidence must not fire while the claim is open.
+        sqlx::query("UPDATE autopilot_actions SET status = 'unknown' WHERE id = $1")
+            .bind(action_id)
+            .execute(&db)
+            .await
+            .context("mark the action unknown")?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(action_status(&db, action_id).await?, "unknown");
+        let report_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM autopilot_execution_reports WHERE action_id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&db)
+        .await?;
+        assert_eq!(
+            report_count, 0,
+            "no sweep may write a receipt under a live claim"
+        );
+
+        // The fences lift when the claim does — the same run then resolves
+        // the gap the ordinary way, with the synthesized receipt to prove it.
+        sqlx::query(
+            "UPDATE autopilot_execution_claims SET status = 'failed', \
+             error_kind = 'executor_abandoned', completed_at = now(), updated_at = now() \
+             WHERE workspace_id=$1 AND action_id=$2 AND executor_id=$3",
+        )
+        .bind(ws.into_uuid())
+        .bind(action_id)
+        .bind(OPERATOR_EXECUTOR_ID)
+        .execute(&db)
+        .await
+        .context("settle the operator claim")?;
+        worker(db.clone(), ws).run_once().await?;
+        assert_eq!(action_status(&db, action_id).await?, "succeeded");
+        let synthesized: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM autopilot_execution_reports \
+             WHERE action_id = $1 AND executor_id = 'receipt_reconciliation'",
+        )
+        .bind(action_id)
+        .fetch_one(&db)
+        .await?;
+        assert_eq!(
+            synthesized, 1,
+            "a closed claim returns the action to ordinary reconciliation"
+        );
+        Ok(())
+    }
+    .await
+}
