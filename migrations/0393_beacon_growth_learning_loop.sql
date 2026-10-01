@@ -43,7 +43,7 @@ ALTER TABLE autopilot_measurements
 ALTER TABLE autopilot_measurements
     DROP CONSTRAINT IF EXISTS viryaos_autopilot_measurements_measurement_kind_check;
 ALTER TABLE autopilot_measurements
-    ADD CONSTRAINT viryaos_autopilot_measurements_measurement_kind_check
+    ADD CONSTRAINT autopilot_measurements_measurement_kind_check
     CHECK (measurement_kind IN (
         'ticket_revenue_72h','merch_gross_proxy_7d','promotion_roas_7d',
         'booking_reply_7d','outreach_reply_7d','audience_ticket_revenue_72h',
