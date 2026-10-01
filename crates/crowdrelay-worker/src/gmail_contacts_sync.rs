@@ -39,7 +39,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crowdrelay_domain::drive_contacts::{ExtractedContact, extract_header_contacts};
+use crowdrelay_domain::drive_contacts::{
+    ExtractedContact, extract_header_contacts, is_automated_inbound,
+};
 use crowdrelay_domain::scan_scope::ScanScope;
 use crowdrelay_infra::{
     gdrive::{GDriveError, PostgresGDriveRepository},
@@ -839,8 +841,17 @@ impl GmailContactsSyncWorker {
             .iter()
             .flat_map(|name| values_of(name))
             .collect();
-        let contacts = extract_header_contacts(&address_headers, self_email);
         let from = values_of("From").into_iter().next().unwrap_or_default();
+        let header_pairs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect();
+        let automated_inbound = is_automated_inbound(&header_pairs, &from, self_email);
+        let contacts = if automated_inbound {
+            Vec::new()
+        } else {
+            extract_header_contacts(&address_headers, self_email)
+        };
         let subject = values_of("Subject").into_iter().next().unwrap_or_default();
         let provenance = format!("{} — {}", from.trim(), subject.trim())
             .trim_matches(|c| c == '—' || c == ' ')
@@ -906,6 +917,7 @@ impl GmailContactsSyncWorker {
         // `internalDate` parses — the same instant the floor check used.
         if let Some((email, at)) =
             inbound_sighting(&from, self_email, message.internal_date.as_deref())
+                .filter(|_| !automated_inbound)
         {
             self.repo
                 .record_inbound_sighting(self.workspace_id, &email, at)
@@ -1157,41 +1169,5 @@ fn message_vanished(error: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-
-    #[test]
-    fn a_vanished_message_is_not_a_failure() {
-        assert!(super::message_vanished("gmail request failed status=404"));
-        assert!(!super::message_vanished("gmail request failed status=500"));
-        assert!(!super::message_vanished("gmail request failed status=4040"));
-        assert!(!super::message_vanished("gmail response parse failed: eof"));
-    }
-
-    use super::*;
-
-    #[test]
-    fn the_tenants_own_outbound_mail_records_nothing() {
-        assert_eq!(
-            inbound_sighting(
-                "Band <band@virya.music>",
-                "band@virya.music",
-                Some("1727740800000")
-            ),
-            None
-        );
-        assert_eq!(
-            inbound_sighting("Promoter <promo@venue.pl>", "band@virya.music", None),
-            None,
-            "no internalDate, no sighting"
-        );
-        assert_eq!(
-            inbound_sighting(
-                "Promoter <promo@venue.pl>",
-                "band@virya.music",
-                Some("not-a-timestamp")
-            ),
-            None,
-            "an unparseable internalDate records nothing"
-        );
-    }
-}
+#[path = "gmail_contacts_sync/tests.rs"]
+mod tests;

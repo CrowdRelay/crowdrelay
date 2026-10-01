@@ -409,6 +409,15 @@ jobs:
             community_tracked_links \
             ops_watchdog \
             source_refresh_preserves_promotion_policy_campaign_and_request
+          # The join executor against a stand-in agents service: the stand-in
+          # answers every request itself, so the URL and key are placeholders
+          # and no agents service has to run. Only the credential-gap proof
+          # is listed -- the rest of the suite needs the real service.
+          CROWDRELAY_AGENTS_TEST_DATABASE_URL="$CROWDRELAY_TEST_DATABASE_URL" \
+          CROWDRELAY_AGENTS_TEST_URL=http://127.0.0.1:9 \
+          CROWDRELAY_AGENTS_TEST_AUTH_KEY=ci-only-agents-key-0123456789abcdef \
+            cargo test --locked --all-features --package crowdrelay-worker --test agents_boundary_postgres -- --ignored --test-threads=1 \
+            h_a_lane_without_a_credential_is_paused_not_hammered
           cargo test --locked --all-features --package crowdrelay-infra --test peer_act_seed_postgres -- --ignored --test-threads=1 \
             a_band_sheet_lands_as_attributed_peer_facts
           cargo test --locked --all-features --package crowdrelay-infra --test team_reminder_drain_postgres -- --ignored --test-threads=1 \

@@ -463,7 +463,7 @@ pub struct HeaderContact {
     pub display_name: Option<String>,
 }
 
-/// Local-parts and whole domains that are never a person worth reviewing.
+/// Local-parts that are never a person worth reviewing.
 const SKIP_LOCAL: &[&str] = &[
     "noreply",
     "no-reply",
@@ -474,11 +474,46 @@ const SKIP_LOCAL: &[&str] = &[
     "postmaster",
     "bounce",
     "bounces",
+    // Platform notification mailboxes. Measured in production on 2026-10-01:
+    // `notifications@link.com`, `security@facebookmail.com` and
+    // `security@mail.instagram.com` were all staged as contacts, so the
+    // archive's likely-fan cut held a login alert and a verify-your-email
+    // message as if they were people who had written to the band.
+    "notifications",
+    "notification",
+    "notify",
+    "alerts",
+    "security",
 ];
+/// Substrings of a local part that mark a machine whatever precedes them —
+/// `ads-account-noreply@google.com` is not caught by an exact `noreply`.
+const SKIP_LOCAL_CONTAINS: &[&str] = &["noreply", "no-reply", "donotreply"];
+/// Domains whose mail is the platform talking, not a person. A subdomain of a
+/// listed domain matches too (`mail.instagram.com`, `groups.tapatalk.com`).
+///
+/// This is a list of platforms that appeared in the production staging table
+/// as senders of account mail — Meta, Google/YouTube, Tapatalk forums — not a
+/// guess at every platform that might. Anything else a person decides in
+/// review; the message-level check below catches the rest of the bulk mail.
 const SKIP_DOMAINS: &[&str] = &[
     "bounces.google.com",
     "calendar-notification.bounces.google.com",
+    "facebookmail.com",
+    "facebook.com",
+    "instagram.com",
+    "google.com",
+    "youtube.com",
+    "tapatalk.com",
 ];
+
+fn domain_is_skipped(domain: &str) -> bool {
+    SKIP_DOMAINS.iter().any(|skipped| {
+        domain == *skipped
+            || domain
+                .strip_suffix(skipped)
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
+}
 
 /// Splits an RFC-5322-style address list (`"Jane <jane@x.com>", bob@y.com`)
 /// into validated contacts. The tenant's own mailbox (`self_email`) and
@@ -512,7 +547,12 @@ pub fn extract_header_contacts(header_values: &[String], self_email: &str) -> Ve
             }
             let (local, domain) = email.rsplit_once('@').unwrap_or(("", ""));
             let local_base = local.split('+').next().unwrap_or(local);
-            if SKIP_LOCAL.contains(&local_base) || SKIP_DOMAINS.contains(&domain) {
+            if SKIP_LOCAL.contains(&local_base)
+                || SKIP_LOCAL_CONTAINS
+                    .iter()
+                    .any(|marker| local_base.contains(marker))
+                || domain_is_skipped(domain)
+            {
                 continue;
             }
             let name = capped(clean(name), 200);
@@ -529,6 +569,56 @@ pub fn extract_header_contacts(header_values: &[String], self_email: &str) -> Ve
         }
     }
     seen.into_values().collect()
+}
+
+/// Whether a message's headers say a machine or a mailing list sent it.
+///
+/// The markers are the ones RFC 2369 / RFC 3834 define for exactly this:
+/// `List-Unsubscribe` and `List-Id` (mailing lists and every bulk sender that
+/// wants to reach an inbox), `Precedence: bulk|list|junk`, and any
+/// `Auto-Submitted` other than `no`. A person writing to the band sets none of
+/// them. Names are matched case-insensitively; an absent header is not a
+/// marker, so a message with no headers at all is treated as a person's.
+#[must_use]
+pub fn has_bulk_markers(headers: &[(&str, &str)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        let value = value.trim().to_ascii_lowercase();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "list-unsubscribe" | "list-id" => !value.is_empty(),
+            "precedence" => matches!(value.as_str(), "bulk" | "list" | "junk"),
+            "auto-submitted" => !value.is_empty() && value != "no",
+            _ => false,
+        }
+    })
+}
+
+/// Whether the `From` header is the tenant's own mailbox — the outbound side,
+/// which the bulk-marker rule must never apply to: an outreach tool that adds
+/// `List-Unsubscribe` to the band's own pitches would otherwise hide every
+/// recipient it pitched.
+#[must_use]
+pub fn from_is_self(from_header: &str, self_email: &str) -> bool {
+    // `extract_header_contacts` drops the self address by definition, so ask
+    // it with a sentinel that matches nothing and compare afterwards — the
+    // `"Name <addr>"` parse stays in one place.
+    let own = self_email.trim().to_ascii_lowercase();
+    !own.is_empty()
+        && extract_header_contacts(&[from_header.to_owned()], "\u{0}")
+            .iter()
+            .any(|contact| contact.email == own)
+}
+
+/// Whether an inbound message was sent by a machine or a mailing list, so it
+/// stages nobody and counts as nobody having written in.
+///
+/// `last_inbound_at` is one of the two signals the archive's likely-fan cut
+/// reads, so a newsletter that recorded a sighting would present itself as a
+/// fan who replied. Outbound mail is exempt: an outreach tool that adds
+/// `List-Unsubscribe` to the band's own pitches must not hide the people it
+/// pitched.
+#[must_use]
+pub fn is_automated_inbound(headers: &[(&str, &str)], from_header: &str, self_email: &str) -> bool {
+    !from_is_self(from_header, self_email) && has_bulk_markers(headers)
 }
 
 /// Delimited text → the grid `extract_contacts` reads. A header row is
@@ -847,5 +937,113 @@ mod tests {
         // Claimed columns do not double-land.
         assert!(!contact.extras.contains_key("email"));
         assert!(!contact.extras.contains_key("name"));
+    }
+
+    fn harvested(headers: &[&str]) -> Vec<String> {
+        let headers: Vec<String> = headers.iter().map(|h| (*h).to_owned()).collect();
+        let mut emails: Vec<String> = extract_header_contacts(&headers, "band@example.test")
+            .into_iter()
+            .map(|contact| contact.email)
+            .collect();
+        emails.sort();
+        emails
+    }
+
+    /// The senders that reached the production staging table on 2026-10-01.
+    #[test]
+    fn platform_account_mail_is_not_a_contact() {
+        for sender in [
+            "Link <notifications@link.com>",
+            "Facebook <security@facebookmail.com>",
+            "Instagram <security@mail.instagram.com>",
+            "Google Ads <ads-account-noreply@google.com>",
+            "youtube-support@google.com",
+            "Tapatalk <tapatalkid@tapatalk.com>",
+            "GnarBoard <braveboard@groups.tapatalk.com>",
+        ] {
+            assert!(
+                harvested(&[sender]).is_empty(),
+                "{sender} is a platform, not a person"
+            );
+        }
+    }
+
+    #[test]
+    fn people_and_venues_still_pass() {
+        assert_eq!(
+            harvested(&[
+                "Jan <jan@gmail.com>, booking@klub.pl",
+                "info@domain-google.com.pl",
+                "someone@notgoogle.com"
+            ]),
+            vec![
+                "booking@klub.pl",
+                "info@domain-google.com.pl",
+                "jan@gmail.com",
+                "someone@notgoogle.com"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_skipped_domain_matches_whole_labels_only() {
+        assert!(domain_is_skipped("google.com"));
+        assert!(domain_is_skipped("mail.instagram.com"));
+        assert!(!domain_is_skipped("notgoogle.com"));
+        assert!(!domain_is_skipped("google.com.evil.example"));
+    }
+
+    #[test]
+    fn bulk_markers_are_read_from_the_standard_headers() {
+        assert!(has_bulk_markers(&[(
+            "List-Unsubscribe",
+            "<mailto:u@x.test>"
+        )]));
+        assert!(has_bulk_markers(&[("list-id", "<news.x.test>")]));
+        assert!(has_bulk_markers(&[("Precedence", "bulk")]));
+        assert!(has_bulk_markers(&[("Auto-Submitted", "auto-generated")]));
+        // `Auto-Submitted: no` is the explicit statement that a person sent it.
+        assert!(!has_bulk_markers(&[("Auto-Submitted", "no")]));
+        assert!(!has_bulk_markers(&[("Precedence", "first-class")]));
+        assert!(!has_bulk_markers(&[("List-Unsubscribe", "  ")]));
+        assert!(!has_bulk_markers(&[
+            ("From", "a@b.test"),
+            ("Subject", "gig on the 17th")
+        ]));
+        assert!(!has_bulk_markers(&[]));
+    }
+
+    #[test]
+    fn bulk_mail_is_automated_only_when_inbound() {
+        let bulk = [("List-Unsubscribe", "<mailto:u@x.test>")];
+        assert!(is_automated_inbound(
+            &bulk,
+            "News <n@x.test>",
+            "band@example.test"
+        ));
+        // The band's own pitch, sent through a tool that adds the header.
+        assert!(!is_automated_inbound(
+            &bulk,
+            "Band <band@example.test>",
+            "band@example.test"
+        ));
+        // A person's reply.
+        assert!(!is_automated_inbound(
+            &[],
+            "Jan <jan@x.test>",
+            "band@example.test"
+        ));
+    }
+
+    #[test]
+    fn the_tenants_own_mail_is_recognised_as_outbound() {
+        assert!(from_is_self(
+            "Band <Band@Example.test>",
+            "band@example.test"
+        ));
+        assert!(!from_is_self("Jan <jan@x.test>", "band@example.test"));
+        assert!(!from_is_self("not an address", "band@example.test"));
+        // No known mailbox: nothing is the tenant's, so nothing is exempt.
+        assert!(!from_is_self("Band <band@example.test>", ""));
     }
 }

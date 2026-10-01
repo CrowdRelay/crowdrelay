@@ -802,3 +802,82 @@ async fn partial_outage_scenario(
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// H. A platform with no credential is paused, not hammered
+// ---------------------------------------------------------------------------
+
+/// What the agents service answered for Lemmy in production on 2026-10-01.
+const LEMMY_NO_CREDENTIAL: &str = "HTTP/1.1 400 Bad Request\r\n\
+                                   Content-Type: application/json\r\n\
+                                   Content-Length: 57\r\nConnection: close\r\n\r\n\
+                                   {\"error\":\"no lemmy credential stored for this workspace\"}";
+
+/// Three Lemmy places were claimed and refused every five minutes -- 216
+/// warnings in six hours. One refusal must close the lane: the rest of the
+/// batch goes back untouched, and the next cycle claims nothing.
+#[tokio::test]
+#[ignore = "requires a disposable database"]
+async fn h_a_lane_without_a_credential_is_paused_not_hammered() -> Result<()> {
+    let Some(env) = Env::load() else {
+        eprintln!("skipped: agents boundary variables are not set");
+        return Ok(());
+    };
+    let pool = connect(&env).await?;
+    let workspace = Uuid::now_v7();
+    let result = paused_lane_scenario(&pool, &env, workspace).await;
+    let cleaned = cleanup(&pool, &[workspace]).await;
+    pool.close().await;
+    result?;
+    cleaned
+}
+
+async fn paused_lane_scenario(pool: &PgPool, env: &Env, workspace: Uuid) -> Result<()> {
+    let agents = CountingAgents::start(LEMMY_NO_CREDENTIAL).await?;
+    seed_workspace(pool, workspace).await?;
+    let mut places = Vec::new();
+    for index in 0..4 {
+        let id: Uuid = sqlx::query_scalar(
+            r"INSERT INTO discovery_places
+                  (workspace_id, place_kind, platform, name, url, member_count,
+                   status, membership_state)
+              VALUES ($1, 'lemmy', 'lemmy', $2, $3, 5000, 'active', 'not_joined')
+              RETURNING id",
+        )
+        .bind(workspace)
+        .bind(format!("!metal{index}@lemmy.test"))
+        .bind(format!("!metal{index}@lemmy.test"))
+        .fetch_one(pool)
+        .await
+        .context("seed a lemmy place")?;
+        places.push(id);
+    }
+    let worker = executor(pool, workspace, &agents.url, &env.auth_key)?;
+
+    let first = worker.run_once().await.context("first cycle")?;
+    ensure!(first == 0, "nothing joined, got {first}");
+    ensure!(
+        agents.requests() == 1,
+        "one refusal must close the lane; the stand-in saw {} requests",
+        agents.requests()
+    );
+
+    let second = worker.run_once().await.context("second cycle")?;
+    ensure!(second == 0, "nothing joined, got {second}");
+    ensure!(
+        agents.requests() == 1,
+        "a paused lane must claim nothing next cycle; the stand-in saw {} requests",
+        agents.requests()
+    );
+
+    // No place is blamed for our own missing credential: every one is still
+    // joinable the day the credential is stored.
+    for place in places {
+        let (state, _) = membership(pool, workspace, place).await?;
+        ensure!(
+            state == "not_joined",
+            "a missing credential must not mark a place, found {state}"
+        );
+    }
+    Ok(())
+}

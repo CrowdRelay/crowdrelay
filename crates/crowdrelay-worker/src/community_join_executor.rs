@@ -27,7 +27,11 @@
 //! `joining` rows older than 10 minutes are reclaimed and marked `not_joined`
 //! (safe to retry — joining is idempotent on Reddit's side).
 
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 use crowdrelay_domain::WorkspaceId;
 use sqlx::PgPool;
@@ -70,6 +74,20 @@ const CYCLE_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Maximum places to claim in a single cycle.
 const CLAIM_BATCH: i64 = 3;
 
+/// How long a platform's join lane stays closed after the agents service says
+/// no credential is stored for it.
+///
+/// Measured in production on 2026-10-01: Lemmy had no credential, so every
+/// five-minute cycle claimed three Lemmy places, got `HTTP 400 no lemmy
+/// credential stored`, handed them back and logged three warnings -- 216 in six
+/// hours, forever, and each one buried a signal in the noise. A missing
+/// credential is a fact about the deployment, not about the place, so the whole
+/// lane waits. An hour is short enough that a credential stored by an operator
+/// (or a Reddit login that recovered from an outage) is picked up the same
+/// afternoon, and long enough that a lane which never gets one costs a handful
+/// of warnings a day instead of hundreds.
+const CREDENTIAL_GAP_BACKOFF: Duration = Duration::from_secs(3600);
+
 /// The place kinds an executor can join without a human. `discord` is
 /// deliberately absent — joining a server as a user is a selfbot, which
 /// Discord's ToS bans the whole account for — and `forum` joins are
@@ -105,6 +123,40 @@ pub enum CommunityJoinError {
     NotASubreddit(String),
 }
 
+/// Platform lanes the executor has paused, and until when.
+///
+/// In memory on purpose: a restart reopens every lane, which costs one round of
+/// attempts per lane and cannot strand a lane closed. Shared across clones so
+/// the worker and any handle to it agree.
+#[derive(Clone, Default)]
+struct SuspendedLanes(Arc<Mutex<HashMap<String, Instant>>>);
+
+impl SuspendedLanes {
+    fn suspend(&self, kind: &str, now: Instant) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(kind.to_owned(), now + CREDENTIAL_GAP_BACKOFF);
+    }
+
+    fn is_suspended(&self, kind: &str, now: Instant) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(kind)
+            .is_some_and(|until| now < *until)
+    }
+
+    /// The auto-joinable kinds whose lane is open at `now`.
+    fn open_kinds(&self, now: Instant) -> Vec<&'static str> {
+        AUTO_JOINABLE_KINDS
+            .iter()
+            .copied()
+            .filter(|kind| !self.is_suspended(kind, now))
+            .collect()
+    }
+}
+
 /// The whole `source()` chain of an error, joined.
 ///
 /// `reqwest::Error` renders as "error sending request for url (...)" and says
@@ -122,6 +174,22 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 }
 
 impl CommunityJoinError {
+    /// Whether the agents service answered that it holds no credential for the
+    /// platform -- `no lemmy credential stored for this workspace`, `no reddit
+    /// credentials stored`. Our own configuration gap: no place is at fault, so
+    /// no place is marked and the platform's whole lane waits.
+    fn is_missing_credential(&self) -> bool {
+        match self {
+            Self::AgentsService(message) => {
+                let message = message.to_ascii_lowercase();
+                message.contains("no ")
+                    && message.contains("credential")
+                    && message.contains("stored")
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this failure is Reddit refusing us, as opposed to our own side
     /// failing before Reddit ever saw the request.
     ///
@@ -204,6 +272,8 @@ pub struct CommunityJoinExecutorWorker {
     /// When false (default), places stay `not_joined` — the operator
     /// joins manually and records the result via the API.
     auto_join: bool,
+    /// Platform lanes paused for want of a credential.
+    suspended: SuspendedLanes,
 }
 
 impl CommunityJoinExecutorWorker {
@@ -234,6 +304,7 @@ impl CommunityJoinExecutorWorker {
             agent_service_auth_key,
             poll_interval: POLL_INTERVAL,
             auto_join,
+            suspended: SuspendedLanes::default(),
         })
     }
 
@@ -283,6 +354,21 @@ impl CommunityJoinExecutorWorker {
         let places = self.claim_joinable_places().await?;
         let mut processed = 0;
         for place in &places {
+            // Claimed before a sibling in this batch showed the lane has no
+            // credential: hand it back without calling the platform.
+            if self
+                .suspended
+                .is_suspended(&place.place_kind, Instant::now())
+            {
+                self.set_membership(
+                    place.place_id,
+                    "not_joined",
+                    Some("join lane paused: no credential stored"),
+                )
+                .await
+                .ok();
+                continue;
+            }
             match self.join_community(place).await {
                 Ok(()) => processed += 1,
                 Err(CommunityJoinError::RateLimited) => {
@@ -302,6 +388,19 @@ impl CommunityJoinExecutorWorker {
                         .await
                         .ok();
                     break;
+                }
+                Err(error) if error.is_missing_credential() => {
+                    let cause = error_chain(&error);
+                    tracing::warn!(
+                        place_kind = %place.place_kind,
+                        %cause,
+                        backoff_secs = CREDENTIAL_GAP_BACKOFF.as_secs(),
+                        "no credential stored for this platform; its join lane is paused"
+                    );
+                    self.suspended.suspend(&place.place_kind, Instant::now());
+                    self.set_membership(place.place_id, "not_joined", Some(&cause))
+                        .await
+                        .ok();
                 }
                 Err(error) => {
                     // `rejected` is terminal. It is written only when Reddit
@@ -395,6 +494,11 @@ impl CommunityJoinExecutorWorker {
             return Ok(vec![]);
         }
 
+        let open_kinds = self.suspended.open_kinds(Instant::now());
+        if open_kinds.is_empty() {
+            return Ok(vec![]);
+        }
+
         let rows = sqlx::query_as::<_, ClaimedPlace>(
             r#"
             WITH claimed AS (
@@ -465,7 +569,7 @@ impl CommunityJoinExecutorWorker {
         .bind(ws)
         .bind(MIN_MEMBER_COUNT)
         .bind(CLAIM_BATCH)
-        .bind(AUTO_JOINABLE_KINDS)
+        .bind(open_kinds)
         .fetch_all(&self.pool)
         .await?;
 
@@ -714,6 +818,67 @@ mod tests {
                 .to_owned(),
         );
         assert!(!route_missing.is_refusal());
+    }
+
+    #[test]
+    fn a_missing_credential_is_our_gap_not_a_refusal() {
+        // The two real messages production returned.
+        let lemmy = CommunityJoinError::AgentsService(
+            "agents join HTTP 400 Bad Request for lemmy: {\"error\":\"no lemmy \
+             credential stored for this workspace — POST /lemmy/credentials first\"}"
+                .to_owned(),
+        );
+        let reddit = CommunityJoinError::AgentsService(
+            "agents join HTTP 503 Service Unavailable for reddit: no reddit \
+             credentials stored"
+                .to_owned(),
+        );
+        for error in [&lemmy, &reddit] {
+            assert!(error.is_missing_credential());
+            assert!(!error.is_refusal(), "no place is at fault");
+        }
+        // Everything else keeps its existing handling.
+        for message in [
+            "agents join HTTP 400 Bad Request: subreddit must be 2-21 chars",
+            "Route POST:/lemmy/join not found",
+            "agents join HTTP 404 Not Found: community does not exist",
+        ] {
+            assert!(
+                !CommunityJoinError::AgentsService(message.to_owned()).is_missing_credential(),
+                "{message}"
+            );
+        }
+        assert!(!CommunityJoinError::RateLimited.is_missing_credential());
+        assert!(!CommunityJoinError::NoAuthKey.is_missing_credential());
+    }
+
+    #[test]
+    fn a_suspended_lane_reopens_after_the_backoff() {
+        let lanes = SuspendedLanes::default();
+        let start = Instant::now();
+        assert_eq!(lanes.open_kinds(start), AUTO_JOINABLE_KINDS);
+
+        lanes.suspend("lemmy", start);
+        let during = start + CREDENTIAL_GAP_BACKOFF - Duration::from_secs(1);
+        assert!(lanes.is_suspended("lemmy", during));
+        assert_eq!(lanes.open_kinds(during), vec!["subreddit", "telegram"]);
+
+        let after = start + CREDENTIAL_GAP_BACKOFF + Duration::from_secs(1);
+        assert!(!lanes.is_suspended("lemmy", after));
+        assert_eq!(lanes.open_kinds(after), AUTO_JOINABLE_KINDS);
+    }
+
+    #[test]
+    fn suspension_is_per_lane_and_shared_across_clones() {
+        let lanes = SuspendedLanes::default();
+        let now = Instant::now();
+        lanes.clone().suspend("lemmy", now);
+        assert!(lanes.is_suspended("lemmy", now));
+        assert!(!lanes.is_suspended("subreddit", now));
+        // Every lane closed leaves nothing to claim.
+        lanes.suspend("subreddit", now);
+        lanes.suspend("telegram", now);
+        assert!(lanes.open_kinds(now).is_empty());
     }
 
     #[test]
