@@ -12,6 +12,7 @@
 //! they count fans traced to the action (`attributed_fans`).
 
 pub(super) mod attributed_fans;
+mod beacons;
 mod campaigns;
 pub(super) mod content_synergy;
 pub(super) mod harm;
@@ -369,6 +370,15 @@ pub(super) async fn observe_with_metrics(
                 .fetch_one(pool)
                 .await
                 .map_err(map_sqlx)?
+            }
+            AutopilotMeasurementKind::BeaconOutreachReply14d => {
+                beacons::reply_14d(pool, workspace_id, measurement).await?
+            }
+            AutopilotMeasurementKind::BeaconOutreachUniqueVisitors14d => {
+                beacons::unique_visitors_14d(pool, workspace_id, measurement).await?
+            }
+            AutopilotMeasurementKind::BeaconOutreachFanAcquisition14d => {
+                beacons::fan_acquisitions_14d(pool, workspace_id, measurement).await?
             }
             // Attendance: redeemed admission passes over every pass that was
             // valid for entry — issued, claimed and expired passes could all
