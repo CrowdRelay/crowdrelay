@@ -290,11 +290,25 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
             let changed = sqlx::query(
                 r#"
                 INSERT INTO beacon_campaigns(
-                    workspace_id,beacon_id,event_id,status,last_reply_disposition,updated_at
-                ) VALUES($1,$2,$3,$4,$5,$6)
+                    workspace_id,beacon_id,event_id,status,last_reply_disposition,
+                    last_reply_at,updated_at
+                ) VALUES(
+                    $1,$2,$3,$4,$5,
+                    CASE WHEN $5='none' THEN NULL ELSE $6 END,
+                    $6
+                )
                 ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
                     status=EXCLUDED.status,
                     last_reply_disposition=EXCLUDED.last_reply_disposition,
+                    -- A later outbound touch also moves campaign.updated_at.
+                    -- Reply learning must stay anchored to the reply itself,
+                    -- and an explicit "none" observation must not erase the
+                    -- last real reply we already know happened.
+                    last_reply_at=CASE
+                        WHEN EXCLUDED.last_reply_disposition='none'
+                        THEN beacon_campaigns.last_reply_at
+                        ELSE EXCLUDED.last_reply_at
+                    END,
                     updated_at=EXCLUDED.updated_at
                 "#,
             )
