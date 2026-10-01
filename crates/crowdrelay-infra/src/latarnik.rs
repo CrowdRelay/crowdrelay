@@ -28,8 +28,8 @@
 
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
-use crowdrelay_domain::WorkspaceId;
-use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, decide};
+use crowdrelay_domain::{BeaconId, WorkspaceId};
+use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, InviteHold, decide};
 use crowdrelay_domain::trace::TraceContext;
 use serde::Serialize;
 use serde_json::json;
@@ -328,6 +328,73 @@ pub async fn dual_role_contact(
         .fetch_optional(pool)
         .await?;
     Ok(row.map(|row| row_to_contact(&row, reason_available).0))
+}
+
+
+/// The small queue of warm relationships worth learning about now.
+///
+/// This is not an invitation queue. It asks a narrower question: which people
+/// have already earned a relationship, are rested, have not opted out, are not
+/// already fans/pending, and have something concrete the act could eventually
+/// tell them — but are missing the recent sourced context required for a
+/// thoughtful message.
+///
+/// The domain rule remains authoritative. We reconstruct the standing and ask
+/// `decide` for `NeedsResearch`; then we additionally require a real
+/// database-backed invite reason rather than the review screen's placeholder.
+/// At most eight contacts enter one cycle: research attention is scarce and
+/// quality falls before throughput becomes useful.
+pub async fn relationship_research_queue(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<crowdrelay_application::autopilot::RelationshipResearchSnapshot>, sqlx::Error> {
+    const MAX_RESEARCH_PER_CYCLE: usize = 8;
+    let review = dual_role_review(pool, workspace_id, now, true).await?;
+    let mut queue = Vec::new();
+
+    for contact in review.contacts {
+        if queue.len() >= MAX_RESEARCH_PER_CYCLE {
+            break;
+        }
+        let standing = ContactStanding {
+            display_name: contact.display_name.clone(),
+            role: contact.role.clone(),
+            city: contact.city.clone(),
+            relationship_score: contact.relationship_score,
+            has_replied: contact.has_replied,
+            do_not_contact: contact.do_not_contact,
+            accepts_outreach: contact.accepts_outreach,
+            days_since_last_contact: contact.days_since_last_contact,
+            already_invited: contact.already_invited,
+            already_a_fan: contact.hears_the_dates,
+            previously_opted_out: contact.previously_opted_out,
+            opt_in_pending: contact.opt_in_pending,
+            has_recent_research: contact.has_research,
+        };
+        if decide(&standing, Some(&PLACEHOLDER_REASON))
+            != InviteDecision::Hold(InviteHold::NeedsResearch)
+        {
+            continue;
+        }
+        let language = contact_language(pool, workspace_id, contact.beacon_id).await?;
+        if invite_reason(pool, workspace_id, contact.beacon_id, language, now)
+            .await?
+            .is_none()
+        {
+            continue;
+        }
+        queue.push(crowdrelay_application::autopilot::RelationshipResearchSnapshot {
+            beacon_id: BeaconId::from_uuid(contact.beacon_id),
+            display_name: contact.display_name,
+            role: contact.role,
+            city: contact.city,
+            relationship_score: contact.relationship_score,
+            has_replied: contact.has_replied,
+            days_since_last_contact: contact.days_since_last_contact,
+        });
+    }
+    Ok(queue)
 }
 
 /// One decoded row → the standing, the decision and the contact the console
