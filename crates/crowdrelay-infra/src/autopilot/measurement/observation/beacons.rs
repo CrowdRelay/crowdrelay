@@ -91,28 +91,3 @@ pub(super) async fn unique_visitors_14d(
     .await
     .map_err(map_sqlx)
 }
-
-pub(super) async fn fan_acquisitions_14d(
-    pool: &sqlx::PgPool,
-    workspace_id: WorkspaceId,
-    measurement: &ClaimedAutopilotMeasurement,
-) -> Result<f64, RepositoryError> {
-    sqlx::query_scalar::<_, f64>(
-        r#"
-        SELECT COUNT(DISTINCT conversion.fan_id)::double precision
-        FROM fan_provenance_events AS conversion
-        WHERE conversion.workspace_id=$1
-          AND conversion.action_id=$2
-          AND conversion.event_kind='conversion'
-          AND conversion.attribution_method='last_tracked_click'
-          AND conversion.occurred_at >= $3
-          AND conversion.occurred_at < $3 + INTERVAL '14 days'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(measurement.action_id.into_uuid())
-    .bind(measurement.action_finished_at)
-    .fetch_one(pool)
-    .await
-    .map_err(map_sqlx)
-}
