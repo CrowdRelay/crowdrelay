@@ -14,7 +14,6 @@ use crate::common;
 use crowdrelay_application::autopilot::{AutopilotActionPayload, AutopilotActionRepository};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
-use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -25,6 +24,27 @@ async fn discovery_request_seeds_non_sibling_bill_mates_and_the_venue()
     let (pool, database_url) =
         common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
     let now = OffsetDateTime::now_utc();
+
+    // Foreign table owned by crowdrelay-agents. The production path now
+    // delegates research directly to this scheduler rather than an unrouted
+    // webhook.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_service_tasks (
+            id uuid PRIMARY KEY,
+            workspace_id uuid NOT NULL,
+            template_id text NOT NULL,
+            model_id text NOT NULL,
+            prompt text NOT NULL,
+            status text NOT NULL,
+            tier text NOT NULL DEFAULT 'basic',
+            metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+            created_at timestamptz NOT NULL DEFAULT now()
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
     let workspace_id = WorkspaceId::new();
     let suffix = workspace_id.into_uuid().simple().to_string();
@@ -118,33 +138,8 @@ async fn discovery_request_seeds_non_sibling_bill_mates_and_the_venue()
         .await?;
     }
 
-    // The emit gate fails closed only when a registered executor exists —
-    // register one advertising beacon.discovery so the emission lands.
-    sqlx::query(
-        r#"
-        INSERT INTO executor_instances (
-            workspace_id, executor_id, version, manifest_sha, observed_at, expires_at
-        ) VALUES ($1,'n8n-seed-test','test','test-manifest',$2,$3)
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(now)
-    .bind(now + time::Duration::minutes(10))
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO executor_capabilities (
-            workspace_id, executor_id, capability, capability_version, observed_at, expires_at
-        ) VALUES ($1,'n8n-seed-test','beacon.discovery','1',$2,$3)
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(now)
-    .bind(now + time::Duration::minutes(10))
-    .execute(&pool)
-    .await?;
-
+    // Research is in-process agent work now, so no n8n/executor capability is
+    // required to let the Brain act on the discovery decision.
     let decision_id = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -208,38 +203,34 @@ async fn discovery_request_seeds_non_sibling_bill_mates_and_the_venue()
         .execute_action(workspace_id, &claimed[0], now)
         .await?;
 
-    let payload = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT payload FROM outbox_events
-        WHERE workspace_id=$1 AND event_type='crowdrelay.beacon.discovery_requested'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let (template_id, tier, prompt, metadata) =
+        sqlx::query_as::<_, (String, String, String, serde_json::Value)>(
+            r#"
+            SELECT template_id,tier,prompt,metadata
+            FROM agent_service_tasks
+            WHERE workspace_id=$1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
 
-    let seeds = payload["seed_entities"]
-        .as_array()
-        .expect("seed_entities is an array");
-    let names: Vec<&str> = seeds
-        .iter()
-        .filter_map(|seed| seed["name"].as_str())
-        .collect();
-    // Tenant, peer and unclaimed mates are named for public resolution;
-    // the workspace's own act and the org sibling are not.
-    assert!(names.contains(&"Tenant Act"));
-    assert!(names.contains(&"Peer Act"));
-    assert!(names.contains(&"Unclaimed Act"));
-    assert!(!names.contains(&"Own Act"));
-    assert!(!names.contains(&"Sibling Act"));
-    assert!(
-        seeds
-            .iter()
-            .all(|seed| seed["kind"] == "scene_partner" || seed["kind"] == "venue")
-    );
-    assert!(seeds.iter().any(|seed| seed["name"] == "Klub Seed"
-        && seed["kind"] == "venue"
-        && seed["role"] == "host_venue"));
+    assert_eq!(template_id, "event-network-scout");
+    assert_eq!(tier, "premium");
+    assert_eq!(metadata["action_id"], action_id.to_string());
+    assert!(prompt.contains(&event_id.to_string()));
+    assert!(prompt.contains(&city_id.to_string()));
+    assert!(prompt.contains("Seed City"));
+    assert!(prompt.contains("Klub Seed"));
+    assert!(prompt.contains("Tenant Act"));
+    assert!(prompt.contains("Peer Act"));
+    assert!(prompt.contains("Unclaimed Act"));
+    assert!(!prompt.contains("Own Act"));
+    assert!(!prompt.contains("Sibling Act"));
+    assert!(prompt.contains("local_artists_craftspeople_and_alternative_culture_nodes"));
+    assert!(prompt.contains("do not contact anybody"));
 
     Ok(())
 }

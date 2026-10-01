@@ -274,6 +274,7 @@ mod authority_tests {
                 OutcomeKind::SignalPush,
                 OutcomeKind::AudienceSegments,
                 OutcomeKind::OutreachTargets,
+                OutcomeKind::BeaconCandidates,
                 OutcomeKind::OpportunityFindings,
                 OutcomeKind::CampaignInsight,
                 OutcomeKind::ReleasePlanNote,

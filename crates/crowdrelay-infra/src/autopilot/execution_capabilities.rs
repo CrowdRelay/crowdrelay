@@ -30,7 +30,6 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
         // so an executor that does not know replies skips it rather than
         // sending the wrong thing.
         "crowdrelay.booking_agent.reply_requested" => "booking_agent.approach",
-        "crowdrelay.beacon.discovery_requested" => "beacon.discovery",
         "crowdrelay.outreach.discovery_requested" => "outreach.discovery",
         "crowdrelay.booking.target_discovery_requested" => "booking.discovery",
         "crowdrelay.beacon.outreach_requested" => "beacon.outreach",
@@ -156,7 +155,6 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::RequestBookingAgentApproach { .. }
                 | AutopilotActionPayload::RequestBookingAgentApproachWave { .. }
                 | AutopilotActionPayload::RequestBookingAgentReply { .. }
-                | AutopilotActionPayload::RequestBeaconDiscovery { .. }
                 | AutopilotActionPayload::RequestOutreachDiscovery { .. }
                 | AutopilotActionPayload::RequestBookingTargetDiscovery { .. }
                 | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
@@ -227,7 +225,6 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         | AutopilotActionPayload::RequestBookingAgentReply { .. } => {
             "booking_agent.approach"
         }
-        AutopilotActionPayload::RequestBeaconDiscovery { .. } => "beacon.discovery",
         AutopilotActionPayload::RequestOutreachDiscovery { .. } => "outreach.discovery",
         AutopilotActionPayload::RequestBookingTargetDiscovery { .. } => "booking.discovery",
         AutopilotActionPayload::RequestBeaconOutreach { .. } => "beacon.outreach",
