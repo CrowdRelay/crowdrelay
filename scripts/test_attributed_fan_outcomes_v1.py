@@ -31,6 +31,10 @@ OBSERVATION = ROOT / "crates/crowdrelay-infra/src/autopilot/measurement/observat
 ATTRIBUTED = (
     ROOT / "crates/crowdrelay-infra/src/autopilot/measurement/observation/attributed_fans.rs"
 )
+CHANNEL_YIELD = (
+    ROOT
+    / "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence/channel_yield.rs"
+)
 
 EXPECTED = {
     "AgentRunFanGrowth14d",
@@ -101,6 +105,16 @@ class AttributedFanOutcomes(unittest.TestCase):
         self.assertGreaterEqual(len(constants), 4, f"expected four queries, found {sorted(constants)}")
         for name, sql in constants.items():
             self.assertNotRegex(sql, r"\bFROM\s+fans\b", name)
+
+    def test_durable_learning_and_channel_roi_share_one_retention_predicate(self) -> None:
+        attributed = ATTRIBUTED.read_text()
+        channel_yield = CHANNEL_YIELD.read_text()
+        self.assertEqual(
+            attributed.count("fan_is_meaningfully_retained("),
+            2,
+            "both attributed count query variants must use the canonical retention predicate",
+        )
+        self.assertIn("fan_is_meaningfully_retained(", channel_yield)
 
 
 if __name__ == "__main__":

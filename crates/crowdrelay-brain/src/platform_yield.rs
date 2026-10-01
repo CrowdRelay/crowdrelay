@@ -212,31 +212,18 @@ pub struct ChannelYield {
 }
 
 impl ChannelYield {
-    /// What this channel is ranked on. There is no rate term: clicks and
-    /// conversions have no honest denominator — posts sent is not one, since
-    /// reach varies by three orders of magnitude between channels — so the
-    /// key carries an absolute only, in the same slot
-    /// [`PlatformGrowth::rank_key`] fills with weighted followers.
-    ///
-    /// A conversion is an addressable fan, weighted like a Signal install for
-    /// the same reason `SIGNAL_VALUE_MULTIPLE` exists: it is the North Star
-    /// unit itself. A clicker is the weak signal worth one — enough to rank
-    /// a channel that is being *tried* above one that is not, not enough to
-    /// impersonate a conversion.
-    ///
-    /// `None` only when the channel produced nothing at all, so it ranks
-    /// with the unmeasured templates rather than ahead of them.
+    /// Direct acquisition evidence without pretending unlike stages are one
+    /// currency. A conversion is categorically stronger than any number of
+    /// clicks; clicks remain useful only when no converted fan exists yet.
     #[must_use]
     pub fn rank_key(&self) -> RankKey {
-        // A fan who stayed counts again on top of the conversion that
-        // brought them: the North Star is fans who stay, so a channel whose
-        // arrivals remain outranks one with the same arrivals that left.
-        let absolute = self
-            .conversions_30d
-            .saturating_add(self.durable_90d)
-            .saturating_mul(SIGNAL_VALUE_MULTIPLE)
-            .saturating_add(self.unique_clickers_30d);
-        (absolute > 0).then_some((0, absolute))
+        if self.conversions_30d > 0 {
+            Some((2, self.conversions_30d))
+        } else if self.unique_clickers_30d > 0 {
+            Some((1, self.unique_clickers_30d))
+        } else {
+            None
+        }
     }
 }
 
@@ -273,33 +260,25 @@ type RankKey = Option<(u32, u32)>;
 /// Durable fans are a direct observation of the default North Star. They sort
 /// before proxy evidence; the existing RankKey decides only when neither side
 /// has earned that stronger signal.
-type RankedTemplate = (usize, &'static str, u32, RankKey);
+type RankedTemplate = (usize, &'static str, u32, u32, RankKey, u32);
 
 /// Reorders a strategy's template list by measured platform yield and by the
 /// attributed fan yield of the channel each template posts on.
 ///
-/// Two evidence sources, different in kind, combined deliberately simply:
-/// each template's key is the *better* of its platform-growth key and its
-/// channel-yield key. Follower growth says a platform is compounding;
-/// attributed conversions say a channel delivers fans. Whichever a template
-/// honestly earned is what it ranks on — a channel with real fans and flat
-/// follower counts is not demoted for the followers it never asked for, and
-/// a platform compounding on followers is not demoted for conversions the
-/// ledger has not seen yet.
+/// Evidence sources keep their semantics instead of being collapsed into an
+/// arbitrary fan-equivalent sum. The ordering follows how directly each stage
+/// answers the North Star:
 ///
-/// Evidence is ordered by how directly it answers the North Star:
+/// 1. **durable attributed fans** — people the channel produced who reached
+///    the meaningful-retention boundary;
+/// 2. **fresh attributed conversions** — real people who joined, but whose
+///    retention window has not matured yet;
+/// 3. **trusted platform growth** — useful rented-audience proxy evidence;
+/// 4. **tracked unique clickers** — an early leading signal only;
+/// 5. **the strategy prior** — preserved where measurement is absent or tied.
 ///
-/// 1. **durable attributed fans** — direct evidence that a channel produced
-///    people who stayed; this outranks follower-growth proxies;
-/// 2. **trusted platform growth / fresh attributed yield** — useful leading
-///    evidence while retention has not matured yet;
-/// 3. **the strategy prior** — preserved where measurement is absent or tied.
-///
-/// Fresh conversions and clicks deliberately do *not* jump a trustworthy
-/// platform-growth rate: they have not survived the retention window yet.
-/// Once `durable_90d` is non-zero, the evidence has matured into the thing the
-/// default North Star actually optimizes, so continuing to put follower rate
-/// first would make source ROI informational rather than controlling.
+/// This means no amount of click-only traffic can outrank one actual attributed
+/// fan, and follower growth cannot impersonate a first-party conversion.
 ///
 /// Stable: templates with no evidence on either axis keep their relative
 /// position, and ties are broken by the prior order. The returned list
@@ -311,7 +290,7 @@ pub fn rank_templates(
     growth: &[PlatformGrowth],
     channel_yield: &[ChannelYield],
 ) -> Vec<&'static str> {
-    let score_for = |template: &str| -> (u32, RankKey) {
+    let score_for = |template: &str| -> (u32, u32, RankKey, u32) {
         let growth_key = template_growth_platforms(template)
             .iter()
             .filter_map(|platform| {
@@ -333,45 +312,56 @@ pub fn rank_templates(
             })
             .max()
             .unwrap_or(0);
-
-        let yield_key = channels
+        let conversions = channels
             .iter()
             .filter_map(|channel| {
                 channel_yield
                     .iter()
                     .find(|entry| entry.channel == *channel)
-                    .and_then(ChannelYield::rank_key)
+                    .map(|entry| entry.conversions_30d)
             })
-            .max();
+            .max()
+            .unwrap_or(0);
+        let clickers = channels
+            .iter()
+            .filter_map(|channel| {
+                channel_yield
+                    .iter()
+                    .find(|entry| entry.channel == *channel)
+                    .map(|entry| entry.unique_clickers_30d)
+            })
+            .max()
+            .unwrap_or(0);
 
-        // Fresh attribution remains comparable with follower-growth evidence;
-        // only matured retention gets the stronger, North-Star-direct tier.
-        (durable, growth_key.max(yield_key))
+        // Evidence is intentionally not collapsed into fan-equivalent points.
+        // A retained fan is the North Star itself; a fresh attributed fan is
+        // stronger than rented-platform growth; platform growth is stronger
+        // than a click-only leading signal.
+        (durable, conversions, growth_key, clickers)
     };
 
     let mut ranked: Vec<RankedTemplate> = prior
         .iter()
         .enumerate()
         .map(|(index, template)| {
-            let (durable, evidence) = score_for(template);
-            (index, *template, durable, evidence)
+            let (durable, conversions, growth, clickers) = score_for(template);
+            (index, *template, durable, conversions, growth, clickers)
         })
         .collect();
 
     ranked.sort_by(|left, right| {
-        // A durable attributed fan is direct evidence for the default North
-        // Star, so it outranks proxy growth. Within the same maturity tier the
-        // existing evidence key and, finally, the strategy prior still decide.
         right
             .2
             .cmp(&left.2)
             .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| right.4.cmp(&left.4))
+            .then_with(|| right.5.cmp(&left.5))
             .then_with(|| left.0.cmp(&right.0))
     });
 
     ranked
         .into_iter()
-        .map(|(_, template, _, _)| template)
+        .map(|(_, template, _, _, _, _)| template)
         .collect()
 }
 
@@ -630,41 +620,27 @@ mod tests {
     }
 
     #[test]
-    fn a_conversion_outweighs_a_handful_of_clicks_but_not_a_crowd() {
-        // One conversion weighs 5; four clickers do not beat it, ten do.
-        let close = rank_templates(
+    fn a_conversion_always_outranks_click_only_volume() {
+        let ranked = rank_templates(
             PRIOR,
             &[],
-            &[yielded("reddit", 1, 0), yielded("telegram", 0, 4)],
+            &[yielded("reddit", 1, 0), yielded("telegram", 0, 10_000)],
         );
         assert_eq!(
-            close.first(),
+            ranked.first(),
             Some(&"reddit-scanner"),
-            "a fan is worth more than a handful of clicks"
-        );
-        let crowd = rank_templates(
-            PRIOR,
-            &[],
-            &[yielded("reddit", 1, 0), yielded("telegram", 0, 10)],
-        );
-        assert_eq!(
-            crowd.first(),
-            Some(&"telegram-scanner"),
-            "enough clickers is the stronger honest signal"
+            "click volume is exploration evidence and can never impersonate a converted fan"
         );
     }
 
     #[test]
-    fn a_trustworthy_growth_rate_still_leads_attributed_yield() {
-        // Social compounds at a measured rate; telegram has early fans.
-        // The rate-first tuple keeps sustained machinery ahead of the
-        // absolute-only yield key — early fans do not impersonate a rate.
+    fn an_attributed_conversion_outranks_follower_growth_proxy() {
         let measured = [growth("social", 5_000, 250)];
-        let ranked = rank_templates(PRIOR, &measured, &[yielded("telegram", 3, 0)]);
+        let ranked = rank_templates(PRIOR, &measured, &[yielded("telegram", 1, 0)]);
         assert_eq!(
             ranked.first(),
-            Some(&"reddit-scanner"),
-            "a measured rate outranks an absolute-only channel yield"
+            Some(&"telegram-scanner"),
+            "a first-party converted fan is stronger evidence than rented-platform follower growth"
         );
     }
 
@@ -688,17 +664,19 @@ mod tests {
     }
 
     #[test]
-    fn fresh_conversion_does_not_prematurely_overrule_trusted_growth() {
-        // The maturity boundary is deliberate: a signup that has not had time
-        // to survive the retention window is useful evidence, but it is not yet
-        // a durable fan. Existing platform-growth behaviour must remain intact.
-        let measured = [growth("social", 5_000, 250)];
-        let ranked = rank_templates(PRIOR, &measured, &[yielded("telegram", 4, 0)]);
+    fn durable_evidence_still_outranks_more_fresh_conversions() {
+        let mut telegram = yielded("telegram", 1, 0);
+        telegram.durable_90d = 1;
+        let ranked = rank_templates(
+            PRIOR,
+            &[],
+            &[yielded("reddit", 100, 0), telegram],
+        );
 
         assert_eq!(
             ranked.first(),
-            Some(&"reddit-scanner"),
-            "fresh conversions should not impersonate retained-fan evidence"
+            Some(&"telegram-scanner"),
+            "meaningful retention is stronger evidence than any number of still-immature signups"
         );
     }
 

@@ -56,7 +56,7 @@ pub(crate) async fn converted_fan(
     at: OffsetDateTime,
     created: OffsetDateTime,
     status: &str,
-) {
+) -> uuid::Uuid {
     let fan_id = uuid::Uuid::now_v7();
     sqlx::query(
         "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at) \
@@ -83,6 +83,46 @@ pub(crate) async fn converted_fan(
     .execute(&f.pool)
     .await
     .expect("conversion");
+    fan_id
+}
+
+async fn marketing_consent(
+    f: &Fixture,
+    fan_id: uuid::Uuid,
+    granted: bool,
+    recorded_at: OffsetDateTime,
+) {
+    sqlx::query(
+        "INSERT INTO fan_consents
+           (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+         VALUES ($1,$2,'marketing',$3,'v1','retention-test',$4)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(granted)
+    .bind(recorded_at)
+    .execute(&f.pool)
+    .await
+    .expect("consent");
+}
+
+async fn meaningful_session(f: &Fixture, fan_id: uuid::Uuid, last_seen_at: OffsetDateTime) {
+    let mut hash = fan_id.as_bytes().to_vec();
+    hash.extend_from_slice(fan_id.as_bytes());
+    sqlx::query(
+        "INSERT INTO fan_sessions
+           (workspace_id, fan_id, session_token_hash, created_at, last_seen_at, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(hash)
+    .bind(last_seen_at - time::Duration::days(1))
+    .bind(last_seen_at)
+    .bind(f.now + time::Duration::days(30))
+    .execute(&f.pool)
+    .await
+    .expect("meaningful session");
 }
 
 async fn observe(f: &Fixture, measurement: &ClaimedAutopilotMeasurement) -> f64 {
@@ -229,17 +269,41 @@ async fn the_window_opens_when_the_tracked_post_went_live() {
     );
 }
 
-/// Durable counts only fans still active thirty days after they arrived.
+/// Durable means meaningfully retained, not merely an account that survived.
+///
+/// The qualifying fan is active, currently consented and returned through a
+/// first-party session after the thirty-day maturity boundary. Active-but-silent,
+/// never-consented, consent-revoked and unsubscribed conversions must all stay
+/// out of the North Star.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn durable_counts_fans_still_active_after_thirty_days() {
+async fn durable_counts_only_meaningfully_retained_consented_fans() {
     let f = setup().await.expect("fixture");
     let finished = f.now - time::Duration::days(44);
     let action = insert_dispatch(&f, "lineage:durable", finished).await;
     live_post(&f, action, "durable", finished + time::Duration::hours(1)).await;
     let converted = finished + time::Duration::days(3);
-    converted_fan(&f, action, converted, converted, "active").await;
-    converted_fan(&f, action, converted, converted, "unsubscribed").await;
+    let returned_at = f.now - time::Duration::days(1);
+
+    let retained = converted_fan(&f, action, converted, converted, "active").await;
+    marketing_consent(&f, retained, true, converted).await;
+    meaningful_session(&f, retained, returned_at).await;
+
+    let silent = converted_fan(&f, action, converted, converted, "active").await;
+    marketing_consent(&f, silent, true, converted).await;
+
+    let no_consent = converted_fan(&f, action, converted, converted, "active").await;
+    meaningful_session(&f, no_consent, returned_at).await;
+
+    let revoked = converted_fan(&f, action, converted, converted, "active").await;
+    marketing_consent(&f, revoked, true, converted).await;
+    marketing_consent(&f, revoked, false, f.now - time::Duration::days(2)).await;
+    meaningful_session(&f, revoked, returned_at).await;
+
+    let unsubscribed =
+        converted_fan(&f, action, converted, converted, "unsubscribed").await;
+    marketing_consent(&f, unsubscribed, true, converted).await;
+    meaningful_session(&f, unsubscribed, returned_at).await;
 
     let measurement = queue_measurement(
         &f,
@@ -251,7 +315,7 @@ async fn durable_counts_fans_still_active_after_thirty_days() {
     .await;
     assert!(
         (observe(&f, &measurement).await - 1.0).abs() < f64::EPSILON,
-        "one of the two traced fans is still active"
+        "only the fan with current consent and a meaningful post-D30 return is durable"
     );
 }
 
