@@ -45,6 +45,37 @@ pub const FACT_MIN_CHARS: usize = 20;
 pub const FACT_MAX_CHARS: usize = 400;
 pub const PRAISE_MAX_CHARS: usize = 300;
 
+/// Research attention is spent only on a real, rested relationship. These
+/// thresholds deliberately describe the professional relationship, not fan or
+/// marketing consent: somebody may be a fan, or may have opted out of
+/// marketing, while still remaining a journalist/promoter/creator the act
+/// legitimately works with.
+pub const RELATIONSHIP_RESEARCH_MIN_SCORE: i32 = 60;
+pub const RELATIONSHIP_RESEARCH_QUIET_DAYS: i64 = 21;
+
+/// Whether this relationship is worth spending deep-research budget on now.
+///
+/// This grants no contact authority. It only prevents expensive AI research
+/// from being spent on cold directory rows, recently contacted people, refused
+/// routes, or somebody we already researched recently.
+#[must_use]
+pub fn relationship_is_worth_researching(
+    has_replied: bool,
+    relationship_score: i32,
+    accepts_outreach: bool,
+    do_not_contact: bool,
+    days_since_last_contact: Option<i64>,
+    has_recent_research: bool,
+) -> bool {
+    if do_not_contact || !accepts_outreach || has_recent_research {
+        return false;
+    }
+    let known = has_replied || relationship_score >= RELATIONSHIP_RESEARCH_MIN_SCORE;
+    let rested = days_since_last_contact
+        .is_some_and(|days| days >= RELATIONSHIP_RESEARCH_QUIET_DAYS);
+    known && rested
+}
+
 /// One thing a person did, with where it was found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersonalHook {
@@ -212,6 +243,31 @@ mod tests {
             TODAY,
         )
         .expect("a recent, sourced fact")
+    }
+
+    #[test]
+    fn deep_research_is_for_warm_rested_relationships_only() {
+        assert!(relationship_is_worth_researching(
+            true, 20, true, false, Some(40), false
+        ));
+        assert!(relationship_is_worth_researching(
+            false, RELATIONSHIP_RESEARCH_MIN_SCORE, true, false, Some(40), false
+        ));
+        assert!(!relationship_is_worth_researching(
+            false, 50, true, false, Some(40), false
+        ));
+        assert!(!relationship_is_worth_researching(
+            true, 90, true, false, Some(3), false
+        ));
+        assert!(!relationship_is_worth_researching(
+            true, 90, false, false, Some(40), false
+        ));
+        assert!(!relationship_is_worth_researching(
+            true, 90, true, true, Some(40), false
+        ));
+        assert!(!relationship_is_worth_researching(
+            true, 90, true, false, Some(40), true
+        ));
     }
 
     #[test]
