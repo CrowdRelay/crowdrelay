@@ -1,6 +1,5 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 
-use uuid::Uuid;
 use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
@@ -78,9 +77,12 @@ use crowdrelay_domain::{
 use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use super::{
-    evidence_ledger::EvidenceLedger, model::*, policy_config::*,
+    evidence_ledger::EvidenceLedger,
+    model::*,
+    policy_config::*,
     ports::{AutopilotDecisionRepository, LoadedCausalModel},
 };
 mod beacons;
