@@ -18,8 +18,10 @@ class AutopilotMeasurementContract(unittest.TestCase):
         kind_migrations = sorted(
             path
             for path in (ROOT / "migrations").glob("*.sql")
-            if "ADD CONSTRAINT viryaos_autopilot_measurements_measurement_kind_check"
-            in path.read_text()
+            if re.search(
+                r"ADD CONSTRAINT (?:viryaos_)?autopilot_measurements_measurement_kind_check",
+                path.read_text(),
+            )
         )
         self.assertTrue(kind_migrations)
         migration = kind_migrations[-1].read_text()
@@ -30,7 +32,7 @@ class AutopilotMeasurementContract(unittest.TestCase):
         ports = text("crates/crowdrelay-application/src/autopilot/measurement_ports.rs")
         support = text("crates/crowdrelay-infra/src/autopilot/support.rs")
         check = re.search(
-            r"viryaos_autopilot_measurements_measurement_kind_check\s+CHECK\s*\(measurement_kind IN \((.*?)\)\)",
+            r"(?:viryaos_)?autopilot_measurements_measurement_kind_check\s+CHECK\s*\(measurement_kind IN \((.*?)\)\)",
             migration,
             re.S,
         )
@@ -68,6 +70,65 @@ class AutopilotMeasurementContract(unittest.TestCase):
         self.assertIn("reply_received_semantics", show_growth)
         self.assertIn("reply_recorded_at >= $3", measurement)
         self.assertNotIn("status IN ('completed','introduced','sent','delivered')", measurement)
+
+    def test_named_beacon_outreach_closes_the_primary_fan_loop(self) -> None:
+        migration = text("migrations/0393_beacon_growth_learning_loop.sql")
+        beacon_execution = text(
+            "crates/crowdrelay-infra/src/autopilot/execution_beacon.rs"
+        )
+        scheduling = text("crates/crowdrelay-infra/src/autopilot/execution.rs")
+        dispatch = text("crates/crowdrelay-infra/src/autopilot/execution_dispatch.rs")
+        attribution = text(
+            "crates/crowdrelay-infra/src/autopilot/measurement/observation/attributed_fans.rs"
+        )
+        acquisition = text("crates/crowdrelay-infra/src/acquisition/acquisition_events.rs")
+        observation = text(
+            "crates/crowdrelay-infra/src/autopilot/measurement/observation/beacons.rs"
+        )
+
+        # A non-post outreach owns its redirect directly; the signup path must
+        # prefer that owner over the publication-ledger fallback.
+        self.assertIn("ADD COLUMN IF NOT EXISTS action_id uuid", migration)
+        self.assertIn("action_id,\n            channel_source", beacon_execution)
+        self.assertIn("COALESCE(link.action_id, post.action_id)", acquisition)
+
+        # The canonical fan learner, not a Beacon-only vanity counter, is the
+        # North-Star outcome. Y3 gives fast feedback; Y14 and Y30 mature it.
+        for kind in (
+            "IncrementalFanGrowth3d",
+            "IncrementalFanGrowth14d",
+            "DurableFanGrowth30d",
+        ):
+            self.assertIn(kind, scheduling)
+        self.assertNotIn("BeaconOutreachFanAcquisition14d", scheduling)
+
+        # Resolving a measurement is not learning unless the action owns the
+        # prediction/evidence envelope the causal replay updates. Beacon phase
+        # templates are separate causal identities; the person remains target.
+        self.assertIn("AutopilotActionPayload::RequestBeaconOutreach", dispatch)
+        self.assertIn("template_key.clone()", dispatch)
+        self.assertIn('format!("beacon:{beacon_id}")', dispatch)
+
+        # The generic fan observer must treat a successfully delivered
+        # action-owned redirect as a live acquisition surface.
+        self.assertIn("FROM smart_links AS link", attribution)
+        self.assertIn("action.id=link.action_id", attribution)
+        self.assertIn("action.status='succeeded'", attribution)
+        self.assertIn("action.finished_at IS NOT NULL", attribution)
+
+        # Proximal Beacon signals remain exact and per-action: one reply and
+        # distinct people, never event-wide traffic borrowed by every target.
+        self.assertIn("BeaconOutreachReplyQuality14d", scheduling)
+        self.assertIn("BeaconOutreachUniqueVisitors14d", scheduling)
+        self.assertIn("COUNT(DISTINCT click.anonymous_visitor_id)", observation)
+        self.assertIn("reply.action='record_autopilot_beacon_reply'", observation)
+        self.assertIn("WHEN 'interested' THEN 1.0", observation)
+        self.assertIn("WHEN 'declined' THEN -1.0", observation)
+        self.assertIn("WHEN 'do_not_contact' THEN -1.0", observation)
+        self.assertIn("newer.action_kind='beacon.outreach.request'", observation)
+        self.assertIn("JOIN autopilot_execution_reports AS receipt", observation)
+        self.assertIn("receipt.status='succeeded'", observation)
+        self.assertIn("receipt.provider_reference IS NOT NULL", observation)
 
     def test_claim_quarantines_unknown_kind_before_commit(self) -> None:
         measurement = text("crates/crowdrelay-infra/src/autopilot/measurement.rs")

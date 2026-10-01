@@ -128,6 +128,23 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("booking-target:{target_id}")),
             DispatchContext::default(),
         ),
+        // A named Beacon message is a measured acquisition intervention,
+        // not just an executor task. Its phase-specific template key is the
+        // causal identity: local-story, collaboration, local-push and thanks
+        // must learn separately, while the exact Beacon remains the target.
+        //
+        // The row is created only when provider success applies this envelope,
+        // so a queued/failed external send never becomes treatment evidence.
+        AutopilotActionPayload::RequestBeaconOutreach {
+            beacon_id,
+            template_key,
+            ..
+        } => (
+            template_key.clone(),
+            format!("beacon:{beacon_id}"),
+            Some(format!("beacon:{beacon_id}")),
+            DispatchContext::default(),
+        ),
         AutopilotActionPayload::RequestGigOutreach { venue, .. } => (
             "gig-outreach".to_owned(),
             format!("venue:{venue}"),

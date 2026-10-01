@@ -445,6 +445,63 @@ pub(super) async fn schedule_effect_measurement(
                 }
             }
         }
+        // Named Beacon outreach is the relationship lane's real experiment.
+        // Schedule only after its executor-success receipt, so a delivered
+        // message with no response becomes valid negative evidence while a
+        // send that never left never teaches the Brain that the relationship
+        // failed. Link outcomes are action-owned and therefore cannot be
+        // borrowed from another Beacon or another show.
+        AutopilotActionPayload::RequestBeaconOutreach { beacon_id, .. } => {
+            plans.push((
+                AutopilotMeasurementKind::BeaconOutreachReplyQuality14d,
+                beacon_id.into_uuid(),
+                0.0,
+                now + time::Duration::days(14),
+            ));
+            let has_tracked_cta = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM smart_links
+                    WHERE workspace_id=$1 AND action_id=$2 AND active
+                )
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(action_id.into_uuid())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(map_sqlx)?;
+            if has_tracked_cta {
+                plans.push((
+                    AutopilotMeasurementKind::BeaconOutreachUniqueVisitors14d,
+                    beacon_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(14),
+                ));
+                // Fan value uses the canonical North-Star learner rather than
+                // a Beacon-only counter. The action-owned smart link makes
+                // attribution exact, and the generic fan observer feeds the
+                // same Y3/Y14/Y30 posteriors every other acquisition lane uses.
+                plans.push((
+                    AutopilotMeasurementKind::IncrementalFanGrowth3d,
+                    beacon_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(3),
+                ));
+                plans.push((
+                    AutopilotMeasurementKind::IncrementalFanGrowth14d,
+                    beacon_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(14),
+                ));
+                plans.push((
+                    AutopilotMeasurementKind::DurableFanGrowth30d,
+                    beacon_id.into_uuid(),
+                    0.0,
+                    now + time::Duration::days(44),
+                ));
+            }
+        }
         // A produced artifact is content the brain asked for and an audience
         // now sees — the request half of the loop closed at the receipt, and
         // the answer half is whether fans moved afterward. It sat in the
@@ -500,7 +557,6 @@ pub(super) async fn schedule_effect_measurement(
         | AutopilotActionPayload::RequestOutreachDiscovery { .. }
         | AutopilotActionPayload::RequestBookingTargetDiscovery { .. }
         | AutopilotActionPayload::RequestBeaconInviteBatch { .. }
-        | AutopilotActionPayload::RequestBeaconOutreach { .. }
         | AutopilotActionPayload::AdjustExperiment { .. }
         | AutopilotActionPayload::CompleteShowTask { .. }
         | AutopilotActionPayload::EscalateShowTask { .. }

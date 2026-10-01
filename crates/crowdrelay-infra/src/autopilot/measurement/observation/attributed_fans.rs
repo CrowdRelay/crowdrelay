@@ -13,9 +13,11 @@
 //!
 //! # What an action's fans are
 //!
-//! A conversion row names the action whose post carried the clicked link
-//! (`record_community_conversion`). The measured action is often not that
-//! action: an `agent.run.request` is measured, but the post belongs to the
+//! A conversion row names the action that owned the clicked link. Publication
+//! lanes recover that owner from the post ledger; non-post lanes such as
+//! named Beacon email bind `smart_links.action_id` directly. The measured
+//! action is often not that action: an `agent.run.request` is measured, but
+//! the post belongs to the
 //! `community.engage.request` its outcome created. So the count runs over the
 //! action's **lineage**:
 //!
@@ -29,11 +31,11 @@
 //!
 //! # What the number means
 //!
-//! A fan cannot click a link that was never posted, so the untreated outcome
-//! is zero and the count is the effect — a lower bound, missing anyone who saw
-//! the post and signed up without clicking. It is only a zero where a zero was
-//! possible: a lineage with no live tracked link is abandoned as
-//! `NO_TRACKED_LINK`. The window opens when the first tracked post went live,
+//! A fan cannot click a link that was never delivered, so the untreated
+//! outcome is zero and the count is the effect — a lower bound, missing anyone
+//! who saw the promotion and signed up without clicking. It is only a zero
+//! where a zero was possible: a lineage with no live tracked link is abandoned
+//! as `NO_TRACKED_LINK`. For post lanes the window opens when the first tracked post went live;
 //! not when the action finished, because a draft that waited a week for a
 //! person to publish it could not convert anyone in that week.
 //!
@@ -134,6 +136,34 @@ pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST: &str = r#"
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+        UNION ALL
+        -- Non-post delivery lanes bind the redirect directly to the action.
+        -- finished_at is the delivery-success anchor; link.created_at can be
+        -- earlier while the external executor is still working.
+        SELECT action.finished_at AS posted_at
+        FROM smart_links AS link
+        JOIN autopilot_actions AS action
+          ON action.workspace_id=link.workspace_id
+         AND action.id=link.action_id
+        WHERE link.workspace_id=$1
+          AND link.action_id IN (SELECT action_id FROM lineage)
+          AND link.active
+          AND action.status='succeeded'
+          AND action.finished_at IS NOT NULL
+        UNION ALL
+        -- Non-post delivery lanes bind the redirect directly to the action.
+        -- finished_at is the delivery-success anchor; link.created_at can be
+        -- earlier while the external executor is still working.
+        SELECT action.finished_at AS posted_at
+        FROM smart_links AS link
+        JOIN autopilot_actions AS action
+          ON action.workspace_id=link.workspace_id
+         AND action.id=link.action_id
+        WHERE link.workspace_id=$1
+          AND link.action_id IN (SELECT action_id FROM lineage)
+          AND link.active
+          AND action.status='succeeded'
+          AND action.finished_at IS NOT NULL
     ) AS post
 "#;
 

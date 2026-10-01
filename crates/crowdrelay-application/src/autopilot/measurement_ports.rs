@@ -34,6 +34,15 @@ pub enum AutopilotMeasurementKind {
     ShowGrowthSurfaceClicks7d,
     ShowGrowthAttributedTicketOrders7d,
     GrassrootsActivationReplies14d,
+    /// Signed quality of the exact named Beacon's reply inside fourteen days:
+    /// interested/partner = +1, received/unknown = 0, declined/do-not-contact
+    /// = -1. Silence is also 0. A negative answer must never look like success
+    /// merely because somebody replied. Attribution is per action/Beacon.
+    BeaconOutreachReplyQuality14d,
+    /// Distinct anonymous visitors who crossed a smart link owned by this
+    /// exact Beacon outreach action. People, not raw clicks: refreshes and
+    /// repeated taps from one browser do not make a relationship look larger.
+    BeaconOutreachUniqueVisitors14d,
     /// Fan count delta in the 14 days after an agent dispatch. Measures
     /// whether the worker's intelligence gathering actually aggregated
     /// new fans into the fanbase.
@@ -204,6 +213,8 @@ impl AutopilotMeasurementKind {
             Self::ShowGrowthSurfaceClicks7d => "show_growth_surface_clicks_7d",
             Self::ShowGrowthAttributedTicketOrders7d => "show_growth_attributed_ticket_orders_7d",
             Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
+            Self::BeaconOutreachReplyQuality14d => "beacon_outreach_reply_quality_14d",
+            Self::BeaconOutreachUniqueVisitors14d => "beacon_outreach_unique_visitors_14d",
             Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
             Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
             Self::IncrementalFanGrowth3d => "incremental_fan_growth_3d",
@@ -288,6 +299,8 @@ impl AutopilotMeasurementKind {
             Self::ContentFanAcquisition7d => Some("content_fan_acquisitions"),
             Self::ArtifactOutcome7d => Some("artifact_posts"),
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
+            Self::BeaconOutreachReplyQuality14d => Some("beacon_outreach_reply_quality"),
+            Self::BeaconOutreachUniqueVisitors14d => Some("beacon_outreach_unique_visitors"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
             Self::ScannerDiscoveryQuality14d => Some("scanner_discoveries"),
@@ -329,6 +342,7 @@ impl AutopilotMeasurementKind {
                 // it as a level would refuse the negative reading a release
                 // that moved backwards earns.
                 | Self::ReleaseChannelLift14d
+                | Self::BeaconOutreachReplyQuality14d
         )
     }
 

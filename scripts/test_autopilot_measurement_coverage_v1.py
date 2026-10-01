@@ -64,7 +64,6 @@ KNOWN_UNMEASURED = {
     "SetEventTicketUrl",
     "RequestBeaconDiscovery",
     "RequestBeaconInviteBatch",
-    "RequestBeaconOutreach",
     "RequestBookingTargetDiscovery",
     "RequestMerchBundle",
     "RequestMerchReorder",

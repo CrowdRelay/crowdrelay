@@ -2,6 +2,59 @@
 // re-verifies the partner row, reserves the contact window, emits the outward
 // send and records the campaign touch inside the caller's transaction.
 
+/// Mints one redirect owned by the exact Beacon action.
+///
+/// Posts recover attribution through their publication ledger. Email has no
+/// post row, so the link itself owns the action. That lets the ordinary click
+/// + signup spine attribute a person to the named relationship without
+/// inventing a parallel Beacon analytics system.
+async fn ensure_beacon_action_link(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
+    beacon_id: crowdrelay_domain::BeaconId,
+    site_root: Option<&str>,
+    suffix: &str,
+    destination: Option<&str>,
+    creative: &str,
+) -> Result<Option<String>, RepositoryError> {
+    let Some(site_root) = site_root.map(str::trim).filter(|root| !root.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(destination) = destination
+        .map(str::trim)
+        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+    else {
+        return Ok(None);
+    };
+    let slug = format!("beacon-{suffix}-{}", action_id.into_uuid().simple());
+    sqlx::query(
+        r#"
+        INSERT INTO smart_links (
+            workspace_id, slug, destination_url, active, action_id,
+            channel_source, channel_community, channel_creative
+        ) VALUES ($1,$2,$3,true,$4,'beacon',$5,$6)
+        ON CONFLICT (workspace_id, slug) DO UPDATE
+        SET destination_url=EXCLUDED.destination_url,
+            active=true,
+            action_id=EXCLUDED.action_id,
+            channel_source=EXCLUDED.channel_source,
+            channel_community=EXCLUDED.channel_community,
+            channel_creative=EXCLUDED.channel_creative
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(destination)
+    .bind(action_id.into_uuid())
+    .bind(beacon_id.to_string())
+    .bind(creative)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(Some(format!("{}/l/{slug}", site_root.trim_end_matches('/'))))
+}
+
 /// Executes a beacon cross-promotion ask: re-verify the partner row under its
 /// locked version, reserve the contact window, emit the outward send with
 /// evidence, then record the campaign touch — all in the caller's transaction.
@@ -84,13 +137,45 @@ pub(super) async fn execute_beacon_outreach(
         crate::beacon_signal::beacon_release_signature(&mut **transaction, workspace_id.into_uuid())
             .await
             .map_err(map_sqlx)?;
-    let show_url = if first_tenant {
+    let direct_show_url = if first_tenant {
         site_root
             .as_deref()
             .map(|root| format!("{root}/pl/live/{}/", target.6))
     } else {
         None
     };
+    let phase_key = match phase {
+        crowdrelay_domain::beacons::BeaconOutreachPhase::Initial => "initial",
+        crowdrelay_domain::beacons::BeaconOutreachPhase::CollaborationFollowUp => {
+            "collaboration_follow_up"
+        }
+        crowdrelay_domain::beacons::BeaconOutreachPhase::LocalPush => "local_push",
+        crowdrelay_domain::beacons::BeaconOutreachPhase::PostShowThanks => "post_show_thanks",
+    };
+    let show_url = ensure_beacon_action_link(
+        transaction,
+        workspace_id,
+        action_id,
+        beacon_id,
+        site_root.as_deref(),
+        "show",
+        direct_show_url.as_deref(),
+        phase_key,
+    )
+    .await?
+    .or(direct_show_url);
+    let ticket_url = ensure_beacon_action_link(
+        transaction,
+        workspace_id,
+        action_id,
+        beacon_id,
+        site_root.as_deref(),
+        "ticket",
+        target.7.as_deref(),
+        phase_key,
+    )
+    .await?
+    .or_else(|| target.7.clone());
     let epk_url = if first_tenant {
         site_root.as_deref().map(|root| format!("{root}/pl/epk/"))
     } else {
@@ -116,7 +201,7 @@ pub(super) async fn execute_beacon_outreach(
                 "city": city,
                 "starts_at": crowdrelay_domain::wire_time::Wire(&target.5),
                 "slug": target.6,
-                "ticket_url": target.7,
+                "ticket_url": ticket_url,
                 "show_url": show_url,
             },
             "phase": phase,
@@ -154,12 +239,7 @@ pub(super) async fn execute_beacon_outreach(
     .bind(workspace_id.into_uuid())
     .bind(beacon_id.into_uuid())
     .bind(event_id.into_uuid())
-    .bind(match phase {
-        crowdrelay_domain::beacons::BeaconOutreachPhase::Initial => "initial",
-        crowdrelay_domain::beacons::BeaconOutreachPhase::CollaborationFollowUp => "collaboration_follow_up",
-        crowdrelay_domain::beacons::BeaconOutreachPhase::LocalPush => "local_push",
-        crowdrelay_domain::beacons::BeaconOutreachPhase::PostShowThanks => "post_show_thanks",
-    })
+    .bind(phase_key)
     .bind(now)
     .execute(&mut **transaction)
     .await

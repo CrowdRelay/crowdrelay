@@ -491,7 +491,7 @@ pub fn evaluate_beacon_campaign(
         {
             return BeaconDecision::Hold(BeaconHoldReason::AlreadyReplied);
         }
-        return request(BeaconOutreachPhase::PostShowThanks, snapshot);
+        return request(BeaconOutreachPhase::PostShowThanks, snapshot, policy);
     }
 
     if snapshot.followup_count >= policy.maximum_pre_show_touches {
@@ -516,15 +516,23 @@ pub fn evaluate_beacon_campaign(
     };
 
     phase.map_or(BeaconDecision::Hold(BeaconHoldReason::NotDue), |phase| {
-        request(phase, snapshot)
+        request(phase, snapshot, policy)
     })
 }
 
-fn request(phase: BeaconOutreachPhase, snapshot: BeaconCampaignSnapshot) -> BeaconDecision {
+fn request(
+    phase: BeaconOutreachPhase,
+    snapshot: BeaconCampaignSnapshot,
+    policy: BeaconCampaignPolicy,
+) -> BeaconDecision {
     let relationship_bonus = snapshot.relationship_score.saturating_mul(10).min(800);
+    // Bonus starts at the same relevance floor that admitted the candidate.
+    // A hard-coded 7000 here made policy tuning inconsistent: raising the
+    // minimum still awarded the old surplus, while lowering it withheld bonus
+    // from candidates the operator explicitly made eligible.
     let relevance_bonus = snapshot
         .relevance_basis_points
-        .saturating_sub(7_000)
+        .saturating_sub(policy.minimum_relevance_basis_points)
         .min(800);
     let confidence = snapshot
         .evidence_confidence
@@ -625,6 +633,43 @@ mod tests {
         assert_eq!(
             evaluate_beacon_discovery(discovery, policy, now()),
             BeaconDiscoveryDecision::Hold(BeaconDiscoveryHoldReason::RecentlyScouted)
+        );
+    }
+
+    #[test]
+    fn relevance_bonus_starts_at_the_policy_floor() {
+        let mut candidate = snapshot(40);
+        candidate.relationship_score = 0;
+        candidate.relevance_basis_points = 8_500;
+        candidate.evidence_confidence = Confidence::saturating_from_basis_points(7_500);
+
+        let mut policy = BeaconCampaignPolicy::default();
+        policy.minimum_relevance_basis_points = 8_500;
+        let BeaconDecision::Request {
+            confidence: at_floor,
+            ..
+        } = evaluate_beacon_campaign(candidate, policy, now())
+        else {
+            panic!("candidate at the configured floor should be eligible");
+        };
+        assert_eq!(
+            at_floor.basis_points(),
+            7_500,
+            "the relevance floor itself is not a bonus"
+        );
+
+        policy.minimum_relevance_basis_points = 8_000;
+        let BeaconDecision::Request {
+            confidence: above_floor,
+            ..
+        } = evaluate_beacon_campaign(candidate, policy, now())
+        else {
+            panic!("candidate above the configured floor should be eligible");
+        };
+        assert_eq!(
+            above_floor.basis_points(),
+            8_000,
+            "500bp above the policy floor should add exactly 500bp"
         );
     }
 
