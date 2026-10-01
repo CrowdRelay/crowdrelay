@@ -48,7 +48,7 @@ class BeaconLearnedSelectionContract(unittest.TestCase):
         beacon = read(BEACON)
 
         candidate = beacon.index("beacon_candidate(snapshot, policy, now)?")
-        rank = beacon.index("rank_beacon_candidate(")
+        rank = beacon.rindex("rank_beacon_candidate(")
         self.assertLess(candidate, rank)
         self.assertIn("already-eligible Beacon outreach", beacon)
         self.assertIn("may\n// reorder due asks; it must never make an ineligible Beacon eligible", beacon)
