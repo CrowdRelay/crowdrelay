@@ -49,7 +49,7 @@ ALTER TABLE autopilot_measurements
         'show_ticket_revenue_7d','show_growth_surface_clicks_7d',
         'show_growth_attributed_ticket_orders_7d',
         'grassroots_activation_replies_14d',
-        'beacon_outreach_reply_14d',
+        'beacon_outreach_reply_quality_14d',
         'beacon_outreach_unique_visitors_14d',
         'agent_run_fan_growth_14d','agent_run_signal_installs_7d',
         'agent_run_community_engagement_7d','incremental_fan_growth_14d',
