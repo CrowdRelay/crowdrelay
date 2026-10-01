@@ -81,7 +81,10 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use super::{
-    evidence_ledger::EvidenceLedger, model::*, policy_config::*, ports::AutopilotDecisionRepository,
+    evidence_ledger::EvidenceLedger,
+    model::*,
+    policy_config::*,
+    ports::{AutopilotDecisionRepository, LoadedCausalModel},
 };
 mod beacons;
 mod booking_supply;
@@ -187,6 +190,33 @@ where
             touched_this_cycle: &mut touched_this_cycle,
         };
         let mut report = AutopilotCycleReport::default();
+
+        let growth_intelligence_enabled = policies
+            .iter()
+            .any(|policy| policy.enabled && policy.context == AutopilotContext::GrowthIntelligence);
+        let beacon_enabled = policies
+            .iter()
+            .any(|policy| policy.enabled && policy.context == AutopilotContext::Beacon);
+        let loaded_causal_model: Option<LoadedCausalModel> = if growth_intelligence_enabled {
+            // Preserve the existing GI failure semantics: candidate ranking
+            // without the model would silently change what the Brain means.
+            Some(self.repository.load_causal_model(self.workspace_id).await?)
+        } else if beacon_enabled {
+            // Beacon learning is advisory ordering only. If its model cannot
+            // be read, relationship eligibility/cooldowns still run exactly as
+            // before and the cycle records that it fell back.
+            match self.repository.load_causal_model(self.workspace_id).await {
+                Ok(model) => Some(model),
+                Err(_) => {
+                    report.gi_dispatch_log.push(
+                        "beacon North-Star ranking unavailable; preserving repository order".into(),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
             // Registered before the arm runs so a context that produced
@@ -683,9 +713,42 @@ where
                         .repository
                         .load_beacon_campaign_snapshots(self.workspace_id, now)
                         .await?;
-                    for snapshot in snapshots {
-                        if let Some(candidate) = beacon_candidate(snapshot, &policy, now)? {
+                    if let Some(loaded_model) = loaded_causal_model.as_ref() {
+                        let mut ranked = Vec::with_capacity(snapshots.len());
+                        for (original_order, snapshot) in snapshots.into_iter().enumerate() {
+                            if let Some(candidate) = beacon_candidate(snapshot, &policy, now)? {
+                                let AutopilotActionPayload::RequestBeaconOutreach {
+                                    beacon_id,
+                                    template_key,
+                                    ..
+                                } = &candidate.action
+                                else {
+                                    return Err(RepositoryError::Unexpected.into());
+                                };
+                                ranked.push(rank_beacon_candidate(
+                                    candidate,
+                                    original_order,
+                                    template_key,
+                                    &format!("beacon:{beacon_id}"),
+                                    &loaded_model.model,
+                                ));
+                            }
+                        }
+                        let (ordered, reordered) = order_ranked_beacon_candidates(ranked);
+                        if reordered {
+                            report.gi_dispatch_log.push(
+                                "brain decision influenced by learning: Beacon due-ask order changed by North-Star value"
+                                    .into(),
+                            );
+                        }
+                        for candidate in ordered {
                             self.persist(&candidate, &mut limits, &mut report).await?;
+                        }
+                    } else {
+                        for snapshot in snapshots {
+                            if let Some(candidate) = beacon_candidate(snapshot, &policy, now)? {
+                                self.persist(&candidate, &mut limits, &mut report).await?;
+                            }
                         }
                     }
                     let invites = self
@@ -853,9 +916,13 @@ where
                     }
                 }
                 AutopilotContext::GrowthIntelligence => {
+                    let Some(loaded_model) = loaded_causal_model.as_ref() else {
+                        return Err(RepositoryError::Unexpected.into());
+                    };
                     self.evaluate_growth_intelligence_context(
                         &policy,
                         &evidence,
+                        loaded_model,
                         now,
                         &mut limits,
                         &mut report,
@@ -918,6 +985,21 @@ where
             }
         }
 
+        // One checkpoint for the one model snapshot this cycle replayed. Both
+        // Beacon and GI consume it; neither context owns persistence anymore.
+        if let Some(loaded_model) = loaded_causal_model.as_ref()
+            && self
+                .repository
+                .save_brain_state_checkpoint(self.workspace_id, &loaded_model.model)
+                .await
+                .is_err()
+        {
+            report.gi_dispatch_log.push(
+                "causal model checkpoint failed; learning will retry from the previous cursor"
+                    .into(),
+            );
+        }
+
         Ok(report)
     }
 
@@ -977,6 +1059,7 @@ include!("evaluate/candidates_drop_surge.rs");
 include!("evaluate/candidates_reply_rescue.rs");
 include!("evaluate/supply_quiet.rs");
 include!("evaluate/growth_intelligence_context.rs");
+include!("evaluate/beacon_learning.rs");
 include!("evaluate/hypothesis_validation.rs");
 include!("evaluate/tests.rs");
 include!("evaluate/tests_booking.rs");
