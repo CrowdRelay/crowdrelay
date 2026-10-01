@@ -236,11 +236,6 @@ impl CommunityRulesWorker {
         place: &StalePlace,
         info: &CommunityInfoResponse,
     ) -> Result<(), sqlx::Error> {
-        let titles: Vec<&str> = info
-            .rules
-            .iter()
-            .filter_map(|r| r.short_name.as_deref())
-            .collect();
         let texts: Vec<String> = info
             .rules
             .iter()
@@ -255,7 +250,26 @@ impl CommunityRulesWorker {
         let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let stance = classify_self_promo(&text_refs);
         let (ratio, requires_approval) = stance.columns();
-        let summary = summarize(&titles);
+
+        // The classifier already reads descriptions; keep the same moderator
+        // words in rules_summary so the drafter and operator can obey the
+        // actual constraint instead of seeing only a vague heading.
+        let rule_summaries: Vec<String> = info
+            .rules
+            .iter()
+            .map(|r| {
+                let title = r.short_name.as_deref().unwrap_or("").trim();
+                let description = r.description.as_deref().unwrap_or("").trim();
+                match (title.is_empty(), description.is_empty()) {
+                    (false, false) => format!("{title} :: {description}"),
+                    (false, true) => title.to_owned(),
+                    (true, false) => description.to_owned(),
+                    (true, true) => String::new(),
+                }
+            })
+            .collect();
+        let summary_refs: Vec<&str> = rule_summaries.iter().map(String::as_str).collect();
+        let summary = summarize(&summary_refs);
 
         let mut tx = self.pool.begin().await?;
         sqlx::query(
