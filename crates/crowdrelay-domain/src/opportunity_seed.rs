@@ -96,6 +96,13 @@ pub struct SeededOpportunity {
     pub strategic_value_basis_points: i32,
     pub deadline: Option<Date>,
     pub event_starts_on: Option<Date>,
+    /// Verified one-way road distance supplied by the operator/scout. Absent
+    /// stays absent: the intake never substitutes straight-line distance or a
+    /// band average for a road-cost fact.
+    pub distance_km: Option<i32>,
+    /// Stated nights away when known. Otherwise tour economics applies its own
+    /// overnight-threshold policy once distance is known.
+    pub nights_away: Option<i16>,
     /// `false` when the sheet itself reports the route resolved or closed.
     pub eligible: bool,
     /// Only when the sheet carries an explicit verification verdict.
@@ -248,6 +255,24 @@ fn first_iso_date(value: &str) -> Option<Date> {
 fn score_basis_points(value: &str) -> Option<i32> {
     let value: f64 = value.trim().parse().ok()?;
     Some((value * 100.0).round().clamp(0.0, 10000.0) as i32)
+}
+
+fn bounded_i32(value: &str, max: i32) -> Option<i32> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed: i32 = value.parse().ok()?;
+    (0..=max).contains(&parsed).then_some(parsed)
+}
+
+fn bounded_i16(value: &str, max: i16) -> Option<i16> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed: i16 = value.parse().ok()?;
+    (0..=max).contains(&parsed).then_some(parsed)
 }
 
 /// The band's A–D priority column → `strategic_value_basis_points`, on the
@@ -642,6 +667,8 @@ fn seed_row(
         email_cell,
         fit,
         strategic,
+        distance_km,
+        nights_away,
         eligible,
         verified,
         metadata,
@@ -679,6 +706,8 @@ fn seed_row(
                 String::new(),
                 priority_bps.unwrap_or(0),
                 priority_bps.unwrap_or(0),
+                None,
+                None,
                 eligible_for(c!("status")),
                 verified_for(c!("verification_status")),
                 metadata,
@@ -712,6 +741,8 @@ fn seed_row(
                 c!("contact_email").to_owned(),
                 score_basis_points(c!("relevance_score")).unwrap_or(0),
                 letter_priority(c!("priority")).unwrap_or(0),
+                bounded_i32(c!("distance_km"), 20_000),
+                bounded_i16(c!("nights_away"), 30),
                 eligible_for(c!("status")),
                 false,
                 metadata,
@@ -741,6 +772,8 @@ fn seed_row(
                 ("virya_history", c!("virya_history").to_owned()),
                 ("next_action", c!("next_action").to_owned()),
                 ("submission_method", c!("submission_method").to_owned()),
+                ("free_to_apply", c!("free_to_apply").to_owned()),
+                ("routing_source", c!("routing_source").to_owned()),
                 ("why_fit", c!("why_fit").to_owned()),
                 ("red_flags", c!("red_flags").to_owned()),
                 ("dedupe_key", c!("dedupe_key").to_owned()),
@@ -768,6 +801,8 @@ fn seed_row(
                 email.to_owned(),
                 score_basis_points(c!("relevance_score")).unwrap_or(0),
                 letter_priority(c!("priority")).unwrap_or(0),
+                bounded_i32(c!("distance_km"), 20_000),
+                bounded_i16(c!("nights_away"), 30),
                 eligible_for(c!("current_status")),
                 verified,
                 metadata,
@@ -838,6 +873,8 @@ fn seed_row(
         strategic_value_basis_points: strategic,
         deadline: first_iso_date(&deadline_cell),
         event_starts_on: first_iso_date(&event_cell),
+        distance_km,
+        nights_away,
         eligible,
         verified_destination: verified,
         metadata,
@@ -995,6 +1032,9 @@ mod tests {
         "Source_Checked",
         "Why_Fit",
         "Red_Flags",
+        "Distance_Km",
+        "Nights_Away",
+        "Routing_Source",
     ];
 
     const EN_HEADER: &[&str] = &[
@@ -1140,6 +1180,9 @@ mod tests {
         row[21] = "nexus-leipzig|2027|virya";
         row[22] = "Official NEXUS pages; checked 2026-10-01";
         row[23] = "Close routing and dedicated rock/metal stage";
+        row[25] = "356";
+        row[26] = "1";
+        row[27] = "Verified road-route source";
 
         let report = extract_opportunity_sheet(&grid(REGISTRY_HEADER, &[&row])).unwrap();
         let opp = &report.rows[0];
@@ -1149,6 +1192,9 @@ mod tests {
         assert_eq!(opp.fit_basis_points, 8_800);
         assert_eq!(opp.strategic_value_basis_points, 6_500);
         assert_eq!(opp.confidence_basis_points, 8_500);
+        assert_eq!(opp.distance_km, Some(356));
+        assert_eq!(opp.nights_away, Some(1));
+        assert_eq!(opp.metadata["routing_source"], "Verified road-route source");
         assert!(opp.verified_destination);
         assert!(opp.eligible);
         assert_eq!(
