@@ -678,8 +678,10 @@ mod tests {
         candidate.relevance_basis_points = 8_500;
         candidate.evidence_confidence = Confidence::saturating_from_basis_points(7_500);
 
-        let mut policy = BeaconCampaignPolicy::default();
-        policy.minimum_relevance_basis_points = 8_500;
+        let policy = BeaconCampaignPolicy {
+            minimum_relevance_basis_points: 8_500,
+            ..BeaconCampaignPolicy::default()
+        };
         let BeaconDecision::Request {
             confidence: at_floor,
             ..
@@ -693,7 +695,10 @@ mod tests {
             "the relevance floor itself is not a bonus"
         );
 
-        policy.minimum_relevance_basis_points = 8_000;
+        let policy = BeaconCampaignPolicy {
+            minimum_relevance_basis_points: 8_000,
+            ..BeaconCampaignPolicy::default()
+        };
         let BeaconDecision::Request {
             confidence: above_floor,
             ..

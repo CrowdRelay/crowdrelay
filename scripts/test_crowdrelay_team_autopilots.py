@@ -195,7 +195,7 @@ class TeamAutopilotsContract(unittest.TestCase):
         migration = text("migrations/0053_beacon_identity_dedup.sql")
         ingress = text("crates/crowdrelay-infra/src/autopilot/operations/ingress/beacons.rs")
         actions = text(
-            "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
+            "crates/crowdrelay-infra/src/autopilot/execution_beacon_discovery.rs"
         )
         self.assertIn("pg_get_constraintdef(con.oid)", migration)
         self.assertIn("UNIQUE NULLS NOT DISTINCT (workspace_id, beacon_kind, city_id, contact_email)", migration)

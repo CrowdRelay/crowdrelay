@@ -7,7 +7,8 @@
 /// Posts recover attribution through their publication ledger. Email has no
 /// post row, so the link itself owns the action. That lets the ordinary click
 /// + signup spine attribute a person to the named relationship without
-/// inventing a parallel Beacon analytics system.
+///   inventing a parallel Beacon analytics system.
+#[allow(clippy::too_many_arguments)]
 async fn ensure_beacon_action_link(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
