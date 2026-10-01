@@ -301,7 +301,9 @@ async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         body.contains("Gramy w Wrocław"),
         "the letter does not open with her city: {body}"
     );
-    assert!(body.contains("https://virya.music/pl/latarnik"), "{body}");
+    // Since #426 every outward link in a letter is a tracked one, so the
+    // invitation points at the redirect that lands on the latarnik page.
+    assert!(body.contains("https://virya.music/l/latarnik"), "{body}");
     assert!(
         !body.contains('!'),
         "an exclamation mark reached a working promoter: {body}"
