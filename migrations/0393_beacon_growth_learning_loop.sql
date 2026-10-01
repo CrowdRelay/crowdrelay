@@ -35,9 +35,8 @@ CREATE INDEX IF NOT EXISTS beacon_campaigns_reply_idx
     ON beacon_campaigns (workspace_id, beacon_id, event_id, last_reply_at DESC)
     WHERE last_reply_at IS NOT NULL;
 
--- Fail closed on measurement vocabulary. Keep the historical constraint name:
--- the contract test and older installations know it, while the table itself
--- now uses the unprefixed runtime name.
+-- Fail closed on measurement vocabulary. Migration 0346 renamed the table
+-- and its constraints, so new schema writes stay on the unprefixed vocabulary.
 ALTER TABLE autopilot_measurements
     DROP CONSTRAINT IF EXISTS autopilot_measurements_measurement_kind_check;
 ALTER TABLE autopilot_measurements
