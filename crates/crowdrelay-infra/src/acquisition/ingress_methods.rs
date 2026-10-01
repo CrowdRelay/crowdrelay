@@ -393,7 +393,7 @@ impl PostgresAcquisitionRepository {
             return Err(StoreError::Conflict);
         }
 
-        let request_bytes = serde_json::to_vec(signup).map_err(|_| StoreError::Unexpected)?;
+        let request_bytes = serde_json::to_vec(&signup.idempotency_payload()).map_err(|_| StoreError::Unexpected)?;
         let request_hash = Sha256::digest(request_bytes).to_vec();
         let mut transaction = self.pool.begin().await.map_err(StoreError::from_sqlx)?;
 
@@ -569,6 +569,9 @@ impl PostgresAcquisitionRepository {
                 self.increment_city_aggregate(&mut transaction, workspace_id, city_id)
                     .await?;
             }
+        }
+        if fan_upsert.created {
+            initial_metadata::persist(&mut transaction, signup, fan_upsert.fan.id).await?;
         }
         if fan_upsert.became_active {
             self.increment_city_aggregates_for_fan(

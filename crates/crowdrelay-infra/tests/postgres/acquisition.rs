@@ -912,3 +912,4 @@ include!("acquisition/helpers.rs");
 include!("acquisition/attribution.rs");
 include!("acquisition/attribution_channels.rs");
 include!("acquisition/email_first.rs");
+include!("acquisition/initial_metadata.rs");
