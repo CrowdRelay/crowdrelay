@@ -38,10 +38,7 @@ use crate::{Problem, request_id};
 /// than as a constraint violation five layers down.
 const PLATFORMS: [&str; 4] = ["android", "ios", "desktop", "web"];
 
-/// Bounds on what a device may write into a public table. Long enough for a
-/// UUID or a store identifier, short enough that the row cannot be used as
-/// storage.
-const MAX_INSTALLATION_ID: usize = 128;
+/// Bound on the version string a device may write into a public table.
 const MAX_APP_VERSION: usize = 32;
 
 #[derive(Debug, Deserialize)]
@@ -79,8 +76,7 @@ pub async fn record_installation(
 
     let installation_id = payload.installation_id.trim();
     let platform = payload.platform.trim().to_lowercase();
-    if installation_id.is_empty()
-        || installation_id.len() > MAX_INSTALLATION_ID
+    if !crate::push::valid_installation_id(installation_id)
         || !PLATFORMS.contains(&platform.as_str())
     {
         return Problem::unprocessable(request_id_value)
@@ -122,6 +118,7 @@ pub async fn record_installation(
 /// accepts. The platform is the caller's claim about itself; a web Signal
 /// session reports `web`, and that is what the funnel counts it as.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkInstallationRequest {
     installation_id: String,
     platform: String,
@@ -169,8 +166,7 @@ pub async fn link_installation(
     };
     let installation_id = payload.installation_id.trim();
     let platform = payload.platform.trim().to_lowercase();
-    if installation_id.is_empty()
-        || installation_id.len() > MAX_INSTALLATION_ID
+    if !crate::push::valid_installation_id(installation_id)
         || !PLATFORMS.contains(&platform.as_str())
     {
         return Problem::unprocessable(request_id_value)
