@@ -180,10 +180,15 @@ impl PostgresAcquisitionRepository {
         // produces no rows and no conversion is written: fail-closed rather
         // than fabricating a timestamp for an event we cannot anchor.
         //
-        // action_id is recovered via the smart_link chain:
-        //   click_events.smart_link_id → smart_links.slug
-        //   → post.smart_link = '/l/' || slug → post.action_id
-        // where `post` is whichever executor ledger owns the link —
+        // action_id has two honest owners:
+        //   1. smart_links.action_id when a non-post delivery lane (for example
+        //      named Beacon email) minted the redirect for one exact action;
+        //   2. the published post ledger as the backwards-compatible fallback:
+        //      click_events.smart_link_id → smart_links.slug
+        //      → post.smart_link = '/l/' || slug → post.action_id.
+        // Direct link ownership wins. A model cannot choose it: the executor
+        // binds it server-side while materialising the approved action.
+        // Where no direct owner exists, `post` is whichever executor ledger owns the link —
         // community_posts, social_posts, telegram_posts or discord_posts all
         // store the same '/l/{slug}' text. The UNION picks the most recently
         // *posted* row across all four — the post that was live when the fan
@@ -217,7 +222,7 @@ impl PostgresAcquisitionRepository {
             SELECT $1, $2, 'conversion',
                    link.channel_source,
                    link.slug, link.channel_community, click.campaign_id,
-                   post.action_id,
+                   COALESCE(link.action_id, post.action_id),
                    'last_tracked_click', 1.0, fan.created_at,
                    post.format_key
             FROM click_events AS click
