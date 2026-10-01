@@ -1,0 +1,286 @@
+diff --git a/src/components/SignalPage.astro b/src/components/SignalPage.astro
+--- a/src/components/SignalPage.astro
++++ b/src/components/SignalPage.astro
+@@ -5,7 +5,7 @@
+ import ScrollToTop from "./ScrollToTop.astro"
+ import SignalHub from "./preact/signal/SignalHub"
+ import SynesthesiaLeaderboard from "./SynesthesiaLeaderboard.astro"
+-import PlayStoreBadge from "./PlayStoreBadge.astro"
++import SignalCampaignIntro from "./preact/signal/SignalCampaignIntro"
+ import SectionHeading from "./SectionHeading.astro"
+ import { SIGNAL_COPY } from "../data/signalCopy"
+ import { VIRYA_GROUP_REF } from "../data/viryaIdentity"
+@@ -88,46 +88,10 @@
+       <header class="relative overflow-hidden border-b border-zinc-800/60 px-5 pb-16 pt-[calc(8rem+env(safe-area-inset-top))] sm:px-8 sm:pb-20 lg:px-12 lg:pb-28 lg:pt-40">
+         <div class="signal-hero-grid absolute inset-0 opacity-60" aria-hidden="true"></div>
+         <div class="absolute left-[6%] top-32 h-72 w-72 rounded-full bg-amber-400/[.08] blur-[120px]" aria-hidden="true"></div>
+-        <div class="virya-container relative">
+-          <p class="virya-eyebrow">{copy.hero.eyebrow}</p>
+-          {/* The heading spans the container rather than the 1.1fr column. The
+-              Polish hero copy is a 58-character sentence against 33 in English,
+-              and inside the narrower column it wrapped to six display-size lines
+-              that pushed the body and both calls to action below the fold. */}
+-          <h1 class="virya-display virya-display--long mt-6">{copy.hero.heading}</h1>
+-          <div class="mt-10 grid gap-12 lg:mt-12 lg:grid-cols-[minmax(0,1.1fr)_minmax(300px,.58fr)] lg:items-end">
+-          <div>
+-            <p class="max-w-2xl text-base leading-7 text-zinc-300 sm:text-lg sm:leading-8">
+-              {copy.hero.body}
+-            </p>
+-            <div class="mt-9 flex flex-wrap items-center gap-3">
+-              <a href="#join-signal" class="virya-button virya-button--primary">
+-                {copy.hero.primary} <span aria-hidden="true">→</span>
+-              </a>
+-              <a href={lp(lang, "/my-signal/")} class="virya-button virya-button--secondary">
+-                {lang === "pl" ? "Mam już konto" : "I already joined"}
+-              </a>
+-              <PlayStoreBadge lang={lang} />
+-            </div>
+-          </div>
++        <SignalCampaignIntro client:load lang={lang} />
++      </header>
+ 
+-          <aside class="border-l border-amber-400/45 pl-5 sm:pl-7">
+-            <p class="virya-eyebrow text-zinc-400">{lang === "pl" ? "W skrócie" : "In short"}</p>
+-            <dl class="mt-5 divide-y divide-zinc-800/70 border-y border-zinc-800/70">
+-              {(lang === "pl"
+-                ? [["Miasto", "koncerty i alerty"], ["Konto", "bez hasła"], ["Dane", "bez sprzedaży reklamodawcom"]]
+-                : [["City", "shows and alerts"], ["Account", "no password"], ["Data", "never sold to advertisers"]]
+-              ).map(([label, value]) => (
+-                <div class="grid grid-cols-[5rem_1fr] gap-4 py-3 text-sm">
+-                  <dt class="font-bold uppercase tracking-[.08em] text-zinc-400">{label}</dt>
+-                  <dd class="text-zinc-200">{value}</dd>
+-                </div>
+-              ))}
+-            </dl>
+-          </aside>
+-          </div>
+-        </div>
+-      </header>
++      <SignalHub client:load lang={lang} />
+ 
+       <section class="virya-section virya-surface" aria-labelledby="signal-benefits-heading">
+         <div class="virya-section__inner">
+@@ -150,7 +114,6 @@
+         </div>
+       </section>
+ 
+-      <SignalHub client:visible lang={lang} />
+       <SynesthesiaLeaderboard compact lang={lang} />
+ 
+       <section class="virya-section signal-deferred border-t border-zinc-800/60">
+diff --git a/src/components/preact/signal/EventDetail.tsx b/src/components/preact/signal/EventDetail.tsx
+--- a/src/components/preact/signal/EventDetail.tsx
++++ b/src/components/preact/signal/EventDetail.tsx
+@@ -1,3 +1,4 @@
++import { captureContextForPage } from "../../../lib/signalCaptureContext"
+ import type { ComponentChildren } from "preact"
+ import { useEffect, useMemo, useState } from "preact/hooks"
+ import { SIGNAL_COPY } from "../../../data/signalCopy"
+@@ -648,6 +649,7 @@
+     try {
+       const consent = new FormData(event.currentTarget as HTMLFormElement).get("consent") === "on"
+       const result = await submitSignup(signalSignupInput(email, lang, consent, {
++        capture_context: captureContextForPage(window.location.pathname, window.location.search),
+         campaign_id: campaignIdFromLocation(),
+         referral_code: referralCodeFromLocation(),
+         ad_attribution: signupAttribution(),
+diff --git a/src/components/preact/signal/SignalCampaignIntro.tsx b/src/components/preact/signal/SignalCampaignIntro.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/preact/signal/SignalCampaignIntro.tsx
+@@ -0,0 +1,13 @@
++import {useEffect,useState} from "preact/hooks"
++import {captureContextFromSearch} from "../../../lib/signalCaptureContext"
++export default function SignalCampaignIntro({lang}:{lang:"pl"|"en"}) {
++ const [shows,setShows]=useState(false)
++ useEffect(()=>setShows(captureContextFromSearch(window.location.search)?.offer === "shows"),[])
++ return <div class="virya-container relative max-w-4xl">
++  <p class="virya-eyebrow">VIRYA // SIGNAL</p>
++  <h1 class="mt-5 text-4xl font-black uppercase leading-tight text-white sm:text-6xl">{shows ? lang === "pl" ? "Złap następny koncert VIRYA" : "Catch the next VIRYA show" : lang === "pl" ? "Muzyka i wiadomości prosto od VIRYA" : "Music and updates straight from VIRYA"}</h1>
++  <p class="mt-6 text-base leading-7 text-zinc-300">{shows ? lang === "pl" ? "Dostawaj wiadomości o koncertach. Miasto możesz dodać później." : "Get show updates. You can add your city later." : lang === "pl" ? "Dostawaj wiadomości o nowej muzyce i materiałach zespołu." : "Get updates about new music and band material."}</p>
++  <p class="mt-4 text-sm text-zinc-400">{lang === "pl" ? "E-mail, Twoja zgoda i potwierdzenie w skrzynce. Bez hasła. Aplikacja jest opcjonalna." : "Email, your consent and inbox confirmation. No password. The app is optional."}</p>
++  <div class="mt-7 flex flex-wrap gap-3"><a href="#join-signal" class="virya-button virya-button--primary">{lang === "pl" ? "Zapisz mnie" : "Keep me updated"}</a><a href={lang === "pl" ? "/pl/my-signal/" : "/my-signal/"} class="virya-button virya-button--secondary">{lang === "pl" ? "Mam już konto" : "I already joined"}</a></div>
++ </div>
++}
+diff --git a/src/components/preact/signal/SignalHub.tsx b/src/components/preact/signal/SignalHub.tsx
+--- a/src/components/preact/signal/SignalHub.tsx
++++ b/src/components/preact/signal/SignalHub.tsx
+@@ -1,3 +1,4 @@
++import { captureContextForPage } from "../../../lib/signalCaptureContext"
+ import { useEffect, useMemo, useState } from "preact/hooks"
+ import { SIGNAL_COPY } from "../../../data/signalCopy"
+ import type { Lang } from "../../../i18n/t"
+@@ -191,6 +192,7 @@
+       const referralCode = referralCodeFromLocation()
+       const attribution = signupAttribution()
+       const result = await submitSignup(signalSignupInput(email, locale, consent, {
++        capture_context: captureContextForPage(window.location.pathname, window.location.search),
+         ...(citySlug ? { city_slug: citySlug } : {}),
+         ...(displayName ? { display_name: displayName } : {}),
+         ...(campaignId ? { campaign_id: campaignId } : {}),
+diff --git a/src/components/preact/signal/SignalTokenAction.tsx b/src/components/preact/signal/SignalTokenAction.tsx
+--- a/src/components/preact/signal/SignalTokenAction.tsx
++++ b/src/components/preact/signal/SignalTokenAction.tsx
+@@ -1,3 +1,4 @@
++import { captureReturnPath } from "../../../lib/signalCaptureContext"
+ import { useEffect, useState } from "preact/hooks"
+ import { SIGNAL_COPY } from "../../../data/signalCopy"
+ import type { Lang } from "../../../i18n/t"
+@@ -37,6 +38,7 @@
+   )
+   const [pendingToken, setPendingToken] = useState<string | null>(null)
+   const [email, setEmail] = useState("")
++  const [nextPath, setNextPath] = useState(pagePath(lang, "/my-signal/"))
+   const [resending, setResending] = useState(false)
+   const [resendDone, setResendDone] = useState(false)
+ 
+@@ -66,7 +68,7 @@
+         : crowdrelay.unsubscribeFan(token)
+ 
+     void request
+-      .then(async () => {
++      .then(async result => {
+         if (cancelled) return
+         setState("success")
+         setMessage(
+@@ -74,6 +76,7 @@
+         )
+ 
+         if (action !== "confirm") return
++        if ("capture_context" in result) setNextPath(captureReturnPath(result.capture_context, lang))
+         const pending = getPendingConcertCheckin()
+         if (!pending) return
+         try {
+@@ -159,6 +162,7 @@
+       <p class="mt-5 max-w-2xl text-sm leading-relaxed text-zinc-300" role="status" aria-live="polite">
+         {message}
+       </p>
++      {state === "error" && pendingToken && <button type="button" onClick={() => exchange(pendingToken)} class="virya-button virya-button--secondary mt-6">{lang === "pl" ? "Spróbuj ponownie" : "Try again"}</button>}
+       {state === "error" && action === "confirm" && (
+         <form onSubmit={resendAccess} class="mt-6 max-w-md">
+           <label class="block text-xs font-black uppercase tracking-wider text-zinc-300">
+@@ -205,10 +209,10 @@
+         )}
+         {state === "success" && action === "confirm" && (
+           <a
+-            href={pagePath(lang, "/my-signal/")}
++            href={nextPath}
+             class="virya-button virya-button--primary min-h-[46px] px-5"
+           >
+-            {copy.account}
++            {lang === "pl" ? "Wracam do muzyki i koncertów" : "Back to music and shows"}
+           </a>
+         )}
+         <a
+diff --git a/src/components/preact/signal/WatchJoin.tsx b/src/components/preact/signal/WatchJoin.tsx
+--- a/src/components/preact/signal/WatchJoin.tsx
++++ b/src/components/preact/signal/WatchJoin.tsx
+@@ -1,3 +1,4 @@
++import { captureContextForPage } from "../../../lib/signalCaptureContext"
+ import { useEffect, useMemo, useState } from "preact/hooks"
+ import { createSignalSignupSubmitter, signalSignupInput } from "../../../lib/signalSignup"
+ import { SIGNAL_COPY } from "../../../data/signalCopy"
+@@ -86,6 +87,7 @@
+       const referralCode = referralCodeFromLocation()
+       const attribution = signupAttribution()
+       const result = await submitSignup(signalSignupInput(email, locale, consent, {
++        capture_context: captureContextForPage(window.location.pathname, window.location.search),
+         city_slug: citySlug,
+         ...(campaignId ? { campaign_id: campaignId } : {}),
+         ...(referralCode ? { referral_code: referralCode } : {}),
+diff --git a/src/lib/crowdrelay-client.ts b/src/lib/crowdrelay-client.ts
+--- a/src/lib/crowdrelay-client.ts
++++ b/src/lib/crowdrelay-client.ts
+@@ -240,7 +240,10 @@
+   policy_version: string
+ }
+ 
++import type { SignalCaptureContext } from "./signalCaptureContext"
++
+ export interface FanSignupInput {
++  capture_context?: SignalCaptureContext
+   email: string
+   city_slug?: string
+   display_name?: string
+@@ -274,6 +277,7 @@
+ }
+ 
+ export interface FanConfirmationResult {
++  capture_context?: SignalCaptureContext | null
+   fan_id: string
+   status: "active"
+   referral_url: string
+diff --git a/src/lib/signalCaptureContext.ts b/src/lib/signalCaptureContext.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/signalCaptureContext.ts
+@@ -0,0 +1,34 @@
++export interface SignalCaptureContext {
++  offer?: "shows" | "releases"
++  event_slug?: string
++  video_id?: string
++}
++export function validatedCaptureContext(value: unknown): SignalCaptureContext | undefined {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
++  const v = value as Record<string, unknown>
++  const offer = v.offer === "shows" || v.offer === "releases" ? v.offer : undefined
++  const event = typeof v.event_slug === "string" && /^[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?$/.test(v.event_slug) ? v.event_slug : undefined
++  const video = typeof v.video_id === "string" && /^[A-Za-z0-9_-]{11}$/.test(v.video_id) ? v.video_id : undefined
++  if (event && video) return offer ? { offer } : undefined
++  const context = {...(offer ? {offer} : {}),...(event ? {event_slug:event} : {}),...(video ? {video_id:video} : {})}
++  return Object.keys(context).length ? context : undefined
++}
++export function captureContextFromSearch(search: string): SignalCaptureContext | undefined {
++  const q = new URLSearchParams(search)
++  return validatedCaptureContext({offer:q.get("offer"),event_slug:q.get("event"),video_id:q.get("video")})
++}
++export function captureContextForPage(path: string, search: string): SignalCaptureContext | undefined {
++  const event = path.match(/^\/(?:pl\/)?live\/([a-z0-9-]+)\/?$/)?.[1]
++  if (event) return validatedCaptureContext({offer:"shows",event_slug:event})
++  const video = path.match(/^\/(?:pl\/)?watch\/([A-Za-z0-9_-]+)\/?$/)?.[1]
++  if (video) return validatedCaptureContext({offer:"releases",video_id:video})
++  return captureContextFromSearch(search)
++}
++export function captureReturnPath(value: unknown, lang: "pl" | "en"): string {
++  const c = validatedCaptureContext(value), prefix = lang === "pl" ? "/pl" : ""
++  if (c?.event_slug) return `${prefix}/live/${c.event_slug}/`
++  if (c?.video_id) return `${prefix}/watch/${c.video_id}/`
++  if (c?.offer === "shows") return `${prefix}/signal/#signal-shows`
++  if (c?.offer === "releases") return `${prefix}/videos/`
++  return `${prefix}/my-signal/`
++}
+diff --git a/src/lib/signalSignup.ts b/src/lib/signalSignup.ts
+--- a/src/lib/signalSignup.ts
++++ b/src/lib/signalSignup.ts
+@@ -2,7 +2,7 @@
+ 
+ export type SignalSignupContext = Pick<
+   FanSignupInput,
+-  "city_slug" | "display_name" | "campaign_id" | "referral_code" | "ad_attribution"
++  "city_slug" | "display_name" | "campaign_id" | "referral_code" | "ad_attribution" | "capture_context"
+ >
+ 
+ /** Capture only explicit opt-in. City enriches a signup; it never gates one. */
+diff --git a/tests/signalCaptureContext.test.ts b/tests/signalCaptureContext.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/signalCaptureContext.test.ts
+@@ -0,0 +1,18 @@
++import {test} from "node:test"
++import assert from "node:assert/strict"
++import {captureContextFromSearch,captureContextForPage,captureReturnPath,validatedCaptureContext} from "../src/lib/signalCaptureContext.ts"
++test("promise and local resource survive confirmation on another device",()=>{
++ const c=captureContextFromSearch("?utm_source=telegram&offer=shows&event=real-show")
++ assert.deepEqual(c,{offer:"shows",event_slug:"real-show"})
++ assert.equal(captureReturnPath(c,"pl"),"/pl/live/real-show/")
++ assert.equal(captureReturnPath({offer:"releases",video_id:"AbCdEfGhI12"},"en"),"/watch/AbCdEfGhI12/")
++})
++test("unknown promises and redirect injection cannot produce copy or navigation",()=>{
++ for(const slug of ["//evil.test","../admin","x?token=y","x#y","UPPER",""]) assert.equal(validatedCaptureContext({event_slug:slug}),undefined)
++ assert.equal(captureReturnPath({return_url:"https://evil.test",offer:"prize"},"pl"),"/pl/my-signal/")
++ assert.deepEqual(validatedCaptureContext({offer:"shows",event_slug:"real-show",video_id:"AbCdEfGhI12"}),{offer:"shows"})
++})
++test("a resource form preserves its actual resource instead of injected query context",()=>{
++ assert.deepEqual(captureContextForPage("/pl/live/real-show/","?offer=releases&event=other"),{offer:"shows",event_slug:"real-show"})
++ assert.deepEqual(captureContextForPage("/watch/AbCdEfGhI12/","?event=other"),{offer:"releases",video_id:"AbCdEfGhI12"})
++})

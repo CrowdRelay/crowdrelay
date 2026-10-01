@@ -62,6 +62,7 @@ pub const EDITABLE_KEYS: [&str; 22] = [
     KEY_JOIN_ASK_CADENCE_DAYS,
     KEY_JOIN_ASK_PLATFORMS,
     KEY_JOIN_ASK_IMAGE_URL,
+    KEY_JOIN_ASK_CAPTURE_CONTEXT,
     KEY_BRAND_WORDMARK,
     KEY_SOCIAL_AUTOPOST_PLATFORMS,
 ];
@@ -152,6 +153,8 @@ pub const KEY_JOIN_ASK_PLATFORMS: &str = "join_ask_platforms";
 /// time, and a value that is not a fetchable image URL is refused at the
 /// edge rather than stored and silently ignored.
 pub const KEY_JOIN_ASK_IMAGE_URL: &str = "join_ask_image_url";
+/// A known offer and optional local resource to preserve through confirmation.
+pub const KEY_JOIN_ASK_CAPTURE_CONTEXT: &str = "join_ask_capture_context";
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -628,7 +631,7 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4, $5)
+              AND key IN ($2, $3, $4, $5, $6)
             "#,
         )
         .bind(workspace_id)
@@ -636,6 +639,7 @@ impl TenantSettingsRepository {
         .bind(KEY_JOIN_ASK_CADENCE_DAYS)
         .bind(KEY_JOIN_ASK_PLATFORMS)
         .bind(KEY_JOIN_ASK_IMAGE_URL)
+        .bind(KEY_JOIN_ASK_CAPTURE_CONTEXT)
         .fetch_all(&self.pool)
         .await?;
         let mut variants = None;
@@ -645,8 +649,12 @@ impl TenantSettingsRepository {
             .map(|platform| (*platform).to_owned())
             .collect();
         let mut image_url = None;
+        let mut capture_context = None;
         for (key, value) in rows {
             match key.as_str() {
+                KEY_JOIN_ASK_CAPTURE_CONTEXT => {
+                    capture_context = join_ask::parse_capture_context(&value)
+                }
                 KEY_JOIN_ASK_VARIANTS => variants = join_ask::parse_variants(&value),
                 KEY_JOIN_ASK_CADENCE_DAYS => {
                     if let Some(days) = join_ask::parse_cadence_days(&value) {
@@ -665,6 +673,7 @@ impl TenantSettingsRepository {
             }
         }
         Ok(variants.map(|variants| join_ask::JoinAskConfig {
+            capture_context,
             variants,
             cadence_days,
             platforms,

@@ -248,6 +248,13 @@ pub async fn get_brand_settings(
             // platforms carry their shipped defaults instead, so the panel
             // shows the rule the evaluator will actually apply.
             settings.insert(
+                "join_ask_capture_context".to_owned(),
+                overrides
+                    .get("join_ask_capture_context")
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            settings.insert(
                 "join_ask_variants".to_owned(),
                 overrides
                     .get("join_ask_variants")
@@ -330,6 +337,10 @@ fn validate_value(key: &str, value: &str) -> bool {
     // §5: a variants list is JSON text, and five 500-char variants plus
     // syntax do not fit under the generic 512 ceiling — it has its own
     // bounds, checked by the same domain contract the reader applies.
+    if key == "join_ask_capture_context" {
+        return value.trim().is_empty()
+            || crowdrelay_domain::join_ask::parse_capture_context(value).is_some();
+    }
     if key == "join_ask_variants" {
         return value.len() <= 4_096
             && crowdrelay_domain::join_ask::parse_variants(value).is_some();

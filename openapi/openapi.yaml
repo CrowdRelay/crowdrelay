@@ -5323,6 +5323,41 @@ paths:
         '404': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
 
+  /admin/ops/organic-funnel:
+    get:
+      operationId: getOrganicFanFunnel
+      summary: Live canonical acquisition, deliberate activation and retained fan cohorts
+      description: Bounded metadata-only read; attributed facts do not prove causal lift. Shared links with ambiguous owners are diagnosed and excluded from conversion credit.
+      security:
+      - adminBearer: []
+      parameters:
+      - name: action_id
+        in: query
+        schema: {type: string, format: uuid}
+      - name: campaign_id
+        in: query
+        schema: {type: string, format: uuid}
+      - name: days
+        in: query
+        schema: {type: integer, minimum: 1, maximum: 90, default: 90}
+      - name: limit
+        in: query
+        schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        '200':
+          description: Current consent and observed engagement with explicit cohort maturity.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrganicFanFunnel'}
+        '400':
+          $ref: '#/components/responses/PrivateProblem'
+        '401':
+          $ref: '#/components/responses/PrivateProblem'
+        '503':
+          $ref: '#/components/responses/PrivateProblem'
   /admin/ops/summary:
     get:
       operationId: getOperationsSummary
@@ -16463,6 +16498,51 @@ components:
           format: int64
           minimum: 0
 
+    FanCaptureContext:
+      type: object
+      additionalProperties: false
+      description: Initial navigation promise preserved across devices; never consent, a reward or an external redirect.
+      not:
+        required: [event_slug, video_id]
+      properties:
+        offer: {type: string, enum: [shows, releases]}
+        event_slug: {type: string, maxLength: 120, pattern: '^[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?$'}
+        video_id: {type: string, pattern: '^[A-Za-z0-9_-]{11}$'}
+    OrganicFanFunnel:
+      type: object
+      required: [as_of, window_days, credit_basis, activation_basis, visitor_basis, causal_claim, items]
+      properties:
+        as_of: {type: string, format: date-time}
+        window_days: {type: integer, minimum: 1, maximum: 90}
+        credit_basis: {type: string, const: canonical_last_tracked_click}
+        activation_basis: {type: string, const: deliberate_first_party_engagement_with_current_consent_excluding_sessions}
+        visitor_basis: {type: string, const: distinct_browser_ids_including_unclassified_previews}
+        causal_claim: {type: boolean, const: false}
+        items:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/OrganicFanFunnelRow'}
+    OrganicFanFunnelRow:
+      type: object
+      properties:
+        link_id: {type: string, format: uuid}
+        slug: {type: string}
+        campaign_id: {type: [string, 'null'], format: uuid}
+        action_id: {type: [string, 'null'], format: uuid}
+        channel: {type: [string, 'null']}
+        active: {type: boolean}
+        ambiguous_owner: {type: boolean}
+        published_at: {type: [string, 'null'], format: date-time}
+        unique_visitors: {type: integer, minimum: 0, description: Distinct browser identities including unclassified link previews.}
+        signups: {type: integer, minimum: 0, description: Historical canonical conversions in the selected lookback.}
+        confirmed: {type: integer, minimum: 0, description: Currently active and marketing-consented converted fans.}
+        activated: {type: integer, minimum: 0, description: Deliberate first-party engagement within seven days with current consent. Confirmation sessions are excluded.}
+        activation_mature: {type: integer, minimum: 0, description: All converted fans whose seven-day window has closed.}
+        activated_mature: {type: integer, minimum: 0, description: Currently consented deliberately activated fans in the mature cohort. Divide only this numerator by activation_mature.}
+        retention_mature: {type: integer, minimum: 0, description: Converted fans at least thirty days old.}
+        retained: {type: integer, minimum: 0, description: Canonical retention with additional deliberate engagement after day thirty in the latest thirty days.}
+        qualified_referrals: {type: integer, minimum: 0, description: Unique qualified referred fans credited to the acquisition cohort.}
+        diagnosis: {type: string}
     FanSignupRequest:
       type: object
       additionalProperties: false
@@ -16470,6 +16550,8 @@ components:
       - email
       - consent
       properties:
+        capture_context:
+          $ref: "#/components/schemas/FanCaptureContext"
         email:
           type: string
           format: email
@@ -18762,6 +18844,10 @@ components:
       - fan_session_token
       - email
       properties:
+        capture_context:
+          anyOf:
+          - $ref: "#/components/schemas/FanCaptureContext"
+          - type: "null"
         fan_id:
           type: string
           format: uuid

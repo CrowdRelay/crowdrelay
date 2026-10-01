@@ -291,6 +291,7 @@ include!("acquisition/redirect.rs");
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanSignupRequest {
+    capture_context: Option<crowdrelay_domain::acquisition::FanCaptureContext>,
     email: String,
     display_name: Option<String>,
     city_slug: Option<String>,
@@ -500,6 +501,7 @@ fn build_signup(
     payload: FanSignupRequest,
 ) -> Result<FanSignup, SignupPayloadError> {
     let metadata = crowdrelay_domain::acquisition::SignupMetadata {
+        capture_context: payload.capture_context,
         nearby_gigs: payload
             .city_slug
             .as_ref()

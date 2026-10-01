@@ -16,6 +16,7 @@ impl PostgresAutopilotRepository {
         self.bounded(async {
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
             action_recovery::lock_current_attempt(&mut transaction, workspace_id, action).await?;
+            lifecycle_grants::check_install_grant(&mut transaction, workspace_id, action, now).await?;
             match &action.payload {
                 AutopilotActionPayload::ChangeTicketPrice {
                     ticket_type_id,
@@ -128,17 +129,13 @@ impl PostgresAutopilotRepository {
                                     "signal install ask refused: tenant has no member site URL",
                                 ),
                             )?;
-                            let slug = if locale.starts_with("pl") {
-                                "signal-install-pl"
-                            } else {
-                                "signal-install"
-                            };
+                            let slug = format!("signal-install-{}",action.id.into_uuid().simple());
                             // Channel identity is safe to set: this slug is the
                             // ask's own, shared with no other surface.
                             let link = crate::tracked_links::ensure_smart_link_in_tx(
                                 &mut transaction,
                                 workspace_id.into_uuid(),
-                                slug,
+                                &slug,
                                 &destination,
                                 brand.site_root(),
                                 Some("email"),
@@ -149,6 +146,10 @@ impl PostgresAutopilotRepository {
                             .ok_or(RepositoryError::ConflictBecause(
                                 "signal install ask refused: destination is not a printable URL",
                             ))?;
+                            let bound=sqlx::query("UPDATE smart_links SET action_id=$3 WHERE workspace_id=$1 AND slug=$2 AND (action_id IS NULL OR action_id=$3)")
+                                .bind(workspace_id.into_uuid()).bind(&slug).bind(action.id.into_uuid())
+                                .execute(&mut *transaction).await.map_err(map_sqlx)?;
+                            if bound.rows_affected()!=1 {return Err(RepositoryError::ConflictBecause("install ask link belongs to another action"));}
                             Some(link.as_str().to_owned())
                         } else {
                             None

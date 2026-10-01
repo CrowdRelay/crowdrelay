@@ -17,6 +17,7 @@ mod join_ask_tests {
 
     fn snapshot() -> JoinAskSnapshot {
         JoinAskSnapshot {
+            capture_context: None,
             variants: vec!["join us".to_owned(), "come along".to_owned()],
             cadence_days: 7,
             platforms: vec!["facebook".to_owned()],
@@ -38,9 +39,7 @@ mod join_ask_tests {
             autonomy_level,
             minimum_confidence: Confidence::from_basis_points(5_000)?,
             max_actions_24h: 6,
-            config: AutopilotPolicyConfig::ContentStrategy(
-                ContentStrategyPolicy::default(),
-            ),
+            config: AutopilotPolicyConfig::ContentStrategy(ContentStrategyPolicy::default()),
             version: 3,
             guarded_until: None,
             guardrail_reason: None,
@@ -48,8 +47,7 @@ mod join_ask_tests {
     }
 
     #[test]
-    fn an_eligible_platform_emits_one_keyed_candidate()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn an_eligible_platform_emits_one_keyed_candidate() -> Result<(), Box<dyn std::error::Error>> {
         let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(7));
         let now = datetime!(2026-09-23 10:00 UTC);
         let evaluation = evaluate_join_ask_candidates(

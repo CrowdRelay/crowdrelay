@@ -30,6 +30,9 @@ use crowdrelay_infra::{
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+#[path = "autopilot_standing_approval/install_tests.rs"]
+mod install_tests;
+
 struct Fixture {
     pool: sqlx::PgPool,
     repository: PostgresAutopilotRepository,

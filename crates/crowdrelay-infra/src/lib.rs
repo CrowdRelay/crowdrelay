@@ -99,3 +99,5 @@ pub(crate) mod tracked_links;
 pub mod venue_directory;
 pub mod venue_seed;
 pub mod workspace_secrets;
+
+pub mod organic_funnel;

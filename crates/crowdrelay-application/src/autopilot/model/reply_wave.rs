@@ -63,6 +63,11 @@ impl AutopilotActionPayload {
     #[must_use]
     pub fn standing_approval_target(&self) -> Option<String> {
         match self {
+            Self::RequestFanLifecycleMessage { template_key, .. }
+                if template_key == "crowdrelay.fan.signal_install_ask.v1" =>
+            {
+                Some(format!("template:{template_key}"))
+            }
             Self::RequestCommunityEngagement { target_id, .. } => Some(target_id.to_string()),
             Self::RequestOutreach { target_id, .. } => Some(target_id.to_string()),
             Self::RequestBookingOutreach { target_id, .. } => Some(target_id.to_string()),
@@ -405,5 +410,30 @@ mod payload_tests {
         };
         assert!(draft.subject.is_empty() && draft.body.is_empty());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod install_grant_tests {
+    use super::*;
+    #[test]
+    fn approval_names_one_version_not_all_fans_or_all_lifecycle_messages() {
+        let payload = |key: &str| AutopilotActionPayload::RequestFanLifecycleMessage {
+            fan_id: FanId::new(),
+            template_key: key.to_owned(),
+            show: None,
+        };
+        assert_eq!(
+            payload("crowdrelay.fan.signal_install_ask.v1").standing_approval_target(),
+            Some("template:crowdrelay.fan.signal_install_ask.v1".into())
+        );
+        for key in [
+            "crowdrelay.fan.signal_install_ask.v2",
+            "crowdrelay.fan.referral_invite.v1",
+            "crowdrelay.fan.show_recall.v1",
+            "arbitrary",
+        ] {
+            assert_eq!(payload(key).standing_approval_target(), None);
+        }
     }
 }

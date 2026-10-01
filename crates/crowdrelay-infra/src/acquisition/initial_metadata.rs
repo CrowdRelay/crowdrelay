@@ -9,6 +9,11 @@ pub(super) async fn persist(
         return Ok(());
     };
     let workspace_id = signup.workspace_id().into_uuid();
+    if let Some(context) = &metadata.capture_context {
+        sqlx::query("INSERT INTO fan_capture_contexts(workspace_id,fan_id,context) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(workspace_id).bind(fan_id.into_uuid()).bind(serde_json::json!(context))
+            .execute(&mut **transaction).await.map_err(StoreError::from_sqlx)?;
+    }
     if let (Some(city), Some((enabled, radius))) = (signup.city_slug(), metadata.nearby_gigs) {
         sqlx::query(r#"
             INSERT INTO fan_location_preferences (workspace_id, fan_id, city_id, nearby_gigs_enabled, radius_km)

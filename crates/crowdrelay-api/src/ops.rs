@@ -49,6 +49,7 @@ include!("ops/attention.rs");
 include!("ops/post_queues.rs");
 include!("ops/post_queues_pg_tests.rs");
 include!("ops/funnel.rs");
+include!("ops/organic_funnel.rs");
 include!("ops/funnel_pg_tests.rs");
 include!("ops/outcomes.rs");
 include!("ops/outcomes_pg_tests.rs");

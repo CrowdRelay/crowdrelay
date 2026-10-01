@@ -178,11 +178,12 @@ pub(crate) async fn queue_measurement(
 /// Puts a queued measurement into the state `complete_measurement` requires.
 async fn mark_processing(f: &Fixture, measurement: &ClaimedAutopilotMeasurement) {
     sqlx::query(
-        "UPDATE autopilot_measurements SET status='processing', started_at=now() \
+        "UPDATE autopilot_measurements SET status='processing', started_at=now(), attempt_count=$3 \
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(f.workspace_id.into_uuid())
     .bind(measurement.id.into_uuid())
+    .bind(i32::try_from(measurement.attempt_number).expect("attempt"))
     .execute(&f.pool)
     .await
     .expect("processing");

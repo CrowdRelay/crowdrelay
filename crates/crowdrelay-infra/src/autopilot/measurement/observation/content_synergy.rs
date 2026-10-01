@@ -27,7 +27,7 @@ use super::*;
 /// post table: social, Telegram and Discord posts carry `smart_link_id`
 /// outright; a community post stores only the `/l/{slug}` path in
 /// `smart_link`, resolved back to the `smart_links` row that serves it.
-const POSTED_LINKS: &str = r#"
+pub(in crate::autopilot::measurement) const POSTED_LINKS: &str = r#"
     SELECT post.smart_link_id AS link_id, post.posted_at
     FROM social_posts AS post
     WHERE post.workspace_id = $1 AND post.action_id = $2
@@ -196,23 +196,17 @@ static FAN_LADDER_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
                JOIN fans AS fan
                  ON fan.workspace_id = $1 AND fan.id = acquired.fan_id
               WHERE fan.status = 'active') AS confirmed,
-            (SELECT COUNT(DISTINCT acquired.fan_id)
-               FROM acquired
-               WHERE EXISTS (
-                   SELECT 1 FROM fan_provenance_events AS act
-                   WHERE act.workspace_id = $1
-                     AND act.fan_id = acquired.fan_id
-                     AND act.event_kind = 'interaction'
-                     AND act.occurred_at > acquired.converted_at
-                     AND act.occurred_at <= acquired.converted_at + INTERVAL '7 days'
-               )) AS activated,
-            CASE WHEN $3 >= (SELECT MIN(posted_at) FROM posted_links) + INTERVAL '30 days'
-                 THEN (SELECT COUNT(DISTINCT acquired.fan_id)
-                         FROM acquired
-                         JOIN fan_provenance_events AS durable
-                           ON durable.workspace_id = $1
-                          AND durable.fan_id = acquired.fan_id
-                          AND durable.event_kind = 'durability')
+            (SELECT COUNT(DISTINCT acquired.fan_id) FROM acquired JOIN fans fan ON fan.workspace_id=$1 AND fan.id=acquired.fan_id
+              WHERE fan.status='active' AND fan.deleted_at IS NULL
+                AND COALESCE((SELECT granted FROM fan_consents WHERE workspace_id=$1 AND fan_id=fan.id AND purpose='marketing'
+                     AND recorded_at <= $3 ORDER BY recorded_at DESC,id DESC LIMIT 1),false)
+                AND fan_has_engagement_between($1,fan.id,fan.normalized_email,acquired.converted_at+INTERVAL '1 microsecond',
+                    LEAST(acquired.converted_at+INTERVAL '7 days',$3+INTERVAL '1 microsecond'))) AS activated,
+            CASE WHEN $3 >= (SELECT MAX(posted_at) FROM posted_links)+INTERVAL '37 days'
+              THEN (SELECT COUNT(DISTINCT acquired.fan_id) FROM acquired JOIN fans fan ON fan.workspace_id=$1 AND fan.id=acquired.fan_id
+                WHERE fan.deleted_at IS NULL AND fan_is_meaningfully_retained($1,fan.id,acquired.converted_at,$3)
+                  AND fan_has_engagement_between($1,fan.id,fan.normalized_email,
+                      GREATEST(acquired.converted_at+INTERVAL '30 days',$3-INTERVAL '30 days'),$3+INTERVAL '1 microsecond'))
             END AS returned
         "#,
     )
@@ -252,10 +246,9 @@ pub(super) async fn content_fan_acquisitions(
 /// number smuggling confirmation, activation and return into one. Each stage
 /// names only what it can honestly see: `unique_visitors` are distinct
 /// clickers, `signups` are canonical conversions, `confirmed` reached
-/// `status = 'active'` (double opt-in), `activated` produced a post-conversion
-/// `interaction` provenance row within seven days of signing up.
+/// `status = 'active'` (double opt-in), `activated` produced deliberate first-party engagement after conversion provenance row within seven days of signing up.
 ///
-/// `returned` is NULL until the earliest credited post's 30-day durability
+/// `returned` is NULL until the latest credited post's full 7-day acquisition plus 30-day durability
 /// horizon has passed — an unobserved stage is an unknown, not a zero. The
 /// number beside the learned scalar is reporting only; the selector keeps
 /// learning from `signups` alone.

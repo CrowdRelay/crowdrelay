@@ -433,3 +433,8 @@ async fn fans_credited_elsewhere_or_nowhere_are_not_counted() {
         "only the fan traced to this action counts"
     );
 }
+
+#[path = "autopilot_attributed_fans/funnel_tests.rs"]
+mod funnel_tests;
+#[path = "autopilot_attributed_fans/recovery_tests.rs"]
+mod recovery_tests;
