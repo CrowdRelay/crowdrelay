@@ -18,7 +18,9 @@
 fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRejection> {
     // Only require_approval kinds create actions. Insights and segments
     // are observations — confidence 0 is weak but not dangerous.
-    if outcome.kind.disposition() != "require_approval" {
+    if outcome.kind.disposition() != "require_approval"
+        && outcome.kind != OutcomeKind::ContactResearch
+    {
         return Ok(());
     }
 
