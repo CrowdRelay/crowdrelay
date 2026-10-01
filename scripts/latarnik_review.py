@@ -17,6 +17,19 @@ letter, and asks. Nothing is sent unless you answer ``s`` *and* then type
 ``tak``. There is no flag that skips either question, and no batch mode: the
 server has none on purpose, and a session is capped at ``MAX_PER_SESSION``.
 
+Nobody is written to unread. A person with no recent, sourced fact on file about
+what they did lately is held ("not read yet") and never appears in ``review``:
+
+    scripts/latarnik_review.py needs-research          # the work queue
+    scripts/latarnik_review.py note BEACON_ID \\
+        --fact "recenzja plyty X w audycji Y" \\
+        --source-url https://... --observed-on 2026-09-20 \\
+        [--praise "one specific, true sentence"]
+
+The fact must be dated within the last 120 days, sourced to an https page, and in
+the band's register (no exclamation marks, hashtags or links). The research agent
+writes through the same route and the same checks.
+
 Standard library only. The key is read from the environment and never printed.
 """
 from __future__ import annotations
@@ -52,6 +65,26 @@ def invitable(review: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
+def needs_research(review: dict[str, Any]) -> list[dict[str, Any]]:
+    """Warm people who could be asked if only the band had read their recent work.
+
+    This is the research queue, and it is deliberately narrow: it holds only
+    people who passed every relationship test, so no research is spent on a cold
+    contact or on somebody written to last week.
+    """
+    rows = [
+        row
+        for row in review.get("contacts", [])
+        if not row.get("invitable")
+        and not row.get("has_research")
+        and "not read yet" in str(row.get("hold_reason") or "")
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (-int(row.get("relationship_score") or 0), str(row.get("display_name"))),
+    )
+
+
 def render_letter(preview: dict[str, Any]) -> str:
     """The whole letter, with who it is going to and why, exactly as sent."""
     rule = "-" * 72
@@ -61,6 +94,8 @@ def render_letter(preview: dict[str, Any]) -> str:
         f"Rola:    {preview.get('role', '')}"
         + (f", {preview['city']}" if preview.get("city") else ""),
         f"Powod:   {preview.get('reason', '')}",
+        f"Czytane: {preview.get('hook_fact', '')}",
+        f"Zrodlo:  {preview.get('hook_source_url', '')}  ({preview.get('hook_observed_on', '')})",
         f"Temat:   {preview['subject']}",
         rule,
         preview["body"].rstrip(),
@@ -129,6 +164,43 @@ def command_list(_: argparse.Namespace) -> int:
             f"{row['beacon_id']}  {row.get('relationship_score'):>3}  "
             f"{row.get('role', ''):<12} {row.get('city') or '-':<18} {row.get('display_name')}"
         )
+    unread = needs_research(review)
+    if unread:
+        print(f"\nDo zbadania (jeszcze nieprzeczytani): {len(unread)}  - `needs-research`")
+    return 0
+
+
+def command_needs_research(_: argparse.Namespace) -> int:
+    review = cp_request("GET", "contacts/dual-role")
+    rows = needs_research(review)
+    print(f"Nieprzeczytani, a gotowi na list: {len(rows)}")
+    for row in rows:
+        print(
+            f"{row['beacon_id']}  {row.get('relationship_score'):>3}  "
+            f"{row.get('role', ''):<12} {row.get('city') or '-':<18} {row.get('display_name')}"
+        )
+    return 0
+
+
+def command_note(args: argparse.Namespace) -> int:
+    body: dict[str, Any] = {
+        "fact": args.fact,
+        "source_url": args.source_url,
+        "observed_on": args.observed_on,
+        "language": args.language,
+    }
+    if args.praise:
+        body["praise"] = args.praise
+    result = request_json(
+        "PUT",
+        f"control-plane/contacts/{args.beacon_id}/research",
+        bearer=env(KEY_NAME),
+        payload=body,
+    )
+    if isinstance(result, dict) and "refused" in result:
+        print(f"ODMOWA: {result['refused']}")
+        return 1
+    print(f"Zapisano: {result.get('fact')} ({result.get('observed_on')})")
     return 0
 
 
@@ -162,6 +234,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="who may be asked now (read only)").set_defaults(run=command_list)
+    sub.add_parser(
+        "needs-research", help="warm people the band has not read yet (the research queue)"
+    ).set_defaults(run=command_needs_research)
+    note = sub.add_parser("note", help="record one dated, sourced thing a person did lately")
+    note.add_argument("beacon_id")
+    note.add_argument("--fact", required=True, help="what they did, as a phrase the letter can quote")
+    note.add_argument("--source-url", required=True, help="https page where it can be checked")
+    note.add_argument("--observed-on", required=True, help="YYYY-MM-DD: when it happened")
+    note.add_argument("--praise", help="one specific, true sentence of appreciation")
+    note.add_argument("--language", default="pl")
+    note.set_defaults(run=command_note)
     review = sub.add_parser("review", help="read each letter, send only what you confirm")
     review.add_argument(
         "--limit",

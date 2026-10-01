@@ -392,6 +392,7 @@ jobs:
             the_industry_list_is_also_an_audience \
             the_invitation_carries_its_letter_and_refuses_the_rest \
             the_preview_is_the_letter_the_click_would_send \
+            nobody_is_written_to_unread \
             autopilot_show_growth_retry \
             autopilot_past_show_sources \
             autopilot_relay_pacing \

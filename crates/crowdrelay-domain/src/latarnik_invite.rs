@@ -24,6 +24,9 @@
 //! * **Never empty-handed.** The invitation names a concrete reason tied to
 //!   them — a date in their city, a record they wrote about. Without one there
 //!   is nothing to say, and the honest move is to say nothing.
+//! * **Never unread.** The band has looked at what this person did lately and
+//!   the letter opens with it (`crate::contact_research`). Somebody with no
+//!   recent, sourced fact on file is held, not written to as a stranger.
 //! * **Not to people who are already in.** A consented fan does not need an
 //!   invitation to something they already receive.
 //! * **Never back to somebody who left.** An address that once had marketing
@@ -43,6 +46,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::contact_research::PersonalHook;
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::tracked_link::TrackedLink;
 
@@ -92,6 +96,9 @@ pub struct ContactStanding {
     /// The double opt-in is already in their inbox — the ask is open, not
     /// declined. Inviting again now would read as a reminder to confirm.
     pub opt_in_pending: bool,
+    /// A recent, sourced fact about what they did lately is on file. Without
+    /// one the letter would have nothing true and specific to open with.
+    pub has_recent_research: bool,
 }
 
 /// Why this person is worth writing to *now*, in their own terms.
@@ -139,6 +146,9 @@ pub enum InviteHold {
     OptInPending,
     /// Nothing concrete to say to them right now.
     NothingToOffer,
+    /// The band has not looked at their recent work yet. The work queue for
+    /// the research step is exactly the people held for this.
+    NeedsResearch,
 }
 
 impl InviteHold {
@@ -169,6 +179,10 @@ impl InviteHold {
                 .to_owned(),
             Self::NothingToOffer => "nothing concrete to tell them right now — no date in their \
                  city, no shared night, no new record"
+                .to_owned(),
+            Self::NeedsResearch => "not read yet — we write to people whose recent work we have \
+                 looked at: one dated, sourced thing they did, from the last few months. \
+                 Research them first"
                 .to_owned(),
         }
     }
@@ -212,6 +226,11 @@ pub fn decide(standing: &ContactStanding, reason: Option<&InviteReason>) -> Invi
             days_to_wait: QUIET_DAYS_AFTER_CONTACT - days,
         });
     }
+    // After the relationship tests on purpose: research is paid for, and only
+    // the people who could otherwise be asked are worth the spend.
+    if !standing.has_recent_research {
+        return InviteDecision::Hold(InviteHold::NeedsResearch);
+    }
     if reason.is_none() {
         return InviteDecision::Hold(InviteHold::NothingToOffer);
     }
@@ -236,18 +255,25 @@ pub fn compose(
     sender: &SenderIdentity,
     standing: &ContactStanding,
     reason: &InviteReason,
+    hook: &PersonalHook,
     member_area_url: &TrackedLink,
     language: LetterLanguage,
 ) -> Invite {
     let act = sender.act_name.trim();
     let name = standing.display_name.trim();
     match language {
-        LetterLanguage::Polish => polish(act, name, reason, member_area_url),
-        LetterLanguage::English => english(act, name, reason, member_area_url),
+        LetterLanguage::Polish => polish(act, name, reason, hook, member_area_url),
+        LetterLanguage::English => english(act, name, reason, hook, member_area_url),
     }
 }
 
-fn polish(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> Invite {
+fn polish(
+    act: &str,
+    name: &str,
+    reason: &InviteReason,
+    hook: &PersonalHook,
+    url: &TrackedLink,
+) -> Invite {
     let opening = match reason {
         InviteReason::UpcomingShowInTheirCity { city, when } => format!(
             "Gramy w {city} {when}. Zanim to wyjdzie oficjalnie, chcieliśmy dać znać Tobie."
@@ -259,8 +285,17 @@ fn polish(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> In
             format!("Wyszła nasza nowa rzecz — {title}. Piszemy w jednej sprawie.")
         }
     };
+    let known = format!(
+        "Zanim napisaliśmy, zajrzeliśmy do tego, co ostatnio robisz — {}.{}",
+        hook.fact,
+        hook.praise_sentence()
+            .map(|sentence| format!(" {sentence}"))
+            .unwrap_or_default()
+    );
     let body = format!(
         "Cześć {name},\n\
+         \n\
+         {known}\n\
          \n\
          {opening}\n\
          \n\
@@ -286,7 +321,13 @@ fn polish(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> In
     }
 }
 
-fn english(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> Invite {
+fn english(
+    act: &str,
+    name: &str,
+    reason: &InviteReason,
+    hook: &PersonalHook,
+    url: &TrackedLink,
+) -> Invite {
     let opening = match reason {
         InviteReason::UpcomingShowInTheirCity { city, when } => format!(
             "We are playing {city} on {when}. Before it goes public, we wanted you to know."
@@ -299,8 +340,17 @@ fn english(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> I
             format!("Our new record is out — {title}. One thing we wanted to ask.")
         }
     };
+    let known = format!(
+        "Before writing we looked at what you have been doing lately — {}.{}",
+        hook.fact,
+        hook.praise_sentence()
+            .map(|sentence| format!(" {sentence}"))
+            .unwrap_or_default()
+    );
     let body = format!(
         "Hi {name},\n\
+         \n\
+         {known}\n\
          \n\
          {opening}\n\
          \n\
@@ -343,6 +393,16 @@ mod tests {
             already_a_fan: false,
             previously_opted_out: false,
             opt_in_pending: false,
+            has_recent_research: true,
+        }
+    }
+
+    fn hook() -> PersonalHook {
+        PersonalHook {
+            fact: "recenzja płyty „Szum” w audycji „Metalowy Wieczór”".to_owned(),
+            praise: Some("Rzadko ktoś omawia tę płytę tak konkretnie".to_owned()),
+            source_url: "https://example.test/audycje/metalowy-wieczor".to_owned(),
+            observed_on: time::macros::date!(2026 - 09 - 20),
         }
     }
 
@@ -499,6 +559,7 @@ mod tests {
             &sender,
             &known_promoter(),
             &reason(),
+            &hook(),
             &TrackedLink::for_site(
                 "https://virya.music",
                 &crate::SmartLinkSlug::parse("latarnik").unwrap(),
@@ -534,6 +595,7 @@ mod tests {
             &InviteReason::RecentRelease {
                 title: "Nowy Świat".to_owned(),
             },
+            &hook(),
             &TrackedLink::for_site(
                 "https://virya.music",
                 &crate::SmartLinkSlug::parse("lighthouse").unwrap(),
@@ -545,5 +607,112 @@ mod tests {
         assert!(invite.body.contains("A few messages a quarter"));
         assert!(invite.body.contains("Leaving is one click"));
         assert!(!invite.body.contains('!'));
+    }
+
+    /// The rule, as a gate: a person the band has not read is held, however
+    /// warm the relationship and however good the reason.
+    #[test]
+    fn nobody_unread_is_invited() {
+        let unread = ContactStanding {
+            has_recent_research: false,
+            ..known_promoter()
+        };
+        assert_eq!(
+            decide(&unread, Some(&reason())),
+            InviteDecision::Hold(InviteHold::NeedsResearch)
+        );
+        assert_eq!(
+            decide(&known_promoter(), Some(&reason())),
+            InviteDecision::Send
+        );
+        assert!(
+            InviteHold::NeedsResearch
+                .message()
+                .contains("Research them first")
+        );
+    }
+
+    /// Research is paid for, so it is only worth doing for people who could
+    /// otherwise be asked: a cold contact, or one written to last week, is held
+    /// for those reasons and not queued for research.
+    #[test]
+    fn research_is_asked_for_only_those_who_could_otherwise_be_asked() {
+        let cold_and_unread = ContactStanding {
+            has_replied: false,
+            relationship_score: 90,
+            days_since_last_contact: None,
+            has_recent_research: false,
+            ..known_promoter()
+        };
+        assert_eq!(
+            decide(&cold_and_unread, Some(&reason())),
+            InviteDecision::Hold(InviteHold::TooCold)
+        );
+        let busy_and_unread = ContactStanding {
+            days_since_last_contact: Some(3),
+            has_recent_research: false,
+            ..known_promoter()
+        };
+        assert!(matches!(
+            decide(&busy_and_unread, Some(&reason())),
+            InviteDecision::Hold(InviteHold::TooSoon { .. })
+        ));
+    }
+
+    /// The letter opens with what the band found, before anything it wants, and
+    /// keeps the source out of the text: the operator checks it, the reader does
+    /// not need it, and every URL in a letter is a tracked link.
+    #[test]
+    fn the_letter_opens_with_what_the_band_read() {
+        let sender = SenderIdentity {
+            act_name: "Virya".to_owned(),
+            ..SenderIdentity::default()
+        };
+        let link = TrackedLink::for_site(
+            "https://virya.music",
+            &crate::SmartLinkSlug::parse("latarnik").unwrap(),
+        );
+        let polish = compose(
+            &sender,
+            &known_promoter(),
+            &reason(),
+            &hook(),
+            &link,
+            LetterLanguage::Polish,
+        );
+        let at = |needle: &str| {
+            polish
+                .body
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {}", polish.body))
+        };
+        assert!(at("recenzja płyty „Szum” w audycji „Metalowy Wieczór”") < at("Gramy w Wrocław"));
+        assert!(
+            polish
+                .body
+                .contains("Rzadko ktoś omawia tę płytę tak konkretnie.")
+        );
+        assert!(!polish.body.contains("example.test"), "{}", polish.body);
+        assert!(!polish.body.contains('!'), "{}", polish.body);
+
+        let english = compose(
+            &sender,
+            &known_promoter(),
+            &reason(),
+            &hook(),
+            &link,
+            LetterLanguage::English,
+        );
+        assert!(
+            english
+                .body
+                .contains("Before writing we looked at what you have been doing lately")
+        );
+        assert!(
+            english
+                .body
+                .contains("recenzja płyty „Szum” w audycji „Metalowy Wieczór”")
+        );
+        assert!(!english.body.contains("example.test"));
     }
 }

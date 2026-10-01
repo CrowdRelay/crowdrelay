@@ -92,6 +92,12 @@ pub struct InvitePreview {
     pub reason: String,
     pub subject: String,
     pub body: String,
+    /// What the band read of this person, so the operator can check it before
+    /// the letter goes: the fact the letter opens with, where it was found and
+    /// when it happened. The source is never printed in the letter itself.
+    pub hook_fact: String,
+    pub hook_source_url: String,
+    pub hook_observed_on: String,
 }
 
 /// Composes the letter without queueing it.
@@ -122,6 +128,9 @@ pub async fn preview_latarnik_invite(
         reason: composed.reason_sentence,
         subject: composed.letter.subject,
         body: composed.letter.body,
+        hook_fact: composed.hook.fact,
+        hook_source_url: composed.hook.source_url,
+        hook_observed_on: composed.hook.observed_on.to_string(),
     })
 }
 
@@ -133,6 +142,7 @@ struct ComposedInvite {
     role: String,
     city: Option<String>,
     reason_sentence: String,
+    hook: crowdrelay_domain::contact_research::PersonalHook,
     letter: crowdrelay_domain::latarnik_invite::Invite,
 }
 
@@ -199,6 +209,7 @@ async fn compose_invite(
         already_a_fan: contact.hears_the_dates,
         previously_opted_out: contact.previously_opted_out,
         opt_in_pending: contact.opt_in_pending,
+        has_recent_research: contact.has_research,
     };
     // Belt and braces: the review said yes, and the rule is asked again against
     // the standing the letter is actually composed from. Two answers that
@@ -218,7 +229,23 @@ async fn compose_invite(
                 .to_owned(),
         )
     })?;
-    let letter = compose(&sender, &standing, &reason, &member_area, language);
+    // The price of a letter: what the band read of this person lately. The
+    // eligibility rule above already holds the unread, so this lookup is the
+    // words rather than the gate; it still refuses on a miss so a race between
+    // the two reads can never produce a letter that opens on nothing.
+    let hook = crate::contact_research::latest_hook(
+        pool,
+        workspace_id,
+        &contact_email,
+        now.date(),
+    )
+    .await?
+    .ok_or_else(|| {
+        InviteError::Refused(
+            crowdrelay_domain::latarnik_invite::InviteHold::NeedsResearch.message(),
+        )
+    })?;
+    let letter = compose(&sender, &standing, &reason, &hook, &member_area, language);
 
     Ok(ComposedInvite {
         beacon_version,
@@ -227,6 +254,7 @@ async fn compose_invite(
         role: contact.role.clone(),
         city: contact.city.clone(),
         reason_sentence: reason_sentence(&reason, language),
+        hook,
         letter,
     })
 }
