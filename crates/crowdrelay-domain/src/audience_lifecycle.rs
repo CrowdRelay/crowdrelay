@@ -39,6 +39,11 @@ pub struct FanLifecycleSnapshot {
     /// behind it is a dead end. So the code is issued first, for the same
     /// reason a show gets its tracked link before anything is shared.
     pub has_referral_code: bool,
+    /// Whether a `signal_installations` row already names this fan — the app
+    /// on Android, or a web session that identified itself. This is the
+    /// "contactable through Signal" bit the whole funnel is counted on; a fan
+    /// without it can only be reached by the email they may never open.
+    pub has_signal_install: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_event_interest_at: Option<OffsetDateTime>,
 }
@@ -68,6 +73,18 @@ pub struct FanLifecyclePolicy {
     /// with the default cooldown of 120 hours, days 3 to 14 allow at most two.
     /// A fan who has not invited anyone in two weeks has answered.
     pub referral_invite_until_days: u32,
+    /// Minimum signup age before a fan without Signal is asked to open it.
+    ///
+    /// The welcome lands first: an install ask inside the first message reads
+    /// as an app download nag rather than a reason to stay close.
+    pub signal_install_ask_after_days: u32,
+    /// Days after signup past which the install ask stops.
+    ///
+    /// Same bound shape as the referral invite: nothing records that a fan was
+    /// asked, so the window is what keeps "ask once" honest — days 2 to 9 with
+    /// the default 120-hour cooldown admit one, at the edges two. A fan who
+    /// has not opened Signal in that window has answered.
+    pub signal_install_ask_until_days: u32,
 }
 
 impl Default for FanLifecyclePolicy {
@@ -81,6 +98,8 @@ impl Default for FanLifecyclePolicy {
             dormant_after_days: 60,
             referral_invite_after_days: 3,
             referral_invite_until_days: 14,
+            signal_install_ask_after_days: 2,
+            signal_install_ask_until_days: 9,
         }
     }
 }
@@ -107,6 +126,15 @@ pub enum LifecycleTemplate {
     /// Not a milestone: it is an approach, so it waits for the cooldown like
     /// every other approach.
     ReferralInvite,
+    /// Ask a confirmed fan to open Signal — the app, or the web session that
+    /// B3 made count as the same thing.
+    ///
+    /// Twenty consented fans and one install is the funnel's quietest leak:
+    /// an email-only fan is unreachable by push, and a push-reachable fan is
+    /// the difference between a contactable audience and a mailing list. Like
+    /// the referral invite it is an approach, not a milestone — it waits for
+    /// the cooldown and never precedes the welcome.
+    SignalInstallAsk,
 }
 
 impl LifecycleTemplate {
@@ -257,6 +285,24 @@ pub fn evaluate_fan_lifecycle(
         };
     }
 
+    // The install ask. Placed after the welcome so it is never a fan's first
+    // contact, and before the referral invite: a fan who opens Signal becomes
+    // push-reachable, which is worth more to every later ask than an install
+    // deferred behind one. Bounded like the referral invite — a window, not
+    // an "asked" flag — so it asks once, at the edges twice, then stops.
+    if !snapshot.has_signal_install
+        && snapshot.last_marketing_touch_at.is_some()
+        && now - snapshot.created_at
+            >= Duration::days(i64::from(policy.signal_install_ask_after_days))
+        && now - snapshot.created_at
+            < Duration::days(i64::from(policy.signal_install_ask_until_days))
+    {
+        return FanLifecycleDecision::RequestMessage {
+            template: LifecycleTemplate::SignalInstallAsk,
+            confidence: Confidence::saturating_from_basis_points(8_800),
+        };
+    }
+
     // The ask. Placed after the welcome so it is never a fan's first contact,
     // and before dormancy so it reaches somebody still paying attention.
     //
@@ -329,6 +375,7 @@ mod tests {
             last_marketing_touch_at: None,
             has_paid_ticket: false,
             has_referral_code: true,
+            has_signal_install: true,
             paid_ticket_count: 0,
             qualified_referrals: 0,
             last_qualified_referral_at: None,
@@ -426,6 +473,72 @@ mod tests {
             evaluate_fan_lifecycle(data, policy, now()),
             FanLifecycleDecision::RequestMessage {
                 template: LifecycleTemplate::ReturningFanThankYou,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_confirmed_fan_without_signal_is_asked_to_open_it() {
+        // Twenty consented fans and one install is the funnel's quietest
+        // leak; the ask must actually fire.
+        let mut data = eligible();
+        data.has_signal_install = false;
+        data.last_marketing_touch_at = Some(now() - Duration::days(7));
+        data.created_at = now() - Duration::days(4);
+        assert_eq!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::SignalInstallAsk,
+                confidence: Confidence::saturating_from_basis_points(8_800),
+            }
+        );
+    }
+
+    #[test]
+    fn the_install_ask_is_never_the_first_contact() {
+        let mut data = eligible();
+        data.has_signal_install = false;
+        data.last_marketing_touch_at = None;
+        data.created_at = now() - Duration::days(4);
+        // No welcome yet — the welcome fires instead, and the ask waits.
+        assert!(matches!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::Welcome,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_install_ask_stops_outside_its_window() {
+        // The window is the bound, not an "asked" flag: past it the fan is
+        // left alone rather than nagged forever.
+        let mut data = eligible();
+        data.has_signal_install = false;
+        data.last_marketing_touch_at = Some(now() - Duration::days(30));
+        data.created_at = now() - Duration::days(30);
+        assert!(!matches!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::SignalInstallAsk,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_installed_fan_is_never_asked_to_install() {
+        let mut data = eligible();
+        // fixture default already true; make it explicit
+        data.has_signal_install = true;
+        data.last_marketing_touch_at = Some(now() - Duration::days(7));
+        data.created_at = now() - Duration::days(4);
+        assert!(!matches!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::SignalInstallAsk,
                 ..
             }
         ));

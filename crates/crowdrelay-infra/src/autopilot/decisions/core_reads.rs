@@ -190,7 +190,13 @@ macro_rules! decision_core_reads {
                         WHERE code.workspace_id = fan.workspace_id
                           AND code.fan_id = fan.id
                           AND code.active
-                    ) AS has_referral_code
+                    ) AS has_referral_code,
+                    EXISTS (
+                        SELECT 1
+                        FROM signal_installations AS install
+                        WHERE install.workspace_id = fan.workspace_id
+                          AND install.fan_id = fan.id
+                    ) AS has_signal_install
                 FROM fans AS fan
                 LEFT JOIN LATERAL (
                     SELECT consent.granted

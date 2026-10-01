@@ -257,6 +257,18 @@ impl TenantBrandSettings {
         Some(format!("{}/#wydania", self.member_area_url()?))
     }
 
+    /// The public Signal page — where a fan installs the app or opens the web
+    /// hub. Locale forks the same way `member_area_path_for` does: the Polish
+    /// route carries its `pl/` prefix.
+    #[must_use]
+    pub fn signal_page_url(&self, locale: &str) -> Option<String> {
+        if locale.starts_with("pl") {
+            Some(format!("{}/pl/signal", self.site_root()?))
+        } else {
+            Some(format!("{}/signal", self.site_root()?))
+        }
+    }
+
     /// The member-area path in the reader's locale: the configured path for
     /// `pl*`, and the same path with a leading `pl/` segment dropped for
     /// everyone else — `pl/latarnik` reads `latarnik` to an English fan.

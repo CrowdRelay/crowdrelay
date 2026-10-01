@@ -278,6 +278,47 @@ paths:
         '400': { $ref: '#/components/responses/PrivateProblem' }
         '401': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
+  /me/signal/installations:
+    post:
+      operationId: linkMySignalInstallation
+      summary: Record a Signal installation and attach it to the authenticated fan
+      description: >-
+        The identified half of the install funnel for Signal surfaces that
+        hold no push transport. `/me/push/endpoints` can only link an install
+        that already has a row, and nothing on the web surface ever wrote one
+        -- a fan could open Signal every day and the funnel still read zero.
+        This call records and links in one step, so a web Signal session with
+        a fan session is counted and counted *as* that fan. The session cookie
+        is the only fan identity accepted; a caller cannot name someone else's
+        fan. Idempotent: `linked` is true only on the first identification.
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installation_id, platform]
+              properties:
+                installation_id: { type: string, minLength: 1, maxLength: 128 }
+                platform: { type: string, enum: [android, ios, desktop, web] }
+                app_version: { type: string, maxLength: 32 }
+      responses:
+        '200':
+          description: Installation recorded; `linked` reports whether this call made the first fan attribution.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [recorded, linked]
+                properties:
+                  recorded: { type: boolean }
+                  linked: { type: boolean }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '422': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
   /me/location:
     post:
       operationId: setMyLocation

@@ -473,6 +473,7 @@ struct LifecycleSnapshotRow {
     qualified_referrals: i64,
     last_qualified_referral_at: Option<OffsetDateTime>,
     has_referral_code: bool,
+    has_signal_install: bool,
 }
 
 #[derive(Debug, FromRow)]
