@@ -116,6 +116,14 @@ impl AcquisitionRepository for StubAcquisition {
     ) -> Result<Vec<UpsertedSmartLink>, RepositoryError> {
         Ok(Vec::new())
     }
+    async fn link_click_stats(
+        &self,
+        _workspace_id: WorkspaceId,
+        _slugs: &[String],
+        _now: time::OffsetDateTime,
+    ) -> Result<Vec<crowdrelay_application::LinkClickStats>, RepositoryError> {
+        Ok(Vec::new())
+    }
     async fn load_or_create_fan_referral_code(
         &self,
         _workspace_id: WorkspaceId,

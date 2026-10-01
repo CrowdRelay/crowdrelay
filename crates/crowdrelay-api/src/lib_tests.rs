@@ -20,7 +20,7 @@ mod tests {
     use crowdrelay_application::{
         AcquisitionRepository, AdmissionRepository, ClaimAdmissionPass, ConfirmFan,
         ConfirmFanCommand, CreateEventCommand, CreatedEvent, EventCache, EventRepository,
-        FanLifecycleRepository, IssueAdmissionPass,
+        FanLifecycleRepository, IssueAdmissionPass, LinkClickStats,
         ListCities, ListFanEventInterests, LoadAdmissionPass, LoadReferralProgress,
         RedeemAdmissionPass, RedeemCoupon, RedeemCouponCommand, RedirectCache, RedirectContext,
         ReferralRepository,

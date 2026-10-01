@@ -104,6 +104,7 @@ pub mod hook_scorecard;
 pub mod ids;
 pub mod iso_date;
 pub mod join_ask;
+pub mod join_kit;
 pub mod latarnik_invite;
 pub mod learning;
 pub mod listing;

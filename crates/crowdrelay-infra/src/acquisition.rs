@@ -12,7 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use crowdrelay_application::{
-    AcquisitionRepository, RedirectContext, RepositoryError, SignupFanCommand,
+    AcquisitionRepository, LinkClickStats, RedirectContext, RepositoryError, SignupFanCommand,
     UpsertSmartLinkCommand, UpsertedSmartLink,
 };
 use crowdrelay_domain::{
@@ -207,6 +207,50 @@ impl AcquisitionRepository for PostgresAcquisitionRepository {
                         channel_community: row.channel_community,
                         channel_creative: row.channel_creative,
                         campaign_id: row.campaign_id.map(CampaignId::from_uuid),
+                    })
+                })
+                .collect()
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn link_click_stats(
+        &self,
+        workspace_id: WorkspaceId,
+        slugs: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Vec<LinkClickStats>, RepositoryError> {
+        self.bounded(async move {
+            let rows = sqlx::query_as::<_, (String, i64, i64)>(
+                r#"
+                SELECT link.slug,
+                       count(click.id)::bigint AS clicks_total,
+                       count(click.id) FILTER (
+                           WHERE click.occurred_at >= $3 - INTERVAL '7 days'
+                       )::bigint AS clicks_7d
+                FROM smart_links AS link
+                LEFT JOIN click_events AS click
+                  ON click.workspace_id = link.workspace_id
+                 AND click.smart_link_id = link.id
+                WHERE link.workspace_id = $1
+                  AND link.slug = ANY($2)
+                GROUP BY link.id, link.slug
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(slugs)
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::from_sqlx)?;
+            rows.into_iter()
+                .map(|(slug, clicks_total, clicks_7d)| {
+                    Ok(LinkClickStats {
+                        slug,
+                        clicks_total: u32::try_from(clicks_total)
+                            .map_err(|_| StoreError::Unexpected)?,
+                        clicks_7d: u32::try_from(clicks_7d).map_err(|_| StoreError::Unexpected)?,
                     })
                 })
                 .collect()
@@ -813,6 +857,15 @@ mod tests {
             &self,
             _workspace_id: WorkspaceId,
         ) -> Result<Vec<UpsertedSmartLink>, RepositoryError> {
+            unreachable!("not used by click buffer tests")
+        }
+
+        async fn link_click_stats(
+            &self,
+            _workspace_id: WorkspaceId,
+            _slugs: &[String],
+            _now: OffsetDateTime,
+        ) -> Result<Vec<LinkClickStats>, RepositoryError> {
             unreachable!("not used by click buffer tests")
         }
 
