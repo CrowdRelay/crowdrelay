@@ -458,7 +458,8 @@ async fn concert_checkin_alone_can_activate_a_consented_recent_fan()
         .execute(&pool)
         .await?;
 
-    let now = OffsetDateTime::now_utc();
+    // PostgreSQL timestamps have microsecond precision.
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0)?;
     let fan_id = Uuid::now_v7();
     let created_at = now - time::Duration::days(2);
     sqlx::query(

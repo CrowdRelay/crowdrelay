@@ -55,15 +55,10 @@ async fn load_failed_drop_surge_tasks(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<HashMap<Uuid, Vec<DropSurgeLaneFailure>>, RepositoryError> {
-    if !sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
-        .fetch_one(&repo.pool)
-        .await
-        .map_err(map_sqlx)?
-    {
+    let Some(completion) = task_completion_projection(&repo.pool).await? else {
         return Ok(HashMap::new());
-    }
-    let rows = sqlx::query_as::<_, (Uuid, String, i64, OffsetDateTime)>(
-        r#"
+    };
+    let sql = r#"
         SELECT source.id,
                'community:' || split_part(action.idempotency_key, ':', 5) AS lane,
                count(*)::bigint,
@@ -73,7 +68,7 @@ async fn load_failed_drop_surge_tasks(
           ON action.workspace_id = source.workspace_id
          AND action.idempotency_key LIKE 'action:drop_surge:' || source.id::text || ':community:%'
         JOIN LATERAL (
-            SELECT t.status, t.created_at, t.completed_at
+            SELECT t.status, t.created_at, __TASK_COMPLETED_AT__
             FROM agent_service_tasks t
             WHERE t.workspace_id = action.workspace_id
               AND t.metadata->>'action_id' = action.id::text
@@ -86,12 +81,13 @@ async fn load_failed_drop_surge_tasks(
           AND action.status = 'succeeded'
           AND task.status = 'failed'
         GROUP BY source.id, lane
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_all(&repo.pool)
-    .await
-    .map_err(map_sqlx)?;
+        "#
+    .replace("__TASK_COMPLETED_AT__", completion);
+    let rows = sqlx::query_as::<_, (Uuid, String, i64, OffsetDateTime)>(&sql)
+        .bind(workspace_id.into_uuid())
+        .fetch_all(&repo.pool)
+        .await
+        .map_err(map_sqlx)?;
     let mut failures: HashMap<Uuid, Vec<DropSurgeLaneFailure>> = HashMap::new();
     for (source, lane, count, last_failed_at) in rows {
         failures

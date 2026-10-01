@@ -107,6 +107,31 @@ pub(super) use show_growth_execution::*;
 pub(super) use snapshots::*;
 pub(super) use source_campaign::*;
 
+/// Agent tables belong to another service. Older/minimal installations have
+/// task status and creation time but no completion timestamp. Keep reading
+/// genuine failure receipts there instead of aborting every supply/relay read.
+/// The returned SQL is static and assumes the inner task alias is `t`.
+async fn task_completion_projection(
+    pool: &sqlx::PgPool,
+) -> Result<Option<&'static str>, RepositoryError> {
+    let has_completion = sqlx::query_scalar::<_, Option<bool>>(
+        "SELECT CASE WHEN to_regclass('agent_service_tasks') IS NULL THEN NULL
+         ELSE EXISTS (SELECT 1 FROM pg_attribute
+                      WHERE attrelid = to_regclass('agent_service_tasks')
+                        AND attname = 'completed_at' AND NOT attisdropped) END",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(has_completion.map(|present| {
+        if present {
+            "t.completed_at"
+        } else {
+            "NULL::timestamptz AS completed_at"
+        }
+    }))
+}
+
 /// The gate every smart-link destination must pass before it is inserted:
 /// `smart_links.destination_url` is CHECKed `~* '^https?://'` — a looser gate
 /// here turns a malformed URL into a CHECK violation that wedges the whole

@@ -23,10 +23,7 @@ async fn separate_horizons_survive_checkpoint_restart_and_teach_durability_once(
     let once = serde_json::to_value(&complete.model)?;
     repo.save_brain_state(workspace, "causal_model", &once)
         .await?;
-    assert_eq!(
-        serde_json::to_value(repo.load_causal_model(workspace).await?.model)?,
-        once
-    );
+    assert_checkpoint_is_unchanged(&repo, workspace).await?;
     Ok(())
 }
 
@@ -44,10 +41,7 @@ async fn a_malformed_only_batch_advances_without_legacy_fallback_or_repeated_wor
     let once = serde_json::to_value(learned.model)?;
     repo.save_brain_state(workspace, "causal_model", &once)
         .await?;
-    assert_eq!(
-        serde_json::to_value(repo.load_causal_model(workspace).await?.model)?,
-        once
-    );
+    assert_checkpoint_is_unchanged(&repo, workspace).await?;
     Ok(())
 }
 
@@ -86,10 +80,26 @@ async fn malformed_context_is_preserved_but_cannot_teach_a_fabricated_cell()
         &serde_json::to_value(&learned.model)?,
     )
     .await?;
+    assert_checkpoint_is_unchanged(&repo, workspace).await?;
+    Ok(())
+}
+
+// Compare against the state decoded from the actual PostgreSQL JSONB row.
+// A decimal round trip can change the in-memory f64 by one ULP; that is not
+// another learning update. No tolerance is allowed between decoded models.
+async fn assert_checkpoint_is_unchanged(
+    repo: &PostgresAutopilotRepository,
+    workspace: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (stored, _) = repo
+        .load_brain_state(workspace, "causal_model")
+        .await?
+        .ok_or("checkpoint")?;
+    let expected: crowdrelay_brain::CausalModel = serde_json::from_value(stored)?;
     let repeated = repo.load_causal_model(workspace).await?;
     assert_eq!(
         serde_json::to_value(repeated.model)?,
-        serde_json::to_value(learned.model)?
+        serde_json::to_value(expected)?
     );
     Ok(())
 }
