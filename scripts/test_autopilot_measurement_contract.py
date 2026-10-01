@@ -130,6 +130,28 @@ class AutopilotMeasurementContract(unittest.TestCase):
         self.assertIn("receipt.status='succeeded'", observation)
         self.assertIn("receipt.provider_reference IS NOT NULL", observation)
 
+    def test_action_owned_links_are_live_with_and_without_agent_tasks(self) -> None:
+        attribution = text(
+            "crates/crowdrelay-infra/src/autopilot/measurement/observation/attributed_fans.rs"
+        )
+        plain = attribution.split(
+            "const FIRST_TRACKED_POST:", 1
+        )[1].split(
+            "const FIRST_TRACKED_POST_WITH_TASKS:", 1
+        )[0]
+        with_tasks = attribution.split(
+            "const FIRST_TRACKED_POST_WITH_TASKS:", 1
+        )[1].split(
+            "const ATTRIBUTED_FANS:", 1
+        )[0]
+
+        self.assertEqual(plain.count("FROM smart_links AS link"), 1)
+        self.assertEqual(with_tasks.count("FROM smart_links AS link"), 1)
+        for query in (plain, with_tasks):
+            self.assertIn("action.id=link.action_id", query)
+            self.assertIn("action.status='succeeded'", query)
+            self.assertIn("action.finished_at IS NOT NULL", query)
+
     def test_claim_quarantines_unknown_kind_before_commit(self) -> None:
         measurement = text("crates/crowdrelay-infra/src/autopilot/measurement.rs")
         parse_pos = measurement.index("match claimed_measurement(row)")
