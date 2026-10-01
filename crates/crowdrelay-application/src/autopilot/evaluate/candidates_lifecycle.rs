@@ -211,3 +211,30 @@ fn relationship_research_candidate(
         ),
     }))
 }
+
+
+impl<'a, R> EvaluateAutopilot<'a, R>
+where
+    R: AutopilotDecisionRepository,
+{
+    async fn evaluate_relationship_research(
+        &self,
+        policy: &AutopilotPolicy,
+        now: OffsetDateTime,
+        limits: &mut CycleLimits<'_>,
+        report: &mut AutopilotCycleReport,
+    ) -> Result<(), AutopilotError> {
+        let research = self
+            .repository
+            .load_relationship_research_snapshots(self.workspace_id, now)
+            .await?;
+        for snapshot in research {
+            if let Some(candidate) =
+                relationship_research_candidate(snapshot, policy, now)?
+            {
+                self.persist(&candidate, limits, report).await?;
+            }
+        }
+        Ok(())
+    }
+}
