@@ -283,6 +283,21 @@ async fn scout_files_dedupe_across_dialects_and_preserve_status_on(pool: PgPool)
         "the cross-file duplicate should refresh, not insert"
     );
 
+    // The later registry sighting enriches the existing opportunity metadata
+    // rather than losing its dedupe/evidence keys on the conflict path.
+    let dedupe_key: Option<String> = sqlx::query_scalar(
+        "SELECT metadata->>'dedupe_key' FROM team_opportunities \
+         WHERE workspace_id = $1 AND external_key = 'url:euroblast.net/en/contact'",
+    )
+    .bind(workspace_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        dedupe_key.as_deref(),
+        Some("euroblast|band-application|virya"),
+        "registry metadata did not enrich the existing opportunity"
+    );
+
     // Three rows total — the same destination URL asserted by two
     // dialects in two files is one opportunity.
     let count: i64 = sqlx::query_scalar(
