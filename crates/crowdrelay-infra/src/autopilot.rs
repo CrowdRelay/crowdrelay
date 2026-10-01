@@ -474,6 +474,9 @@ struct LifecycleSnapshotRow {
     last_qualified_referral_at: Option<OffsetDateTime>,
     has_referral_code: bool,
     has_signal_install: bool,
+    checkin_at: Option<OffsetDateTime>,
+    checkin_event_slug: Option<String>,
+    checkin_event_title: Option<String>,
 }
 
 #[derive(Debug, FromRow)]

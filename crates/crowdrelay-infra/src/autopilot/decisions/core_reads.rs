@@ -196,7 +196,10 @@ macro_rules! decision_core_reads {
                         FROM signal_installations AS install
                         WHERE install.workspace_id = fan.workspace_id
                           AND install.fan_id = fan.id
-                    ) AS has_signal_install
+                    ) AS has_signal_install,
+                    last_checkin.checked_in_at AS checkin_at,
+                    last_checkin.event_slug AS checkin_event_slug,
+                    last_checkin.event_title AS checkin_event_title
                 FROM fans AS fan
                 LEFT JOIN LATERAL (
                     SELECT consent.granted
@@ -250,6 +253,19 @@ macro_rules! decision_core_reads {
                     ) DESC, campaign.id DESC
                     LIMIT 1
                 ) AS campaign_touch ON true
+                LEFT JOIN LATERAL (
+                    SELECT checkin.checked_in_at,
+                           event.slug AS event_slug,
+                           event.title AS event_title
+                    FROM concert_checkins AS checkin
+                    JOIN events AS event
+                      ON event.workspace_id = checkin.workspace_id
+                     AND event.id = checkin.event_id
+                    WHERE checkin.workspace_id = fan.workspace_id
+                      AND checkin.fan_id = fan.id
+                    ORDER BY checkin.checked_in_at DESC, checkin.id DESC
+                    LIMIT 1
+                ) AS last_checkin ON true
                 WHERE fan.workspace_id = $1
                   AND fan.status = 'active'
                   AND (synesthesia.completed_at IS NULL OR synesthesia.completed_at <= $2)
