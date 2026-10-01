@@ -301,7 +301,7 @@ paths:
               additionalProperties: false
               required: [installation_id, platform]
               properties:
-                installation_id: { type: string, minLength: 8, maxLength: 160 }
+                installation_id: { type: string, minLength: 1, maxLength: 128 }
                 platform: { type: string, enum: [android, ios, desktop, web] }
                 app_version: { type: string, maxLength: 32 }
       responses:
@@ -1084,8 +1084,8 @@ paths:
               properties:
                 installation_id:
                   type: string
-                  minLength: 8
-                  maxLength: 160
+                  minLength: 1
+                  maxLength: 128
                 platform:
                   type: string
                   enum: [android, ios, desktop, web]
@@ -14833,7 +14833,7 @@ components:
     ChannelPerformance:
       type: object
       additionalProperties: false
-      required: [attribution, signups, activated_30d, departed]
+      required: [attribution, signups, activated_30d, departed, sufficient_evidence]
       properties:
         attribution: { $ref: '#/components/schemas/ChannelAttribution' }
         signups:
@@ -14848,7 +14848,14 @@ components:
           type: integer
           minimum: 0
           nullable: true
-          description: Null when there are no signups to divide by; a rate from an empty denominator is not a zero.
+          description: Null when fewer than four fans stayed to divide by; a rate over three people is luck wearing a percentage, and a rate from an empty denominator is not a zero.
+        sufficient_evidence:
+          type: boolean
+          description: >
+            True when the channel produced at least four fans (stayed or
+            departed — both count). Below the floor every derived number is
+            suppressed: "insufficient evidence" is not the same statement
+            as zero.
         best_action:
           type: string
           nullable: true
@@ -14863,7 +14870,7 @@ components:
     UnattributedGroup:
       type: object
       additionalProperties: false
-      required: [reason, remedy, signups, activated_30d, departed]
+      required: [reason, remedy, signups, activated_30d, departed, sufficient_evidence]
       properties:
         reason:
           type: string
@@ -14872,6 +14879,9 @@ components:
         signups: { type: integer, minimum: 0 }
         activated_30d: { type: integer, minimum: 0 }
         departed: { type: integer, minimum: 0 }
+        sufficient_evidence:
+          type: boolean
+          description: Same four-fan floor as ChannelPerformance — three unattributed fans are insufficient evidence too.
     AcquisitionChannels:
       type: object
       additionalProperties: false

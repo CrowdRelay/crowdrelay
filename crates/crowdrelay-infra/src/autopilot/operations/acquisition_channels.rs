@@ -8,7 +8,7 @@
 use super::*;
 use crate::autopilot::bounded_u32;
 use crowdrelay_application::autopilot::{
-    AcquisitionChannels, ChannelPerformance, UnattributedGroup,
+    AcquisitionChannels, ChannelPerformance, MIN_CHANNEL_EVIDENCE_FANS, UnattributedGroup,
 };
 use crowdrelay_domain::acquisition_channel::{
     AttributionEvidence, ChannelAttribution, ChannelIdentity, attribute_channel,
@@ -253,6 +253,10 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
             }),
         });
 
+        // Each claim is floored on its own denominator. The channel-level
+        // "did it produce fans" flag counts everyone it produced — stayed or
+        // departed — while the rate's denominator is only those who stayed.
+        let produced = signups.saturating_add(departed);
         match attribution {
             ChannelAttribution::Unattributed { reason } => {
                 // Merge rather than append: two groups can share a
@@ -263,6 +267,9 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                     existing.signups = existing.signups.saturating_add(signups);
                     existing.activated_30d = existing.activated_30d.saturating_add(activated);
                     existing.departed = existing.departed.saturating_add(departed);
+                    existing.sufficient_evidence =
+                        existing.departed.saturating_add(existing.signups)
+                            >= MIN_CHANNEL_EVIDENCE_FANS;
                 } else {
                     unattributed.push(UnattributedGroup {
                         reason,
@@ -270,6 +277,7 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                         signups,
                         activated_30d: activated,
                         departed,
+                        sufficient_evidence: produced >= MIN_CHANNEL_EVIDENCE_FANS,
                     });
                 }
             }
@@ -277,11 +285,13 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                 attribution: attributed,
                 signups,
                 activated_30d: activated,
-                // A rate from an empty denominator is not a zero.
-                activation_basis_points: (signups > 0).then(|| {
+                // A rate from an empty denominator is not a zero, and a rate
+                // over fewer than four who stayed is luck, not signal.
+                activation_basis_points: (signups >= MIN_CHANNEL_EVIDENCE_FANS).then(|| {
                     u32::try_from(u64::from(activated).saturating_mul(10_000) / u64::from(signups))
                         .unwrap_or(u32::MAX)
                 }),
+                sufficient_evidence: produced >= MIN_CHANNEL_EVIDENCE_FANS,
                 best_action: row.best_action.as_deref().and_then(MeaningfulAction::parse),
                 departed,
             }),

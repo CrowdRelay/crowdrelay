@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::common;
 use crowdrelay_application::autopilot::AutopilotControlRepository;
 use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::acquisition_channel::ChannelAttribution;
 use crowdrelay_infra::{autopilot::PostgresAutopilotRepository, config::DatabaseConfig};
 use time::macros::datetime;
 use uuid::Uuid;
@@ -184,6 +185,109 @@ async fn a_channel_everyone_left_still_appears() -> Result<(), Box<dyn std::erro
     assert_eq!(
         channel.activation_basis_points, None,
         "no one stayed, so there is no rate — not a zero"
+    );
+    assert!(
+        !channel.sufficient_evidence,
+        "three produced fans are luck, not evidence"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_floor_separates_insufficient_evidence_from_a_stated_zero()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repository, pool) = repository().await?;
+    let workspace_id = WorkspaceId::new();
+    let ws = workspace_id.into_uuid();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Floor')")
+        .bind(ws)
+        .bind(format!("floor-{}", ws.simple()))
+        .execute(&pool)
+        .await?;
+
+    // Three arrivals under the small link — two stayed, one left. Nobody can
+    // read a percentage off three people, so the channel reports evidence
+    // below the floor and the rate is suppressed rather than rounded.
+    let thin_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO smart_links (id, workspace_id, slug, destination_url, channel_source)
+         VALUES ($1, $2, $3, 'https://band.example/signal', 'reddit')",
+    )
+    .bind(thin_id)
+    .bind(ws)
+    .bind(format!("thin-{}", thin_id.simple()))
+    .execute(&pool)
+    .await?;
+    arrive(&pool, workspace_id, thin_id, "thin-a", "active", None).await?;
+    arrive(&pool, workspace_id, thin_id, "thin-b", "active", None).await?;
+    arrive(
+        &pool,
+        workspace_id,
+        thin_id,
+        "thin-gone",
+        "unsubscribed",
+        None,
+    )
+    .await?;
+
+    // Four arrivals under the fat link — all stayed, none did anything
+    // meaningful yet. Four is the floor: the channel can state a real zero
+    // because a stated zero now rests on evidence.
+    let fat_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO smart_links (id, workspace_id, slug, destination_url, channel_source)
+         VALUES ($1, $2, $3, 'https://band.example/signal', 'discord')",
+    )
+    .bind(fat_id)
+    .bind(ws)
+    .bind(format!("fat-{}", fat_id.simple()))
+    .execute(&pool)
+    .await?;
+    for label in ["fat-a", "fat-b", "fat-c", "fat-d"] {
+        arrive(&pool, workspace_id, fat_id, label, "active", None).await?;
+    }
+
+    let readout = repository
+        .load_acquisition_channels(workspace_id, datetime!(2026-09-20 12:00 UTC))
+        .await?;
+    assert_eq!(readout.channels.len(), 2, "{readout:?}");
+    let channel = |source: &str| {
+        readout
+            .channels
+            .iter()
+            .find(|c| {
+                matches!(
+                    &c.attribution,
+                    ChannelAttribution::Attributed(id) if id.source == source
+                )
+            })
+            .expect(source)
+    };
+
+    let thin = channel("reddit");
+    assert_eq!(thin.signups, 2);
+    assert_eq!(thin.departed, 1);
+    assert!(
+        !thin.sufficient_evidence,
+        "three produced fans are below the floor"
+    );
+    assert_eq!(
+        thin.activation_basis_points, None,
+        "the rate is suppressed under the floor — not stated as a number"
+    );
+
+    let fat = channel("discord");
+    assert_eq!(fat.signups, 4);
+    assert_eq!(fat.departed, 0);
+    assert!(
+        fat.sufficient_evidence,
+        "four produced fans clear the floor"
+    );
+    assert_eq!(
+        fat.activation_basis_points,
+        Some(0),
+        "a stated zero is a claim made on evidence, not a missing number"
     );
     Ok(())
 }
