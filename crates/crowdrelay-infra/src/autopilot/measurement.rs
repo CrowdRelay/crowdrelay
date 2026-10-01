@@ -1,6 +1,8 @@
 //! Split PostgreSQL Autopilot adapter implementation.
 
 mod fan_windows;
+mod fence;
+mod late_publication_recovery;
 mod observation;
 mod readiness;
 
@@ -79,6 +81,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             .fetch_one(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            late_publication_recovery::recover(&mut transaction, workspace_id, with_tasks, now).await?;
             let claim_sql = fan_windows::claim_sql(with_tasks);
             let rows = sqlx::query_as::<_, ClaimedMeasurementRow>(&claim_sql)
                 .bind(workspace_id.into_uuid())
@@ -214,6 +217,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
             }
             let observed_value = observation.value;
             let mut transaction = self.pool.begin().await.map_err(map_sqlx)?;
+            fence::lock(&mut transaction, workspace_id, measurement).await?;
             let metric_key = format!("effect.{}", measurement.kind.as_str());
             let assessment = effect_assessment_str(effect.assessment);
             // The content funnel's own report: unique visitors, canonical
@@ -824,7 +828,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                     started_at = CASE WHEN $4 AND attempt_count < 3 THEN NULL ELSE started_at END,
                     finished_at = CASE WHEN $4 AND attempt_count < 3 THEN NULL ELSE $3 END,
                     last_error_kind = $5
-                WHERE workspace_id = $1 AND id = $2 AND status = 'processing'
+                WHERE workspace_id = $1 AND id = $2 AND status = 'processing' AND attempt_count=$6
                 RETURNING action_id, measurement_kind, status
                 "#,
                 )
@@ -833,6 +837,7 @@ impl AutopilotMeasurementRepository for PostgresAutopilotRepository {
                 .bind(now)
                 .bind(retryable)
                 .bind(error_kind)
+                .bind(i32::try_from(measurement.attempt_number).map_err(|_| RepositoryError::Unexpected)?)
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(map_sqlx)?;

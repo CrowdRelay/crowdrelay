@@ -64,6 +64,7 @@ pub struct FanActionRequest {
 
 #[derive(Serialize)]
 struct FanConfirmationResponse {
+    capture_context: Option<crowdrelay_domain::acquisition::FanCaptureContext>,
     fan_id: crowdrelay_domain::FanId,
     status: FanStatus,
     referral_url: String,
@@ -488,14 +489,14 @@ pub async fn confirm_fan(
                 .into_response();
         }
     };
-    let canonical_identity = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT normalized_email, display_name FROM fans WHERE workspace_id=$1 AND id=$2",
+    let canonical_identity = sqlx::query_as::<_, (String, Option<String>, Option<serde_json::Value>)>(
+        "SELECT fan.normalized_email, fan.display_name, context.context FROM fans fan LEFT JOIN fan_capture_contexts context ON context.workspace_id=fan.workspace_id AND context.fan_id=fan.id WHERE fan.workspace_id=$1 AND fan.id=$2",
     )
     .bind(state.fan_lifecycle.workspace_id.into_uuid())
     .bind(result.fan_id.into_uuid())
     .fetch_optional(&state.database)
     .await;
-    let (email, display_name) = match canonical_identity {
+    let (email, display_name, capture_context) = match canonical_identity {
         Ok(Some(identity)) => identity,
         Ok(None) => {
             tracing::error!(fan_id=%result.fan_id, "confirmed fan disappeared before identity response");
@@ -530,6 +531,7 @@ pub async fn confirm_fan(
             (SET_COOKIE, cookie),
         ],
         Json(FanConfirmationResponse {
+            capture_context: capture_context.and_then(|v| serde_json::from_value::<crowdrelay_domain::acquisition::FanCaptureContext>(v).ok()).filter(|c| c.is_valid()),
             fan_id: result.fan_id,
             status: result.status,
             referral_url,

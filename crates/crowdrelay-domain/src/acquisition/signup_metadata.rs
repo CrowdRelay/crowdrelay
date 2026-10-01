@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 /// These values must never authorize changes to an existing fan.
 #[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SignupMetadata {
+    /// Frozen at initial signup; anonymous retries cannot overwrite it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_context: Option<super::FanCaptureContext>,
     /// Opt-in and radius for the explicitly supplied city.
     pub nearby_gigs: Option<(bool, i32)>,
     /// Meta browser identifier.

@@ -302,6 +302,10 @@ pub enum MarketingConsentError {
     InvalidSource,
 }
 
+#[path = "acquisition/capture_context.rs"]
+mod capture_context;
+pub use capture_context::{CaptureOffer, FanCaptureContext};
+
 #[path = "acquisition/signup_metadata.rs"]
 mod signup_metadata;
 pub use signup_metadata::SignupMetadata;
@@ -402,6 +406,10 @@ impl FanSignup {
             .is_some_and(|(_, radius)| !(25..=500).contains(&radius))
         {
             return Err(FanSignupError::InvalidNearbyRadius);
+        }
+        if self.initial_metadata.as_ref().and_then(|m| m.capture_context.as_ref())
+            .is_some_and(|c| !c.is_valid()) {
+            return Err(FanSignupError::InvalidCaptureContext);
         }
         if !self.consent.granted() {
             return Err(FanSignupError::MarketingConsentRequired);
@@ -539,6 +547,8 @@ pub enum FanSignupError {
     /// The nearby show radius was outside the supported range.
     #[error("nearby show radius must be between 25 and 500 km")]
     InvalidNearbyRadius,
+    #[error("invalid fan capture navigation context")]
+    InvalidCaptureContext,
     /// The display name was empty, too long, or contained control characters.
     #[error("display name must contain at most 120 bytes and no control characters")]
     InvalidDisplayName,
