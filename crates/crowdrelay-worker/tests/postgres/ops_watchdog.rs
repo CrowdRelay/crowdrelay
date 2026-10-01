@@ -32,6 +32,7 @@ fn watchdog(pool: PgPool, workspace_id: WorkspaceId) -> OpsWatchdogWorker {
             },
             reddit: RedditPosture::Publishes,
         },
+        true,
     )
 }
 

@@ -37,6 +37,39 @@ mod acquisition_tests {
         assert_eq!(raised.details["capture_clicks_7d"], 35);
     }
 
+    /// `fans.capture_disabled` fires only when the page is unconfigured AND
+    /// capture-eligible clicks arrived. Non-capture clicks (youtube) alone,
+    /// no clicks at all, or a configured page all stay silent.
+    #[test]
+    fn capture_clicks_with_no_capture_page_raise_a_critical() {
+        let find = |snapshot: &OpsSnapshot| {
+            conditions(snapshot, publishing())
+                .into_iter()
+                .find(|c| c.key == "fans.capture_disabled")
+                .expect("the condition is evaluated")
+        };
+        let mut snapshot = healthy();
+        snapshot.capture_page_configured = false;
+
+        // Nothing arrived: the switch would change nothing, so no page.
+        assert!(!find(&snapshot).active);
+
+        // Only youtube clicks: they are already on YouTube, not capturable.
+        snapshot.clicks_7d_by_channel = Some(json!({"youtube": 12}));
+        assert!(!find(&snapshot).active);
+
+        // Capture-eligible clicks went past an unconfigured page.
+        snapshot.clicks_7d_by_channel = Some(json!({"telegram": 4, "youtube": 12, "reddit": 3}));
+        let raised = find(&snapshot);
+        assert!(raised.active);
+        assert_eq!(raised.severity, "critical");
+        assert_eq!(raised.details["capture_clicks_7d"], 7);
+
+        // Configured: the same clicks land on /watch, so it clears.
+        snapshot.capture_page_configured = true;
+        assert!(!find(&snapshot).active);
+    }
+
     /// Nobody ever joining is the stall at its most extreme.
     #[test]
     fn never_having_acquired_a_fan_is_the_stall() {

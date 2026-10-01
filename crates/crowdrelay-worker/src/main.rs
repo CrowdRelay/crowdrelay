@@ -468,6 +468,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         OPS_WATCHDOG_INTERVAL,
         config.database.operation_timeout,
         posture,
+        config.watch_page_origin.is_some(),
     );
     let manual_mode = !posture.reddit.publishes();
     // The community executor re-mints fresh Meta media URLs at post time — the

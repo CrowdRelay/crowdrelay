@@ -37,7 +37,7 @@ fn release_series_cannot_inherit_a_fan_experiments_causal_quality() {
     assert_eq!(randomized.as_object().unwrap().len(), 2);
     assert!(randomized.get("release_channel_lift").is_none());
     let mut model = CausalModel::new();
-    apply_evidence_to_model_with_contrast(&mut model, &[row.clone()], &[], None);
+    apply_evidence_to_model_with_contrast(&mut model, std::slice::from_ref(&row), &[], None);
     let once = serde_json::to_value(&model.metric_posteriors).unwrap();
     apply_evidence_to_model_with_contrast(&mut model, &[row], &[], Some(at));
     assert_eq!(serde_json::to_value(model.metric_posteriors).unwrap(), once);
