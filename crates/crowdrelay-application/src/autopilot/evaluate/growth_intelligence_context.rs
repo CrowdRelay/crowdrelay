@@ -7,6 +7,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         &self,
         policy: &AutopilotPolicy,
         evidence: &EvidenceLedger,
+        loaded_model: &LoadedCausalModel,
         now: OffsetDateTime,
         _limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
@@ -30,16 +31,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // outcomes — and it is the part of this cycle with no bearing on
         // candidate generation below.
         self.validate_hypotheses(&mut snapshots, now).await?;
-        // Load the causal model from past predictions + outcomes.
-        // The brain uses this to predict how many fans each
-        // dispatch will produce, and learns from prediction errors.
-        // The model and the identity of the beliefs behind it. A decision
-        // persists the number the model gave it; without the identity it could
-        // not say which beliefs produced that number, and the posteriors move
-        // every cycle.
-        let loaded_model = self.repository.load_causal_model(self.workspace_id).await?;
+        // The cycle owns one causal-model read. Beacon and GrowthIntelligence
+        // consume the same decision-time belief state so delta evidence is
+        // replayed once, not once per context.
         let belief_origin = loaded_model.belief.clone();
-        let causal_model = loaded_model.model;
+        let causal_model = &loaded_model.model;
         // The infra loader owns posterior learning; its consumer below uses
         // the resulting state to refine strategy selection.
         // Load the exploration memory from past dispatch
@@ -177,7 +173,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 evidence.for_context(policy.context),
                 self.workspace_id,
                 now,
-                &causal_model,
+                causal_model,
                 strategy,
                 novelty,
             )?;
@@ -621,7 +617,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         }
         // Whether the posterior's spread has earned a say in ranking.
         let uncertainty_gate = crowdrelay_brain::uncertainty_gate::uncertainty_gate(
-            &causal_model.calibration.y30_interval,
+            causal_model.calibration.y30_interval,
         );
         report.gi_dispatch_log.push(uncertainty_gate.summary());
         let run = portfolio::select_portfolio(
@@ -631,7 +627,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             self.workspace_id,
             &experimental_quality,
             sizing_multiplier,
-            &causal_model.value_exchange,
+            causal_model.value_exchange,
             snapshots
                 .first()
                 .and_then(|snapshot| snapshot.world_model.objective.as_ref()),
@@ -956,19 +952,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                  re-evaluated next cycle",
                 consumed_ids.len(),
             ));
-        }
-        // Best-effort persistence. Failure preserves the previous checkpoint;
-        // the next cycle retries its delta (or a bounded initial rebuild).
-        if self
-            .repository
-            .save_brain_state_checkpoint(self.workspace_id, &causal_model)
-            .await
-            .is_err()
-        {
-            report.gi_dispatch_log.push(
-                "causal model checkpoint failed; learning will retry from the previous cursor"
-                    .into(),
-            );
         }
         self.save_growth_metacognition(&snapshots, now, report)
             .await;
