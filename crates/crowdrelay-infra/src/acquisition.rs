@@ -696,8 +696,10 @@ pub struct FanAdAttributionParams<'a> {
 /// Persists ad attribution parameters so the conversion workers can send
 /// server-side events with maximum matching quality. Idempotent: if the fan
 /// already has attribution, the row is updated with any new non-null values.
-pub async fn persist_fan_ad_attribution(
-    pool: &sqlx::PgPool,
+mod initial_metadata;
+
+async fn persist_fan_ad_attribution<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     workspace_id: uuid::Uuid,
     fan_id: uuid::Uuid,
     params: &FanAdAttributionParams<'_>,
@@ -742,7 +744,7 @@ pub async fn persist_fan_ad_attribution(
     .bind(params.client_ip_address)
     .bind(params.client_user_agent)
     .bind(params.event_source_url)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }

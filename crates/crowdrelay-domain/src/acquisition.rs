@@ -302,6 +302,10 @@ pub enum MarketingConsentError {
     InvalidSource,
 }
 
+#[path = "acquisition/signup_metadata.rs"]
+mod signup_metadata;
+pub use signup_metadata::SignupMetadata;
+
 /// Input for constructing a [`FanSignup`].
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FanSignupInput {
@@ -330,6 +334,8 @@ pub struct FanSignup {
     visitor_id: Option<VisitorId>,
     claimed_referral_code: Option<ReferralCode>,
     consent: MarketingConsent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_metadata: Option<SignupMetadata>,
 }
 
 impl FanSignup {
@@ -346,9 +352,42 @@ impl FanSignup {
             visitor_id: input.visitor_id,
             claimed_referral_code: input.claimed_referral_code,
             consent: input.consent,
+            initial_metadata: None,
         };
         signup.validate()?;
         Ok(signup)
+    }
+
+    /// Attaches initial preferences to the durable signup command.
+    pub fn with_initial_metadata(
+        mut self,
+        metadata: SignupMetadata,
+    ) -> Result<Self, FanSignupError> {
+        self.initial_metadata = Some(metadata);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Returns initial preferences; these cannot authorize updates to existing fans.
+    #[must_use]
+    pub fn initial_metadata(&self) -> Option<&SignupMetadata> {
+        self.initial_metadata.as_ref()
+    }
+
+    /// Adds transport context without changing the client retry fingerprint.
+    #[must_use]
+    pub fn with_signup_transport(mut self, ip: Option<String>, agent: Option<String>) -> Self {
+        if let Some(metadata) = &mut self.initial_metadata {
+            metadata.client_ip_address = ip;
+            metadata.client_user_agent = agent;
+        }
+        self
+    }
+
+    /// Returns the business intent used for idempotency, excluding transport changes.
+    #[must_use]
+    pub fn idempotency_payload(&self) -> Self {
+        self.clone().with_signup_transport(None, None)
     }
 
     /// Validates display name, locale, and consent state.
@@ -356,6 +395,14 @@ impl FanSignup {
         validate_normalized_display_name(self.display_name.as_deref())?;
         validate_normalized_locale(self.locale.as_deref())?;
         self.consent.validate()?;
+        if self
+            .initial_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.nearby_gigs)
+            .is_some_and(|(_, radius)| !(25..=500).contains(&radius))
+        {
+            return Err(FanSignupError::InvalidNearbyRadius);
+        }
         if !self.consent.granted() {
             return Err(FanSignupError::MarketingConsentRequired);
         }
@@ -489,6 +536,9 @@ fn is_language_tag(value: &str) -> bool {
 /// Error returned when a fan signup fails validation.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum FanSignupError {
+    /// The nearby show radius was outside the supported range.
+    #[error("nearby show radius must be between 25 and 500 km")]
+    InvalidNearbyRadius,
     /// The display name was empty, too long, or contained control characters.
     #[error("display name must contain at most 120 bytes and no control characters")]
     InvalidDisplayName,

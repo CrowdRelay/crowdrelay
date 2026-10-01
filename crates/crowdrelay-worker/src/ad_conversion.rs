@@ -40,6 +40,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod eligibility;
+
 const BATCH_SIZE: i64 = 50;
 /// Politeness gap between individual API calls within a cycle.
 /// Meta CAPI tolerates roughly 1 event per second per dataset; 500ms is safe
@@ -59,6 +61,8 @@ const NOTIFY_CHANNEL_PURCHASE: &str = "ad_conversion_purchase";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdConversionError {
+    #[error("recipient no longer permits ad conversion delivery")]
+    Ineligible,
     #[error("ad conversion HTTP request failed")]
     Network(#[from] reqwest::Error),
     #[error("ad conversion API returned HTTP {status}: {body}")]
@@ -368,6 +372,7 @@ impl AdConversionWorker {
         event_name: &str,
         event_id: &str,
     ) -> Result<u16, AdConversionError> {
+        self.ensure_recipient_eligible(Some(fan.fan_id)).await?;
         let config = &self.config.meta;
         let now = time::OffsetDateTime::now_utc();
         let event_time = now.unix_timestamp();
@@ -440,6 +445,7 @@ impl AdConversionWorker {
         order: &PaidTicketOrder,
         event_id: &str,
     ) -> Result<u16, AdConversionError> {
+        self.ensure_recipient_eligible(order.fan_id).await?;
         let config = &self.config.meta;
         let now = time::OffsetDateTime::now_utc();
         let event_time = now.unix_timestamp();
@@ -609,6 +615,7 @@ impl AdConversionWorker {
     ) -> Result<u16, AdConversionError> {
         let config = &self.config.google;
         let access_token = self.get_google_access_token().await?;
+        self.ensure_recipient_eligible(Some(fan.fan_id)).await?;
         let now = time::OffsetDateTime::now_utc();
         let conversion_time = now
             .format(&time::format_description::well_known::Rfc3339)
@@ -731,6 +738,7 @@ impl AdConversionWorker {
         fan: &FanAttribution,
         event_id: &str,
     ) -> Result<u16, AdConversionError> {
+        self.ensure_recipient_eligible(Some(fan.fan_id)).await?;
         let config = &self.config.bandsintown;
         let payload = json!({
             "token": config.api_token,
@@ -804,13 +812,13 @@ impl AdConversionWorker {
             WHERE fan.workspace_id = $1
               AND fan.status = 'active'
               AND {platform_filter}
-              AND EXISTS (
-                  SELECT 1 FROM fan_consents consent
+              AND COALESCE((
+                  SELECT consent.granted FROM fan_consents consent
                   WHERE consent.workspace_id = fan.workspace_id
                     AND consent.fan_id = fan.id
                     AND consent.purpose = 'marketing'
-                    AND consent.granted
-              )
+                  ORDER BY consent.recorded_at DESC, consent.id DESC LIMIT 1
+              ), false)
               AND NOT EXISTS (
                   SELECT 1 FROM ad_conversion_deliveries d
                   WHERE d.workspace_id = fan.workspace_id
@@ -876,14 +884,15 @@ impl AdConversionWorker {
              AND attr.fan_id = fan.id
             WHERE orders.workspace_id = $1
               AND orders.status IN ('paid', 'partially_refunded')
+              AND fan.status = 'active'
               AND {platform_filter}
-              AND EXISTS (
-                  SELECT 1 FROM fan_consents consent
+              AND COALESCE((
+                  SELECT consent.granted FROM fan_consents consent
                   WHERE consent.workspace_id = fan.workspace_id
                     AND consent.fan_id = fan.id
                     AND consent.purpose = 'marketing'
-                    AND consent.granted
-              )
+                  ORDER BY consent.recorded_at DESC, consent.id DESC LIMIT 1
+              ), false)
               AND NOT EXISTS (
                   SELECT 1 FROM ad_conversion_deliveries d
                   WHERE d.workspace_id = orders.workspace_id

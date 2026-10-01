@@ -417,27 +417,18 @@ pub async fn signup_fan(
         return Problem::internal(None).private().into_response();
     };
 
-    let nearby_enabled = payload.nearby_gigs.enabled;
-    let nearby_radius_km = payload.nearby_gigs.radius_km;
-    let requested_city_slug = payload.city_slug.clone();
-    let ad_attribution = payload.ad_attribution.clone();
     let client_ip = client_ip_address(&headers);
     let client_user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    if !(25..=500).contains(&nearby_radius_km) {
-        return Problem::unprocessable(request_id_value)
-            .private()
-            .into_response();
-    }
     let signup = match build_signup(
         state.acquisition.workspace_id,
         attribution_visitor(&headers),
         referral_cookie(&headers),
         payload,
     ) {
-        Ok(signup) => signup,
+        Ok(signup) => signup.with_signup_transport(client_ip, client_user_agent),
         Err(_) => {
             return Problem::unprocessable(request_id_value)
                 .private()
@@ -450,66 +441,6 @@ pub async fn signup_fan(
         Ok(result) => result,
         Err(error) => return signup_error(error, request_id_value).into_response(),
     };
-    if let Some(requested_city_slug) = requested_city_slug {
-        let mobile_fan = crowdrelay_infra::mobile_fan::PostgresMobileFanRepository::new(
-            state.ticketing.pool().clone(),
-            state.acquisition.workspace_id,
-            state.ticketing.operation_timeout(),
-        );
-        match mobile_fan
-            .upsert_fan_location_preference(
-                result.fan_id,
-                &requested_city_slug,
-                nearby_enabled,
-                nearby_radius_km,
-            )
-            .await
-        {
-            Ok(true) => {}
-            // The write is conditional on the fan already holding an interest in
-            // this city, and a repeat signup for a pending or active address does
-            // not create one. Silence here meant a fan opted into nearby shows,
-            // saw it accepted, and was never reachable by that loop.
-            Ok(false) => tracing::warn!(
-                fan_id = %result.fan_id,
-                city_slug = %requested_city_slug,
-                "fan signup completed but no city interest matched, so the nearby preference was not stored"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                fan_id = %result.fan_id,
-                "fan signup completed but nearby preference could not be persisted"
-            ),
-        }
-    }
-    if let Err(error) = crowdrelay_infra::acquisition::persist_fan_ad_attribution(
-        state.ticketing.pool(),
-        state.acquisition.workspace_id.into_uuid(),
-        result.fan_id.into_uuid(),
-        &crowdrelay_infra::acquisition::FanAdAttributionParams {
-            meta_fbp: ad_attribution.meta_fbp.as_deref(),
-            meta_fbc: ad_attribution.meta_fbc.as_deref(),
-            google_gclid: ad_attribution.google_gclid.as_deref(),
-            bandsintown_ref: ad_attribution.bandsintown_ref.as_deref(),
-            utm_source: ad_attribution.utm_source.as_deref(),
-            utm_medium: ad_attribution.utm_medium.as_deref(),
-            utm_campaign: ad_attribution.utm_campaign.as_deref(),
-            utm_content: ad_attribution.utm_content.as_deref(),
-            utm_term: ad_attribution.utm_term.as_deref(),
-            client_ip_address: client_ip.as_deref(),
-            client_user_agent: client_user_agent.as_deref(),
-            event_source_url: ad_attribution.event_source_url.as_deref(),
-        },
-    )
-    .await
-    {
-        tracing::warn!(
-            %error,
-            fan_id = %result.fan_id,
-            "fan signup completed but ad attribution could not be persisted"
-        );
-    }
-
     let status = if result.confirmation_required {
         StatusCode::ACCEPTED
     } else if result.created {
@@ -565,6 +496,23 @@ fn build_signup(
     cookie_referral_code: Option<ReferralCode>,
     payload: FanSignupRequest,
 ) -> Result<FanSignup, SignupPayloadError> {
+    let metadata = crowdrelay_domain::acquisition::SignupMetadata {
+        nearby_gigs: payload
+            .city_slug
+            .as_ref()
+            .map(|_| (payload.nearby_gigs.enabled, payload.nearby_gigs.radius_km)),
+        meta_fbp: payload.ad_attribution.meta_fbp,
+        meta_fbc: payload.ad_attribution.meta_fbc,
+        google_gclid: payload.ad_attribution.google_gclid,
+        bandsintown_ref: payload.ad_attribution.bandsintown_ref,
+        utm_source: payload.ad_attribution.utm_source,
+        utm_medium: payload.ad_attribution.utm_medium,
+        utm_campaign: payload.ad_attribution.utm_campaign,
+        utm_content: payload.ad_attribution.utm_content,
+        utm_term: payload.ad_attribution.utm_term,
+        event_source_url: payload.ad_attribution.event_source_url,
+        ..Default::default()
+    };
     let email = NormalizedEmail::parse(payload.email).map_err(|_| SignupPayloadError::Email)?;
     let city_slug = payload
         .city_slug
@@ -595,6 +543,7 @@ fn build_signup(
         claimed_referral_code,
         consent,
     })
+    .and_then(|signup| signup.with_initial_metadata(metadata))
     .map_err(|_| SignupPayloadError::Signup)
 }
 

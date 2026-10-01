@@ -799,10 +799,12 @@ async fn process_refund(
     let refunded = request
         .amount_refunded_minor
         .ok_or(TicketingError::Invalid)?;
-    if refunded < order.amount_refunded_minor || refunded > order.amount_gross_minor {
+    if refunded > order.amount_gross_minor {
         return Err(TicketingError::Conflict);
     }
-    if refunded == order.amount_refunded_minor {
+    // Stripe may replay earlier cumulative observations before later refunds.
+    // Acknowledge them without reversing inventory or immutable accounting.
+    if refunded <= order.amount_refunded_minor {
         return Ok(());
     }
     let full = refunded == order.amount_gross_minor;
@@ -953,6 +955,10 @@ async fn process_refund(
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "refund_replay_tests.rs"]
+mod refund_replay_tests;
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_accounting_entry(
