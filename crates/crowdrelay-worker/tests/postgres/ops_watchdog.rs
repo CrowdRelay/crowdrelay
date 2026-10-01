@@ -591,3 +591,108 @@ async fn refused_delivery(
     .context("insert refused delivery")?;
     Ok(())
 }
+
+/// One outreach target and the interactions that make its history: each tuple
+/// is `(direction, phase, disposition, days_ago)`.
+async fn target_history(
+    pool: &PgPool,
+    ws: WorkspaceId,
+    email: &str,
+    history: &[(&str, &str, &str, i32)],
+) -> Result<()> {
+    let target: Uuid = sqlx::query_scalar(
+        "INSERT INTO outreach_targets (workspace_id, target_kind, display_name, contact_email)
+         VALUES ($1, 'press', $2, $2) RETURNING id",
+    )
+    .bind(ws.into_uuid())
+    .bind(email)
+    .fetch_one(pool)
+    .await
+    .context("insert outreach target")?;
+    for (index, (direction, phase, disposition, days_ago)) in history.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO outreach_interactions
+                 (workspace_id, target_id, direction, phase, disposition, source_key, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now() - make_interval(days => $7))",
+        )
+        .bind(ws.into_uuid())
+        .bind(target)
+        .bind(direction)
+        .bind(phase)
+        .bind(disposition)
+        .bind(format!("gmail:{email}:{index}"))
+        .bind(*days_ago)
+        .execute(pool)
+        .await
+        .context("insert outreach interaction")?;
+    }
+    Ok(())
+}
+
+/// The engine holds a target that has replied, so a pitch after a yes came from
+/// the Gmail or workbook correspondence it only records. The alarm must name
+/// exactly that and nothing else: a person answering (`reply`), a bare
+/// `received`, and a pitch sent *before* the yes are all normal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_pitch_after_a_yes_reaches_the_operator() -> Result<()> {
+    let db = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+
+    async {
+        let ws = workspace(&db).await?;
+
+        // Pitched, answered yes, then a person answered: the healthy shape.
+        target_history(
+            &db,
+            ws,
+            "healthy@example.test",
+            &[
+                ("outbound", "initial", "none", 10),
+                ("inbound", "reply", "positive", 8),
+                ("outbound", "reply", "none", 7),
+            ],
+        )
+        .await?;
+        // A bare reply that may be an out-of-office, followed by a follow-up.
+        target_history(
+            &db,
+            ws,
+            "autoreply@example.test",
+            &[
+                ("outbound", "initial", "none", 10),
+                ("inbound", "reply", "received", 9),
+                ("outbound", "followup", "none", 5),
+            ],
+        )
+        .await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
+        assert!(
+            !alerts.contains(&"outreach.mailed_after_yes".to_owned()),
+            "nothing here pitched somebody who said yes: {alerts:?}"
+        );
+
+        // Said yes, then received another template.
+        target_history(
+            &db,
+            ws,
+            "yes@example.test",
+            &[
+                ("outbound", "initial", "none", 10),
+                ("inbound", "reply", "positive", 6),
+                ("outbound", "followup", "none", 2),
+            ],
+        )
+        .await?;
+        watchdog(db.clone(), ws).run_once().await?;
+        let alerts = active_alerts(&db, ws).await?;
+        assert!(
+            alerts.contains(&"outreach.mailed_after_yes".to_owned()),
+            "a pitch after a yes must be reported: {alerts:?}"
+        );
+        Ok(())
+    }
+    .await
+}
