@@ -29,7 +29,8 @@
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
 use crowdrelay_domain::{BeaconId, WorkspaceId};
-use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, InviteHold, decide};
+use crowdrelay_domain::contact_research::relationship_is_worth_researching;
+use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, decide};
 use crowdrelay_domain::trace::TraceContext;
 use serde::Serialize;
 use serde_json::json;
@@ -357,26 +358,28 @@ pub async fn relationship_research_queue(
         if queue.len() >= MAX_RESEARCH_PER_CYCLE {
             break;
         }
-        let standing = ContactStanding {
-            display_name: contact.display_name.clone(),
-            role: contact.role.clone(),
-            city: contact.city.clone(),
-            relationship_score: contact.relationship_score,
-            has_replied: contact.has_replied,
-            do_not_contact: contact.do_not_contact,
-            accepts_outreach: contact.accepts_outreach,
-            days_since_last_contact: contact.days_since_last_contact,
-            already_invited: contact.already_invited,
-            already_a_fan: contact.hears_the_dates,
-            previously_opted_out: contact.previously_opted_out,
-            opt_in_pending: contact.opt_in_pending,
-            has_recent_research: contact.has_research,
-        };
-        if decide(&standing, Some(&PLACEHOLDER_REASON))
-            != InviteDecision::Hold(InviteHold::NeedsResearch)
-        {
+
+        // Research eligibility belongs to the professional relationship, not
+        // the marketing role. A contact may already be a fan, have a pending
+        // fan opt-in, or have withdrawn marketing consent and still remain a
+        // journalist/promoter/creator the act legitimately works with. Those
+        // states constrain later fan/marketing sends; they do not rewrite the
+        // history of the working relationship or make public research illicit.
+        if !relationship_is_worth_researching(
+            contact.has_replied,
+            contact.relationship_score,
+            contact.accepts_outreach,
+            contact.do_not_contact,
+            contact.days_since_last_contact,
+            contact.has_research,
+        ) {
             continue;
         }
+
+        // Spend deep-research budget only when there is a concrete row-backed
+        // reason that could make the context useful soon: an upcoming date in
+        // their city, a shared night, or a recent release. This still grants no
+        // permission to message them; downstream policy decides the use.
         let language = contact_language(pool, workspace_id, contact.beacon_id).await?;
         if invite_reason(pool, workspace_id, contact.beacon_id, language, now)
             .await?
@@ -384,6 +387,7 @@ pub async fn relationship_research_queue(
         {
             continue;
         }
+
         queue.push(crowdrelay_application::autopilot::RelationshipResearchSnapshot {
             beacon_id: BeaconId::from_uuid(contact.beacon_id),
             display_name: contact.display_name,
