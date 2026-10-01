@@ -31,12 +31,11 @@ pub(super) async fn load_channel_yield(
     pool: &PgPool,
     workspace_id: WorkspaceId,
 ) -> Result<Vec<ChannelYield>, RepositoryError> {
-    // Durable fans: only conversions old enough to have had a full 30-day
-    // retention window can earn the retention bonus. They must still be active,
-    // still consented to marketing (latest record), and have a meaningful
-    // action both after that 30-day anniversary and inside the current 30-day
-    // window. A fan acquired yesterday can contribute a conversion today, but
-    // cannot also be called durable before thirty days have actually elapsed.
+    // Durable fans use the same canonical predicate as the causal fan
+    // measurement. A conversion must be at least thirty days old, the account
+    // must still be active, current marketing consent must still be granted,
+    // and a first-party meaningful action must exist after the maturity
+    // boundary. One definition feeds both learning and source selection.
     let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
         r#"
         WITH evidence AS (
@@ -46,32 +45,16 @@ pub(super) async fn load_channel_yield(
               AND event_kind IN ('conversion', 'interaction')
               AND occurred_at >= now() - interval '90 days'
         ), durable AS (
-            SELECT evidence.channel, COUNT(DISTINCT fan.id)::bigint AS durable
+            SELECT evidence.channel, COUNT(DISTINCT evidence.fan_id)::bigint AS durable
             FROM evidence
-            JOIN fans AS fan
-              ON fan.workspace_id = $1
-             AND fan.id = evidence.fan_id
-             AND fan.status = 'active'
             WHERE evidence.event_kind = 'conversion'
-              AND evidence.occurred_at <= now() - interval '30 days'
-              AND EXISTS (
-                  SELECT 1 FROM fan_consents AS consent
-                  WHERE consent.workspace_id = fan.workspace_id
-                    AND consent.fan_id = fan.id
-                    AND consent.purpose = 'marketing'
-                    AND consent.granted
-                    AND consent.recorded_at = (
-                        SELECT max(latest.recorded_at) FROM fan_consents AS latest
-                        WHERE latest.workspace_id = fan.workspace_id
-                          AND latest.fan_id = fan.id
-                          AND latest.purpose = 'marketing'
-                    )
+              AND evidence.fan_id IS NOT NULL
+              AND fan_is_meaningfully_retained(
+                  $1,
+                  evidence.fan_id,
+                  evidence.occurred_at,
+                  now()
               )
-              AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
-                  >= GREATEST(
-                      now() - interval '30 days',
-                      evidence.occurred_at + interval '30 days'
-                  )
             GROUP BY evidence.channel
         )
         SELECT evidence.channel,

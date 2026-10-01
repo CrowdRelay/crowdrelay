@@ -324,8 +324,10 @@ Fan measurements are claimed only after their publication-anchored window
 matures. The bounded locked claim batch moves an immature 3/14-day window, or
 the 14-day acquisition plus 30-day survival window, to its readiness time
 without spending a failed attempt. A ready sibling can still be claimed.
-`durable_fan_growth_30d` counts account survival; meaningful engagement is a
-distinct outcome and must not be inferred from account status alone.
+`durable_fan_growth_30d` uses the canonical meaningful-retention predicate:
+the attributed conversion must mature for thirty days, the account must remain
+active with current marketing consent, and a first-party meaningful action must
+occur at or after that maturity boundary. Account survival alone is never Y30.
 
 `growth_intelligence/metacognition.rs` owns the compact assessment checkpoint.
 The completed evaluator submits an observation, while preview only projects it.

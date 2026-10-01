@@ -44,8 +44,8 @@
 
 use super::*;
 
-/// The window, and whether the kind asks for fans still active thirty days
-/// after arriving.
+/// The window, and whether the kind asks for fans who became meaningfully
+/// retained after the full thirty-day maturity boundary.
 fn window_for(kind: AutopilotMeasurementKind) -> Option<(i32, bool)> {
     match kind {
         AutopilotMeasurementKind::AgentRunFanGrowth3d
@@ -181,7 +181,9 @@ pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST_WITH_TASKS: &str 
 "#;
 
 /// Distinct fans with a conversion credited to the lineage inside the window.
-/// `$5` asks for durability: still active thirty days after arriving.
+/// `$5` asks for canonical meaningful retention: the account is still active,
+/// current marketing consent is granted, and a first-party meaningful action
+/// happened at or after the conversion's thirty-day maturity boundary.
 const ATTRIBUTED_FANS: &str = r#"
     WITH lineage AS (
         SELECT $2::uuid AS action_id
@@ -205,9 +207,18 @@ const ATTRIBUTED_FANS: &str = r#"
       AND conversion.occurred_at < $3 + make_interval(days => $4)
       AND conversion.occurred_at <= $6
       AND fan.created_at <= $6
-      AND fan.status <> 'suppressed'
-      AND (NOT $5 OR (fan.status = 'active'
-                      AND conversion.occurred_at + INTERVAL '30 days' <= $6))
+      AND (
+          (NOT $5 AND fan.status <> 'suppressed')
+          OR (
+              $5
+              AND fan_is_meaningfully_retained(
+                  fan.workspace_id,
+                  fan.id,
+                  conversion.occurred_at,
+                  $6
+              )
+          )
+      )
 "#;
 
 /// [`ATTRIBUTED_FANS`] with the agent-outcome branch of the lineage.
@@ -242,7 +253,16 @@ const ATTRIBUTED_FANS_WITH_TASKS: &str = r#"
       AND conversion.occurred_at < $3 + make_interval(days => $4)
       AND conversion.occurred_at <= $6
       AND fan.created_at <= $6
-      AND fan.status <> 'suppressed'
-      AND (NOT $5 OR (fan.status = 'active'
-                      AND conversion.occurred_at + INTERVAL '30 days' <= $6))
+      AND (
+          (NOT $5 AND fan.status <> 'suppressed')
+          OR (
+              $5
+              AND fan_is_meaningfully_retained(
+                  fan.workspace_id,
+                  fan.id,
+                  conversion.occurred_at,
+                  $6
+              )
+          )
+      )
 "#;
