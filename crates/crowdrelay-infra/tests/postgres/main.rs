@@ -5,6 +5,7 @@
 
 mod acquisition;
 mod acquisition_channels;
+mod action_recovery;
 mod admission;
 mod archive_bulk_promote;
 mod attestation;

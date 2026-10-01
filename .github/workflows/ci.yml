@@ -387,6 +387,7 @@ jobs:
             autopilot_release_tier \
             autopilot_outreach_engine \
             outward_link_gate \
+            action_recovery \
             autopilot_archive_wave \
             archive_bulk_promote \
             people_the_outreach_engine_knows_are_not_cold \

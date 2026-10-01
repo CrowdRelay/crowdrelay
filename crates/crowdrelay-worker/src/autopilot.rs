@@ -766,6 +766,7 @@ impl AutopilotWorker {
                             .fail_action(
                                 self.workspace_id,
                                 action.id,
+                                action.attempt_number,
                                 error_kind,
                                 retryable,
                                 OffsetDateTime::now_utc(),
@@ -1176,6 +1177,7 @@ impl TeamEmailDispatchWorker {
                             .fail_action(
                                 self.workspace_id,
                                 action.id,
+                                action.attempt_number,
                                 error_kind,
                                 retryable,
                                 OffsetDateTime::now_utc(),

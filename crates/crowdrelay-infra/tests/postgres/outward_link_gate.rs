@@ -28,7 +28,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-fn repository(pool: &PgPool, url: &str) -> PostgresAutopilotRepository {
+pub(super) fn repository(pool: &PgPool, url: &str) -> PostgresAutopilotRepository {
     PostgresAutopilotRepository::new(
         pool.clone(),
         &DatabaseConfig {
@@ -42,7 +42,7 @@ fn repository(pool: &PgPool, url: &str) -> PostgresAutopilotRepository {
     )
 }
 
-async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+pub(super) async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
@@ -53,7 +53,7 @@ async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(id)
 }
 
-async fn city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+pub(super) async fn city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO cities (slug, name, country_code) VALUES ($1, $1, 'PL')
          ON CONFLICT (country_code, slug) DO NOTHING",
@@ -69,7 +69,7 @@ async fn city(pool: &PgPool, slug: &str) -> Result<Uuid, Box<dyn std::error::Err
     .await?)
 }
 
-async fn target(
+pub(super) async fn target(
     pool: &PgPool,
     workspace_id: Uuid,
     city_id: Uuid,
@@ -89,7 +89,7 @@ async fn target(
 
 /// The executor advertisement a claim needs — the same rows a worker
 /// heartbeat writes.
-async fn advertise(pool: &PgPool, workspace_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) async fn advertise(pool: &PgPool, workspace_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     let executor = format!("n8n-linkgate-{}", Uuid::now_v7().simple());
     sqlx::query(
@@ -120,7 +120,7 @@ async fn advertise(pool: &PgPool, workspace_id: Uuid) -> Result<(), Box<dyn std:
 
 /// A queued `booking.outreach.request` action whose approved draft is the
 /// body under test — seeded the way the evaluator's persist path writes it.
-async fn outreach_action(
+pub(super) async fn outreach_action(
     pool: &PgPool,
     workspace_id: Uuid,
     city_id: Uuid,
@@ -220,7 +220,7 @@ async fn live_link(
     Ok(())
 }
 
-async fn emitted_for(pool: &PgPool, workspace_id: Uuid, action_id: Uuid) -> i64 {
+pub(super) async fn emitted_for(pool: &PgPool, workspace_id: Uuid, action_id: Uuid) -> i64 {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM outbox_events
          WHERE workspace_id = $1 AND payload->>'action_id' = $2",
@@ -229,7 +229,7 @@ async fn emitted_for(pool: &PgPool, workspace_id: Uuid, action_id: Uuid) -> i64 
     .bind(action_id.to_string())
     .fetch_one(pool)
     .await
-    .unwrap_or(0)
+    .expect("read outbox emissions")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

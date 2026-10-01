@@ -267,6 +267,7 @@ async fn fail(
         .fail_action(
             WorkspaceId::from_uuid(workspace_id),
             AutopilotActionId::from_uuid(action_id),
+            1,
             kind,
             false,
             OffsetDateTime::now_utc(),
@@ -518,8 +519,8 @@ async fn a_replayed_action_does_not_spend_twice() -> Result<(), Box<dyn std::err
 
     // Re-executing the first action must not spend again — its touch row is
     // already counted, and a budget the action already paid cannot refuse it
-    // a second time. The whole execute then fails only at the terminal
-    // status guard — the action is `succeeded`, not `processing` — which is
+    // a second time. Execution now refuses before touching the budget at the
+    // claim guard — the action is `succeeded`, not `processing` — which is
     // a plain `Conflict`, never the budget's kind.
     let replay = repository(pool)
         .execute_action(

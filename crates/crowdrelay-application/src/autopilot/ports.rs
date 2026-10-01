@@ -1035,10 +1035,13 @@ pub trait AutopilotActionRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<(), RepositoryError>;
 
+    /// Record only the supplied claim's failure. A reclaimed or completed
+    /// attempt must remain untouched by a late worker.
     async fn fail_action(
         &self,
         workspace_id: WorkspaceId,
         action_id: AutopilotActionId,
+        attempt_number: u32,
         error_kind: &'static str,
         retryable: bool,
         now: OffsetDateTime,
