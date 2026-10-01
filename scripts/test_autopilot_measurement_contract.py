@@ -18,8 +18,10 @@ class AutopilotMeasurementContract(unittest.TestCase):
         kind_migrations = sorted(
             path
             for path in (ROOT / "migrations").glob("*.sql")
-            if "ADD CONSTRAINT viryaos_autopilot_measurements_measurement_kind_check"
-            in path.read_text()
+            if re.search(
+                r"ADD CONSTRAINT (?:viryaos_)?autopilot_measurements_measurement_kind_check",
+                path.read_text(),
+            )
         )
         self.assertTrue(kind_migrations)
         migration = kind_migrations[-1].read_text()
@@ -30,7 +32,7 @@ class AutopilotMeasurementContract(unittest.TestCase):
         ports = text("crates/crowdrelay-application/src/autopilot/measurement_ports.rs")
         support = text("crates/crowdrelay-infra/src/autopilot/support.rs")
         check = re.search(
-            r"viryaos_autopilot_measurements_measurement_kind_check\s+CHECK\s*\(measurement_kind IN \((.*?)\)\)",
+            r"(?:viryaos_)?autopilot_measurements_measurement_kind_check\s+CHECK\s*\(measurement_kind IN \((.*?)\)\)",
             migration,
             re.S,
         )
