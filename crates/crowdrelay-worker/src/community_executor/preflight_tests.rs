@@ -94,7 +94,7 @@ mod promotion_preflight_tests {
         // rules park the post for a person rather than risking a removal.
         let reddit_place = Uuid::now_v7();
         let reddit_target = Uuid::now_v7();
-        sqlx::query("INSERT INTO discovery_places(id,workspace_id,place_kind,platform,name,url,membership_state) VALUES($1,$2,'subreddit','reddit','Metal Test','https://reddit.com/r/metaltest','joined')")
+        sqlx::query("INSERT INTO discovery_places(id,workspace_id,place_kind,platform,name,url,membership_state) VALUES($1,$2,'subreddit','reddit','Metal Test','https://www.reddit.com/r/metaltest','joined')")
             .bind(reddit_place).bind(ws.into_uuid()).execute(&pool).await?;
         sqlx::query("INSERT INTO agent_outreach_targets(id,workspace_id,target_kind,display_name,platform,subreddit,place_id,status,screening_verdict) VALUES($1,$2,'community','Metal Test','reddit','metaltest',$3,'promoted','admitted')")
             .bind(reddit_target).bind(ws.into_uuid()).bind(reddit_place).execute(&pool).await?;
