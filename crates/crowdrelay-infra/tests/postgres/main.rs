@@ -73,6 +73,7 @@ mod autopilot_unsupported_approval;
 mod autopilot_waves;
 mod autopilot_world_model;
 mod band_listing;
+mod beacon_outreach_state;
 mod beacon_upsert;
 mod booking_agents;
 mod booking_graph;

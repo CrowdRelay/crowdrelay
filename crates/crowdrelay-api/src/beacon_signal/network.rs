@@ -80,8 +80,7 @@ struct DiscoveredBeaconView {
     /// relevant to three consecutive events is a relationship with history,
     /// not three discoveries.
     matched_events: Value,
-    /// The one operator action this row is waiting on, derived from state —
-    /// `review_candidate`, `send_invite`, `awaiting_reply`, `partner_active`.
+    /// The one operator action this row is waiting on, derived from state.
     next_step: String,
 }
 
@@ -114,12 +113,49 @@ struct InviteJobView {
     created_at: OffsetDateTime,
 }
 
+/// One outreach recommendation waiting on the booker — the decision the
+/// brain ranked, with the evidence that ranked it.
+///
+/// The card is where "outcome → next selection" becomes inspectable: the
+/// ranking fields say whether the estimate came from direct Y30 evidence, a
+/// bridged Y14 read or the cold-start prior (`estimationRegime` +
+/// `sampleSize`), and `opportunityCostFans` says what the budget would have
+/// bought from the runner-up instead. `priorOutcome` is the pair's own
+/// campaign history; `deferDays`/`decline` are the verbs that write the
+/// booker's answer back into the next cycle.
+#[derive(Debug, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+struct PendingAskView {
+    action_id: Uuid,
+    decision_id: Uuid,
+    beacon_id: Uuid,
+    beacon_name: String,
+    beacon_kind: String,
+    contact_email: Option<String>,
+    event_id: Uuid,
+    event_title: String,
+    #[serde(with = "time::serde::rfc3339")]
+    event_starts_at: OffsetDateTime,
+    city_name: Option<String>,
+    phase: String,
+    template_key: String,
+    /// The full decision-time belief the ranker recorded: regime, expected
+    /// incremental fans, uncertainty, sample size, opportunity cost.
+    north_star_ranking: Value,
+    /// The pair's campaign state as it stands — status, last reply, touches.
+    prior_outcome: Value,
+    /// Days until the show — the "why now" half of the recommendation.
+    days_to_event: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BeaconNetworkResponse {
     discovery_runs: Vec<DiscoveryRunView>,
     pending_candidates: Vec<DiscoveredBeaconView>,
     approved_candidates: Vec<DiscoveredBeaconView>,
+    /// Outreach asks the brain ranked and parked for the booker.
+    pending_asks: Vec<PendingAskView>,
     invite_jobs: Vec<InviteJobView>,
     /// Researched contacts not yet on the roster.
     ///
@@ -149,6 +185,12 @@ pub struct AdminNetworkActionRequest {
     /// Where the partner's link should land. Defaults to the event's public
     /// page when `event_id` is given.
     destination_url: Option<String>,
+    /// How long a deferred (beacon, event) ask stays out of the due set.
+    /// Only present when `action` is `defer`; defaults to 7 days.
+    defer_days: Option<i32>,
+    /// The operator's note on a declined pair. Only present when `action`
+    /// is `decline`.
+    reason: Option<String>,
     /// Parsed rows from a SubmitHub Activity CSV. Only present when
     /// `action` is `import_submithub`.
     csv_rows: Option<Vec<SubmithubCsvRow>>,
@@ -284,6 +326,8 @@ fn valid_beacon_kind(value: &str) -> bool {
             | "promoter"
             | "patron"
             | "community"
+            | "venue"
+            | "scene_partner"
     )
 }
 

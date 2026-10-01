@@ -300,6 +300,14 @@ impl AutopilotBeaconStateRepository for PostgresAutopilotRepository {
                 ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
                     status=EXCLUDED.status,
                     last_reply_disposition=EXCLUDED.last_reply_disposition,
+                    -- `declined_via` lives only on declined rows (CHECK): a
+                    -- reply moving the pair off declined clears it, and one
+                    -- landing it there is the partner's own answer.
+                    declined_via=CASE
+                        WHEN EXCLUDED.status='declined'
+                        THEN COALESCE(beacon_campaigns.declined_via,'partner_reply')
+                        ELSE NULL
+                    END,
                     -- A later outbound touch also moves campaign.updated_at.
                     -- Reply learning must stay anchored to the reply itself,
                     -- and an explicit "none" observation must not erase the

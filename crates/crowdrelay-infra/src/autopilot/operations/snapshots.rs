@@ -617,6 +617,11 @@ pub(in crate::autopilot) async fn load_beacon_campaign_snapshots(
         WHERE beacon.workspace_id = $1
           AND beacon.active
           AND COALESCE(campaign.status, 'candidate') NOT IN ('declined','suppressed','closed')
+          -- The booker's "not now": the pair re-enters the due set when the
+          -- defer lapses. `deferred_until` only ever lives inside an event
+          -- window, so a stale defer on a passed show cannot suppress a
+          -- later pairing — the event range above already dropped it.
+          AND (campaign.deferred_until IS NULL OR campaign.deferred_until <= $2)
         ORDER BY event.starts_at, beacon.relevance_basis_points DESC,
                  beacon.relationship_score DESC, beacon.id
         LIMIT $3

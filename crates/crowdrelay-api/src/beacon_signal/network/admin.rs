@@ -36,11 +36,11 @@ pub async fn admin_beacon_network(
                beacon.metadata->'network_review' AS network_review,
                COALESCE(
                    (SELECT jsonb_agg(jsonb_build_object(
-                            'event_id', m.event_id,
+                            'eventId', m.event_id,
                             'title', match_event.title,
-                            'starts_at', match_event.starts_at,
-                            'matched_at', m.matched_at,
-                            'matched_count', m.matched_count)
+                            'startsAt', match_event.starts_at,
+                            'matchedAt', m.matched_at,
+                            'matchedCount', m.matched_count)
                             ORDER BY m.matched_at DESC)
                     FROM beacon_event_matches m
                     JOIN events match_event
@@ -85,11 +85,11 @@ pub async fn admin_beacon_network(
                beacon.metadata->'network_review' AS network_review,
                COALESCE(
                    (SELECT jsonb_agg(jsonb_build_object(
-                            'event_id', m.event_id,
+                            'eventId', m.event_id,
                             'title', match_event.title,
-                            'starts_at', match_event.starts_at,
-                            'matched_at', m.matched_at,
-                            'matched_count', m.matched_count)
+                            'startsAt', match_event.starts_at,
+                            'matchedAt', m.matched_at,
+                            'matchedCount', m.matched_count)
                             ORDER BY m.matched_at DESC)
                     FROM beacon_event_matches m
                     JOIN events match_event
@@ -142,6 +142,72 @@ pub async fn admin_beacon_network(
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(%error, "Latarnik network approved candidate listing failed");
+            return BeaconSignalError::Unavailable.response(request_id_value);
+        }
+    };
+    // The recommendation cards: every ranked ask parked in the approval
+    // queue, carrying the decision-time belief that ordered it and the
+    // pair's own campaign history. `north_star_ranking` is written at rank
+    // time beside the decision — the card reads it back rather than
+    // recomputing, so what the booker sees is exactly what moved the order.
+    let pending_asks = match sqlx::query_as::<_, PendingAskView>(
+        r#"
+        SELECT action.id AS action_id,
+               action.decision_id,
+               beacon.id AS beacon_id,
+               beacon.display_name AS beacon_name,
+               beacon.beacon_kind,
+               beacon.contact_email,
+               event.id AS event_id,
+               event.title AS event_title,
+               event.starts_at AS event_starts_at,
+               city.name AS city_name,
+               COALESCE(action.payload->>'phase', '') AS phase,
+               COALESCE(action.payload->>'template_key', '') AS template_key,
+               COALESCE(decision.input_snapshot->'north_star_ranking', '{}'::jsonb)
+                   AS north_star_ranking,
+               COALESCE(
+                   jsonb_build_object(
+                       'status', campaign.status,
+                       'last_reply_disposition', campaign.last_reply_disposition,
+                       'last_outreach_at', campaign.last_outreach_at,
+                       'followup_count', campaign.followup_count,
+                       'deferred_until', campaign.deferred_until,
+                       'declined_via', campaign.declined_via
+                   ),
+                   '{}'::jsonb
+               ) AS prior_outcome,
+               FLOOR(EXTRACT(EPOCH FROM (event.starts_at - now())) / 86400)::bigint
+                   AS days_to_event
+        FROM autopilot_actions AS action
+        JOIN autopilot_decisions AS decision
+          ON decision.workspace_id = action.workspace_id
+         AND decision.id = action.decision_id
+        JOIN beacons AS beacon
+          ON beacon.workspace_id = action.workspace_id
+         AND beacon.id = (action.payload->>'beacon_id')::uuid
+        JOIN events AS event
+          ON event.workspace_id = action.workspace_id
+         AND event.id = (action.payload->>'event_id')::uuid
+        LEFT JOIN cities AS city ON city.id = event.city_id
+        LEFT JOIN beacon_campaigns AS campaign
+          ON campaign.workspace_id = action.workspace_id
+         AND campaign.beacon_id = beacon.id
+         AND campaign.event_id = event.id
+        WHERE action.workspace_id = $1
+          AND action.status = 'awaiting_approval'
+          AND action.action_kind IN ('beacon.outreach.request','beacon.invite_batch.request')
+        ORDER BY event.starts_at, action.created_at
+        LIMIT 100
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(state.ticketing.pool())
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik pending-ask listing failed");
             return BeaconSignalError::Unavailable.response(request_id_value);
         }
     };
@@ -285,6 +351,7 @@ pub async fn admin_beacon_network(
             discovery_runs,
             pending_candidates,
             approved_candidates,
+            pending_asks,
             invite_jobs,
             researched_available,
         },
@@ -313,6 +380,8 @@ pub async fn admin_beacon_network_action(
         "import_submithub" => import_submithub(&state, &headers, payload, idempotency_key).await,
         "approve" => approve_candidate(&state, &headers, payload, idempotency_key).await,
         "partner_link" => partner_link(&state, &headers, payload, idempotency_key).await,
+        "defer" => defer_outreach(&state, &headers, payload, idempotency_key).await,
+        "decline" => decline_outreach(&state, &headers, payload, idempotency_key).await,
         "queue_invites" => queue_invites(&state, &headers, payload, idempotency_key).await,
         _ => BeaconSignalError::BadRequest.response(request_id_value),
     }
@@ -701,13 +770,102 @@ async fn partner_link(
             | crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::EventNotFound,
         )) => BeaconSignalError::NotFound.response(request_id_value),
         Ok(Err(
-            crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::BeaconNotApproved,
+            crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::BeaconNotApproved
+            | crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::IdempotencyConflict,
         )) => BeaconSignalError::Conflict.response(request_id_value),
         Ok(Err(
             crowdrelay_infra::beacon_signal::partner_link::PartnerLinkRefusal::DestinationRequired,
         )) => BeaconSignalError::BadRequest.response(request_id_value),
         Err(error) => {
             tracing::warn!(%error, "Latarnik partner link mint failed");
+            BeaconSignalError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
+/// The booker's two "no" on a recommended outreach, written where the next
+/// cycle reads it.
+///
+/// `defer` holds the (beacon, event) pair out of the due set for `deferDays`
+/// (1–90, default 7) and `decline` marks it declined by the operator; both
+/// also cancel every approval-queue ask still waiting on the pair. The
+/// campaign row, not the cancelled action, is what the evaluator reads — a
+/// cancelled row alone would just re-recommend next cycle.
+async fn defer_outreach(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    payload: AdminNetworkActionRequest,
+    idempotency_key: String,
+) -> Response {
+    let request_id_value = request_id(headers);
+    let (Some(beacon_id), Some(event_id)) = (payload.beacon_id, payload.event_id) else {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::beacon_signal::outreach_state::defer_beacon_outreach(
+        state.ticketing.pool(),
+        workspace_id,
+        beacon_id,
+        event_id,
+        payload.defer_days.unwrap_or(7),
+        &idempotency_key,
+        request_id_value.as_deref(),
+    )
+    .await
+    {
+        Ok(Ok(changed)) => private_json(StatusCode::OK, json!(changed)),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::BadDeferDays,
+        )) => BeaconSignalError::BadRequest.response(request_id_value),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::BeaconNotFound
+            | crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::EventNotFound,
+        )) => BeaconSignalError::NotFound.response(request_id_value),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::IdempotencyConflict,
+        )) => BeaconSignalError::Conflict.response(request_id_value),
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik outreach defer failed");
+            BeaconSignalError::Unavailable.response(request_id_value)
+        }
+    }
+}
+
+async fn decline_outreach(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+    payload: AdminNetworkActionRequest,
+    idempotency_key: String,
+) -> Response {
+    let request_id_value = request_id(headers);
+    let (Some(beacon_id), Some(event_id)) = (payload.beacon_id, payload.event_id) else {
+        return BeaconSignalError::BadRequest.response(request_id_value);
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::beacon_signal::outreach_state::decline_beacon_outreach(
+        state.ticketing.pool(),
+        workspace_id,
+        beacon_id,
+        event_id,
+        payload.reason.as_deref(),
+        &idempotency_key,
+        request_id_value.as_deref(),
+    )
+    .await
+    {
+        Ok(Ok(changed)) => private_json(StatusCode::OK, json!(changed)),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::BeaconNotFound
+            | crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::EventNotFound,
+        )) => BeaconSignalError::NotFound.response(request_id_value),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::BadDeferDays,
+        )) => BeaconSignalError::BadRequest.response(request_id_value),
+        Ok(Err(
+            crowdrelay_infra::beacon_signal::outreach_state::OutreachStateRefusal::IdempotencyConflict,
+        )) => BeaconSignalError::Conflict.response(request_id_value),
+        Err(error) => {
+            tracing::warn!(%error, "Latarnik outreach decline failed");
             BeaconSignalError::Unavailable.response(request_id_value)
         }
     }

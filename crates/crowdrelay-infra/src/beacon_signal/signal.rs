@@ -727,8 +727,8 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         if let Err(error) = sqlx::query(
             r#"
             INSERT INTO beacon_campaigns (
-                workspace_id,beacon_id,event_id,status,last_phase,last_reply_disposition,last_outreach_at
-            ) VALUES ($1,$2,$3,$4,'local_push',$5,now())
+                workspace_id,beacon_id,event_id,status,last_phase,last_reply_disposition,last_outreach_at,declined_via
+            ) VALUES ($1,$2,$3,$4,'local_push',$5,now(),CASE WHEN $4='declined' THEN 'partner_reply' END)
             ON CONFLICT (workspace_id,beacon_id,event_id) DO UPDATE SET
                 status=CASE
                     WHEN $4='closed' THEN 'closed'
@@ -749,6 +749,16 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
                     ELSE 'received'
                 END,
                 last_outreach_at=COALESCE(beacon_campaigns.last_outreach_at,now()),
+                -- A reply moving the pair to declined is the partner's answer,
+                -- never the operator's. `declined_via` only exists while the
+                -- row is declined — the CHECK demands it — so a stronger reply
+                -- re-opening the pair clears the provenance with the status.
+                declined_via=CASE
+                    WHEN $4='declined' THEN 'partner_reply'
+                    WHEN $4 IN ('closed','partner','interested') THEN NULL
+                    WHEN beacon_campaigns.status='declined' THEN beacon_campaigns.declined_via
+                    ELSE NULL
+                END,
                 updated_at=now()
             WHERE beacon_campaigns.status NOT IN ('suppressed','closed')
             "#,
@@ -870,7 +880,9 @@ impl BeaconSignalRepository for PostgresBeaconReleaseRepository {
         if let Err(error) = sqlx::query(
             r#"
             UPDATE beacon_campaigns
-            SET status='closed',last_reply_disposition='partner',updated_at=now()
+            -- Closing from a declined row retires the decline provenance
+            -- with the status — the pair was completed, not merely answered.
+            SET status='closed',last_reply_disposition='partner',declined_via=NULL,updated_at=now()
             WHERE workspace_id=$1 AND beacon_id=$2 AND event_id=$3
               AND status <> 'suppressed'
             "#,

@@ -78,19 +78,29 @@ pub(super) async fn execute_beacon_outreach(
         FROM beacons AS beacon
         JOIN events AS event
           ON event.workspace_id = beacon.workspace_id AND event.id = $3
+        LEFT JOIN beacon_campaigns AS campaign
+          ON campaign.workspace_id = beacon.workspace_id
+         AND campaign.beacon_id = beacon.id
+         AND campaign.event_id = event.id
         WHERE beacon.workspace_id = $1 AND beacon.id = $2
           AND beacon.version = $4
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach
           AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
           AND event.status IN ('published','completed')
-        FOR SHARE OF beacon, event
+          -- The ask travels with the answer the operator gave at approval
+          -- time; hours can pass before the send runs, and a deferred or
+          -- declined pair must not ship on the stale yes.
+          AND COALESCE(campaign.status, 'candidate') NOT IN ('declined','suppressed','closed')
+          AND (campaign.deferred_until IS NULL OR campaign.deferred_until <= $5)
+        FOR SHARE OF beacon, event, campaign
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(beacon_id.into_uuid())
     .bind(event_id.into_uuid())
     .bind(beacon_version)
+    .bind(now)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?
@@ -234,6 +244,11 @@ pub(super) async fn execute_beacon_outreach(
             END,
             last_phase = EXCLUDED.last_phase,
             last_outreach_at = EXCLUDED.last_outreach_at,
+            -- A sent ask is no longer deferred, and the new status is never
+            -- 'declined', so the decline provenance has to clear or the
+            -- CHECK forbids the row.
+            deferred_until = NULL,
+            declined_via = NULL,
             followup_count = beacon_campaigns.followup_count + 1
         "#,
     )

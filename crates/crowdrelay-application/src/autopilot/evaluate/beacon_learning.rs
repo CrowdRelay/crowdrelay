@@ -37,18 +37,49 @@ fn rank_beacon_candidate(
         crowdrelay_brain::DecisionMode::Explore
     };
 
-    // Resource cost is deliberately absent from this ordering. The domain
-    // policy, class ceiling and attention envelope already decide whether a
-    // relationship ask may happen; this comparison only answers which of the
-    // already-due asks has stronger North-Star evidence. Harm that has an
-    // honest fan-equivalent conversion remains part of intrinsic value.
+    // One ask spends one person's attention and this event's one
+    // relationship slot with that partner. Neither converts to fans
+    // honestly yet, so `units` stays zero — the dimensions are provenance
+    // the review card shows, not a made-up fan penalty. What the choice
+    // actually costs is recorded below as the foregone runner-up.
     let value = crowdrelay_brain::DecisionValue::from_stats(
         &stats,
-        crowdrelay_brain::ResourceCost::default(),
+        crowdrelay_brain::ResourceCost {
+            audience_attention: Some(1.0),
+            campaign_slots: Some(1.0),
+            ..crowdrelay_brain::ResourceCost::default()
+        },
         mode,
     )
     .with_harm_cost(&stats);
     let rank_value = value.total();
+
+    // Granularity honesty: the numbers above shrink toward parent levels, so
+    // `expected_incremental_y30` alone cannot say whose history produced it.
+    // The card distinguishes this beacon's own outcomes from the template's
+    // and from a bare prior — a learned τ on `beacon:…` is not the same
+    // claim as the phase average wearing a target's name.
+    let target_observations = causal_model.fans.target_confidence(target_key)
+        + causal_model
+            .treatment_effects
+            .effects
+            .target_confidence(target_key)
+        + causal_model
+            .treatment_effects_y30
+            .effects
+            .target_confidence(target_key);
+    let template_observations = causal_model.fans.confidence(template_id)
+        + causal_model.treatment_effects.observation_count(template_id)
+        + causal_model
+            .treatment_effects_y30
+            .observation_count(template_id);
+    let evidence_basis = if target_observations > 0 {
+        "target_history"
+    } else if template_observations > 0 {
+        "template_prior"
+    } else {
+        "prior"
+    };
 
     // Persist the exact decision-time belief beside the normal Beacon
     // snapshot. A later operator can tell whether ordering came from a cold
@@ -70,6 +101,9 @@ fn rank_beacon_candidate(
                 "bridge_confidence": value.bridge_confidence,
                 "bridge_is_reliable": value.bridge_is_reliable,
                 "harm_fans": value.harm_fans,
+                "evidence_basis": evidence_basis,
+                "target_observations": target_observations,
+                "template_observations": template_observations,
             }),
         );
     }
@@ -99,6 +133,29 @@ fn order_ranked_beacon_candidates(
             .then_with(|| right.rank_value.total_cmp(&left.rank_value))
             .then_with(|| left.original_order.cmp(&right.original_order))
     });
+
+    // The budget-aware read: what choosing this ask foregoes. Each card
+    // records the value of the ask the budget would have bought instead —
+    // the top of the ordering for everyone below it, the runner-up for the
+    // top itself. It stays out of `total()`: subtracting the same constant
+    // from every non-top candidate changes nothing about the order and
+    // would only dress a tie up as a loss.
+    let top_value = candidates.first().map(|item| item.rank_value);
+    let runner_up_value = candidates.get(1).map(|item| item.rank_value);
+    for (index, item) in candidates.iter_mut().enumerate() {
+        let foregone = if index == 0 { runner_up_value } else { top_value };
+        let opportunity_cost = foregone.map_or(0.0, |value| -value);
+        if let Some(snapshot) = item.candidate.input_snapshot.as_object_mut()
+            && let Some(ranking) = snapshot
+                .get_mut("north_star_ranking")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            ranking.insert(
+                "opportunity_cost_fans".to_owned(),
+                serde_json::json!(opportunity_cost),
+            );
+        }
+    }
 
     let reordered = candidates
         .iter()
@@ -159,10 +216,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
 
         let (ordered, reordered) = order_ranked_beacon_candidates(ranked);
         if reordered {
-            report.gi_dispatch_log.push(
-                "brain decision influenced by learning: Beacon due-ask order changed by North-Star value"
-                    .into(),
-            );
+            // Which learned belief actually moved the ask: the outcome→choice
+            // proof the spec asks for lives in `north_star_ranking`, and this
+            // line names the winner so the log alone answers "why this one".
+            let winner = ordered
+                .first()
+                .map(|candidate| candidate.decision_key.as_str())
+                .unwrap_or("none");
+            report.gi_dispatch_log.push(format!(
+                "brain decision influenced by learning: Beacon due-ask order changed by North-Star value (top: {winner})"
+            ));
         }
         for candidate in ordered {
             self.persist(&candidate, limits, report).await?;
@@ -238,4 +301,39 @@ mod beacon_learning_tests {
         assert_eq!(ordered[1].decision_key, "later-high-y30");
     }
 
+    fn opportunity_cost(candidate: &DecisionCandidate) -> Option<f64> {
+        candidate
+            .input_snapshot
+            .get("north_star_ranking")
+            .and_then(|ranking| ranking.get("opportunity_cost_fans"))
+            .and_then(serde_json::Value::as_f64)
+    }
+
+    #[test]
+    fn opportunity_cost_records_the_foregone_runner_up() {
+        // Same-day asks, so the touch budget buys the stronger one; picking
+        // it costs the runner-up's value. The winner's card shows -0.4 (it
+        // displaced a 0.4 ask), the loser's shows -1.7 (the ask it lost to).
+        let mut first = ranked("first", 0, 1.7, 10);
+        first.candidate.input_snapshot =
+            serde_json::json!({"north_star_ranking": {}});
+        let mut second = ranked("second", 1, 0.4, 10);
+        second.candidate.input_snapshot =
+            serde_json::json!({"north_star_ranking": {}});
+        let (ordered, _) = order_ranked_beacon_candidates(vec![first, second]);
+        assert_eq!(opportunity_cost(&ordered[0]), Some(-0.4));
+        assert_eq!(opportunity_cost(&ordered[1]), Some(-1.7));
+    }
+
+    #[test]
+    fn sole_candidate_foregoes_nothing() {
+        // With no runner-up there is no foregone ask — the honest number is
+        // zero, not a fabricated loss against an empty budget.
+        let mut only = ranked("only", 0, 3.2, 10);
+        only.candidate.input_snapshot =
+            serde_json::json!({"north_star_ranking": {}});
+        let (ordered, changed) = order_ranked_beacon_candidates(vec![only]);
+        assert!(!changed);
+        assert_eq!(opportunity_cost(&ordered[0]), Some(0.0));
+    }
 }

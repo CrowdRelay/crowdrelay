@@ -192,9 +192,8 @@ where
             .await;
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
-            // Registered before the arm runs so a context that produced
-            // nothing still reports `candidates: 0` — the reading a silent
-            // detector leaves, which `decisions` cannot show on its own.
+            // Registered before the arm runs so a silent detector still
+            // reports `candidates: 0` — a reading `decisions` cannot show.
             report.context_stats(policy.context);
             match policy.context {
                 AutopilotContext::TicketYield => {

@@ -393,6 +393,30 @@ impl PostgresAutopilotRepository {
                         .await
                         .map_err(map_sqlx)?;
                     }
+                    Ok(AutopilotActionPayload::RequestBeaconOutreach {
+                        beacon_id,
+                        event_id,
+                        ..
+                    })
+                    | Ok(AutopilotActionPayload::RequestBeaconInviteBatch {
+                        beacon_id,
+                        event_id,
+                        ..
+                    }) => {
+                        // A cancelled beacon ask is the booker's "not this
+                        // one" — write it on the pair ledger or the next
+                        // cycle re-recommends the same ask and the queue
+                        // teaches nothing. The decline is operator-made, not
+                        // the partner's reply.
+                        crate::beacon_signal::outreach_state::stamp_operator_decline(
+                            &mut transaction,
+                            workspace_id.into_uuid(),
+                            beacon_id.into_uuid(),
+                            event_id.into_uuid(),
+                        )
+                        .await
+                        .map_err(map_sqlx)?;
+                    }
                     Ok(AutopilotActionPayload::RaiseContentSuggestion {
                         suggestion_id, ..
                     }) => {
