@@ -1,6 +1,8 @@
 //! Publication maturity is queue scheduling, not a failure to retry three times.
 
-use crate::autopilot_attributed_fans::{converted_fan, live_post};
+use crate::autopilot_attributed_fans::{
+    converted_fan, live_post, marketing_consent, meaningful_session,
+};
 use crate::autopilot_measurement_spine::{insert_dispatch, queue_measurement, setup};
 use crowdrelay_application::autopilot::{AutopilotMeasurementKind, AutopilotMeasurementRepository};
 
@@ -70,8 +72,20 @@ async fn durable_fans_wait_for_the_last_arrival_in_a_late_published_cohort() {
     live_post(&f, action, "window-durable", posted).await;
     let first = posted + time::Duration::days(1);
     let last = posted + time::Duration::days(13);
-    converted_fan(&f, action, first, first, "active").await;
-    converted_fan(&f, action, last, last, "active").await;
+    let observed_at = posted + time::Duration::days(44);
+    // Durable is meaningfully-retained now: consent plus a meaningful action
+    // inside each fan's own trailing-30d window past their +30d maturity.
+    for (acquired_at, session_at) in [
+        (first, posted + time::Duration::days(40)),
+        (
+            last,
+            posted + time::Duration::days(43) + time::Duration::hours(12),
+        ),
+    ] {
+        let fan = converted_fan(&f, action, acquired_at, acquired_at, "active").await;
+        marketing_consent(&f, fan, true, acquired_at).await;
+        meaningful_session(&f, fan, session_at).await;
+    }
     queue_measurement(
         &f,
         action,
@@ -87,17 +101,16 @@ async fn durable_fans_wait_for_the_last_arrival_in_a_late_published_cohort() {
             .expect("immature cohort")
             .is_empty()
     );
-    let at = posted + time::Duration::days(44);
     let claimed = f
         .repository
-        .claim_due_measurements(f.workspace_id, 100, at)
+        .claim_due_measurements(f.workspace_id, 100, observed_at)
         .await
         .expect("mature cohort");
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].attempt_number, 1);
     assert_eq!(
         f.repository
-            .observe_measurement(f.workspace_id, &claimed[0], at)
+            .observe_measurement(f.workspace_id, &claimed[0], observed_at)
             .await
             .expect("observe full cohort"),
         2.0
