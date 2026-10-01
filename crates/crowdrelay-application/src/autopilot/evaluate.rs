@@ -223,13 +223,8 @@ where
                         }
                     }
 
-                    self.evaluate_relationship_research(
-                        &policy,
-                        now,
-                        &mut limits,
-                        &mut report,
-                    )
-                    .await?;
+                    self.evaluate_relationship_research(&policy, now, &mut limits, &mut report)
+                        .await?;
                 }
                 AutopilotContext::CampaignLifecycle => {
                     let snapshots = self
