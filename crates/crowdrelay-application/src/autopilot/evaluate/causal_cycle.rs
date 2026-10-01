@@ -26,7 +26,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 .load_causal_model(self.workspace_id)
                 .await
                 .map(Some)
-                .map_err(Into::into);
+                .map_err(AutopilotError::from);
         }
 
         if !beacon_enabled {
