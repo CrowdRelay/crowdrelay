@@ -26,6 +26,8 @@ pub enum OutcomeKind {
     /// Event-scoped public network research. Items are reviewed Beacon
     /// candidates, never outreach instructions.
     BeaconCandidates,
+    /// Recent sourced context about one warm relationship contact. Internal evidence only.
+    ContactResearch,
     CampaignInsight,
     ReleasePlanNote,
     GenericInsight,
@@ -49,6 +51,7 @@ impl OutcomeKind {
             Self::AudienceSegments => "audience_segments",
             Self::OutreachTargets => "outreach_targets",
             Self::BeaconCandidates => "beacon_candidates",
+            Self::ContactResearch => "contact_research",
             Self::CampaignInsight => "campaign_insight",
             Self::ReleasePlanNote => "release_plan_note",
             Self::GenericInsight => "generic_insight",
@@ -65,6 +68,7 @@ impl OutcomeKind {
             Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
             Self::BeaconCandidates => "beacon",
+            Self::ContactResearch => "fan_lifecycle",
             Self::CampaignInsight
             | Self::ReleasePlanNote
             | Self::GenericInsight
@@ -88,6 +92,7 @@ impl OutcomeKind {
             | Self::SignalPush
             | Self::OutreachTargets
             | Self::BeaconCandidates
+            | Self::ContactResearch
             | Self::OpportunityFindings
             | Self::StrategyProposals => "require_approval",
             Self::AudienceSegments
@@ -106,6 +111,7 @@ impl OutcomeKind {
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
             Self::BeaconCandidates => "agent_beacon_candidate",
+            Self::ContactResearch => "agent_contact_research",
             Self::OpportunityFindings => "agent_opportunity_finding",
             Self::StrategyProposals => "agent_strategy_consult",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
@@ -396,6 +402,7 @@ pub fn validate(
         "audience_segments" => OutcomeKind::AudienceSegments,
         "outreach_targets" => OutcomeKind::OutreachTargets,
         "beacon_candidates" => OutcomeKind::BeaconCandidates,
+        "contact_research" => OutcomeKind::ContactResearch,
         "campaign_insight" => OutcomeKind::CampaignInsight,
         "release_plan_note" => OutcomeKind::ReleasePlanNote,
         "generic_insight" => OutcomeKind::GenericInsight,
