@@ -11,7 +11,7 @@ use crate::common;
 
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_infra::latarnik::{
-    InviteError, InviteOutcome, approve_latarnik_invite, dual_role_review,
+    InviteError, InviteOutcome, approve_latarnik_invite, dual_role_review, preview_latarnik_invite,
 };
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -816,5 +816,106 @@ async fn people_the_outreach_engine_knows_are_not_cold() -> Result<(), Box<dyn s
     assert!(!stefan.invitable, "a contact nobody ever wrote to is cold");
 
     assert_eq!(review.invitable_now, 2, "Marta and Nikodem, today");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_preview_is_the_letter_the_click_would_send() -> Result<(), Box<dyn std::error::Error>>
+{
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(&pool).await?;
+    let city = city(&pool).await?;
+    settings(&pool, act, "member_site_base_url", "https://virya.music").await?;
+    settings(&pool, act, "act_style", "modern metal").await?;
+
+    let anna = beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Anna",
+        "anna@example.test",
+        72,
+        true,
+    )
+    .await?;
+    replied(&pool, act, anna, city, now).await?;
+    contacted(
+        &pool,
+        act,
+        "anna@example.test",
+        "gig_outreach",
+        now - time::Duration::days(40),
+    )
+    .await?;
+    published_show(&pool, act, city, now + time::Duration::days(45)).await?;
+
+    // Dawid was never written to: a click would refuse him, so the preview must.
+    let dawid = beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Dawid",
+        "dawid@example.test",
+        95,
+        true,
+    )
+    .await?;
+
+    let preview = preview_latarnik_invite(&pool, act, anna, now).await?;
+    assert_eq!(preview.recipient_email, "anna@example.test");
+    assert_eq!(preview.recipient_name, "Anna");
+    assert!(preview.body.starts_with("Cześć Anna,"), "{}", preview.body);
+
+    // Reading it queued nothing and wrote no ask: Anna is still invitable.
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1")
+            .bind(act)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 0, "a preview queued an action");
+    let again = preview_latarnik_invite(&pool, act, anna, now).await?;
+    assert_eq!(again.body, preview.body, "a preview is not repeatable");
+
+    // The word-for-word promise: what was shown is what the click queues.
+    let key = IdempotencyKey::parse("latarnik-preview-anna").expect("valid key");
+    let InviteOutcome::Queued { action_id, .. } =
+        approve_latarnik_invite(&pool, act, anna, &key, now).await?
+    else {
+        return Err("expected a queued invitation".into());
+    };
+    let payload = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(act)
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        payload["draft"]["subject"].as_str(),
+        Some(preview.subject.as_str())
+    );
+    assert_eq!(
+        payload["draft"]["body"].as_str(),
+        Some(preview.body.as_str())
+    );
+    assert_eq!(payload["reason"].as_str(), Some(preview.reason.as_str()));
+
+    // Every refusal a click gives, the preview gives: cold, and already asked.
+    match preview_latarnik_invite(&pool, act, dawid, now).await {
+        Err(InviteError::Refused(sentence)) => {
+            assert!(sentence.contains("no relationship"), "{sentence}");
+        }
+        other => return Err(format!("a cold contact was previewed: {other:?}").into()),
+    }
+    match preview_latarnik_invite(&pool, act, anna, now).await {
+        Err(InviteError::Refused(_)) => {}
+        other => return Err(format!("an already-asked contact was previewed: {other:?}").into()),
+    }
     Ok(())
 }
