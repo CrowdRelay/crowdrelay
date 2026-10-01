@@ -377,9 +377,6 @@ pub(super) async fn observe_with_metrics(
             AutopilotMeasurementKind::BeaconOutreachUniqueVisitors14d => {
                 beacons::unique_visitors_14d(pool, workspace_id, measurement).await?
             }
-            AutopilotMeasurementKind::BeaconOutreachFanAcquisition14d => {
-                beacons::fan_acquisitions_14d(pool, workspace_id, measurement).await?
-            }
             // Attendance: redeemed admission passes over every pass that was
             // valid for entry — issued, claimed and expired passes could all
             // have been used or not; revoked ones were taken back and are no
