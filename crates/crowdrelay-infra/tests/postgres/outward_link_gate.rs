@@ -89,7 +89,10 @@ pub(super) async fn target(
 
 /// The executor advertisement a claim needs — the same rows a worker
 /// heartbeat writes.
-pub(super) async fn advertise(pool: &PgPool, workspace_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) async fn advertise(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
     let now = OffsetDateTime::now_utc();
     let executor = format!("n8n-linkgate-{}", Uuid::now_v7().simple());
     sqlx::query(

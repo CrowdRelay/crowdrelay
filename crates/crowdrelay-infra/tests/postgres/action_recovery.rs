@@ -40,12 +40,15 @@ async fn fixture() -> Result<(PgPool, String, WorkspaceId, Uuid), Box<dyn std::e
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn recovered_claim_fences_old_execution_and_failure()
--> Result<(), Box<dyn std::error::Error>> {
+async fn recovered_claim_fences_old_execution_and_failure() -> Result<(), Box<dyn std::error::Error>>
+{
     let (pool, url, workspace_id, action_id) = fixture().await?;
     let repo = repository(&pool, &url);
     let now = OffsetDateTime::now_utc();
-    let first = repo.claim_due_actions(workspace_id, 1, now).await?.remove(0);
+    let first = repo
+        .claim_due_actions(workspace_id, 1, now)
+        .await?
+        .remove(0);
     let recovered_at = now + time::Duration::minutes(16);
     let second = repo
         .claim_due_actions(workspace_id, 1, recovered_at)
@@ -54,7 +57,8 @@ async fn recovered_claim_fences_old_execution_and_failure()
     assert_eq!(first.id, second.id);
     assert_eq!(second.attempt_number, 2);
     assert!(matches!(
-        repo.execute_action(workspace_id, &first, recovered_at).await,
+        repo.execute_action(workspace_id, &first, recovered_at)
+            .await,
         Err(RepositoryError::Conflict)
     ));
     repo.fail_action(
@@ -106,7 +110,8 @@ async fn recovered_claim_fences_old_execution_and_failure()
     repo.execute_action(workspace_id, &second, recovered_at)
         .await?;
     assert!(matches!(
-        repo.execute_action(workspace_id, &second, recovered_at).await,
+        repo.execute_action(workspace_id, &second, recovered_at)
+            .await,
         Err(RepositoryError::Conflict)
     ));
     repo.fail_action(
@@ -146,7 +151,10 @@ async fn retry_backoff_is_bounded_and_terminal_failures_stay_terminal()
     let repo = repository(&pool, &url);
     let mut now = OffsetDateTime::now_utc();
     for (index, delay) in [5_i64, 10, 20, 40, 0].into_iter().enumerate() {
-        let action = repo.claim_due_actions(workspace_id, 1, now).await?.remove(0);
+        let action = repo
+            .claim_due_actions(workspace_id, 1, now)
+            .await?
+            .remove(0);
         assert_eq!(action.attempt_number, u32::try_from(index + 1)?);
         repo.fail_action(
             workspace_id,
@@ -218,13 +226,28 @@ async fn repeated_worker_loss_closes_every_attempt_and_exhausts_the_budget()
     let repo = repository(&pool, &url);
     let mut now = OffsetDateTime::now_utc();
     for attempt in 1..=5 {
-        let action = repo.claim_due_actions(workspace_id, 1, now).await?.remove(0);
+        let action = repo
+            .claim_due_actions(workspace_id, 1, now)
+            .await?
+            .remove(0);
         assert_eq!(action.attempt_number, attempt);
-        assert!(repo.claim_due_actions(workspace_id, 1, now).await?.is_empty());
+        assert!(
+            repo.claim_due_actions(workspace_id, 1, now)
+                .await?
+                .is_empty()
+        );
         now += time::Duration::minutes(16);
     }
-    assert!(repo.claim_due_actions(workspace_id, 1, now).await?.is_empty());
-    assert!(repo.claim_due_actions(workspace_id, 1, now).await?.is_empty());
+    assert!(
+        repo.claim_due_actions(workspace_id, 1, now)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        repo.claim_due_actions(workspace_id, 1, now)
+            .await?
+            .is_empty()
+    );
     let state: (String, String) = sqlx::query_as(
         "SELECT status, last_error_kind FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
     )
@@ -261,12 +284,14 @@ async fn repeated_worker_loss_closes_every_attempt_and_exhausts_the_budget()
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn permanent_refusal_is_not_requeued()
--> Result<(), Box<dyn std::error::Error>> {
+async fn permanent_refusal_is_not_requeued() -> Result<(), Box<dyn std::error::Error>> {
     let (pool, url, workspace_id, action_id) = fixture().await?;
     let repo = repository(&pool, &url);
     let now = OffsetDateTime::now_utc();
-    let action = repo.claim_due_actions(workspace_id, 1, now).await?.remove(0);
+    let action = repo
+        .claim_due_actions(workspace_id, 1, now)
+        .await?
+        .remove(0);
     repo.fail_action(
         workspace_id,
         action.id,
