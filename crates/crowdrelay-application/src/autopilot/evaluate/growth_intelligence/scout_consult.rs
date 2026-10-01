@@ -27,7 +27,8 @@ struct DispatchSpec {
     /// `&'static str`, so the spec carries the literal rather than the
     /// snapshot's owned string.
     template_id: &'static str,
-    /// The question the worker answers, verbatim.
+    /// The base question the worker answers. Fanbase discovery extends this
+    /// with a deterministic Brain-authored brief from live world state.
     prompt: &'static str,
     /// Priority within the cycle.
     priority: u8,
@@ -37,11 +38,45 @@ struct DispatchSpec {
     reason: &'static str,
 }
 
+fn fanbase_research_brief(snapshot: &GrowthIntelligenceSnapshot) -> String {
+    let mut brief = String::from(
+        "You are a research worker delegated by CrowdRelay Brain. This run is discovery only:          find new public fan-bearing places and return evidence-backed targets for screening.          Do not contact people, do not post, and do not infer permission to promote. Search beyond          predefined forums: Reddit, Discord, Telegram, Facebook groups, independent forums, local          scene/community sites and other public places where the act's plausible fans already gather.          Prefer specific, live places over generic directories. Every proposed target needs a real URL          found in this run, and duplicates already known to the workspace are not useful."
+    );
+
+    if let Some(days) = snapshot.days_to_next_event
+        && days <= 30
+    {
+        brief.push_str(&format!(
+            "\n\nEVENT-LOCAL MODE: the nearest published show is in {days} day(s).              The worker context includes that event's city, venue and date. Use them. Search the city              and surrounding scene for communities and public gathering places that can plausibly              affect attendance. Also look at adjacent local music/culture scenes rather than only              genre-labelled forums. This is research for relevance, not permission to promote."
+        ));
+    }
+
+    if let Some(objective) = &snapshot.world_model.objective {
+        brief.push_str(&format!(
+            "\n\nDECLARED OBJECTIVE CONTEXT: {}:{} is currently {:?}; observed {:?}, target {} by {}.              Use this to understand what growth the operator cares about, but never turn deadline              pressure into lower relevance standards or more aggressive outreach.",
+            objective.platform,
+            objective.metric_key,
+            objective.state,
+            objective.observed_value,
+            objective.target_value,
+            objective.deadline
+        ));
+    }
+
+    if snapshot.fan_growth_stagnant {
+        brief.push_str(
+            "\n\nFan growth is currently stagnant. Increase breadth of research, not outreach pressure:              explore genuinely new scenes, regions and community types, while keeping the same evidence              and fit bar."
+        );
+    }
+
+    brief
+}
+
 fn dispatch_spec(template_id: &str) -> Option<DispatchSpec> {
     match template_id {
         "fanbase-scout" => Some(DispatchSpec {
             template_id: "fanbase-scout",
-            prompt: "Where are my future fans? Find the online communities where people who would love this act already gather. Use only the discovery results provided — emit community targets with real URLs, never names from memory.",
+            prompt: "Where are my future fans? Actively search the open web for new, evidence-backed places where people who could genuinely care about this act already gather. Do not limit yourself to the communities already in our database, and never invent a place or URL from memory.",
             priority: 3,
             cooldown_field: |policy| policy.fanbase_scout_cooldown_hours,
             reason: "Weekly fanbase discovery scan is due",
@@ -102,15 +137,27 @@ pub(super) fn scout_consult_dispatch(
         .tenant_preference
         .cadence_multiplier(&snapshot.template_id);
     let discovery_cap_mult = policy.tenant_preference_policy.discovery_cadence_cap;
-    let cooldown = ((f64::from(base) * pref_mult).round() as u32)
+    let mut cooldown = ((f64::from(base) * pref_mult).round() as u32)
         .max(1)
         .min(((f64::from(base) * discovery_cap_mult).round() as u32).max(1))
         .max(1);
+    // A nearby show makes fresh local intelligence perishable. Research is
+    // read-only and still competes in the normal portfolio, so shortening the
+    // scout cadence is not permission to post more or contact more people.
+    if spec.template_id == "fanbase-scout"
+        && snapshot.days_to_next_event.is_some_and(|days| days <= 21)
+    {
+        cooldown = cooldown.min(72);
+    }
     if effective_hours < cooldown || !retry_ready {
         return None;
     }
 
-    let mut prompt = spec.prompt.to_owned();
+    let mut prompt = if spec.template_id == "fanbase-scout" {
+        format!("{}\n\n{}", spec.prompt, fanbase_research_brief(snapshot))
+    } else {
+        spec.prompt.to_owned()
+    };
     if !insights.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(insights);
@@ -199,6 +246,53 @@ mod dispatch_rule_tests {
         snapshot.hours_since_last_run = Some(50);
         snapshot.hours_since_last_effective_run = Some(50);
         assert!(evaluate(&snapshot).is_none());
+    }
+
+    #[test]
+    fn nearby_event_turns_fanbase_scout_into_local_open_web_research() {
+        let mut snapshot = snapshot_for("fanbase-scout");
+        snapshot.days_to_next_event = Some(16);
+        snapshot.has_upcoming_event = true;
+        snapshot.hours_since_last_run = Some(80);
+        snapshot.hours_since_last_effective_run = Some(80);
+
+        let request = evaluate(&snapshot)
+            .expect("read-only local research refreshes inside the ordinary weekly cadence");
+        assert!(request.prompt.contains("EVENT-LOCAL MODE"));
+        assert!(request.prompt.contains("Search beyond predefined forums"));
+        assert!(request.prompt.contains("Do not contact people"));
+    }
+
+    #[test]
+    fn fanbase_scout_receives_declared_objective_without_turning_it_into_spam_pressure() {
+        use crowdrelay_brain::goal::ActiveObjective;
+        use crowdrelay_domain::{
+            growth_metrics::MetricDirection,
+            objectives::ObjectiveState,
+        };
+
+        let mut snapshot = snapshot_for("fanbase-scout");
+        snapshot.world_model.objective = Some(ActiveObjective {
+            objective_id: uuid::Uuid::from_u128(7),
+            platform: "signal".to_owned(),
+            metric_key: "active_fans".to_owned(),
+            direction: MetricDirection::HigherIsBetter,
+            baseline_value: 3,
+            target_value: 100,
+            observed_value: Some(3),
+            declared_at: OffsetDateTime::now_utc() - time::Duration::days(1),
+            deadline: OffsetDateTime::now_utc() + time::Duration::days(30),
+            state: ObjectiveState::Behind {
+                progress_basis_points: 0,
+                projected_value: 5,
+                shortfall: 95,
+            },
+        });
+
+        let request = evaluate(&snapshot).expect("scout dispatch");
+        assert!(request.prompt.contains("signal:active_fans"));
+        assert!(request.prompt.contains("target 100"));
+        assert!(request.prompt.contains("never turn deadline pressure into lower relevance standards"));
     }
 
     #[test]
