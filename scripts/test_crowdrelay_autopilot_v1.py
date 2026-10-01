@@ -78,7 +78,10 @@ class ViryaOsAutopilotV1(unittest.TestCase):
         self.assertIn("started_at <= $2 - INTERVAL '15 minutes'", infra)
         self.assertIn("attempt_count < 5", infra)
         self.assertIn("stale_retry_exhausted", infra)
-        self.assertIn("INTERVAL '5 minutes'", infra)
+        # The retry delay is a bounded backoff ladder, not a fixed five
+        # minutes — pin the ladder the same way the literal was pinned.
+        self.assertIn("INTERVAL '1 minute'", infra)
+        self.assertIn("CASE attempt_count WHEN 1 THEN 5 WHEN 2 THEN 10", infra)
         self.assertIn("record_execution_outcome", infra)
 
     def test_lifecycle_respects_existing_marketing_and_delivery_time_consent(self):
