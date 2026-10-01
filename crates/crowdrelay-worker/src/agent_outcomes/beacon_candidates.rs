@@ -18,6 +18,23 @@ async fn insert_beacon_candidate(
         .into());
     };
 
+    let producing_template = sqlx::query_scalar::<_, String>(
+        "SELECT template_id FROM agent_service_tasks WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(outcome.workspace_id)
+    .bind(outcome.task_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or_default();
+    if producing_template != "event-network-scout" {
+        return Err(OutcomeRejection::UngroundedBeaconCandidate {
+            reason: format!(
+                "beacon_candidates may only come from event-network-scout, got {producing_template:?}"
+            ),
+        }
+        .into());
+    }
+
     let event_id = item
         .get("event_id")
         .and_then(Value::as_str)
