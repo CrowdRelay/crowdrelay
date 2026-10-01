@@ -11,7 +11,7 @@ use crate::common;
 
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_infra::latarnik::{
-    InviteError, InviteOutcome, approve_latarnik_invite, dual_role_review, preview_latarnik_invite,
+    InviteError, InviteOutcome, approve_latarnik_invite, dual_role_review,
 };
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -52,6 +52,38 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "anna@example.test",
         "gig_outreach",
         now - time::Duration::days(40),
+    )
+    .await?;
+
+    researched(
+        pool,
+        act,
+        "anna@example.test",
+        now - time::Duration::days(10),
+    )
+    .await?;
+
+    // Filip is warm in every way the relationship rules ask: he replied and was
+    // last written to fifty days ago. But nobody has looked at what he did
+    // lately, and the band does not write to people it has not read.
+    let filip = beacon(
+        pool,
+        act,
+        city,
+        "promoter",
+        "Filip",
+        "filip@example.test",
+        80,
+        true,
+    )
+    .await?;
+    replied(pool, act, filip, city, now).await?;
+    contacted(
+        pool,
+        act,
+        "filip@example.test",
+        "gig_outreach",
+        now - time::Duration::days(50),
     )
     .await?;
 
@@ -141,7 +173,7 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     let review = dual_role_review(pool, act, now, true).await?;
     assert_eq!(
-        review.total, 5,
+        review.total, 6,
         "every active contactable beacon is reviewed"
     );
     assert_eq!(
@@ -208,6 +240,23 @@ async fn run(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         ewa_row.hold_reason
     );
 
+    let filip_row = by_name("Filip");
+    assert!(
+        !filip_row.invitable,
+        "somebody unread was offered an invitation"
+    );
+    assert!(!filip_row.has_research);
+    assert!(
+        filip_row
+            .hold_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not read yet"),
+        "{:?}",
+        filip_row.hold_reason
+    );
+    assert!(by_name("Anna").has_research);
+
     assert_eq!(review.invitable_now, 1, "Anna alone, today");
 
     // A band with nothing on the calendar has nothing to say, and the read says
@@ -264,6 +313,14 @@ async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    researched(
+        pool,
+        act,
+        "anna@example.test",
+        now - time::Duration::days(10),
+    )
+    .await?;
+
     // A published night in Anna's city is the reason the letter opens with.
     published_show(pool, act, city, now + time::Duration::days(45)).await?;
 
@@ -297,6 +354,15 @@ async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // than with the band's. That is the difference between this and a blast.
     let body = payload["draft"]["body"].as_str().unwrap_or_default();
     assert!(body.starts_with("Cześć Anna,"), "{body}");
+    // What the band read comes first, before anything it wants from her, and
+    // the source stays out of the text.
+    let read = body.find("recenzja płyty „Szum” w audycji „Metalowy Wieczór”");
+    let ask = body.find("Gramy w Wrocław");
+    assert!(
+        read.is_some() && read < ask,
+        "the letter does not open with her work: {body}"
+    );
+    assert!(!body.contains("example.test"), "{body}");
     assert!(
         body.contains("Gramy w Wrocław"),
         "the letter does not open with her city: {body}"
@@ -382,7 +448,7 @@ async fn run_send(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn settings(
+pub(crate) async fn settings(
     pool: &PgPool,
     workspace_id: Uuid,
     key: &str,
@@ -397,7 +463,7 @@ async fn settings(
     Ok(())
 }
 
-async fn published_show(
+pub(crate) async fn published_show(
     pool: &PgPool,
     workspace_id: Uuid,
     city_id: Uuid,
@@ -419,7 +485,32 @@ async fn published_show(
     Ok(())
 }
 
-async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+/// The band has read this person's recent work: one dated, sourced fact.
+pub(crate) async fn researched(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+    observed: OffsetDateTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        r#"
+        INSERT INTO contact_research
+            (workspace_id, normalized_email, fact, praise, source_url, observed_on,
+             researched_by)
+        VALUES ($1, $2, 'recenzja płyty „Szum” w audycji „Metalowy Wieczór”',
+                'Rzadko ktoś omawia tę płytę tak konkretnie.', $3, $4, 'test')
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .bind(format!("https://example.test/{email}"))
+    .bind(observed.date())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, 'Virya')")
         .bind(id)
@@ -429,7 +520,7 @@ async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     Ok(id)
 }
 
-async fn city(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+pub(crate) async fn city(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
     let suffix = Uuid::now_v7().simple().to_string();
     Ok(sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
@@ -448,7 +539,7 @@ async fn city(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn beacon(
+pub(crate) async fn beacon(
     pool: &PgPool,
     workspace_id: Uuid,
     city_id: Uuid,
@@ -479,7 +570,7 @@ async fn beacon(
 }
 
 /// A beacon campaign that got an answer — the reply that outranks a score.
-async fn replied(
+pub(crate) async fn replied(
     pool: &PgPool,
     workspace_id: Uuid,
     beacon_id: Uuid,
@@ -490,7 +581,7 @@ async fn replied(
 }
 
 /// A beacon campaign whose answer was `disposition`.
-async fn campaign_answer(
+pub(crate) async fn campaign_answer(
     pool: &PgPool,
     workspace_id: Uuid,
     beacon_id: Uuid,
@@ -529,7 +620,7 @@ async fn campaign_answer(
 }
 
 /// The governor row: the band reached this address, in whatever role.
-async fn contacted(
+pub(crate) async fn contacted(
     pool: &PgPool,
     workspace_id: Uuid,
     email: &str,
@@ -592,330 +683,6 @@ async fn consented_fan(
         .bind(fan_id)
         .execute(pool)
         .await?;
-    }
-    Ok(())
-}
-
-/// The outreach engine's own row for an address: when it last mailed them and
-/// how they answered. Production held 485 outbound mails a month here and 56
-/// rows in the governor, so the invitation lane saw nobody.
-async fn outreach_target(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    email: &str,
-    last_outreach_at: OffsetDateTime,
-    disposition: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    sqlx::query(
-        r#"
-        INSERT INTO outreach_targets
-            (workspace_id, target_kind, display_name, contact_email,
-             last_outreach_at, last_reply_disposition)
-        VALUES ($1, 'press', $2, $3, $4, $5)
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(email)
-    .bind(email)
-    .bind(last_outreach_at)
-    .bind(disposition)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn people_the_outreach_engine_knows_are_not_cold() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
-        .await
-        .expect("connect to the migrated suite database");
-    let now = OffsetDateTime::now_utc();
-    let act = workspace(&pool).await?;
-    let city = city(&pool).await?;
-
-    // Marta was mailed by the outreach engine forty days ago. The governor
-    // never heard of it. She is a relationship, not a cold contact.
-    beacon(
-        &pool,
-        act,
-        city,
-        "local_press",
-        "Marta",
-        "marta@example.test",
-        72,
-        true,
-    )
-    .await?;
-    outreach_target(
-        &pool,
-        act,
-        "marta@example.test",
-        now - time::Duration::days(40),
-        "none",
-    )
-    .await?;
-
-    // Nikodem scores below the bar, but he answered positively: a reply
-    // outranks a score.
-    beacon(
-        &pool,
-        act,
-        city,
-        "local_press",
-        "Nikodem",
-        "nikodem@example.test",
-        50,
-        true,
-    )
-    .await?;
-    outreach_target(
-        &pool,
-        act,
-        "nikodem@example.test",
-        now - time::Duration::days(30),
-        "positive",
-    )
-    .await?;
-
-    // Olga was mailed five days ago. Business first.
-    beacon(
-        &pool,
-        act,
-        city,
-        "promoter",
-        "Olga",
-        "olga@example.test",
-        70,
-        true,
-    )
-    .await?;
-    outreach_target(
-        &pool,
-        act,
-        "olga@example.test",
-        now - time::Duration::days(5),
-        "none",
-    )
-    .await?;
-
-    // Piotr and Rafał said no to the pitch. Asking through the other role is
-    // the oldest trick in mailing-list software.
-    beacon(
-        &pool,
-        act,
-        city,
-        "local_press",
-        "Piotr",
-        "piotr@example.test",
-        80,
-        true,
-    )
-    .await?;
-    outreach_target(
-        &pool,
-        act,
-        "piotr@example.test",
-        now - time::Duration::days(40),
-        "declined",
-    )
-    .await?;
-    beacon(
-        &pool,
-        act,
-        city,
-        "local_press",
-        "Rafał",
-        "rafal@example.test",
-        80,
-        true,
-    )
-    .await?;
-    outreach_target(
-        &pool,
-        act,
-        "rafal@example.test",
-        now - time::Duration::days(40),
-        "do_not_contact",
-    )
-    .await?;
-
-    // Tola declined a beacon campaign. That used to count as "replied".
-    let tola = beacon(
-        &pool,
-        act,
-        city,
-        "promoter",
-        "Tola",
-        "tola@example.test",
-        80,
-        true,
-    )
-    .await?;
-    campaign_answer(&pool, act, tola, city, now, "declined").await?;
-    contacted(
-        &pool,
-        act,
-        "tola@example.test",
-        "beacon_outreach",
-        now - time::Duration::days(40),
-    )
-    .await?;
-
-    // Stefan was never contacted in either ledger: still cold.
-    beacon(
-        &pool,
-        act,
-        city,
-        "promoter",
-        "Stefan",
-        "stefan@example.test",
-        90,
-        true,
-    )
-    .await?;
-
-    let review = dual_role_review(&pool, act, now, true).await?;
-    let by_name = |name: &str| {
-        review
-            .contacts
-            .iter()
-            .find(|contact| contact.display_name == name)
-            .unwrap_or_else(|| panic!("{name} missing from the review"))
-    };
-
-    let marta = by_name("Marta");
-    assert!(marta.invitable, "Marta: {:?}", marta.hold_reason);
-    assert_eq!(marta.days_since_last_contact, Some(40));
-
-    let nikodem = by_name("Nikodem");
-    assert!(nikodem.invitable, "Nikodem: {:?}", nikodem.hold_reason);
-    assert!(nikodem.has_replied);
-
-    let olga = by_name("Olga");
-    assert!(!olga.invitable);
-    assert!(
-        olga.hold_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("recently"),
-        "{:?}",
-        olga.hold_reason
-    );
-
-    for name in ["Piotr", "Rafał", "Tola"] {
-        let row = by_name(name);
-        assert!(
-            !row.invitable,
-            "{name} said no and was offered an invitation"
-        );
-        assert!(row.do_not_contact, "{name} must read as refused");
-    }
-
-    let stefan = by_name("Stefan");
-    assert!(!stefan.invitable, "a contact nobody ever wrote to is cold");
-
-    assert_eq!(review.invitable_now, 2, "Marta and Nikodem, today");
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn the_preview_is_the_letter_the_click_would_send() -> Result<(), Box<dyn std::error::Error>>
-{
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
-        .await
-        .expect("connect to the migrated suite database");
-    let now = OffsetDateTime::now_utc();
-    let act = workspace(&pool).await?;
-    let city = city(&pool).await?;
-    settings(&pool, act, "member_site_base_url", "https://virya.music").await?;
-    settings(&pool, act, "act_style", "modern metal").await?;
-
-    let anna = beacon(
-        &pool,
-        act,
-        city,
-        "promoter",
-        "Anna",
-        "anna@example.test",
-        72,
-        true,
-    )
-    .await?;
-    replied(&pool, act, anna, city, now).await?;
-    contacted(
-        &pool,
-        act,
-        "anna@example.test",
-        "gig_outreach",
-        now - time::Duration::days(40),
-    )
-    .await?;
-    published_show(&pool, act, city, now + time::Duration::days(45)).await?;
-
-    // Dawid was never written to: a click would refuse him, so the preview must.
-    let dawid = beacon(
-        &pool,
-        act,
-        city,
-        "promoter",
-        "Dawid",
-        "dawid@example.test",
-        95,
-        true,
-    )
-    .await?;
-
-    let preview = preview_latarnik_invite(&pool, act, anna, now).await?;
-    assert_eq!(preview.recipient_email, "anna@example.test");
-    assert_eq!(preview.recipient_name, "Anna");
-    assert!(preview.body.starts_with("Cześć Anna,"), "{}", preview.body);
-
-    // Reading it queued nothing and wrote no ask: Anna is still invitable.
-    let queued: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1")
-            .bind(act)
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(queued, 0, "a preview queued an action");
-    let again = preview_latarnik_invite(&pool, act, anna, now).await?;
-    assert_eq!(again.body, preview.body, "a preview is not repeatable");
-
-    // The word-for-word promise: what was shown is what the click queues.
-    let key = IdempotencyKey::parse("latarnik-preview-anna").expect("valid key");
-    let InviteOutcome::Queued { action_id, .. } =
-        approve_latarnik_invite(&pool, act, anna, &key, now).await?
-    else {
-        return Err("expected a queued invitation".into());
-    };
-    let payload = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT payload FROM autopilot_actions WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(act)
-    .bind(action_id)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(
-        payload["draft"]["subject"].as_str(),
-        Some(preview.subject.as_str())
-    );
-    assert_eq!(
-        payload["draft"]["body"].as_str(),
-        Some(preview.body.as_str())
-    );
-    assert_eq!(payload["reason"].as_str(), Some(preview.reason.as_str()));
-
-    // Every refusal a click gives, the preview gives: cold, and already asked.
-    match preview_latarnik_invite(&pool, act, dawid, now).await {
-        Err(InviteError::Refused(sentence)) => {
-            assert!(sentence.contains("no relationship"), "{sentence}");
-        }
-        other => return Err(format!("a cold contact was previewed: {other:?}").into()),
-    }
-    match preview_latarnik_invite(&pool, act, anna, now).await {
-        Err(InviteError::Refused(_)) => {}
-        other => return Err(format!("an already-asked contact was previewed: {other:?}").into()),
     }
     Ok(())
 }

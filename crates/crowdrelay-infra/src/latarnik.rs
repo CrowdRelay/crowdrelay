@@ -80,6 +80,10 @@ pub struct DualRoleContact {
     pub previously_opted_out: bool,
     /// Their double opt-in is already in their inbox, unanswered.
     pub opt_in_pending: bool,
+    /// The band has looked at what they did lately: a recent, sourced fact is
+    /// on file. Without one they are held as "not read yet" and are the work
+    /// queue for the research step.
+    pub has_research: bool,
 }
 
 /// What the read found, with the honest denominator.
@@ -112,6 +116,7 @@ struct Row {
     latest_consent: Option<bool>,
     days_since_last_contact: Option<i64>,
     already_invited: bool,
+    has_recent_research: bool,
     /// The person said no in either ledger: a declined or do-not-contact
     /// reply on a beacon campaign, or on the outreach target behind the same
     /// address.
@@ -195,7 +200,18 @@ const DUAL_ROLE_CORE: &str = r#"
             $2 - GREATEST(governor.last_outbound_at, outreach.last_at)
         )) / 86400)::bigint
             AS days_since_last_contact,
-        COALESCE(governor.last_context = 'latarnik_invite', false) AS already_invited
+        COALESCE(governor.last_context = 'latarnik_invite', false) AS already_invited,
+        -- Nobody is written to as a stranger: a dated, sourced fact about what
+        -- this address did lately (`contact_research`) is the price of a letter.
+        -- The window is `crowdrelay_domain::contact_research::HOOK_MAX_AGE_DAYS`,
+        -- pinned by a test because a SQL literal cannot import a constant.
+        EXISTS (
+            SELECT 1 FROM contact_research AS research
+            WHERE research.workspace_id = beacon.workspace_id
+              AND research.normalized_email = lower(btrim(beacon.contact_email))
+              AND research.observed_on <= ($2::timestamptz AT TIME ZONE 'UTC')::date
+              AND research.observed_on >= ($2::timestamptz AT TIME ZONE 'UTC')::date - 120
+        ) AS has_recent_research
     FROM beacons AS beacon
     LEFT JOIN cities AS city ON city.id = beacon.city_id
     -- The join that did not exist: the same address wearing the other role.
@@ -345,6 +361,7 @@ fn row_to_contact(row: &Row, reason_available: bool) -> (DualRoleContact, bool, 
         already_a_fan: hears_the_dates,
         previously_opted_out,
         opt_in_pending,
+        has_recent_research: row.has_recent_research,
     };
     // The reason is the caller's to supply; without one every row holds,
     // which is the honest state for a band with nothing on the calendar.
@@ -371,6 +388,7 @@ fn row_to_contact(row: &Row, reason_available: bool) -> (DualRoleContact, bool, 
             accepts_outreach: row.accepts_outreach,
             previously_opted_out,
             opt_in_pending,
+            has_research: row.has_recent_research,
         },
         hears_the_dates,
         invitable,
@@ -387,3 +405,19 @@ static PLACEHOLDER_REASON: crowdrelay_domain::latarnik_invite::InviteReason =
     crowdrelay_domain::latarnik_invite::InviteReason::RecentRelease {
         title: String::new(),
     };
+
+#[cfg(test)]
+mod core_tests {
+    use super::DUAL_ROLE_CORE;
+    use crowdrelay_domain::contact_research::HOOK_MAX_AGE_DAYS;
+
+    /// The read's recency window is a SQL literal; the rule's is a constant.
+    /// They must be the same number.
+    #[test]
+    fn the_sql_window_is_the_domains_window() {
+        assert!(
+            DUAL_ROLE_CORE.contains(&format!("::date - {HOOK_MAX_AGE_DAYS}")),
+            "the research window in DUAL_ROLE_CORE drifted from HOOK_MAX_AGE_DAYS"
+        );
+    }
+}

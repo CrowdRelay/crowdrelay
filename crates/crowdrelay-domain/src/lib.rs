@@ -79,6 +79,7 @@ pub mod community_register;
 pub mod community_reply;
 pub mod community_rules;
 pub mod community_topic;
+pub mod contact_research;
 pub mod content_engine;
 pub mod content_supply;
 pub mod creative;

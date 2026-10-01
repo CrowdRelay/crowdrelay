@@ -36,6 +36,7 @@ pub mod community_intelligence;
 pub mod concert_qr;
 pub mod concert_room;
 pub mod config;
+pub mod contact_research;
 pub mod content_arcs;
 pub mod content_engine;
 pub mod content_peers;

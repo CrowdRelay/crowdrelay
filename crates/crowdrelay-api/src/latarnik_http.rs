@@ -12,6 +12,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
+use crowdrelay_infra::contact_research::{ResearchError, record_hook_for_beacon};
 use crowdrelay_infra::latarnik::{
     InviteError, approve_latarnik_invite, dual_role_review, preview_latarnik_invite,
 };
@@ -78,6 +79,97 @@ pub async fn dual_role_contacts(
             .into_response(),
         Err(error) => {
             tracing::warn!(%error, "dual-role contact read failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// What the band found out about a person: one dated, sourced thing they did.
+#[derive(serde::Deserialize)]
+pub struct ResearchBody {
+    fact: String,
+    #[serde(default)]
+    praise: Option<String>,
+    source_url: String,
+    /// `YYYY-MM-DD`: when the thing happened or was published.
+    observed_on: String,
+    #[serde(default)]
+    language: Option<String>,
+}
+
+fn parse_day(value: &str) -> Option<time::Date> {
+    let mut parts = value.trim().splitn(3, '-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = time::Month::try_from(parts.next()?.parse::<u8>().ok()?).ok()?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
+}
+
+/// `PUT /v1/control-plane/contacts/{beacon_id}/research`
+///
+/// Records what the band read of this person lately, so a letter can open with
+/// it. Nobody is written to as a stranger: until a recent, sourced fact is on
+/// file the eligibility rule holds the person as "not read yet". The research
+/// agent's result and a person's note come through the same checks (https
+/// source, recent, no hype, no links), and the same source again replaces the
+/// earlier row, so repeating the call is safe.
+pub async fn record_research(
+    State(state): State<crate::AppState>,
+    Path(beacon_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ResearchBody>,
+) -> Response {
+    let Ok(beacon_id) = Uuid::parse_str(&beacon_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    let today = OffsetDateTime::now_utc().date();
+    let Some(observed_on) = parse_day(&body.observed_on) else {
+        return (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "refused": "observed_on is a date, YYYY-MM-DD" })),
+        )
+            .into_response();
+    };
+    match record_hook_for_beacon(
+        &state.database,
+        state.ops.workspace_id().into_uuid(),
+        beacon_id,
+        &body.fact,
+        body.praise.as_deref(),
+        &body.source_url,
+        observed_on,
+        body.language.as_deref().unwrap_or("pl"),
+        "operator",
+        today,
+    )
+    .await
+    {
+        Ok(hook) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({
+                "recorded": true,
+                "fact": hook.fact,
+                "observed_on": hook.observed_on.to_string(),
+            })),
+        )
+            .into_response(),
+        Err(ResearchError::NotFound) => Problem::not_found(request_id(&headers))
+            .private()
+            .into_response(),
+        Err(ResearchError::Refused(sentence)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "refused": sentence })),
+        )
+            .into_response(),
+        Err(ResearchError::Database(error)) => {
+            tracing::warn!(%error, "contact research write failed");
             Problem::service_unavailable(request_id(&headers))
                 .private()
                 .into_response()

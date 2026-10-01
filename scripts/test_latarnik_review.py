@@ -24,6 +24,9 @@ def preview(email="anna@example.test", name="Anna"):
         "role": "promoter",
         "city": "Wroclaw",
         "reason": "koncert w Wroclaw",
+        "hook_fact": "recenzja plyty X w audycji Y",
+        "hook_source_url": "https://example.test/audycje/y",
+        "hook_observed_on": "2026-09-20",
         "subject": "Virya: terminy zanim wyjda",
         "body": "Czesc Anna,\n\nGramy w Wroclaw.\n",
     }
@@ -135,6 +138,45 @@ class Selection(unittest.TestCase):
         text = module.render_letter(preview())
         for part in ("Anna <anna@example.test>", "koncert w Wroclaw", "Virya: terminy", "Gramy w Wroclaw."):
             self.assertIn(part, text)
+
+    def test_render_shows_what_the_band_read_and_where(self):
+        text = module.render_letter(preview())
+        for part in ("recenzja plyty X w audycji Y", "https://example.test/audycje/y", "2026-09-20"):
+            self.assertIn(part, text)
+
+    def test_the_research_queue_is_warm_unread_people_only(self):
+        review = {
+            "contacts": [
+                {"beacon_id": "ready", "invitable": True, "has_research": True,
+                 "relationship_score": 90, "display_name": "R"},
+                {"beacon_id": "cold", "invitable": False, "has_research": False,
+                 "hold_reason": "no relationship on record yet", "relationship_score": 95,
+                 "display_name": "C"},
+                {"beacon_id": "busy", "invitable": False, "has_research": False,
+                 "hold_reason": "the band wrote to them recently", "relationship_score": 80,
+                 "display_name": "B"},
+                {"beacon_id": "b", "invitable": False, "has_research": False,
+                 "hold_reason": "not read yet - we write to people", "relationship_score": 60,
+                 "display_name": "B2"},
+                {"beacon_id": "a", "invitable": False, "has_research": False,
+                 "hold_reason": "not read yet - we write to people", "relationship_score": 75,
+                 "display_name": "A"},
+            ]
+        }
+        # Cold and recently-contacted people are held for those reasons; spending
+        # research on them would be spending it on someone who cannot be asked.
+        self.assertEqual([r["beacon_id"] for r in module.needs_research(review)], ["a", "b"])
+
+    def test_note_arguments_are_all_required(self):
+        parser = module.build_parser()
+        with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), mock.patch(
+            "sys.stderr", new=io.StringIO()
+        ):
+            parser.parse_args(["note", "some-id", "--fact", "x"])
+        args = parser.parse_args(
+            ["note", "some-id", "--fact", "f", "--source-url", "https://e.test/x", "--observed-on", "2026-09-20"]
+        )
+        self.assertEqual(args.language, "pl")
 
 
 class Entry(unittest.TestCase):
