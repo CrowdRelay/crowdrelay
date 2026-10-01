@@ -77,6 +77,23 @@ fn lifecycle_snapshot(row: LifecycleSnapshotRow) -> Result<FanLifecycleSnapshot,
         has_paid_ticket: row.has_paid_ticket,
         last_paid_ticket_at: row.last_paid_ticket_at,
         last_event_interest_at: row.last_event_interest_at,
+        // A check-in with no usable event row is no recall at all — the
+        // template cannot name a night it cannot see. The join binds
+        // slug and title together, so either both land or none does.
+        recent_checkin: match (
+            row.checkin_at,
+            row.checkin_event_slug,
+            row.checkin_event_title,
+        ) {
+            (Some(checked_in_at), Some(event_slug), Some(event_title)) => {
+                Some(crowdrelay_domain::audience_lifecycle::LifecycleCheckin {
+                    checked_in_at,
+                    event_slug,
+                    event_title,
+                })
+            }
+            _ => None,
+        },
     })
 }
 

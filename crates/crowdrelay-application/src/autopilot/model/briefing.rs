@@ -129,19 +129,35 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
-            Self::RequestFanLifecycleMessage { fan_id, template_key } => ActionBriefing {
-                summary: format!("Send a message to a fan: {}", friendly_template(template_key)),
-                why_it_matters: "This goes to a fan who consented to be contacted. A sent message cannot be recalled.".into(),
-                steps: vec![
-                    BriefingStep { what_to_do: "Read the message body and its template".into(), why_it_matters: "Make sure the tone fits".into() },
-                    BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "The message is delivered to the fan".into() },
-                ],
-                content: vec![
+            Self::RequestFanLifecycleMessage {
+                fan_id,
+                template_key,
+                show,
+            } => {
+                let mut content = vec![
                     BriefingField { label: "Fan".into(), value: short_ref(fan_id) },
                     BriefingField { label: "Template".into(), value: friendly_template(template_key) },
-                ],
-                deadline_note: String::new(),
-            },
+                ];
+                // The recall's whole content is the night it names — the
+                // approver must see which show the fan is being told they
+                // attended, not just that a template fired.
+                if let Some(show) = show {
+                    content.push(BriefingField {
+                        label: "Show".into(),
+                        value: show.event_title.clone(),
+                    });
+                }
+                ActionBriefing {
+                    summary: format!("Send a message to a fan: {}", friendly_template(template_key)),
+                    why_it_matters: "This goes to a fan who consented to be contacted. A sent message cannot be recalled.".into(),
+                    steps: vec![
+                        BriefingStep { what_to_do: "Read the message body and its template".into(), why_it_matters: "Make sure the tone fits".into() },
+                        BriefingStep { what_to_do: "Click APPROVE to send it".into(), why_it_matters: "The message is delivered to the fan".into() },
+                    ],
+                    content,
+                    deadline_note: String::new(),
+                }
+            }
             Self::RequestMerchReorder { variant_id, quantity } => ActionBriefing {
                 summary: format!("Reorder merch: {} units", quantity),
                 why_it_matters: "A merch order costs money and takes time to arrive. Confirm the stock is actually needed.".into(),

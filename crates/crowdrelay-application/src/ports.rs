@@ -13,6 +13,7 @@ use crowdrelay_domain::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
+use time::OffsetDateTime;
 
 /// Idempotency key sent by the client to make write operations replayable.
 ///
@@ -259,6 +260,18 @@ pub trait AcquisitionRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<Vec<UpsertedSmartLink>, RepositoryError>;
 
+    /// Raw click tallies for a bounded set of link slugs — the join kit's
+    /// per-placement readout. Signups and retention are deliberately not
+    /// counted here: the acquisition-channels readout owns that attribution
+    /// rule, grouped by the same channel fields these links carry, and a
+    /// second implementation of last-click-wins would drift.
+    async fn link_click_stats(
+        &self,
+        workspace_id: WorkspaceId,
+        slugs: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Vec<LinkClickStats>, RepositoryError>;
+
     /// Returns the active referral code for a fan, creating one if none exists.
     /// Idempotent: if the fan already has an active code, it is returned
     /// unchanged.
@@ -280,6 +293,14 @@ pub struct UpsertedSmartLink {
     pub channel_community: Option<String>,
     pub channel_creative: Option<String>,
     pub campaign_id: Option<CampaignId>,
+}
+
+/// Click tallies for one smart link — the raw half of the kit readout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkClickStats {
+    pub slug: String,
+    pub clicks_total: u32,
+    pub clicks_7d: u32,
 }
 
 /// Command for creating or updating a tracked smart link.

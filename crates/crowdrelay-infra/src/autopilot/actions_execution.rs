@@ -50,6 +50,7 @@ impl PostgresAutopilotRepository {
                 AutopilotActionPayload::RequestFanLifecycleMessage {
                     fan_id,
                     template_key,
+                    show,
                 } => {
                     ensure_marketing_eligible(&mut transaction, workspace_id, *fan_id).await?;
                     let fan = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
@@ -104,9 +105,17 @@ impl PostgresAutopilotRepository {
                     // The install ask carries a tracked link to the Signal
                     // page — the click is the only measurement the ask has.
                     // A linkless ask is refused rather than sent, for the same
-                    // reason a referral invite without a URL is.
+                    // reason a referral invite without a URL is. The recall
+                    // mints the same link when the decision flagged the fan
+                    // as install-less: for somebody whose only footprint is
+                    // a door scan, "you were there" and "open Signal" are one
+                    // ask, not two.
+                    let wants_install_url = template_key
+                        == "crowdrelay.fan.signal_install_ask.v1"
+                        || (template_key == "crowdrelay.fan.show_recall.v1"
+                            && show.as_ref().is_some_and(|show| show.wants_install_url));
                     let install_url =
-                        if template_key == "crowdrelay.fan.signal_install_ask.v1" {
+                        if wants_install_url {
                             let brand = crate::tenant_settings::TenantSettingsRepository::new(
                                 self.pool.clone(),
                             )
@@ -144,6 +153,44 @@ impl PostgresAutopilotRepository {
                         } else {
                             None
                         };
+                    // The recall carries a tracked link back to the show's
+                    // own page — `recall-{slug}`, distinct from the shared
+                    // `show-{slug}` the pitches print, so a click here reads
+                    // as a fan revisiting their night rather than another
+                    // channel's traffic. A recall without its show page is
+                    // refused, same as the ask without its install link.
+                    let show_url = if let Some(show) = show.as_ref() {
+                        let brand = crate::tenant_settings::TenantSettingsRepository::new(
+                            self.pool.clone(),
+                        )
+                        .brand_settings(workspace_id.into_uuid())
+                        .await
+                        .map_err(map_sqlx)?;
+                        let locale = fan.2.as_deref().unwrap_or_default();
+                        let destination = brand
+                            .event_page_url(locale, &show.event_slug)
+                            .ok_or(RepositoryError::ConflictBecause(
+                                "show recall refused: tenant has no member site URL",
+                            ))?;
+                        let slug = format!("recall-{}", show.event_slug);
+                        let link = crate::tracked_links::ensure_smart_link_in_tx(
+                            &mut transaction,
+                            workspace_id.into_uuid(),
+                            &slug,
+                            &destination,
+                            brand.site_root(),
+                            Some("email"),
+                            Some("show-recall"),
+                        )
+                        .await
+                        .map_err(map_sqlx)?
+                        .ok_or(RepositoryError::ConflictBecause(
+                            "show recall refused: event page is not a printable URL",
+                        ))?;
+                        Some(link.as_str().to_owned())
+                    } else {
+                        None
+                    };
                     emit_outward_action(
                         &mut transaction,
                         workspace_id,
@@ -167,6 +214,11 @@ impl PostgresAutopilotRepository {
                                 "referral_code": referral_code,
                                 "referral_url": referral_url,
                                 "install_url": install_url,
+                                // The night the recall names — the template's
+                                // only subject. Both are None for every other
+                                // lifecycle key.
+                                "show_title": show.as_ref().map(|show| show.event_title.as_str()),
+                                "show_url": show_url,
                             },
                         }),
                     )

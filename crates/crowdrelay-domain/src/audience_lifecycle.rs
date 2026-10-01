@@ -9,7 +9,20 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{FanId, autonomy::Confidence};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+/// The show this fan most recently scanned into, when there is one.
+///
+/// The slug and title ride the snapshot so the recall candidate can freeze
+/// them into the action it proposes — a second check-in between the
+/// decision and the send must not rewrite the night the operator approved.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct LifecycleCheckin {
+    #[serde(with = "time::serde::rfc3339")]
+    pub checked_in_at: OffsetDateTime,
+    pub event_slug: String,
+    pub event_title: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FanLifecycleSnapshot {
     pub fan_id: FanId,
     pub active: bool,
@@ -46,6 +59,9 @@ pub struct FanLifecycleSnapshot {
     pub has_signal_install: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_event_interest_at: Option<OffsetDateTime>,
+    /// The fan's newest concert check-in, or none. Only the latest matters:
+    /// a recall names one night, and the newest one is the night.
+    pub recent_checkin: Option<LifecycleCheckin>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -85,6 +101,19 @@ pub struct FanLifecyclePolicy {
     /// against the default 120-hour cooldown admit exactly one. A fan who has
     /// not opened Signal in that window has answered.
     pub signal_install_ask_until_days: u32,
+    /// Hours after a check-in before the show recall may send.
+    ///
+    /// Nonzero on purpose: the scan itself sends nothing, and a "great to see
+    /// you" arriving while the fan is still at the merch table is the contact
+    /// collision the recall exists to avoid — the recall is the first message
+    /// a check-in ever triggers, and it lands the next day, not at the door.
+    pub show_recall_after_hours: u32,
+    /// Hours after a check-in past which the recall stops referencing it.
+    ///
+    /// A window rather than an "asked" flag: the 120-hour marketing cooldown
+    /// already guarantees a recall fires at most once per check-in, so the
+    /// bound exists only to keep "you were there" from arriving a week late.
+    pub show_recall_until_hours: u32,
 }
 
 impl Default for FanLifecyclePolicy {
@@ -100,6 +129,8 @@ impl Default for FanLifecyclePolicy {
             referral_invite_until_days: 14,
             signal_install_ask_after_days: 2,
             signal_install_ask_until_days: 9,
+            show_recall_after_hours: 18,
+            show_recall_until_hours: 60,
         }
     }
 }
@@ -135,6 +166,16 @@ pub enum LifecycleTemplate {
     /// the referral invite it is an approach, not a milestone — it waits for
     /// the cooldown and never precedes the welcome.
     SignalInstallAsk,
+    /// A fan checked into a show roughly a day ago. The scan itself sends
+    /// nothing; this "you were there" is the first message a check-in ever
+    /// triggers, which is also why it outranks the welcome — for a fan the
+    /// scan created, the recall *is* the welcome.
+    ///
+    /// Not a milestone and not a standing approach either: it is a windowed
+    /// acknowledgement that still waits out the cooldown, and the cooldown is
+    /// what keeps it to once per night even though nothing records that a
+    /// recall was sent.
+    ShowRecall,
 }
 
 impl LifecycleTemplate {
@@ -192,7 +233,7 @@ pub enum FanLifecycleHoldReason {
 /// One milestone at a time, strongest first: somebody who hit their fifth show
 /// and made a referral in the same week hears about the show, not both.
 fn milestone_due(
-    snapshot: FanLifecycleSnapshot,
+    snapshot: &FanLifecycleSnapshot,
     policy: FanLifecyclePolicy,
     now: OffsetDateTime,
 ) -> Option<LifecycleTemplate> {
@@ -241,6 +282,10 @@ pub fn evaluate_fan_lifecycle(
         || snapshot.last_marketing_touch_at.is_some_and(|at| at > now)
         || snapshot.last_paid_ticket_at.is_some_and(|at| at > now)
         || snapshot.last_event_interest_at.is_some_and(|at| at > now)
+        || snapshot
+            .recent_checkin
+            .as_ref()
+            .is_some_and(|checkin| checkin.checked_in_at > now)
     {
         return FanLifecycleDecision::Hold(FanLifecycleHoldReason::InvalidSnapshot);
     }
@@ -263,7 +308,7 @@ pub fn evaluate_fan_lifecycle(
     // allowed past it. A thank-you for a ticket bought this morning is worth
     // sending this morning; held for five days it becomes strange. Everything
     // else can wait, so everything else waits.
-    if let Some(template) = milestone_due(snapshot, policy, now) {
+    if let Some(template) = milestone_due(&snapshot, policy, now) {
         return FanLifecycleDecision::RequestMessage {
             template,
             confidence: Confidence::saturating_from_basis_points(9_800),
@@ -274,6 +319,22 @@ pub fn evaluate_fan_lifecycle(
         now - last_touch < Duration::hours(i64::from(policy.marketing_cooldown_hours))
     }) {
         return FanLifecycleDecision::Hold(FanLifecycleHoldReason::CooldownActive);
+    }
+
+    // The show recall sits between the cooldown and the welcome. Ahead of
+    // the welcome because for a fan the scan created, "you were there" is
+    // the truer first message; behind the cooldown because a fan already in
+    // conversation does not need the night read back to them — the touch
+    // they already got stands in for it, and the bound below is what keeps
+    // the recall from arriving a week after the encore.
+    if let Some(checkin) = snapshot.recent_checkin.as_ref()
+        && now - checkin.checked_in_at >= Duration::hours(i64::from(policy.show_recall_after_hours))
+        && now - checkin.checked_in_at < Duration::hours(i64::from(policy.show_recall_until_hours))
+    {
+        return FanLifecycleDecision::RequestMessage {
+            template: LifecycleTemplate::ShowRecall,
+            confidence: Confidence::saturating_from_basis_points(9_500),
+        };
     }
 
     if snapshot.last_marketing_touch_at.is_none()
@@ -381,6 +442,7 @@ mod tests {
             last_qualified_referral_at: None,
             last_paid_ticket_at: None,
             last_event_interest_at: None,
+            recent_checkin: None,
         }
     }
     #[test]
@@ -459,7 +521,7 @@ mod tests {
 
         data.paid_ticket_count = policy.returning_fan_ticket_threshold;
         assert!(matches!(
-            evaluate_fan_lifecycle(data, policy, now()),
+            evaluate_fan_lifecycle(data.clone(), policy, now()),
             FanLifecycleDecision::RequestMessage {
                 template: LifecycleTemplate::ReturningFanThankYou,
                 ..
@@ -476,6 +538,95 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_checkin_is_recalled_the_next_day_and_is_the_scanned_fans_first_message() {
+        // FAN_100 §B5's governor rule: the scan sends nothing, the recall is
+        // the first message. For a fan the door created, "you were there"
+        // outranks the welcome.
+        let mut data = eligible();
+        data.created_at = now() - Duration::hours(26);
+        data.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(26),
+            event_slug: "virya-furydate-impala".to_owned(),
+            event_title: "Virya + Furydate + Impala".to_owned(),
+        });
+        assert_eq!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ShowRecall,
+                confidence: Confidence::saturating_from_basis_points(9_500),
+            }
+        );
+    }
+
+    #[test]
+    fn the_recall_waits_out_the_night_and_expires() {
+        let mut data = eligible();
+        data.created_at = now() - Duration::days(30);
+        data.last_marketing_touch_at = Some(now() - Duration::days(7));
+        let checkin = LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(2),
+            event_slug: "virya-furydate-impala".to_owned(),
+            event_title: "Virya + Furydate + Impala".to_owned(),
+        };
+        data.recent_checkin = Some(checkin.clone());
+        // Two hours after the scan is still the show: nothing sends.
+        assert!(!matches!(
+            evaluate_fan_lifecycle(data.clone(), FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ShowRecall,
+                ..
+            }
+        ));
+
+        // Past the window the night is over; mentioning it reads wrong.
+        data.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(80),
+            ..checkin
+        });
+        assert!(!matches!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ShowRecall,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_cooldown_is_the_once_per_night_guard() {
+        // The recall is not a milestone: a fan touched yesterday stays quiet,
+        // and that same cooldown is what stops a second recall for the same
+        // check-in after the first one sent.
+        let mut data = eligible();
+        data.created_at = now() - Duration::days(30);
+        data.last_marketing_touch_at = Some(now() - Duration::hours(40));
+        data.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(26),
+            event_slug: "virya-furydate-impala".to_owned(),
+            event_title: "Virya + Furydate + Impala".to_owned(),
+        });
+        assert_eq!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::Hold(FanLifecycleHoldReason::CooldownActive)
+        );
+    }
+
+    #[test]
+    fn a_checkin_without_consent_sends_nothing() {
+        let mut data = eligible();
+        data.marketing_consent = false;
+        data.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(26),
+            event_slug: "virya-furydate-impala".to_owned(),
+            event_title: "Virya + Furydate + Impala".to_owned(),
+        });
+        assert_eq!(
+            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoConsent)
+        );
     }
 
     #[test]
@@ -581,7 +732,7 @@ mod tests {
 
         // Without a milestone the cooldown holds.
         assert_eq!(
-            evaluate_fan_lifecycle(data, FanLifecyclePolicy::default(), now()),
+            evaluate_fan_lifecycle(data.clone(), FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::Hold(FanLifecycleHoldReason::CooldownActive)
         );
 
@@ -712,7 +863,7 @@ mod tests {
         ] {
             snapshot.last_event_interest_at = activity;
             assert!(!matches!(
-                evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+                evaluate_fan_lifecycle(snapshot.clone(), FanLifecyclePolicy::default(), now()),
                 FanLifecycleDecision::RequestMessage {
                     template: LifecycleTemplate::ReferralInvite,
                     ..

@@ -6393,6 +6393,33 @@ paths:
         '404': *id004
         '422': *id004
         '503': *id004
+  /admin/event-qr/kits:
+    post:
+      operationId: createConcertQrKit
+      summary: Create one show's complete QR kit — the three canonical placements plus a tracked link per bill act
+      security:
+      - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConcertQrKitRequest'
+      responses:
+        '200':
+          description: The show's placements (created or reused) and per-act bill links.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/PrivateNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConcertQrKit'
+        '400': *id004
+        '401': *id004
+        '404': *id004
+        '422': *id004
+        '503': *id004
   /admin/event-qr/campaigns/{campaign_id}/revoke:
     post:
       operationId: revokeConcertQrCampaign
@@ -9798,6 +9825,42 @@ paths:
                   code: { type: string, minLength: 6, maxLength: 128 }
         '401': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /admin/join-kit:
+    get:
+      operationId: getAdminJoinKit
+      summary: The canonical per-placement join links with clicks, signups and D30 retention
+      description: >
+        One tracked link per standing social placement (bio, story, pinned
+        comment, channel description). `minted` is false until POST
+        materializes the link; clicks come from the link rows, signups and
+        `activated_30d` from the same channel readout the placements
+        attribute under — a placement reads the way a channel does.
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: Placement checklist plus per-placement readout.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinKit' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: ensureAdminJoinKit
+      summary: Materialize the canonical per-placement join links
+      description: >
+        Idempotent on slug — re-posting repairs a stale destination rather
+        than failing. Refuses when the tenant has no member site: a link
+        with no destination is a printed 404.
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: The kit after ensuring — every placement with `minted` true.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinKit' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
         '503': { $ref: '#/components/responses/Problem' }
   /admin/smart-links:
     get:
@@ -15544,6 +15607,39 @@ components:
         channel_community: { type: [string, 'null'], maxLength: 120 }
         channel_creative: { type: [string, 'null'], maxLength: 120 }
         campaign_id: { type: [string, 'null'], format: uuid }
+    JoinKit:
+      type: object
+      additionalProperties: false
+      required: [site_root, placements]
+      properties:
+        site_root: { type: [string, 'null'] }
+        placements:
+          type: array
+          items: { $ref: '#/components/schemas/JoinKitPlacement' }
+    JoinKitPlacement:
+      type: object
+      additionalProperties: false
+      required: [platform, placement, slug, hint, link_url, destination_url, minted, clicks_total, clicks_7d, signups, activated_30d]
+      properties:
+        platform: { type: string, enum: [instagram, facebook, youtube] }
+        placement: { type: string, maxLength: 32 }
+        slug: { type: string, maxLength: 128 }
+        hint: { type: string, maxLength: 160 }
+        link_url:
+          type: [string, 'null']
+          description: The printable `{site}/l/{slug}` URL — null until the kit has been materialized or the tenant has no site root.
+        destination_url: { type: [string, 'null'] }
+        minted: { type: boolean }
+        clicks_total: { type: integer, minimum: 0 }
+        clicks_7d: { type: integer, minimum: 0 }
+        signups:
+          type: integer
+          minimum: 0
+          description: Fans whose last pre-signup click was this placement's channel — read from the channel readout, not re-derived.
+        activated_30d:
+          type: integer
+          minimum: 0
+          description: Of those, the fans still active, consented and meaningful inside thirty days.
     RumMetricSummary:
       type: object
       additionalProperties: false
@@ -18456,6 +18552,71 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ConcertQrCampaign'
+    CreateConcertQrKitRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - event_slug
+      properties:
+        event_slug:
+          type: string
+          minLength: 1
+          maxLength: 128
+        bill_acts:
+          type: array
+          description: >
+            The other acts on the bill. Each gets a `bill-{act}` tracked
+            link to the same show page, slugified — a furydate-share click
+            is measured as theirs. At most six.
+          maxItems: 6
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        incentive:
+          type:
+          - string
+          - 'null'
+          description: What the scan offers, written onto every placement the kit creates.
+          maxLength: 256
+    ConcertQrKit:
+      type: object
+      additionalProperties: false
+      required:
+      - event_slug
+      - campaigns
+      - bill_links
+      properties:
+        event_slug:
+          type: string
+        campaigns:
+          type: array
+          description: The three canonical placements — door, stage screen, merch table — created or reused.
+          items:
+            $ref: '#/components/schemas/ConcertQrCampaign'
+        bill_links:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConcertQrBillLink'
+    ConcertQrBillLink:
+      type: object
+      additionalProperties: false
+      required:
+      - act
+      - slug
+      - url
+      - destination_url
+      properties:
+        act:
+          type: string
+          description: The slugified act name — the `channel_community` its clicks attribute under.
+        slug:
+          type: string
+        url:
+          type: string
+          description: The printable `{site}/l/{slug}` URL for the act to share.
+        destination_url:
+          type: string
     ConcertCheckinRequest:
       type: object
       additionalProperties: false

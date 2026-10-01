@@ -631,6 +631,10 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(acquisition::admin_list_smart_links).post(acquisition::admin_create_smart_link),
         )
         .route(
+            "/v1/admin/join-kit",
+            get(acquisition::admin_join_kit).post(acquisition::admin_ensure_join_kit),
+        )
+        .route(
             "/v1/admin/audience/segments",
             get(audience::list_segments).post(audience::create_segment),
         )
@@ -1184,6 +1188,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
             get(concert_qr::list_campaigns).post(concert_qr::create_campaign),
         )
         .route("/v1/admin/event-qr/overview", get(concert_qr::overview))
+        .route("/v1/admin/event-qr/kits", post(concert_qr::create_qr_kit))
         .route(
             "/v1/admin/event-qr/campaigns/{campaign_id}/revoke",
             post(concert_qr::revoke_campaign),

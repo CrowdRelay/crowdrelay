@@ -104,6 +104,15 @@
             Err(RepositoryError::Unavailable)
         }
 
+        async fn link_click_stats(
+            &self,
+            _workspace_id: WorkspaceId,
+            _slugs: &[String],
+            _now: time::OffsetDateTime,
+        ) -> Result<Vec<LinkClickStats>, RepositoryError> {
+            Err(RepositoryError::Unavailable)
+        }
+
         async fn load_or_create_fan_referral_code(
             &self,
             _workspace_id: WorkspaceId,

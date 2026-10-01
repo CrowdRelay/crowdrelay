@@ -114,8 +114,8 @@ pub use fan_lifecycle::{
     ConfirmFan, ConfirmFanCommand, FanLifecycleError, FanLifecycleRepository, UnsubscribeFan,
 };
 pub use ports::{
-    AcquisitionRepository, IdempotencyKey, RepositoryError, RequestId, SignupFanCommand,
-    TextKeyError, UpsertSmartLinkCommand, UpsertedSmartLink,
+    AcquisitionRepository, IdempotencyKey, LinkClickStats, RepositoryError, RequestId,
+    SignupFanCommand, TextKeyError, UpsertSmartLinkCommand, UpsertedSmartLink,
 };
 pub use referrals::{
     LoadReferralProgress, RedeemCoupon, RedeemCouponCommand, RedeemCouponCommandError,

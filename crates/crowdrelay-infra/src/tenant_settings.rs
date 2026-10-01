@@ -257,6 +257,26 @@ impl TenantBrandSettings {
         Some(format!("{}/#wydania", self.member_area_url()?))
     }
 
+    /// The public page for one show — `{site}/live/{slug}` or its `pl/`
+    /// twin. Locale forks the same way `member_area_path_for` does, so the
+    /// show-recall email lands the fan on the page in their own language.
+    /// A tenant with no site root has no event page and the caller fails
+    /// closed rather than printing a link to nowhere.
+    #[must_use]
+    pub fn event_page_url(&self, locale: &str, event_slug: &str) -> Option<String> {
+        let path = self.live_page_path.trim_matches('/');
+        let path = if locale.starts_with("pl") {
+            path
+        } else {
+            path.strip_prefix("pl/").unwrap_or(path)
+        };
+        let slug = event_slug.trim_matches('/');
+        if slug.is_empty() {
+            return None;
+        }
+        Some(format!("{}/{path}/{slug}", self.site_root()?))
+    }
+
     /// The public Signal page — where a fan installs the app or opens the web
     /// hub. Locale forks the same way `member_area_path_for` does: the Polish
     /// route carries its `pl/` prefix.

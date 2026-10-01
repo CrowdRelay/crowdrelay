@@ -457,6 +457,21 @@ pub struct PendingApprovalLink {
     pub skip_url: String,
 }
 
+/// The show a `crowdrelay.fan.show_recall` message names. Frozen into the
+/// action at decision time rather than re-queried at send: the night the
+/// operator reads on the approval card is the night the email names.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LifecycleShowContext {
+    pub event_slug: String,
+    pub event_title: String,
+    /// The fan had no linked Signal install when the recall was proposed,
+    /// so the message carries the tracked install link as its call-to-action.
+    /// A fan who already opened Signal gets no install nag — the flag is the
+    /// difference between the recall doubling as the install ask and being
+    /// only a thank-you.
+    pub wants_install_url: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AutopilotActionPayload {
@@ -489,6 +504,13 @@ pub enum AutopilotActionPayload {
     RequestFanLifecycleMessage {
         fan_id: FanId,
         template_key: String,
+        /// The night a `show_recall` template references, frozen at decision
+        /// time. A second check-in between the decision and the send must not
+        /// rewrite the night the operator approved — the same reason a pitch
+        /// re-pins its recipient under the lock. `None` for every other
+        /// template.
+        #[serde(default)]
+        show: Option<LifecycleShowContext>,
     },
     RequestMerchReorder {
         variant_id: MerchVariantId,

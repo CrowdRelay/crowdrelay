@@ -1224,6 +1224,7 @@ mod tests {
         let payload = AutopilotActionPayload::RequestFanLifecycleMessage {
             fan_id: FanId::from_uuid(Uuid::nil()),
             template_key: "k".to_owned(),
+            show: None,
         };
         assert!(requires_terminal_receipt(&payload));
     }
