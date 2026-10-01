@@ -51,6 +51,37 @@ class BeaconNetworkAcquisitionV1Contract(unittest.TestCase):
         self.assertIn("SET verified=true,accepts_outreach=true", ADMIN)
         self.assertIn("approve_beacon_network_candidate", ADMIN)
 
+    def test_every_research_ingress_uses_the_same_human_review_boundary(self) -> None:
+        # Brain-dispatched event research and imported research must not become
+        # a shadow path around the Latarnik approval/consent gate.
+        for source in (
+            "network_discovery_run_id",
+            "imported_from",
+            "event_network_scout",
+        ):
+            self.assertGreaterEqual(
+                ADMIN.count(f"metadata ? '{source}'"),
+                3,
+                f"{source} is not wired through listing + approval + delivery guards",
+            )
+        approval = ADMIN.split("async fn approve_candidate", 1)[1].split(
+            "async fn preview_invites", 1
+        )[0]
+        self.assertIn("metadata ? 'event_network_scout'", approval)
+        self.assertIn("metadata ? 'imported_from'", approval)
+
+        for function_name, next_name in (
+            ("async fn preview_invites", "async fn queue_invites"),
+            ("async fn queue_invites", None),
+        ):
+            section = ADMIN.split(function_name, 1)[1]
+            if next_name is not None:
+                section = section.split(next_name, 1)[0]
+            self.assertIn("metadata ? 'event_network_scout'", section)
+            self.assertIn("metadata ? 'imported_from'", section)
+            self.assertIn("network_review,source_verified", section)
+            self.assertIn("network_review,marketing_email_consent_confirmed", section)
+
     def test_invite_outbox_contains_job_id_not_plaintext_capability(self) -> None:
         queue = ADMIN.rsplit("async fn queue_invites", 1)[1]
         self.assertIn("crowdrelay.beacon.invite_delivery_requested", queue)
