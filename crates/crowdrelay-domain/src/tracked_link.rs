@@ -300,6 +300,7 @@ mod tests {
         // Scheme-less text is not a click — not flagged.
         assert!(untracked_links_in("find us at virya.music", site).is_empty());
     }
+
     #[test]
     fn a_redirect_prefix_without_a_valid_slug_is_not_tracked() {
         let site = Some("https://virya.music");
@@ -329,5 +330,4 @@ mod tests {
             None
         );
     }
-
 }
