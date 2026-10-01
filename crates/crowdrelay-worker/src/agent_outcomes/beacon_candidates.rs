@@ -1,9 +1,9 @@
-//! Event-network scout outcome -> reviewed Beacon graph candidate.
-//!
-//! The model discovers; it never authorises contact. Every row lands active
-//! but unverified and non-contactable, exactly like the existing network
-//! discovery intake. The operator/verification lifecycle decides whether a
-//! candidate becomes a relationship.
+// Event-network scout outcome -> reviewed Beacon graph candidate.
+//
+// The model discovers; it never authorises contact. Every row lands active
+// but unverified and non-contactable, exactly like the existing network
+// discovery intake. The operator/verification lifecycle decides whether a
+// candidate becomes a relationship.
 
 async fn insert_beacon_candidate(
     tx: &mut Transaction<'_, Postgres>,
