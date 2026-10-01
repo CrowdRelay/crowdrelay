@@ -21,6 +21,7 @@ Nobody is written to unread. A person with no recent, sourced fact on file about
 what they did lately is held ("not read yet") and never appears in ``review``:
 
     scripts/latarnik_review.py needs-research          # the work queue
+    scripts/latarnik_review.py research --limit 10      # send the research agent
     scripts/latarnik_review.py note BEACON_ID \\
         --fact "recenzja plyty X w audycji Y" \\
         --source-url https://... --observed-on 2026-09-20 \\
@@ -182,6 +183,49 @@ def command_needs_research(_: argparse.Namespace) -> int:
     return 0
 
 
+def research_loop(
+    rows: Iterable[dict[str, Any]],
+    *,
+    limit: int,
+    request: Callable[[str], Any],
+    out: Callable[[str], None],
+) -> dict[str, int]:
+    """Send the research agent after each person, one at a time, up to ``limit``.
+
+    Researching contacts nobody, so there is no confirmation; the server still
+    refuses anybody who is not worth researching yet and anybody researched in
+    the last week, and this loop reports each answer instead of hiding it.
+    """
+    if not 1 <= limit <= MAX_PER_SESSION:
+        raise OperatorError(f"--limit must be between 1 and {MAX_PER_SESSION}")
+    counts = {"queued": 0, "refused": 0}
+    for row in list(rows)[:limit]:
+        result = request(row["beacon_id"])
+        if isinstance(result, dict) and "queued" in result:
+            counts["queued"] += 1
+            out(f"zlecone  {row.get('display_name')}")
+        else:
+            counts["refused"] += 1
+            reason = result.get("refused") if isinstance(result, dict) else result
+            out(f"pominiete {row.get('display_name')}: {reason}")
+    return counts
+
+
+def command_research(args: argparse.Namespace) -> int:
+    review = cp_request("GET", "contacts/dual-role")
+    rows = needs_research(review)
+    print(f"Nieprzeczytani, a gotowi na list: {len(rows)}. Zlecam najwyzej {args.limit}.")
+    counts = research_loop(
+        rows,
+        limit=args.limit,
+        request=lambda beacon_id: cp_request("POST", f"contacts/{beacon_id}/research/request"),
+        out=print,
+    )
+    print(f"Zlecone: {counts['queued']}  pominiete: {counts['refused']}")
+    print("Wyniki wracaja, gdy agent skonczy; potem `review` pokaze te listy.")
+    return 0
+
+
 def command_note(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {
         "fact": args.fact,
@@ -237,6 +281,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "needs-research", help="warm people the band has not read yet (the research queue)"
     ).set_defaults(run=command_needs_research)
+    research = sub.add_parser(
+        "research", help="send the research agent to read the people in the queue"
+    )
+    research.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_PER_SESSION,
+        help=f"people to send this session (1-{MAX_PER_SESSION})",
+    )
+    research.set_defaults(run=command_research)
     note = sub.add_parser("note", help="record one dated, sourced thing a person did lately")
     note.add_argument("beacon_id")
     note.add_argument("--fact", required=True, help="what they did, as a phrase the letter can quote")

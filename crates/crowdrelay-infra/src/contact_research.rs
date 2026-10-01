@@ -72,30 +72,25 @@ pub async fn latest_hook(
     )
 }
 
-/// Validates a candidate and records it against the beacon's address.
+/// Records an already-validated hook against the beacon's address on `conn`.
 ///
-/// The same call serves the research agent's result and a person's note:
-/// `researched_by` says which (`agent:<template>` or `operator`). The same
-/// source again replaces the earlier row, so re-running research is idempotent.
+/// Takes a connection rather than a pool so the worker can write it inside the
+/// transaction that records the agent outcome: the fact and the outcome that
+/// produced it commit together or not at all. `hook` can only have come from
+/// [`PersonalHook::new`], so the register and recency rules have already held.
 ///
 /// # Errors
 ///
-/// [`ResearchError::Refused`] with the rule that was broken, or the beacon is
-/// unknown, or the database error.
-#[allow(clippy::too_many_arguments)]
-pub async fn record_hook_for_beacon(
-    pool: &PgPool,
+/// [`ResearchError::NotFound`] when the beacon is unknown or has no address, or
+/// the database error.
+pub async fn record_hook_on(
+    conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     beacon_id: Uuid,
-    fact: &str,
-    praise: Option<&str>,
-    source_url: &str,
-    observed_on: Date,
+    hook: &PersonalHook,
     language: &str,
     researched_by: &str,
-    today: Date,
-) -> Result<PersonalHook, ResearchError> {
-    let hook = PersonalHook::new(fact, praise, source_url, observed_on, today)?;
+) -> Result<(), ResearchError> {
     if language.len() != 2 || !language.bytes().all(|b| b.is_ascii_lowercase()) {
         return Err(ResearchError::Refused(
             "the language is a two-letter code such as pl or en".to_owned(),
@@ -106,7 +101,7 @@ pub async fn record_hook_for_beacon(
     )
     .bind(workspace_id)
     .bind(beacon_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?
     .flatten()
     .filter(|email| !email.is_empty())
@@ -134,7 +129,159 @@ pub async fn record_hook_for_beacon(
     .bind(hook.observed_on)
     .bind(language)
     .bind(researched_by.trim())
-    .execute(pool)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Validates a candidate and records it against the beacon's address.
+///
+/// The same checks serve a person's note and, through the worker, the research
+/// agent's result; `researched_by` says which (`operator` or
+/// `agent:<template>`). The same source again replaces the earlier row, so
+/// re-running research is idempotent.
+///
+/// # Errors
+///
+/// [`ResearchError::Refused`] with the rule that was broken, or the beacon is
+/// unknown, or the database error.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_hook_for_beacon(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+    fact: &str,
+    praise: Option<&str>,
+    source_url: &str,
+    observed_on: Date,
+    language: &str,
+    researched_by: &str,
+    today: Date,
+) -> Result<PersonalHook, ResearchError> {
+    let hook = PersonalHook::new(fact, praise, source_url, observed_on, today)?;
+    let mut conn = pool.acquire().await?;
+    record_hook_on(
+        &mut conn,
+        workspace_id,
+        beacon_id,
+        &hook,
+        language,
+        researched_by,
+    )
     .await?;
     Ok(hook)
+}
+
+/// The template that reads a person's recent work. Must match the agent
+/// service's catalog id.
+pub const RESEARCH_TEMPLATE: &str = "contact-researcher";
+
+/// A person is researched again no sooner than this after the last attempt that
+/// did not fail. Research costs a premium agent run; a person the agent could
+/// find nothing recent about does not become findable by asking again tomorrow.
+pub const RESEARCH_RETRY_DAYS: i32 = 7;
+
+/// Asks the research agent to read one person's recent work.
+///
+/// Researching contacts nobody, so this needs no approval; it is still bounded:
+/// only people who would otherwise be askable are researched (the relationship
+/// tests have all passed and the only thing missing is the research), and one
+/// person is researched at most once per [`RESEARCH_RETRY_DAYS`] unless the
+/// earlier attempt failed.
+///
+/// The person is pinned in the task's metadata (`subject_beacon_id`). The
+/// worker accepts a result only for that person, so a UUID mentioned in the
+/// prompt text is a request and the metadata is the record of what was asked.
+///
+/// # Errors
+///
+/// [`ResearchError::Refused`] with the sentence the operator reads,
+/// [`ResearchError::NotFound`], or the database error.
+pub async fn queue_contact_research(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+    now: time::OffsetDateTime,
+) -> Result<Uuid, ResearchError> {
+    let contact = crate::latarnik::dual_role_contact(pool, workspace_id, beacon_id, now, true)
+        .await?
+        .ok_or(ResearchError::NotFound)?;
+    let needs_research = crowdrelay_domain::latarnik_invite::InviteHold::NeedsResearch.message();
+    if contact.has_research {
+        return Err(ResearchError::Refused(
+            "this person was read recently — their fact is on file".to_owned(),
+        ));
+    }
+    if contact.hold_reason.as_deref() != Some(needs_research.as_str()) {
+        // Held for some other reason first: cold, written to last week, asked
+        // before, opted out. Researching them would be spending on someone who
+        // cannot be asked.
+        return Err(ResearchError::Refused(format!(
+            "not worth researching yet: {}",
+            contact
+                .hold_reason
+                .unwrap_or_else(|| "they are already askable".to_owned())
+        )));
+    }
+    let table_exists =
+        sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    if !table_exists {
+        return Err(ResearchError::Refused(
+            "the agent service is not deployed here, so nothing can read them".to_owned(),
+        ));
+    }
+    let recent = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM agent_service_tasks
+            WHERE workspace_id = $1
+              AND template_id = $2
+              AND metadata->>'subject_beacon_id' = $3
+              AND status <> 'failed'
+              AND created_at > now() - make_interval(days => $4::int)
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(RESEARCH_TEMPLATE)
+    .bind(beacon_id.to_string())
+    .bind(RESEARCH_RETRY_DAYS)
+    .fetch_one(pool)
+    .await?;
+    if recent {
+        return Err(ResearchError::Refused(format!(
+            "they were sent for research in the last {RESEARCH_RETRY_DAYS} days — the result is \
+             on its way or the agent found nothing recent"
+        )));
+    }
+    let prompt = format!(
+        "Research this person for the band, so a letter to them can open with something true \
+         about their recent work.\n\nbeacon_id: {beacon_id}\nname: {}\nrole: {}\ncity: {}\n\n\
+         Return the one most recent, specific thing they did, cited exactly as instructed, or \
+         nothing if the research data does not support one.",
+        contact.display_name,
+        contact.role,
+        contact.city.as_deref().unwrap_or("unknown"),
+    );
+    let task_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO agent_service_tasks
+            (id, workspace_id, template_id, model_id, prompt, status, tier, metadata)
+        VALUES ($1, $2, $3, 'auto', $4, 'queued', 'premium', $5)
+        "#,
+    )
+    .bind(task_id)
+    .bind(workspace_id)
+    .bind(RESEARCH_TEMPLATE)
+    .bind(prompt)
+    .bind(serde_json::json!({
+        "source": "operator",
+        "subject_beacon_id": beacon_id,
+    }))
+    .execute(pool)
+    .await?;
+    Ok(task_id)
 }
