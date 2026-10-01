@@ -17,9 +17,11 @@
 //! sheet mints identifiers in its own namespace.
 //!
 //! The conflict arm copies `import_opportunities.rs` semantics exactly:
-//! contact details, deadlines and scores refresh; `status`, `eligible`
-//! and `metadata` never do — a stale snapshot must not reopen a row the
-//! loop already acted on, and must not erase what an operator corrected.
+//! contact details, deadlines and scores refresh; `status` and `eligible`
+//! never do — a stale snapshot must not reopen a row the loop already acted on.
+//! Registry metadata is merged additively with existing runtime metadata winning
+//! on key collisions, so new evidence/dedupe fields can enrich an old row without
+//! erasing operator/runtime corrections.
 
 use crowdrelay_domain::opportunity_seed::SeededOpportunity;
 use serde_json::{Value, json};
@@ -174,10 +176,11 @@ impl PostgresOpportunitySeedRepository {
                 source_observed_at = COALESCE(
                     EXCLUDED.source_observed_at,
                     team_opportunities.source_observed_at),
-                -- `status`, `eligible` and `metadata` are deliberately
-                -- absent: status is the loop's record of what it did,
-                -- eligibility may have been corrected by an operator, and
-                -- metadata may carry enrichment the sheet does not know.
+                -- Status and eligibility are the loop/operator's record and
+                -- never reopen from a registry refresh. Metadata does enrich:
+                -- registry keys fill gaps, while existing runtime/operator keys
+                -- win collisions so a sheet cannot erase learned state.
+                metadata = EXCLUDED.metadata || team_opportunities.metadata,
                 updated_at = now(),
                 version = team_opportunities.version + 1
             RETURNING (xmax = 0)
