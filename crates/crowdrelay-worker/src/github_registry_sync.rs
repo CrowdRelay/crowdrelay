@@ -225,8 +225,8 @@ impl GithubRegistrySyncWorker {
         self.sync_cycle().await;
 
         loop {
-            let wait = duration_until_next_sync(OffsetDateTime::now_utc())
-                .min(MISSED_WAKE_MAX_STALENESS);
+            let wait =
+                duration_until_next_sync(OffsetDateTime::now_utc()).min(MISSED_WAKE_MAX_STALENESS);
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
