@@ -371,8 +371,8 @@ pub(super) async fn observe_with_metrics(
                 .await
                 .map_err(map_sqlx)?
             }
-            AutopilotMeasurementKind::BeaconOutreachReply14d => {
-                beacons::reply_14d(pool, workspace_id, measurement).await?
+            AutopilotMeasurementKind::BeaconOutreachReplyQuality14d => {
+                beacons::reply_quality_14d(pool, workspace_id, measurement).await?
             }
             AutopilotMeasurementKind::BeaconOutreachUniqueVisitors14d => {
                 beacons::unique_visitors_14d(pool, workspace_id, measurement).await?
