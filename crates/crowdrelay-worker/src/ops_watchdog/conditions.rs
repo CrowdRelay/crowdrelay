@@ -118,6 +118,30 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // A person who answered positively is owed a person's answer. The
+            // engine enforces that for its own sends; the correspondence that
+            // runs through Gmail and the workbook (n8n sequences, hand-sent
+            // follow-ups) is only recorded here, so this can make it visible
+            // and cannot stop it. Warning, not critical: nothing is broken in
+            // CrowdRelay, and the cost is relationships rather than data.
+            key: "outreach.mailed_after_yes",
+            severity: "warning",
+            summary: "Pitches went to people who had already said yes",
+            active: snapshot.mailed_after_yes_targets_14d > 0,
+            details: json!({
+                "mails": snapshot.mailed_after_yes_14d,
+                "people": snapshot.mailed_after_yes_targets_14d,
+                "window": "14 days",
+                "remedy": "these did not come from the autopilot, which holds \
+                           a target that has replied. Find the sequence still \
+                           running in Gmail or the OUTREACH_LOG workbook \
+                           (outreach_interactions.source_key says which: \
+                           gmail:, master:, promo:), stop it for targets whose \
+                           last_reply_disposition is positive, and answer \
+                           those people yourself.",
+            }),
+        },
+        Condition {
             // Warning, not critical: these refused deliveries carry no named
             // recipient — status pings, internal markers, unrouted events that
             // never drafted anything. The same cancelled-instead-of-dead blind

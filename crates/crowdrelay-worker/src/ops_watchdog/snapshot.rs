@@ -242,6 +242,49 @@ async fn load_snapshot(
                    urls.url,
                    rtrim(COALESCE(ts.value, ''), '/') || '/l/')
             )::bigint AS untracked_letter_sends_24h,
+            -- Mail that went to somebody who had already said yes. The engine
+            -- refuses this itself (`AlreadyReplied`; 0 of its 55 sends in
+            -- 30 days went to a target that had replied), so a counted row came
+            -- from outside it: the Gmail and workbook imports record the band's
+            -- own and n8n's correspondence, and 90 initial/follow-up mails in a
+            -- fortnight went to people who had replied. Only an outbound that is
+            -- a pitch (`initial`/`followup`) counts; a `reply` is a person
+            -- answering, which is what should happen next. 'positive' only: a
+            -- bare 'received' can be an out-of-office.
+            (SELECT count(*)
+             FROM outreach_interactions AS sent
+             JOIN (
+                SELECT said_yes.target_id, min(said_yes.occurred_at) AS first_yes
+                FROM outreach_interactions AS said_yes
+                WHERE said_yes.workspace_id = $1
+                  AND said_yes.direction = 'inbound'
+                  AND said_yes.disposition = 'positive'
+                  AND said_yes.target_id IS NOT NULL
+                GROUP BY said_yes.target_id
+             ) AS yes ON yes.target_id = sent.target_id
+             WHERE sent.workspace_id = $1
+               AND sent.direction = 'outbound'
+               AND sent.phase IN ('initial', 'followup')
+               AND sent.occurred_at > yes.first_yes
+               AND sent.occurred_at > now() - interval '14 days'
+            )::bigint AS mailed_after_yes_14d,
+            (SELECT count(DISTINCT sent.target_id)
+             FROM outreach_interactions AS sent
+             JOIN (
+                SELECT said_yes.target_id, min(said_yes.occurred_at) AS first_yes
+                FROM outreach_interactions AS said_yes
+                WHERE said_yes.workspace_id = $1
+                  AND said_yes.direction = 'inbound'
+                  AND said_yes.disposition = 'positive'
+                  AND said_yes.target_id IS NOT NULL
+                GROUP BY said_yes.target_id
+             ) AS yes ON yes.target_id = sent.target_id
+             WHERE sent.workspace_id = $1
+               AND sent.direction = 'outbound'
+               AND sent.phase IN ('initial', 'followup')
+               AND sent.occurred_at > yes.first_yes
+               AND sent.occurred_at > now() - interval '14 days'
+            )::bigint AS mailed_after_yes_targets_14d,
             -- Live opportunities the brain scored and then denied.
             --
             -- Read off the decisions the brain actually recorded rather than by

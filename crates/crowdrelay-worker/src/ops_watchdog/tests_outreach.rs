@@ -28,4 +28,25 @@ mod outreach_tests {
         assert_eq!(raised.severity, "critical");
         assert_eq!(raised.details["letters"], 3);
     }
+
+    /// Somebody who answered yes and then received another pitch: the engine
+    /// cannot do this, so a counted row is correspondence from outside it.
+    #[test]
+    fn a_pitch_after_a_yes_raises_attention() {
+        let find = |snapshot: &OpsSnapshot| {
+            conditions(snapshot, publishing())
+                .into_iter()
+                .find(|c| c.key == "outreach.mailed_after_yes")
+                .expect("the condition is evaluated")
+        };
+        assert!(!find(&healthy()).active);
+        let mut snapshot = healthy();
+        snapshot.mailed_after_yes_14d = 90;
+        snapshot.mailed_after_yes_targets_14d = 25;
+        let raised = find(&snapshot);
+        assert!(raised.active);
+        assert_eq!(raised.severity, "warning");
+        assert_eq!(raised.details["mails"], 90);
+        assert_eq!(raised.details["people"], 25);
+    }
 }

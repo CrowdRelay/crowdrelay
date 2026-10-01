@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 31 conditions. The count and this list are
+//! The watchdog monitors 32 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -52,6 +52,14 @@
 //!   nothing, which is how 111 outreach emails once produced zero
 //!   attributable fans. Critical, because the bypass is invisible everywhere
 //!   else by construction.
+//! - `outreach.mailed_after_yes` — a pitch (`initial`/`followup`) went to
+//!   somebody who had already answered positively. The outreach engine holds
+//!   these itself (`AlreadyReplied`; none of its 55 sends in 30 days went to a
+//!   target that had replied), so a counted row came from outside it — the
+//!   Gmail and workbook imports record the band's and n8n's own
+//!   correspondence. A person who said yes gets a person's answer next, not
+//!   another template. Warning: nothing here can stop a sequence running in a
+//!   mailbox or a sheet, only make it visible.
 //! - `growth.unscoreable_live_opportunities` — the brain scored live
 //!   opportunities and denied every one. Read off its own denied decisions, not
 //!   off a guess at why: the first version counted rows missing strategic value
@@ -532,6 +540,12 @@ struct OpsSnapshot {
     /// row, and the channel that sent it teaches the brain nothing — the
     /// exact failure 111 untracked emails already paid for once.
     untracked_letter_sends_24h: i64,
+    /// Pitches (`initial`/`followup`) sent in the last fortnight to a target
+    /// that had already answered positively, and how many distinct targets.
+    /// Counted from the interaction ledger, which records the Gmail and
+    /// workbook correspondence as well as the engine's own sends.
+    mailed_after_yes_14d: i64,
+    mailed_after_yes_targets_14d: i64,
     /// Live opportunities whose score ceiling is below the score floor.
     ///
     /// Not "none scored well" — *cannot* score well. With no strategic value and

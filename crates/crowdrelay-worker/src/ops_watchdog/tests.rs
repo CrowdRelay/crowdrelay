@@ -49,6 +49,9 @@ mod tests {
             refused_other_deliveries: 0,
             // No letter sent carried a link the ledger cannot see.
             untracked_letter_sends_24h: 0,
+            // Nobody who said yes was pitched again.
+            mailed_after_yes_14d: 0,
+            mailed_after_yes_targets_14d: 0,
             unscoreable_live_opportunities: 0,
             duplicate_community_drafts: 0,
             relentless_degraded_phases: None,
