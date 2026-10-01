@@ -18,6 +18,8 @@ use crowdrelay_infra::{
 use serde_json::Value;
 use sqlx::PgPool;
 
+include!("fan_lifecycle_bughunt.rs");
+
 /// fan_action_tokens.token_hash is globally unique, so fixed literals made this
 /// suite pass once and then fail on 23505 against any reused database. A simple
 /// UUID is 32 hex chars; doubling the per-run suffix gives the 64 the token

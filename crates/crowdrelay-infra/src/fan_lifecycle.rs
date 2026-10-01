@@ -496,7 +496,11 @@ impl PostgresFanLifecycleRepository {
         }
         let previous_status = parse_fan_status(&row.status)?;
         let fan_id = FanId::from_uuid(row.fan_id);
-        if row.consumed_at.is_none() {
+        // A new opt-out after resubscription is a new withdrawal, even when
+        // the still-valid link was used before. Replays while opted out remain no-ops.
+        if row.consumed_at.is_none()
+            || matches!(previous_status, FanStatus::Pending | FanStatus::Active)
+        {
             if previous_status == FanStatus::Active {
                 decrement_city_aggregates(&mut transaction, workspace_id, fan_id).await?;
             }
