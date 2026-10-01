@@ -138,3 +138,76 @@ fn lifecycle_candidate(
         ),
     }))
 }
+
+
+/// Internal research for one warm relationship that is otherwise ready for a
+/// thoughtful next touch. This action reaches nobody; its result must still
+/// pass the agent provenance/grounding gate before it can become durable
+/// relationship intelligence.
+fn relationship_research_candidate(
+    snapshot: RelationshipResearchSnapshot,
+    policy: &AutopilotPolicy,
+    now: OffsetDateTime,
+) -> Result<Option<DecisionCandidate>, serde_json::Error> {
+    let AutopilotPolicyConfig::FanLifecycle(domain_policy) = &policy.config else {
+        return Ok(None);
+    };
+    let confidence = Confidence::MAX;
+    let disposition = crowdrelay_domain::autonomy::internal_work_disposition(disposition(
+        policy.autonomy_level,
+        confidence,
+        policy.minimum_confidence,
+    ));
+    if matches!(
+        disposition,
+        PolicyDisposition::Deny
+            | PolicyDisposition::ObserveOnly
+            | PolicyDisposition::RecommendOnly
+    ) {
+        return Ok(None);
+    }
+
+    let bucket = now.unix_timestamp().div_euclid(86_400);
+    let prompt = format!(
+        "Research exactly this existing relationship before any new outward ask. \
+         The task metadata pins beacon_id={}. Find at most one recent, dated, \
+         public-source thing they actually did that a thoughtful colleague could \
+         mention. Do not draft a message and do not infer consent. If the source \
+         is weak or undated, return no item.\n\nName: {}\nRole: {}\nCity: {}\n\
+         Relationship score: {}\nHas replied: {}\nDays since last contact: {}",
+        snapshot.beacon_id,
+        snapshot.display_name,
+        snapshot.role,
+        snapshot.city.as_deref().unwrap_or("unknown"),
+        snapshot.relationship_score,
+        snapshot.has_replied,
+        snapshot
+            .days_since_last_contact
+            .map_or_else(|| "unknown".to_owned(), |days| days.to_string()),
+    );
+
+    Ok(Some(DecisionCandidate {
+        context: policy.context,
+        subject: ActionSubject::Beacon(snapshot.beacon_id),
+        decision_kind: "request_relationship_research",
+        confidence,
+        disposition,
+        reason: "a warm relationship is eligible for a future value-led touch but lacks recent sourced context",
+        input_snapshot: serde_json::to_value(&snapshot)?,
+        policy_snapshot: policy_evidence(policy, domain_policy)?,
+        action: AutopilotActionPayload::RequestAgentRun {
+            template_id: "contact-research".to_owned(),
+            prompt,
+            priority: 9,
+            tier: crowdrelay_brain::AgentTier::Premium,
+        },
+        decision_key: format!(
+            "decision:relationship-research:v{}:{}:{}",
+            policy.version, snapshot.beacon_id, bucket
+        ),
+        action_idempotency_key: format!(
+            "action:relationship-research:{}:{}",
+            snapshot.beacon_id, bucket
+        ),
+    }))
+}
