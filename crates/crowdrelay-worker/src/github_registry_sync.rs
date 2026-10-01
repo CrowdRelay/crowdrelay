@@ -33,8 +33,9 @@ use crate::sheet_intake::{SHEET_INTAKE_REVISION, harvest_grids, parse_xlsx_sheet
 /// lands each morning — so one sync at 12:00 Europe/Warsaw (safely after
 /// the 08:00–09:00 update window) is the whole cadence. Boot still runs an
 /// immediate catch-up so a worker down at noon does not miss the day, and
-/// a `github_registry` NOTIFY forces an early sync — no endpoint emits one
-/// today; it is a manual (`psql NOTIFY`) wake channel only.
+/// a `github_registry` NOTIFY forces an early sync. The internal registry-sync
+/// endpoint emits that wake after a scout/registry write, while the daily tick
+/// remains the missed-notification safety net.
 const SYNC_ZONE: &str = "Europe/Warsaw";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "CrowdRelay/1.0 (github registry sync)";
