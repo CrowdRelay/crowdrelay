@@ -115,6 +115,9 @@ class AutopilotMeasurementContract(unittest.TestCase):
         self.assertIn("COUNT(DISTINCT click.anonymous_visitor_id)", observation)
         self.assertIn("reply.action='record_autopilot_beacon_reply'", observation)
         self.assertIn("newer.action_kind='beacon.outreach.request'", observation)
+        self.assertIn("JOIN autopilot_execution_reports AS receipt", observation)
+        self.assertIn("receipt.status='succeeded'", observation)
+        self.assertIn("receipt.provider_reference IS NOT NULL", observation)
 
     def test_claim_quarantines_unknown_kind_before_commit(self) -> None:
         measurement = text("crates/crowdrelay-infra/src/autopilot/measurement.rs")
