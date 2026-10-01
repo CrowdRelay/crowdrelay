@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 29 conditions. The count and this list are
+//! The watchdog monitors 30 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -177,6 +177,13 @@
 //!   machine can deliver clicks, but a week of clicks with no joins means
 //!   the capture seam — the /watch page, the signup behind it — is where
 //!   the loss is. Warning: nothing errored, and the next join clears it.
+//! - `fans.capture_disabled` — clicks arrived last week on channels the
+//!   /watch capture page may interpose, and `CROWDRELAY_WATCH_PAGE_ORIGIN`
+//!   is unset, so every one of them redirected straight to YouTube where
+//!   nobody can be asked to join. Critical: on 2026-10-01 the page was
+//!   built, merged and answering 200, the stall warning above named the
+//!   variable in its remedy, and 69 capture-eligible clicks in a week still
+//!   went past it because the variable was never set in production.
 //! - `social.manual_posts_stale` — drafts parked `awaiting_manual_post`
 //!   past two days on a platform the tenant's `social_autopost_platforms`
 //!   setting publishes automatically. Parked on an autopost platform is an
@@ -261,6 +268,12 @@ pub struct OpsWatchdogWorker {
     /// One value is read in `main` so the readiness log, the executor's mode and
     /// this condition cannot disagree about what will publish.
     posture: PublishingPosture,
+    /// Whether `CROWDRELAY_WATCH_PAGE_ORIGIN` is set for this deployment.
+    ///
+    /// Read from the same validated `Config` the API parses from the same env
+    /// file, so it describes whether a capture-channel click is interposed by
+    /// the /watch page or redirected straight to its destination.
+    capture_page_configured: bool,
 }
 
 impl OpsWatchdogWorker {
@@ -271,6 +284,7 @@ impl OpsWatchdogWorker {
         poll_interval: Duration,
         operation_timeout: Duration,
         posture: PublishingPosture,
+        capture_page_configured: bool,
     ) -> Self {
         Self {
             pool,
@@ -278,6 +292,7 @@ impl OpsWatchdogWorker {
             poll_interval,
             operation_timeout,
             posture,
+            capture_page_configured,
         }
     }
 
@@ -360,6 +375,7 @@ impl OpsWatchdogWorker {
         .await?;
         let mut snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
         snapshot.video_cards = Json(video_cards);
+        snapshot.capture_page_configured = self.capture_page_configured;
         let conditions = conditions(&snapshot, self.posture);
         let states = load_states(&mut transaction, self.workspace_id).await?;
         let repeat_before = now
@@ -683,6 +699,11 @@ struct OpsSnapshot {
     /// lock. The SELECT hands back an empty jsonb array and the real cards
     /// replace it before the conditions run.
     video_cards: Json<Vec<VideoScorecardView>>,
+    /// Process configuration, not a row: set from the worker after the
+    /// snapshot loads, like `video_cards`. Defaults to `false` on the row so
+    /// a forgotten assignment raises the alarm rather than hiding it.
+    #[sqlx(skip)]
+    capture_page_configured: bool,
 }
 
 #[derive(Clone, Debug)]
