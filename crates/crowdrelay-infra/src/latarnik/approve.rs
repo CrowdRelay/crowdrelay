@@ -57,6 +57,91 @@ pub async fn approve_latarnik_invite(
         return Ok(InviteOutcome::Replayed { action_id, status });
     }
 
+    let composed = compose_invite(pool, workspace_id, beacon_id, now).await?;
+    let action_id = queue_invite(
+        pool,
+        workspace_id,
+        beacon_id,
+        composed.beacon_version,
+        &composed.contact_email,
+        &composed.contact_name,
+        &composed.reason_sentence,
+        &composed.letter,
+        idempotency_key,
+        now,
+    )
+    .await?;
+
+    Ok(InviteOutcome::Queued {
+        action_id,
+        recipient: composed.contact_email,
+        subject: composed.letter.subject,
+    })
+}
+
+/// A letter composed for one person, exactly as `approve_latarnik_invite`
+/// would queue it and `execute_latarnik_invite` would send it.
+#[derive(Debug, Serialize)]
+pub struct InvitePreview {
+    pub beacon_id: Uuid,
+    pub recipient_name: String,
+    pub recipient_email: String,
+    pub role: String,
+    pub city: Option<String>,
+    /// The reason the letter opens with, as one sentence.
+    pub reason: String,
+    pub subject: String,
+    pub body: String,
+}
+
+/// Composes the letter without queueing it.
+///
+/// `approve_latarnik_invite` is the human's approval: the write queues the
+/// action as already approved, and the mail leaves after the hold window. A
+/// person can therefore only approve what they have read if they can read it
+/// first. This runs the same checks and the same composer, so what it shows is
+/// what a click would send, and every refusal a click would give — cold,
+/// recently contacted, already asked, opted out, declined — is given here too.
+///
+/// # Errors
+///
+/// The same refusals as the approval, or the database error.
+pub async fn preview_latarnik_invite(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<InvitePreview, InviteError> {
+    let composed = compose_invite(pool, workspace_id, beacon_id, now).await?;
+    Ok(InvitePreview {
+        beacon_id,
+        recipient_name: composed.contact_name,
+        recipient_email: composed.contact_email,
+        role: composed.role,
+        city: composed.city,
+        reason: composed.reason_sentence,
+        subject: composed.letter.subject,
+        body: composed.letter.body,
+    })
+}
+
+/// Everything the approval and the preview share: the checks and the words.
+struct ComposedInvite {
+    beacon_version: i64,
+    contact_email: String,
+    contact_name: String,
+    role: String,
+    city: Option<String>,
+    reason_sentence: String,
+    letter: crowdrelay_domain::latarnik_invite::Invite,
+}
+
+async fn compose_invite(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<ComposedInvite, InviteError> {
     // An invitation to this person that has not finished yet is the same
     // invitation. The action ledger's in-flight subject index refuses the second
     // write anyway; asked here, the operator gets a sentence instead of a
@@ -135,24 +220,14 @@ pub async fn approve_latarnik_invite(
     })?;
     let letter = compose(&sender, &standing, &reason, &member_area, language);
 
-    let action_id = queue_invite(
-        pool,
-        workspace_id,
-        beacon_id,
+    Ok(ComposedInvite {
         beacon_version,
-        &contact_email,
-        &contact.display_name,
-        &reason_sentence(&reason, language),
-        &letter,
-        idempotency_key,
-        now,
-    )
-    .await?;
-
-    Ok(InviteOutcome::Queued {
-        action_id,
-        recipient: contact_email,
-        subject: letter.subject,
+        contact_email,
+        contact_name: contact.display_name.clone(),
+        role: contact.role.clone(),
+        city: contact.city.clone(),
+        reason_sentence: reason_sentence(&reason, language),
+        letter,
     })
 }
 
@@ -254,7 +329,47 @@ async fn invite_reason(
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    Ok(release.map(|title| InviteReason::RecentRelease { title }))
+    Ok(release.map(|title| InviteReason::RecentRelease {
+        title: release_title_for_a_letter(&title),
+    }))
+}
+
+/// A release title as a person would write it in a letter.
+///
+/// Release plans are seeded from video titles, and a video title carries its
+/// hashtags: `Technophobia Anno 2026  #staymad #metal #metalmusic#live`. In a
+/// letter to a journalist that reads as a bot. Drops every `#tag` and collapses
+/// the spacing; a title that is nothing but tags comes back empty and the
+/// composer's own fallback applies.
+fn release_title_for_a_letter(title: &str) -> String {
+    title
+        .split_whitespace()
+        .filter(|word| !word.starts_with('#'))
+        .map(|word| word.split('#').next().unwrap_or(word))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod release_title_tests {
+    use super::release_title_for_a_letter;
+
+    #[test]
+    fn hashtags_do_not_reach_a_letter() {
+        assert_eq!(
+            release_title_for_a_letter(
+                "Technophobia Anno 2026  #staymad #metal #metalmusic#live #technophobia"
+            ),
+            "Technophobia Anno 2026"
+        );
+        assert_eq!(
+            release_title_for_a_letter("Technophobia Live From FLSS 2026"),
+            "Technophobia Live From FLSS 2026"
+        );
+        assert_eq!(release_title_for_a_letter("#only #tags"), "");
+        assert_eq!(release_title_for_a_letter("Rise#live Namysłów"), "Rise Namysłów");
+    }
 }
 
 /// The reason as one sentence for the ledger and the briefing, in the same
