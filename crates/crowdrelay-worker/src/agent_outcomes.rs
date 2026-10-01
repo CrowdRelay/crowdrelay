@@ -110,6 +110,7 @@ include!("agent_outcomes/rejections.rs");
 
 include!("agent_outcomes/community_ingestion.rs");
 include!("agent_outcomes/beacon_candidates.rs");
+include!("agent_outcomes/contact_research.rs");
 include!("agent_outcomes/quality_guard.rs");
 include!("agent_outcomes/opportunity_findings.rs");
 include!("agent_outcomes/strategy_proposals.rs");
@@ -456,6 +457,11 @@ impl AgentOutcomeWorker {
             OutcomeKind::BeaconCandidates => {
                 beacon_candidate_subject(&mut tx, outcome, producing_task.as_ref()).await?
             }
+            OutcomeKind::ContactResearch => {
+                let beacon_id =
+                    contact_research_beacon_id(outcome).map_err(AgentOutcomeError::Rejected)?;
+                ("beacon", beacon_id)
+            }
             _ => ("agent_outcome", outcome.id),
         };
 
@@ -609,6 +615,9 @@ impl AgentOutcomeWorker {
                         .await?;
                 }
             }
+            OutcomeKind::ContactResearch => {
+                let _ = persist_contact_research(&mut tx, outcome, producing_task.as_ref()).await?;
+            }
             _ => {}
         }
 
@@ -631,6 +640,7 @@ impl AgentOutcomeWorker {
         let action_id = if outcome.kind.disposition() == "require_approval"
             && outcome.kind != OutcomeKind::OpportunityFindings
             && outcome.kind != OutcomeKind::BeaconCandidates
+            && outcome.kind != OutcomeKind::ContactResearch
             && outcome.kind != OutcomeKind::StrategyProposals
             && outcome.payload.item.is_some()
         {
