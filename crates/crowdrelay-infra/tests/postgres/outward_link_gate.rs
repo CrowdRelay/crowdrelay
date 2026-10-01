@@ -203,6 +203,23 @@ async fn execute(
     .await
 }
 
+async fn live_link(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    slug: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "INSERT INTO smart_links (workspace_id, slug, destination_url, active)
+         VALUES ($1, $2, 'https://listen.example/music', true)
+         ON CONFLICT (workspace_id, slug) DO UPDATE SET active = true",
+    )
+    .bind(workspace_id)
+    .bind(slug)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn emitted_for(pool: &PgPool, workspace_id: Uuid, action_id: Uuid) -> i64 {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM outbox_events
@@ -281,6 +298,7 @@ async fn a_stranger_letter_with_a_tracked_link_passes_the_gate()
     )
     .await?;
 
+    live_link(&pool, workspace_id, "release-rytual").await?;
     execute(&pool, &url, workspace_id, action_id).await?;
     assert_eq!(
         emitted_for(&pool, workspace_id, action_id).await,
@@ -339,6 +357,93 @@ async fn a_stranger_letter_with_no_links_sends_as_before() -> Result<(), Box<dyn
     .await?;
 
     execute(&pool, &url, workspace_id, action_id).await?;
+    assert_eq!(emitted_for(&pool, workspace_id, action_id).await, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn only_live_workspace_redirects_may_leave_in_a_letter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = workspace(&pool).await?;
+    let other_workspace = workspace(&pool).await?;
+    let city_id = city(&pool, &format!("linkgate-{}", Uuid::now_v7().simple())).await?;
+    advertise(&pool, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'member_site_base_url', 'https://band.example')",
+    )
+    .bind(workspace_id)
+    .execute(&pool)
+    .await?;
+    live_link(&pool, other_workspace, "foreign").await?;
+    live_link(&pool, workspace_id, "inactive").await?;
+    sqlx::query("UPDATE smart_links SET active = false WHERE workspace_id = $1 AND slug = 'inactive'")
+        .bind(workspace_id)
+        .execute(&pool)
+        .await?;
+
+    for slug in ["missing", "foreign", "inactive", "bad.slug", "site/extra", ""] {
+        let target_id = target(&pool, workspace_id, city_id).await?;
+        let action_id = outreach_action(
+            &pool,
+            workspace_id,
+            city_id,
+            target_id,
+            &format!("A personal ask. https://band.example/l/{slug}"),
+        )
+        .await?;
+        let outcome = execute(&pool, &url, workspace_id, action_id).await;
+        assert!(
+            matches!(outcome, Err(RepositoryError::ConflictBecause(_))),
+            "{slug:?} must refuse before emission, got {outcome:?}"
+        );
+        assert_eq!(emitted_for(&pool, workspace_id, action_id).await, 0);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn restoring_a_redirect_allows_the_same_claim_without_a_new_send_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = workspace(&pool).await?;
+    let city_id = city(&pool, &format!("linkgate-{}", Uuid::now_v7().simple())).await?;
+    let target_id = target(&pool, workspace_id, city_id).await?;
+    advertise(&pool, workspace_id).await?;
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'member_site_base_url', 'https://band.example')",
+    )
+    .bind(workspace_id)
+    .execute(&pool)
+    .await?;
+    let action_id = outreach_action(
+        &pool,
+        workspace_id,
+        city_id,
+        target_id,
+        "A personal ask. https://band.example/l/restored",
+    )
+    .await?;
+    let repo = repository(&pool, &url);
+    let workspace = WorkspaceId::from_uuid(workspace_id);
+    let now = OffsetDateTime::now_utc();
+    let claimed = repo.claim_due_autonomous_actions(workspace, 8, now).await?;
+    let action = claimed
+        .iter()
+        .find(|action| action.id.into_uuid() == action_id)
+        .expect("the queued letter is claimable");
+    assert!(matches!(
+        repo.execute_action(workspace, action, now).await,
+        Err(RepositoryError::ConflictBecause(_))
+    ));
+    assert_eq!(emitted_for(&pool, workspace_id, action_id).await, 0);
+    live_link(&pool, workspace_id, "restored").await?;
+    repo.execute_action(workspace, action, OffsetDateTime::now_utc())
+        .await?;
     assert_eq!(emitted_for(&pool, workspace_id, action_id).await, 1);
     Ok(())
 }

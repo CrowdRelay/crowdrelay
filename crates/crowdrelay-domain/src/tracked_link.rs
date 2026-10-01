@@ -156,25 +156,49 @@ impl fmt::Display for TrackedLink {
 /// is not the regression this scan exists to catch.
 #[must_use]
 pub fn untracked_links_in(text: &str, site_root: Option<&str>) -> Vec<String> {
-    let link_prefix = site_root.map(|root| format!("{}/l/", root.trim_end_matches('/')));
-    let mut untracked = Vec::new();
-    for token in text.split(|c: char| {
+    letter_links(text)
+        .filter(|token| tracked_site_slug(token, site_root).is_none())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The valid member-site slugs in a letter, or `None` when any absolute
+/// URL bypasses the redirect. Dispatch checks these against the live ledger;
+/// a correct URL shape alone does not prove that the redirect exists.
+#[must_use]
+pub fn tracked_site_link_slugs_in(text: &str, site_root: Option<&str>) -> Option<Vec<String>> {
+    letter_links(text)
+        .map(|token| tracked_site_slug(token, site_root))
+        .collect()
+}
+
+fn letter_links(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| {
         c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']')
-    }) {
-        let Ok(url) = Url::parse(token) else {
-            continue;
-        };
-        if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
-            continue;
-        }
-        let tracked = link_prefix
-            .as_ref()
-            .is_some_and(|prefix| token.starts_with(prefix.as_str()));
-        if !tracked {
-            untracked.push(token.to_owned());
-        }
+    })
+    .filter(|token| {
+        Url::parse(token)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+    })
+}
+
+fn tracked_site_slug(token: &str, site_root: Option<&str>) -> Option<String> {
+    let root = site_root?.trim().trim_end_matches('/');
+    let origin = Url::parse(root).ok()?;
+    if origin.scheme() != "https"
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return None;
     }
-    untracked
+    let prefix = format!("{root}/l/");
+    let slug = token.strip_prefix(&prefix)?;
+    SmartLinkSlug::parse(slug)
+        .ok()
+        .map(|slug| slug.as_str().to_owned())
 }
 
 #[cfg(test)]
@@ -275,5 +299,35 @@ mod tests {
         );
         // Scheme-less text is not a click — not flagged.
         assert!(untracked_links_in("find us at virya.music", site).is_empty());
+    }
+
+    #[test]
+    fn a_redirect_prefix_without_a_valid_slug_is_not_tracked() {
+        let site = Some("https://virya.music");
+        for link in [
+            "https://virya.music/l/",
+            "https://virya.music/l/bad.slug",
+            "https://virya.music/l/site/extra",
+            "https://virya.music/l/site?next=elsewhere",
+            "https://virya.music/l/site#fragment",
+        ] {
+            assert_eq!(untracked_links_in(link, site), vec![link.to_owned()]);
+            assert_eq!(tracked_site_link_slugs_in(link, site), None);
+        }
+        assert_eq!(
+            tracked_site_link_slugs_in(
+                "Listen: https://virya.music/l/release-x\nSite: https://virya.music/l/site",
+                site,
+            ),
+            Some(vec!["release-x".to_owned(), "site".to_owned()])
+        );
+        assert_eq!(
+            tracked_site_link_slugs_in("No URLs in this letter", None),
+            Some(vec![])
+        );
+        assert_eq!(
+            tracked_site_link_slugs_in("http://virya.music/l/site", Some("http://virya.music")),
+            None
+        );
     }
 }

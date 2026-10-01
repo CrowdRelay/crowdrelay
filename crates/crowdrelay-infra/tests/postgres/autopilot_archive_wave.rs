@@ -58,9 +58,11 @@ async fn the_archive_backlog_counts_only_the_promotable_cut()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("archive-backlog").await?;
     for (email, kind, fan_outcome) in [
-        ("ania@gmail.com", None, "staged"),
-        ("bartek@wp.pl", None, "staged"),
-        ("celina@outlook.com", None, "staged"),
+        ("ania@gmail.com", Some("fan"), "staged"),
+        ("bartek@wp.pl", Some("fan"), "staged"),
+        ("celina@outlook.com", Some("fan"), "staged"),
+        // Bare personal mail and prior correspondence never qualify a fan.
+        ("unqualified@gmail.com", None, "staged"),
         // Already promoted: the wave would not reach it, so the debt must
         // not count it either.
         ("danuta@gmail.com", None, "promoted"),
@@ -114,7 +116,7 @@ async fn the_archive_backlog_counts_only_the_promotable_cut()
 async fn an_approved_wave_promotes_the_bounded_slice() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("archive-wave").await?;
     for (email, sources, inbound) in [
-        // The inbound writer is the evidence head — promoted first.
+        // All three have explicit fan origin. Evidence only orders that cut.
         ("wrote-in@gmail.com", "{gdrive}", true),
         ("gmail-fan@gmail.com", "{gdrive}", false),
         ("dual@wp.pl", "{gdrive,github}", false),
@@ -124,7 +126,7 @@ async fn an_approved_wave_promotes_the_bounded_slice() -> Result<(), Box<dyn std
             INSERT INTO drive_contacts
                 (id, workspace_id, normalized_email, suggested_kind, city,
                  source_file_id, source_file_name, sources, last_inbound_at)
-            VALUES ($1, $2, $3, NULL, NULL, 'file-1', 'contacts.csv', $4::text[], $5)
+            VALUES ($1, $2, $3, 'fan', NULL, 'file-1', 'contacts.csv', $4::text[], $5)
             "#,
         )
         .bind(uuid::Uuid::now_v7())
@@ -139,6 +141,20 @@ async fn an_approved_wave_promotes_the_bounded_slice() -> Result<(), Box<dyn std
         .execute(&fixture.pool)
         .await?;
     }
+
+    // A stronger-looking unqualified sighting must never enter the wave.
+    sqlx::query(
+        "INSERT INTO drive_contacts
+             (id, workspace_id, normalized_email, source_file_id, source_file_name,
+              sources, last_inbound_at)
+         VALUES ($1, $2, 'industry@gmail.com', 'other-file', 'press.csv',
+                 '{gdrive,github,gmail}', $3)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(fixture.now - time::Duration::days(1))
+    .execute(&fixture.pool)
+    .await?;
 
     // The queued action is the post-approval shape: a person saw the card
     // and said go. `available_at` defaults to the insert's now.
@@ -213,7 +229,10 @@ async fn an_approved_wave_promotes_the_bounded_slice() -> Result<(), Box<dyn std
     .bind(fixture.workspace_id.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(staged, 1);
+    assert_eq!(
+        staged, 2,
+        "the remaining fan and unqualified industry row stay staged"
+    );
 
     // Two pending fans, two confirmation intents in the same commit.
     let pending: i64 = sqlx::query_scalar(

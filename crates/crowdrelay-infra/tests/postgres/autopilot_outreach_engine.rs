@@ -49,6 +49,15 @@ pub(crate) async fn fixture(label: &str) -> Result<Fixture, Box<dyn std::error::
             lock_timeout: Duration::from_secs(1),
         },
     );
+    // A composed letter needs the tenant redirect surface. Release URLs
+    // remain external destinations; readers receive ledger-backed CTAs.
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'member_site_base_url', 'https://band.example')",
+    )
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
     Ok(Fixture {
         pool,
         repository,
@@ -452,9 +461,27 @@ async fn the_catalogue_is_pitched_in_one_wave_of_composed_letters()
         assert!(wave_id.is_some(), "a catalogue pitch is never a loose card");
         assert_eq!(status, "awaiting_approval");
         assert!(
-            body.contains("Echoes") && body.contains("https://open.spotify.example/album/echoes"),
+            body.contains("Echoes") && body.contains("https://band.example/l/"),
             "the letter names the pitch and links it: {body}"
         );
+        let destination_is_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM smart_links
+                 WHERE workspace_id = $1 AND active
+                   AND destination_url = 'https://open.spotify.example/album/echoes'
+                   AND strpos($2, 'https://band.example/l/' || slug) > 0
+             )",
+        )
+        .bind(f.ws())
+        .bind(body)
+        .fetch_one(&f.pool)
+        .await?;
+        assert!(
+            destination_is_live,
+            "the printed CTA must resolve to this catalogue"
+        );
+        assert!(!body.contains("https://open.spotify.example/album/echoes"));
+
     }
     Ok(())
 }
@@ -1096,9 +1123,27 @@ async fn a_show_opportunity_writes_the_show_letter_to_local_contacts_only()
         "{body}"
     );
     assert!(
-        body.contains("Bilety: https://tickets.example/gorzow"),
+        body.contains("Bilety: https://band.example/l/"),
         "{body}"
     );
+    let ticket_is_live: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM smart_links
+             WHERE workspace_id = $1 AND active
+               AND destination_url = 'https://tickets.example/gorzow'
+               AND strpos($2, 'https://band.example/l/' || slug) > 0
+         )",
+    )
+    .bind(f.ws())
+    .bind(body)
+    .fetch_one(&f.pool)
+    .await?;
+    assert!(
+        ticket_is_live,
+        "the show CTA must resolve to its real ticket destination"
+    );
+    assert!(!body.contains("https://tickets.example/gorzow"));
+
     assert!(
         !body.contains("zaproponować Wam Echoes"),
         "the album pitch: {body}"
