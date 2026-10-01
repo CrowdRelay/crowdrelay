@@ -476,6 +476,18 @@ async fn replied(
     city_id: Uuid,
     now: OffsetDateTime,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    campaign_answer(pool, workspace_id, beacon_id, city_id, now, "received").await
+}
+
+/// A beacon campaign whose answer was `disposition`.
+async fn campaign_answer(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+    city_id: Uuid,
+    now: OffsetDateTime,
+    disposition: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let event_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO events
@@ -494,12 +506,13 @@ async fn replied(
         r#"
         INSERT INTO beacon_campaigns
             (workspace_id, beacon_id, event_id, status, last_reply_disposition)
-        VALUES ($1, $2, $3, 'contacted', 'received')
+        VALUES ($1, $2, $3, 'contacted', $4)
         "#,
     )
     .bind(workspace_id)
     .bind(beacon_id)
     .bind(event_id)
+    .bind(disposition)
     .execute(pool)
     .await?;
     Ok(())
@@ -570,5 +583,228 @@ async fn consented_fan(
         .execute(pool)
         .await?;
     }
+    Ok(())
+}
+
+/// The outreach engine's own row for an address: when it last mailed them and
+/// how they answered. Production held 485 outbound mails a month here and 56
+/// rows in the governor, so the invitation lane saw nobody.
+async fn outreach_target(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+    last_outreach_at: OffsetDateTime,
+    disposition: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        r#"
+        INSERT INTO outreach_targets
+            (workspace_id, target_kind, display_name, contact_email,
+             last_outreach_at, last_reply_disposition)
+        VALUES ($1, 'press', $2, $3, $4, $5)
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .bind(email)
+    .bind(last_outreach_at)
+    .bind(disposition)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn people_the_outreach_engine_knows_are_not_cold() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(&pool).await?;
+    let city = city(&pool).await?;
+
+    // Marta was mailed by the outreach engine forty days ago. The governor
+    // never heard of it. She is a relationship, not a cold contact.
+    beacon(
+        &pool,
+        act,
+        city,
+        "local_press",
+        "Marta",
+        "marta@example.test",
+        72,
+        true,
+    )
+    .await?;
+    outreach_target(
+        &pool,
+        act,
+        "marta@example.test",
+        now - time::Duration::days(40),
+        "none",
+    )
+    .await?;
+
+    // Nikodem scores below the bar, but he answered positively: a reply
+    // outranks a score.
+    beacon(
+        &pool,
+        act,
+        city,
+        "local_press",
+        "Nikodem",
+        "nikodem@example.test",
+        50,
+        true,
+    )
+    .await?;
+    outreach_target(
+        &pool,
+        act,
+        "nikodem@example.test",
+        now - time::Duration::days(30),
+        "positive",
+    )
+    .await?;
+
+    // Olga was mailed five days ago. Business first.
+    beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Olga",
+        "olga@example.test",
+        70,
+        true,
+    )
+    .await?;
+    outreach_target(
+        &pool,
+        act,
+        "olga@example.test",
+        now - time::Duration::days(5),
+        "none",
+    )
+    .await?;
+
+    // Piotr and Rafał said no to the pitch. Asking through the other role is
+    // the oldest trick in mailing-list software.
+    beacon(
+        &pool,
+        act,
+        city,
+        "local_press",
+        "Piotr",
+        "piotr@example.test",
+        80,
+        true,
+    )
+    .await?;
+    outreach_target(
+        &pool,
+        act,
+        "piotr@example.test",
+        now - time::Duration::days(40),
+        "declined",
+    )
+    .await?;
+    beacon(
+        &pool,
+        act,
+        city,
+        "local_press",
+        "Rafał",
+        "rafal@example.test",
+        80,
+        true,
+    )
+    .await?;
+    outreach_target(
+        &pool,
+        act,
+        "rafal@example.test",
+        now - time::Duration::days(40),
+        "do_not_contact",
+    )
+    .await?;
+
+    // Tola declined a beacon campaign. That used to count as "replied".
+    let tola = beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Tola",
+        "tola@example.test",
+        80,
+        true,
+    )
+    .await?;
+    campaign_answer(&pool, act, tola, city, now, "declined").await?;
+    contacted(
+        &pool,
+        act,
+        "tola@example.test",
+        "beacon_outreach",
+        now - time::Duration::days(40),
+    )
+    .await?;
+
+    // Stefan was never contacted in either ledger: still cold.
+    beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Stefan",
+        "stefan@example.test",
+        90,
+        true,
+    )
+    .await?;
+
+    let review = dual_role_review(&pool, act, now, true).await?;
+    let by_name = |name: &str| {
+        review
+            .contacts
+            .iter()
+            .find(|contact| contact.display_name == name)
+            .unwrap_or_else(|| panic!("{name} missing from the review"))
+    };
+
+    let marta = by_name("Marta");
+    assert!(marta.invitable, "Marta: {:?}", marta.hold_reason);
+    assert_eq!(marta.days_since_last_contact, Some(40));
+
+    let nikodem = by_name("Nikodem");
+    assert!(nikodem.invitable, "Nikodem: {:?}", nikodem.hold_reason);
+    assert!(nikodem.has_replied);
+
+    let olga = by_name("Olga");
+    assert!(!olga.invitable);
+    assert!(
+        olga.hold_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("recently"),
+        "{:?}",
+        olga.hold_reason
+    );
+
+    for name in ["Piotr", "Rafał", "Tola"] {
+        let row = by_name(name);
+        assert!(
+            !row.invitable,
+            "{name} said no and was offered an invitation"
+        );
+        assert!(row.do_not_contact, "{name} must read as refused");
+    }
+
+    let stefan = by_name("Stefan");
+    assert!(!stefan.invitable, "a contact nobody ever wrote to is cold");
+
+    assert_eq!(review.invitable_now, 2, "Marta and Nikodem, today");
     Ok(())
 }
