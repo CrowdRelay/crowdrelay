@@ -977,6 +977,7 @@ include!("evaluate/persist.rs");
 include!("evaluate/live_terms.rs");
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
+include!("evaluate/candidates_lifecycle.rs");
 include!("evaluate/candidates_terms.rs");
 include!("evaluate/candidates_relay.rs");
 include!("evaluate/candidates_drop_surge.rs");
