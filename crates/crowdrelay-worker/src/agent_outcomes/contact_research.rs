@@ -44,9 +44,9 @@ fn validate_contact_research_grounding(
             reason: "producing task metadata is unavailable".to_owned(),
         });
     };
-    if template != "contact-research" {
+    if template != "contact-researcher" {
         return Err(OutcomeRejection::UngroundedContactResearch {
-            reason: format!("producing template {template:?} is not contact-research"),
+            reason: format!("producing template {template:?} is not contact-researcher"),
         });
     }
     let pinned = metadata
@@ -81,6 +81,38 @@ fn validate_contact_research_grounding(
         .ok_or_else(|| OutcomeRejection::UngroundedContactResearch {
             reason: "observed_on is not a YYYY-MM-DD date".to_owned(),
         })?;
+    // The date is extractor-owned, never model-owned. The agents service
+    // records the bounded pages the model actually saw, including the exact
+    // publication date extracted from page metadata. Both URL and date must
+    // match the same recent page.
+    let page_matches = metadata
+        .get("contact_research_pages")
+        .and_then(Value::as_array)
+        .is_some_and(|pages| {
+            pages.iter().any(|page| {
+                let same_url = page
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| {
+                        normalize_evidence_url(url) == normalize_evidence_url(source_url)
+                    });
+                let same_date = page
+                    .get("published_on")
+                    .and_then(Value::as_str)
+                    .and_then(parse_contact_research_day)
+                    == Some(observed_on);
+                let recent = page
+                    .get("recent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                same_url && same_date && recent
+            })
+        });
+    if !page_matches {
+        return Err(OutcomeRejection::UngroundedContactResearch {
+            reason: "source_url and observed_on do not match one recent page/date pair extracted for this task".to_owned(),
+        });
+    }
     let fact = item
         .get("fact")
         .and_then(Value::as_str)
@@ -140,7 +172,7 @@ async fn persist_contact_research(
         INSERT INTO contact_research
             (workspace_id, normalized_email, fact, praise, source_url, observed_on,
              language, researched_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'agent:contact-research')
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'agent:contact-researcher')
         ON CONFLICT (workspace_id, normalized_email, source_url) DO UPDATE
             SET fact=EXCLUDED.fact,
                 praise=EXCLUDED.praise,
