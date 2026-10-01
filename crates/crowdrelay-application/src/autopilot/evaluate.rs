@@ -189,9 +189,7 @@ where
         let mut report = AutopilotCycleReport::default();
 
         let loaded_causal_model = self.load_cycle_causal_model(&policies, &mut report).await?;
-        // Loading replays delta evidence and updates stored strategy state.
-        // Persist that causal cursor before any unrelated context can abort the
-        // cycle; the model is read-only from this point onward.
+        // Checkpoint replay before unrelated contexts can abort; the model is read-only below.
         self.checkpoint_cycle_causal_model(loaded_causal_model.as_ref(), &mut report)
             .await;
 
