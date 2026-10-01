@@ -78,6 +78,10 @@ pub enum OutcomeRejection {
     /// or an empty one. A consultation that proposes nothing is not advice —
     /// there is nothing to evaluate and nothing to record verdicts for.
     MissingProposalContent,
+    /// An event-network candidate escaped the Brain's grounded research brief:
+    /// bad event identity, unsupported kind, or a URL/contact the source data
+    /// never contained.
+    UngroundedBeaconCandidate { reason: String },
     /// The source owner excluded this destination from the promotion.
     PlatformExcluded { platform: String },
 }
@@ -135,6 +139,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::MissingProposalContent => write!(
                 f,
                 "MISSING_PROPOSAL_CONTENT: a strategy_consult outcome needs a non-empty proposals array to evaluate"
+            ),
+            Self::UngroundedBeaconCandidate { reason } => write!(
+                f,
+                "UNGROUNDED_BEACON_CANDIDATE: {reason}"
             ),
         }
     }
