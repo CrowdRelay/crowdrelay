@@ -453,19 +453,9 @@ impl AgentOutcomeWorker {
                 // pair is total.
                 None => ("agent_outcome", outcome.id),
             },
-            OutcomeKind::BeaconCandidates => match &outcome.payload.item {
-                Some(item) => (
-                    "beacon",
-                    insert_beacon_candidate(
-                        &mut tx,
-                        outcome,
-                        item,
-                        producing_task.as_ref().map(|(_, prompt)| prompt.as_str()),
-                    )
-                    .await?,
-                ),
-                None => ("agent_outcome", outcome.id),
-            },
+            OutcomeKind::BeaconCandidates => {
+                beacon_candidate_subject(&mut tx, outcome, producing_task.as_ref()).await?
+            }
             _ => ("agent_outcome", outcome.id),
         };
 
