@@ -111,12 +111,15 @@ mod beacon_learning_tests {
             subject: ActionSubject::Workspace(WorkspaceId::from_uuid(Uuid::nil())),
             decision_kind: "fixture",
             confidence: Confidence::saturating_from_basis_points(9_000),
-            disposition: PolicyDisposition::Recommend,
+            disposition: PolicyDisposition::RecommendOnly,
             reason: "fixture",
             input_snapshot: serde_json::json!({}),
             policy_snapshot: serde_json::json!({}),
-            action: AutopilotActionPayload::Noop {
-                reason: key.to_owned(),
+            action: AutopilotActionPayload::RequestAgentRun {
+                template_id: "fixture".to_owned(),
+                prompt: String::new(),
+                priority: 1,
+                tier: crowdrelay_brain::AgentTier::Basic,
             },
             decision_key: key.to_owned(),
             action_idempotency_key: key.to_owned(),
