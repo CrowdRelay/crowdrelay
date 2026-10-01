@@ -32,11 +32,12 @@ pub async fn admin_beacon_network(
                verified,accepts_outreach,do_not_contact,metadata
         FROM beacons
         WHERE workspace_id=$1
-          -- Discovery is one way onto this list; importing researched
-          -- contacts is the other. Both arrive unverified and both need the
-          -- same operator approval before the invite pipeline will touch them,
-          -- so both belong in the same queue.
-          AND (metadata ? 'network_discovery_run_id' OR metadata ? 'imported_from')
+          -- Every research ingress belongs on the same review queue: the
+          -- legacy discovery executor, researched-contact import, and Brain's
+          -- event-network scout all arrive unverified/non-contactable. Finding
+          -- a public page is evidence of identity/relevance, never permission
+          -- to contact it.
+          AND (metadata ? 'network_discovery_run_id' OR metadata ? 'imported_from' OR metadata ? 'event_network_scout')
           AND active AND NOT do_not_contact
           AND (NOT verified OR NOT accepts_outreach)
         ORDER BY created_at DESC,id DESC
@@ -62,7 +63,7 @@ pub async fn admin_beacon_network(
         LEFT JOIN beacon_signal_profiles profile
           ON profile.workspace_id=beacon.workspace_id AND profile.beacon_id=beacon.id
         WHERE beacon.workspace_id=$1
-          AND (beacon.metadata ? 'network_discovery_run_id' OR beacon.metadata ? 'imported_from')
+          AND (beacon.metadata ? 'network_discovery_run_id' OR beacon.metadata ? 'imported_from' OR beacon.metadata ? 'event_network_scout')
           AND beacon.active AND beacon.verified AND beacon.accepts_outreach AND NOT beacon.do_not_contact
           AND beacon.contact_email IS NOT NULL
           -- Same exclusions mint enforces: paused/revoked are operator-set
@@ -528,7 +529,12 @@ async fn approve_candidate(
         r#"
         SELECT do_not_contact,source_url,metadata
         FROM beacons
-        WHERE workspace_id=$1 AND id=$2 AND active AND metadata ? 'network_discovery_run_id'
+        WHERE workspace_id=$1 AND id=$2 AND active
+          AND (
+            metadata ? 'network_discovery_run_id'
+            OR metadata ? 'imported_from'
+            OR metadata ? 'event_network_scout'
+          )
         FOR UPDATE
         "#,
     )
@@ -658,7 +664,11 @@ async fn preview_invites(
           -- first-wave candidates this flow exists to reach, so fold NULL to false.
           AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
           AND (
-            NOT (beacon.metadata ? 'network_discovery_run_id')
+            NOT (
+              beacon.metadata ? 'network_discovery_run_id'
+              OR beacon.metadata ? 'imported_from'
+              OR beacon.metadata ? 'event_network_scout'
+            )
             OR (
               beacon.metadata #>> '{network_review,source_verified}' = 'true'
               AND beacon.metadata #>> '{network_review,marketing_email_consent_confirmed}' = 'true'
@@ -825,7 +835,11 @@ async fn queue_invites(
           -- first-wave candidates this flow exists to reach, so fold NULL to false.
           AND NOT COALESCE(profile.status='invited' AND profile.invite_expires_at > now(), false)
           AND (
-            NOT (beacon.metadata ? 'network_discovery_run_id')
+            NOT (
+              beacon.metadata ? 'network_discovery_run_id'
+              OR beacon.metadata ? 'imported_from'
+              OR beacon.metadata ? 'event_network_scout'
+            )
             OR (
               beacon.metadata #>> '{network_review,source_verified}' = 'true'
               AND beacon.metadata #>> '{network_review,marketing_email_consent_confirmed}' = 'true'
