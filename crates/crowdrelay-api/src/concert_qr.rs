@@ -21,7 +21,7 @@ use crowdrelay_application::{
     CheckinCommand, CheckinConsent, ConcertQrError, ConcertQrRepository, CreateCampaignCommand,
     RevokeCampaignCommand, UpdateCampaignContextCommand, UpsertSmartLinkCommand,
 };
-use crowdrelay_domain::{EventSlug, NormalizedEmail, SmartLinkSlug, WorkspaceId};
+use crowdrelay_domain::{EventSlug, FanId, NormalizedEmail, SmartLinkSlug, WorkspaceId};
 use crowdrelay_infra::tenant_settings::TenantSettingsRepository;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,9 @@ use uuid::Uuid;
 
 use crate::{
     Problem,
-    acquisition::{attribution_cookie, attribution_visitor, fan_session_from_headers},
+    acquisition::{
+        attribution_cookie, attribution_visitor, fan_session_from_headers, referral_url,
+    },
     request_id,
 };
 
@@ -223,6 +225,10 @@ pub struct CheckinResponse {
     /// means the inbox follow-up now decides whether the scan becomes a
     /// reachable fan.
     identity: String,
+    /// The fan's own share link — the referral ask rides the
+    /// scan-confirmation screen instead of a later message. `null` when no
+    /// code could be minted; the check-in itself already succeeded.
+    referral_url: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -683,6 +689,24 @@ pub async fn check_in(
     } else {
         StatusCode::OK
     };
+    // Minted after the check-in commits through the canonical acquisition
+    // port: a referral-code failure degrades to no share card — it must
+    // never turn a confirmed scan into an error.
+    let referral_url = match state
+        .acquisition
+        .acquisition_repository()
+        .load_or_create_fan_referral_code(
+            state.concert_qr.workspace_id,
+            FanId::from_uuid(result.fan_id),
+        )
+        .await
+    {
+        Ok(code) => referral_url(state.acquisition.public_site_base_url(), &code).ok(),
+        Err(error) => {
+            tracing::warn!(%error, fan_id = %result.fan_id, "check-in referral mint failed");
+            None
+        }
+    };
     let mut response = (
         status,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
@@ -693,6 +717,7 @@ pub async fn check_in(
             created: result.created,
             checked_in_at: format_time(result.checked_in_at),
             identity: result.identity.as_str().to_owned(),
+            referral_url,
         }),
     )
         .into_response();

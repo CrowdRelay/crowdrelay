@@ -433,6 +433,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
                 created: false,
                 checked_in_at,
                 identity,
+                fan_id,
             });
         }
 
@@ -584,6 +585,7 @@ impl ConcertQrRepository for PostgresConcertQrRepository {
             created: true,
             checked_in_at,
             identity,
+            fan_id,
         })
     }
 }

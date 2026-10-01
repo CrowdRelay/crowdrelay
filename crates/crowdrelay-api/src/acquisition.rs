@@ -752,7 +752,7 @@ pub(crate) fn client_ip_address(headers: &HeaderMap) -> Option<String> {
         .filter(|v| !v.is_empty() && v.len() <= 64)
 }
 
-fn referral_url(base_url: &Url, code: &ReferralCode) -> Result<String, url::ParseError> {
+pub(crate) fn referral_url(base_url: &Url, code: &ReferralCode) -> Result<String, url::ParseError> {
     base_url
         .join(&format!("r/{}", code.as_str()))
         .map(String::from)

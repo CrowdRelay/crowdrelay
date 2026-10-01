@@ -18636,6 +18636,8 @@ components:
       - campaign_id
       - created
       - checked_in_at
+      - identity
+      - referral_url
       properties:
         event_id:
           type: string
@@ -18650,6 +18652,15 @@ components:
         checked_in_at:
           type: string
           format: date-time
+        identity:
+          type: string
+          enum: [session, email_claim]
+          description: "`session` means the fan's own browser proved identity; `email_claim` means the inbox follow-up now decides whether the scan becomes a reachable fan."
+        referral_url:
+          type:
+          - string
+          - 'null'
+          description: "The fan's own share link, for the referral card on the scan-confirmation screen. `null` when no code could be minted; the check-in itself already succeeded."
     EventInterestRequest:
       type: object
       additionalProperties: false
