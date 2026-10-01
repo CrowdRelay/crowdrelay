@@ -34,52 +34,59 @@ pub struct StagedFanContact {
     pub city: Option<String>,
 }
 
-/// The shared base of the two undecided cuts: staged, untyped, present,
-/// and not marked inactive.
-///
-/// The personal-mailbox providers a sheet full of fans is made of anchor
-/// the split at `@(provider).` — a company-domain address is reviewed by
-/// hand instead, because `promoter@club.pl` is a booking lead, not
-/// somebody who followed the band. The `@` anchor keeps `gmail` inside a
-/// local part or a lookalike domain (`gmail.evil.example`) from matching:
-/// the cut is the provider, not a substring. `last_inbound_at` is the
-/// second signal: an address that already wrote to the band is a fan
-/// whatever provider it sits on.
-///
-/// A row whose sheet names an organisation is an organisation contact
-/// whatever mailbox it uses, and that outranks both signals. Measured in
-/// production on 2026-10-01: 699 of the 813 rows this cut returned named an
-/// organisation — press, radio, festivals, playlist curators — because Polish
-/// zines and promoters run on gmail and wp.pl, and the ones that "wrote to the
-/// band" were replying to booking mail. Every one of them would have been sent
-/// a fan opt-in invitation by the archive wave.
-const LIKELY_FAN_PREDICATE: &str = "c.fan_outcome = 'staged' \
-     AND c.suggested_kind IS NULL \
-     AND c.disappeared_at IS NULL \
-     AND c.staged_status IS DISTINCT FROM 'inactive' \
-     AND NULLIF(btrim(c.organization), '') IS NULL \
-     AND (c.normalized_email ~* '@(gmail|googlemail|wp|o2|onet|interia|hotmail|outlook|live|yahoo|icloud|me|op|tlen|poczta|gazeta|vp|proton|protonmail)\\.' \
-          OR c.last_inbound_at IS NOT NULL)";
+/// A row the registry already knows as industry — a counterparty's exact
+/// address, or a venue's name — can never auto-qualify as a fan. The veto
+/// is deliberately broad: the venue arm matches on `place_venue_key` alone
+/// (no city constraint), so a same-named room in another city still parks
+/// the contact for an operator rather than risking a fan invitation to a
+/// booking lead. Only `fan_qualified_at` — an operator who saw the match
+/// and confirmed anyway — overrides it.
+const REGISTRY_MATCHED_PREDICATE: &str = "(EXISTS (SELECT 1 FROM place_counterparties p \
+              WHERE p.email_key = c.normalized_email) \
+      OR EXISTS (SELECT 1 FROM place_venues v \
+                 WHERE v.name_key = place_venue_key( \
+                     COALESCE(c.organization, c.display_name, ''))))";
 
-const LIKELY_ORG_PREDICATE: &str = "c.fan_outcome = 'staged' \
-     AND c.suggested_kind IS NULL \
+/// The declared fan-origin half of qualification: the sheet typed the row
+/// `fan`, or the last file it was seen in was declared `fan_origin` by an
+/// operator. A named organisation stays a veto — a fan list's press column
+/// is still press — and so does the registry.
+const DECLARED_FAN_ORIGIN_PREDICATE: &str = "(c.suggested_kind IS NOT DISTINCT FROM 'fan' \
+      OR EXISTS (SELECT 1 FROM drive_files f \
+                 WHERE f.workspace_id = c.workspace_id \
+                   AND f.file_id = c.source_file_id \
+                   AND f.audience_role = 'fan_origin'))";
+
+/// The shared undecided base: staged, present, and not marked inactive.
+const STAGED_BASE_PREDICATE: &str = "c.fan_outcome = 'staged' \
      AND c.disappeared_at IS NULL \
-     AND c.staged_status IS DISTINCT FROM 'inactive' \
-     AND (NULLIF(btrim(c.organization), '') IS NOT NULL \
-          OR (c.normalized_email !~* '@(gmail|googlemail|wp|o2|onet|interia|hotmail|outlook|live|yahoo|icloud|me|op|tlen|poczta|gazeta|vp|proton|protonmail)\\.' \
-              AND c.last_inbound_at IS NULL))";
+     AND c.staged_status IS DISTINCT FROM 'inactive'";
+
+/// The automatic half of qualification: declared fan-origin AND nothing
+/// names an organisation AND the registry does not know the contact.
+/// `fan_qualified_at` is deliberately not inside — an operator's confirm
+/// outranks every veto and is or-ed in by the segment itself.
+fn auto_qualified() -> String {
+    format!(
+        "({DECLARED_FAN_ORIGIN_PREDICATE} \
+          AND NULLIF(btrim(c.organization), '') IS NULL \
+          AND NOT {REGISTRY_MATCHED_PREDICATE})"
+    )
+}
 
 /// How the review queue reads one staged row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactSegment {
-    /// Personal-mailbox or already-corresponding addresses — the bulk
-    /// promote's population.
+    /// Fan-qualified rows — a declared fan-origin source with no industry
+    /// signal, or an operator's individual confirm. The bulk promote's
+    /// population; qualification permits an invitation, never consent.
     LikelyFan,
-    /// Organisation domains with no inbound history — a person reviews
-    /// these by hand.
+    /// The unqualified remainder — personal mailboxes, booking-mail
+    /// repliers, registry-vetoed declarations. A person reviews these by
+    /// hand; nothing here is invited without a decision.
     LikelyOrg,
-    /// Rows the sheet itself typed: venue, press, radio, promoter,
-    /// festival, agent.
+    /// Rows the sheet itself typed to an industry kind: venue, press,
+    /// radio, promoter, festival, agent.
     Beacon,
     /// A verification sheet marked the row inactive.
     Inactive,
@@ -116,14 +123,34 @@ impl ContactSegment {
     /// The WHERE fragment over alias `c`, no bind parameters — the same
     /// text serves `list_contacts`' filter and `segment_counts`' FILTERs,
     /// so a count and the page it counts can never drift apart.
+    ///
+    /// `likely_fan`: qualified — a declared fan-origin source with no
+    /// industry signal, or an operator's per-contact `fan_qualified_at`.
+    /// `likely_org`: the unqualified remainder — a person's read, not a
+    /// heuristic's blessing. `beacon`: industry-typed rows; `fan` is not an
+    /// industry kind, and an operator-qualified row reads as fan-qualified
+    /// only, so both exclusions keep the partition disjoint.
     #[must_use]
-    pub fn sql_predicate(&self) -> &'static str {
+    pub fn sql_predicate(&self) -> String {
         match self {
-            Self::LikelyFan => LIKELY_FAN_PREDICATE,
-            Self::LikelyOrg => LIKELY_ORG_PREDICATE,
-            Self::Beacon => "c.suggested_kind IS NOT NULL",
-            Self::Inactive => "c.staged_status = 'inactive'",
-            Self::Gone => "c.disappeared_at IS NOT NULL",
+            Self::LikelyFan => format!(
+                "{STAGED_BASE_PREDICATE} \
+                 AND (c.fan_qualified_at IS NOT NULL OR {})",
+                auto_qualified()
+            ),
+            Self::LikelyOrg => format!(
+                "{STAGED_BASE_PREDICATE} \
+                 AND c.fan_qualified_at IS NULL \
+                 AND (c.suggested_kind IS NULL OR c.suggested_kind = 'fan') \
+                 AND NOT {}",
+                auto_qualified()
+            ),
+            Self::Beacon => "c.suggested_kind IS NOT NULL \
+                 AND c.suggested_kind <> 'fan' \
+                 AND c.fan_qualified_at IS NULL"
+                .to_owned(),
+            Self::Inactive => "c.staged_status = 'inactive'".to_owned(),
+            Self::Gone => "c.disappeared_at IS NOT NULL".to_owned(),
         }
     }
 }
@@ -298,6 +325,59 @@ impl super::PostgresGDriveRepository {
             }
         }
         Ok(resolved)
+    }
+
+    /// Records (or lifts) an operator's individual fan qualification of one
+    /// contact — the only path that can qualify a registry-matched address.
+    /// `qualified_by` names the channel the decision came through, not a
+    /// person: the control plane authenticates a capability, not an
+    /// identity. Qualification permits a fan invitation; it grants no
+    /// consent and touches neither outcome column.
+    pub async fn set_fan_qualification(
+        &self,
+        workspace_id: Uuid,
+        contact_id: Uuid,
+        qualified: bool,
+        qualified_by: &str,
+    ) -> Result<super::DriveContactRow, GDriveError> {
+        let updated = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE drive_contacts \
+             SET fan_qualified_at = CASE WHEN $3 THEN now() ELSE NULL END, \
+                 fan_qualified_by = CASE WHEN $3 THEN $4 ELSE NULL END \
+             WHERE workspace_id = $1 AND id = $2 RETURNING id",
+        )
+        .bind(workspace_id)
+        .bind(contact_id)
+        .bind(qualified)
+        .bind(qualified_by)
+        .fetch_optional(self.pool())
+        .await?;
+        match updated {
+            Some(_) => self.get_contact(workspace_id, contact_id).await,
+            None => Err(GDriveError::NotFound),
+        }
+    }
+
+    /// Declares a scanned file's audience — `fan_origin` makes every
+    /// contact the file contributes an auto-qualification candidate
+    /// (registry and organisation vetoes still apply); `None` retracts the
+    /// declaration. The file row must already exist — a scan writes it.
+    pub async fn set_file_audience_role(
+        &self,
+        workspace_id: Uuid,
+        file_id: &str,
+        audience_role: Option<&str>,
+    ) -> Result<u64, GDriveError> {
+        let result = sqlx::query(
+            "UPDATE drive_files SET audience_role = $3 \
+             WHERE workspace_id = $1 AND file_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(file_id)
+        .bind(audience_role)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Marks the listed contacts' fan outcome promoted inside the caller's

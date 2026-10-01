@@ -39,6 +39,11 @@ pub(crate) struct IntelligenceBrief {
     /// queue. Listed beside `unpublished_drafts` so "the system is posting"
     /// never reads as "waiting on you" or the reverse.
     automatic_queue: Vec<AutomaticQueueChannel>,
+    /// The publication-measurement pipeline per channel — which stage each
+    /// recent post sits in, from `awaiting_publication` through `maturing`
+    /// to `mature_zero`/`conversions`, with `accepted` marking how far the
+    /// learner has already consumed the result.
+    publication_stages: Vec<PublicationStageChannel>,
     /// What the weekly join-ask needs from a person before it can run at all.
     ///
     /// The cold-start half of this brief. The three fields above describe a
@@ -105,6 +110,14 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
         ),
     );
     let join_ask = run_limited(budget, timeout_duration, load_join_ask_readiness(&state.ops));
+    let publication_stages = run_limited(
+        budget,
+        timeout_duration,
+        load_publication_stages(
+            state.ticketing.pool(),
+            state.ticketing.workspace_id().into_uuid(),
+        ),
+    );
 
     let posture = budgeted(
         budget,
@@ -131,8 +144,9 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
             .load_chief_of_staff(workspace_id, now),
     );
 
-    let (worker, brain, needs_you, blocked, drafts, automatic_queue, join_ask, posture, cycle, chief) = tokio::join!(
+    let (worker, brain, needs_you, blocked, drafts, automatic_queue, join_ask, posture, cycle, chief, publication_stages) = tokio::join!(
         worker, brain, needs_you, blocked, drafts, automatic_queue, join_ask, posture, cycle, chief,
+        publication_stages,
     );
 
     let worker = match worker {
@@ -160,6 +174,10 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
         Err(error) => return error.into_response(request_id(&headers)),
     };
     let automatic_queue = match automatic_queue {
+        Ok(value) => value,
+        Err(error) => return error.into_response(request_id(&headers)),
+    };
+    let publication_stages = match publication_stages {
         Ok(value) => value,
         Err(error) => return error.into_response(request_id(&headers)),
     };
@@ -199,6 +217,7 @@ pub async fn intelligence(State(state): State<crate::AppState>, headers: HeaderM
             blocked_communities: blocked,
             unpublished_drafts: drafts,
             automatic_queue,
+            publication_stages,
             join_ask_readiness,
         },
     )

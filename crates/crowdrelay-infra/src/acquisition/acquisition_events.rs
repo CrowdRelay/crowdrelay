@@ -281,6 +281,18 @@ impl PostgresAcquisitionRepository {
               -- otherwise a post-signup click writes a conversion row whose
               -- occurred_at (fan.created_at) predates the click it cites.
               AND click.occurred_at <= fan.created_at
+              -- A fan converts through this attribution axis once: a
+              -- replayed signup path must not write a second
+              -- `last_tracked_click` row under a different winner. Other
+              -- methods (`direct_arrival`, `referral_code`) are complementary
+              -- axes that may honestly coexist — see record_referral_conversion.
+              AND NOT EXISTS (
+                  SELECT 1 FROM fan_provenance_events AS prior
+                  WHERE prior.workspace_id = $1
+                    AND prior.fan_id = $2
+                    AND prior.event_kind = 'conversion'
+                    AND prior.attribution_method = 'last_tracked_click'
+              )
             ORDER BY click.occurred_at DESC, click.id
             LIMIT 1
             "#,

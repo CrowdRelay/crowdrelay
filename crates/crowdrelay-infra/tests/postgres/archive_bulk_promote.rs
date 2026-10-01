@@ -134,13 +134,13 @@ async fn bulk_promote_segment_imports_and_marks_in_one_tx() -> Result<(), Box<dy
     .execute(&pool)
     .await?;
 
-    // Three staged rows: a personal address, an organisation, a typed venue.
-    // Only the first is a likely fan.
+    // Three staged rows: a sheet-declared fan, an organisation, a typed
+    // venue. Only the declared fan is fan-qualified — a bare mailbox is not.
     let fan_row = seed_drive_contact(
         &pool,
         workspace,
         "basia@gmail.com",
-        None,
+        Some("fan"),
         None,
         false,
         false,
@@ -286,13 +286,141 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
     let workspace = seed_workspace(&pool, "segments").await;
     let gdrive = PostgresGDriveRepository::new(pool.clone());
 
-    // Personal provider, no kind → likely fan.
+    // ── Unqualified: mailbox, reply and sighting signals never qualify ──
+    // Personal provider, no declaration → review pile, not a fan invite.
     seed_drive_contact(&pool, workspace, "a@gmail.com", None, None, false, false).await;
-    // Corporate domain but already wrote in → still a likely fan.
+    // Corporate domain but already wrote in → still only the review pile:
+    // replying to booking mail is not a fan origin.
     seed_drive_contact(&pool, workspace, "b@company.pl", None, None, false, true).await;
-    // Corporate domain, never wrote → organisation review.
+    // Corporate domain, never wrote → review pile.
     seed_drive_contact(&pool, workspace, "c@klubx.pl", None, None, false, false).await;
-    // Typed by the sheet → beacon.
+
+    // ── Auto-qualified: declared fan origin, no industry signal ──
+    // The sheet itself typed the row 'fan'.
+    seed_drive_contact(
+        &pool,
+        workspace,
+        "fan1@wp.pl",
+        Some("fan"),
+        None,
+        false,
+        false,
+    )
+    .await;
+    // A fan-origin file: every contact it contributes qualifies.
+    let file_fan = seed_drive_contact(
+        &pool,
+        workspace,
+        "filefan@interia.pl",
+        None,
+        None,
+        false,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE drive_contacts SET source_file_id = 'fan-file' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace)
+    .bind(file_fan)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO drive_files (workspace_id, file_id, file_name, mime_type, audience_role) \
+         VALUES ($1, 'fan-file', 'signal-list.csv', 'text/csv', 'fan_origin')",
+    )
+    .bind(workspace)
+    .execute(&pool)
+    .await?;
+    // The operator's individual confirm — the qualification a registry
+    // match or a missing declaration forces.
+    let confirmed =
+        seed_drive_contact(&pool, workspace, "regular@o2.pl", None, None, false, false).await;
+    gdrive
+        .set_fan_qualification(workspace, confirmed, true, "control_plane")
+        .await?;
+
+    // ── Vetoed: declared fan origin overruled by an industry signal ──
+    // Typed 'fan' but the sheet names an organisation → review pile.
+    let org_fan = seed_drive_contact(
+        &pool,
+        workspace,
+        "zine@wp.pl",
+        Some("fan"),
+        None,
+        false,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE drive_contacts SET organization = 'Metal Zine' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace)
+    .bind(org_fan)
+    .execute(&pool)
+    .await?;
+    // Typed 'fan' but the counterparty registry knows the address → veto.
+    seed_drive_contact(
+        &pool,
+        workspace,
+        "booker@agency.pl",
+        Some("fan"),
+        None,
+        false,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO place_counterparties (email_key, display_name) \
+         VALUES ('booker@agency.pl', 'Agency Booker') \
+         ON CONFLICT (email_key) DO NOTHING",
+    )
+    .execute(&pool)
+    .await?;
+
+    // ── Operator confirm overrides a registry veto ──
+    let venue_fan = seed_drive_contact(
+        &pool,
+        workspace,
+        "room-fan@venue.pl",
+        None,
+        None,
+        false,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE drive_contacts SET organization = 'Club Vega' \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace)
+    .bind(venue_fan)
+    .execute(&pool)
+    .await?;
+    let city_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cities (slug, name, country_code) \
+         VALUES ('warszawa', 'Warszawa', 'PL') \
+         ON CONFLICT (country_code, slug) DO UPDATE SET name = EXCLUDED.name \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO place_venues (city_id, name_key, display_name) \
+         VALUES ($1, place_venue_key('Club Vega'), 'Club Vega') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(city_id)
+    .execute(&pool)
+    .await?;
+    gdrive
+        .set_fan_qualification(workspace, venue_fan, true, "control_plane")
+        .await?;
+
+    // ── Untouched axes ──
+    // Industry-typed by the sheet → beacon.
     seed_drive_contact(
         &pool,
         workspace,
@@ -317,8 +445,16 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
     // Retracted by the source → gone.
     seed_drive_contact(&pool, workspace, "f@gmail.com", None, None, true, false).await;
     // A decided row — promoted on the fan axis, dismissed on the beacon axis.
-    let decided =
-        seed_drive_contact(&pool, workspace, "g@gmail.com", None, None, false, false).await;
+    let decided = seed_drive_contact(
+        &pool,
+        workspace,
+        "g@gmail.com",
+        Some("fan"),
+        None,
+        false,
+        false,
+    )
+    .await;
     sqlx::query(
         "UPDATE drive_contacts SET fan_outcome = 'promoted', beacon_outcome = 'dismissed' \
          WHERE workspace_id = $1 AND id = $2",
@@ -328,24 +464,14 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
     .execute(&pool)
     .await?;
 
-    // A personal mailbox and an inbound reply, but the sheet names the
-    // organisation: a zine editor answering booking mail, not a fan.
-    let named_org =
-        seed_drive_contact(&pool, workspace, "zine@gmail.com", None, None, false, true).await;
-    sqlx::query(
-        "UPDATE drive_contacts SET organization = 'Metal Zine' \
-         WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace)
-    .bind(named_org)
-    .execute(&pool)
-    .await?;
-
     let counts = gdrive.segment_counts(workspace).await?;
-    assert_eq!(counts.likely_fan, 2, "personal + inbound-corporate");
     assert_eq!(
-        counts.likely_org, 2,
-        "corporate without inbound + a named organisation on gmail"
+        counts.likely_fan, 4,
+        "sheet-declared + file-declared + two operator-confirmed"
+    );
+    assert_eq!(
+        counts.likely_org, 5,
+        "bare mailbox + inbound reply + bare domain + org-vetoed + registry-vetoed"
     );
     assert_eq!(counts.beacon, 1);
     assert_eq!(counts.inactive, 1);
@@ -356,7 +482,21 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
     let page = gdrive
         .list_contacts(workspace, Some(ContactSegment::LikelyFan), 500)
         .await?;
-    assert_eq!(page.len(), 2);
+    assert_eq!(page.len(), 4);
+    let mut fan_emails: Vec<&str> = page
+        .iter()
+        .map(|row| row.row.normalized_email.as_str())
+        .collect();
+    fan_emails.sort_unstable();
+    assert_eq!(
+        fan_emails,
+        vec![
+            "fan1@wp.pl",
+            "filefan@interia.pl",
+            "regular@o2.pl",
+            "room-fan@venue.pl"
+        ]
+    );
     let orgs = gdrive
         .list_contacts(workspace, Some(ContactSegment::LikelyOrg), 500)
         .await?;
@@ -365,7 +505,23 @@ async fn segment_counts_match_predicates() -> Result<(), Box<dyn std::error::Err
         .map(|org| org.row.normalized_email.as_str())
         .collect();
     org_emails.sort_unstable();
-    assert_eq!(org_emails, vec!["c@klubx.pl", "zine@gmail.com"]);
+    assert_eq!(
+        org_emails,
+        vec![
+            "a@gmail.com",
+            "b@company.pl",
+            "booker@agency.pl",
+            "c@klubx.pl",
+            "zine@wp.pl"
+        ]
+    );
+
+    // Lifting the qualification returns the row to the review pile.
+    gdrive
+        .set_fan_qualification(workspace, confirmed, false, "control_plane")
+        .await?;
+    let counts = gdrive.segment_counts(workspace).await?;
+    assert_eq!(counts.likely_fan, 3);
 
     cleanup(&pool, &[workspace]).await;
     Ok(())
@@ -383,7 +539,7 @@ async fn suppressed_address_stays_staged_in_bulk() -> Result<(), Box<dyn std::er
         &pool,
         workspace,
         "unsubscribed@gmail.com",
-        None,
+        Some("fan"),
         None,
         false,
         false,

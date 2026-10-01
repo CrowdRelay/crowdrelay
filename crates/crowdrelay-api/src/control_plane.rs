@@ -537,6 +537,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             "/v1/control-plane/gdrive/contacts/{contact_id}/dismiss",
             post(crate::gdrive::dismiss_contact),
         )
+        .route(
+            "/v1/control-plane/gdrive/contacts/{contact_id}/qualify",
+            post(crate::gdrive::qualify_contact),
+        )
+        .route(
+            "/v1/control-plane/gdrive/files/{file_id}/audience",
+            post(crate::gdrive::set_file_audience),
+        )
         // ── Listing + representation (§4h-12) ─────────────────────────
         // The band's public-when-shared profile: the editor reads the whole
         // state, `save` writes the draft only, and `publish`/`unlist` are the

@@ -23,8 +23,8 @@ use std::collections::HashMap;
 
 use crowdrelay_application::RepositoryError;
 use crowdrelay_application::autopilot::{
-    VideoClickLedger, VideoCuratorLedger, VideoEmailLedger, VideoPostCounts, VideoPressLedger,
-    VideoPushLedger, VideoRedditStanding, VideoScorecardView, VideoSendsLedger,
+    VideoClickLedger, VideoCuratorLedger, VideoEmailLedger, VideoPressLedger, VideoPushLedger,
+    VideoRedditStanding, VideoScorecardView, VideoSendsLedger,
 };
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::reddit_standing::{HaltReason, PostRecord, RedditStanding, RemovalCause};
@@ -37,10 +37,14 @@ use uuid::Uuid;
 
 use crate::database::{SqlxErrorClass, classify_sqlx_error};
 
+mod posts;
+
+use posts::{measurement_stages, post_ledgers};
+
 /// Narrows a database failure to the repository's error vocabulary — the same
 /// mapping every sibling module applies, so the read fails the way the rest
 /// of the surface fails.
-fn map_sqlx(error: sqlx::Error) -> RepositoryError {
+pub(super) fn map_sqlx(error: sqlx::Error) -> RepositoryError {
     match classify_sqlx_error(&error) {
         SqlxErrorClass::NotFound => RepositoryError::NotFound,
         SqlxErrorClass::Conflict => RepositoryError::Conflict,
@@ -197,6 +201,7 @@ async fn scorecards_for(
         .await?
         .into_iter()
         .collect::<HashMap<Uuid, i64>>();
+    let mut stages = measurement_stages(pool, ws, &source_ids).await?;
 
     let mut cards = Vec::with_capacity(videos.len());
     for video in videos {
@@ -309,6 +314,7 @@ async fn scorecards_for(
             },
             missing: video_scorecard::missing_reasons(&facts),
             reddit: reddit.clone(),
+            measurement_stages: stages.remove(&video.id).unwrap_or_default(),
         });
     }
     Ok(cards)
@@ -352,7 +358,7 @@ async fn latest_metrics(
 /// key — `video_links` adds the links that chain onto a direct one, and
 /// `inner_hops` marks the links that sit second in a chain so their clicks do
 /// not count again.
-const VIDEO_LINKS_CTE: &str = r#"
+pub(super) const VIDEO_LINKS_CTE: &str = r#"
     WITH videos AS (
         SELECT id, source_key, substring(source_key from 9) AS video_id
         FROM content_sources
@@ -385,31 +391,36 @@ const VIDEO_LINKS_CTE: &str = r#"
     )
 "#;
 
-/// Distinct fans captured within seven days of clicking one of the video's
-/// tracked links — the capture half of the march, measured by visitor
-/// continuity rather than post payload. A video with no tracked links gets no
-/// row, and the caller renders that as `null`: links not yet minted is a
-/// different story than links that captured no one.
+/// Distinct fans this video captured — counted from the canonical
+/// `last_tracked_click` conversion rows, where `source_target` names the
+/// clicked link's slug. The any-click join this replaced credited a person
+/// to every video whose link they touched before signing up; the ledger's
+/// assignment credits exactly one, and this card must agree with it.
+/// Suppressed and deleted fans stop counting — consent withdrawal is a fact
+/// about the person. A video with no tracked links gets no row, and the
+/// caller renders that as `null`: links not yet minted is a different story
+/// than links that captured no one.
 async fn fans_captured(
     pool: &PgPool,
     ws: Uuid,
     source_ids: &[Uuid],
 ) -> Result<Vec<(Uuid, i64)>, RepositoryError> {
-    sqlx::query_as::<_, (Uuid, i64)>(
-        &format!(
-            "{VIDEO_LINKS_CTE}
-            SELECT v.source_id, count(DISTINCT acq.fan_id) AS fans
+    sqlx::query_as::<_, (Uuid, i64)>(&format!(
+        "{VIDEO_LINKS_CTE}
+            SELECT v.source_id, count(DISTINCT conversion.fan_id) AS fans
             FROM video_links v
-            LEFT JOIN click_events click
-              ON click.workspace_id = $1 AND click.smart_link_id = v.id AND click.anonymous_visitor_id IS NOT NULL
-            LEFT JOIN fan_acquisition_events acq
-              ON acq.workspace_id = $1 AND acq.fan_id IS NOT NULL
-             AND acq.anonymous_visitor_id = click.anonymous_visitor_id
-             AND acq.occurred_at >= click.occurred_at
-             AND acq.occurred_at < click.occurred_at + interval '7 days'
+            JOIN fan_provenance_events AS conversion
+              ON conversion.workspace_id = $1
+             AND conversion.event_kind = 'conversion'
+             AND conversion.attribution_method = 'last_tracked_click'
+             AND conversion.source_target = v.slug
+            JOIN fans AS fan
+              ON fan.workspace_id = conversion.workspace_id
+             AND fan.id = conversion.fan_id
+             AND fan.status <> 'suppressed'
+             AND fan.deleted_at IS NULL
             GROUP BY v.source_id"
-        ),
-    )
+    ))
     .bind(ws)
     .bind(source_ids)
     .fetch_all(pool)
@@ -488,138 +499,6 @@ async fn click_ledgers(
             _ => ledger.social = clicks,
         }
         ledger.total += clicks;
-    }
-    Ok(ledgers)
-}
-
-/// The per-lane send counts one video's posts resolve to.
-#[derive(Clone, Debug, Default)]
-struct LanePostLedgers {
-    community: VideoPostCounts,
-    telegram: VideoPostCounts,
-    discord: VideoPostCounts,
-    social: VideoPostCounts,
-}
-
-/// The send ledger's post half. A post belongs to a video through
-/// `relay_source_id`, its action's payload `source_id`, or a bound link whose
-/// destination is the video — three writers, three join shapes. `post_links`
-/// collects the hits and DISTINCT keeps a post that matched two paths at one
-/// row per (lane, post, video).
-async fn post_ledgers(
-    pool: &PgPool,
-    ws: Uuid,
-    source_ids: &[Uuid],
-) -> Result<HashMap<Uuid, LanePostLedgers>, RepositoryError> {
-    let rows = sqlx::query_as::<_, (Uuid, String, String, i64)>(&format!(
-        "{VIDEO_LINKS_CTE},
-            post_hits AS (
-                SELECT DISTINCT lane, post_id, source_id FROM (
-                    SELECT 'community' AS lane, post.id AS post_id,
-                           v.id AS source_id
-                    FROM community_posts post
-                    JOIN videos v ON v.id = post.relay_source_id
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'community', post.id, v.id
-                    FROM community_posts post
-                    JOIN autopilot_actions a
-                      ON a.workspace_id = post.workspace_id
-                     AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'community', post.id, v.source_id
-                    FROM community_posts post
-                    JOIN smart_links link
-                      ON link.workspace_id = post.workspace_id
-                     AND post.smart_link = '/l/' || link.slug
-                    JOIN video_links v ON v.id = link.id
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'telegram', post.id, v.id
-                    FROM telegram_posts post
-                    JOIN autopilot_actions a
-                      ON a.workspace_id = post.workspace_id
-                     AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'telegram', post.id, v.source_id
-                    FROM telegram_posts post
-                    JOIN video_links v ON v.id = post.smart_link_id
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'discord', post.id, v.id
-                    FROM discord_posts post
-                    JOIN autopilot_actions a
-                      ON a.workspace_id = post.workspace_id
-                     AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'discord', post.id, v.source_id
-                    FROM discord_posts post
-                    JOIN video_links v ON v.id = post.smart_link_id
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'social', post.id, v.id
-                    FROM social_posts post
-                    JOIN autopilot_actions a
-                      ON a.workspace_id = post.workspace_id
-                     AND a.id = post.action_id
-                    JOIN videos v ON v.id::text = COALESCE(a.payload ->> 'source_id', a.payload -> 'draft' ->> 'source_id')
-                    WHERE post.workspace_id = $1
-                    UNION ALL
-                    SELECT 'social', post.id, v.source_id
-                    FROM social_posts post
-                    JOIN video_links v ON v.id = post.smart_link_id
-                    WHERE post.workspace_id = $1
-                ) hits
-            )
-            SELECT h.source_id, h.lane, ledger.status, count(*)
-            FROM post_hits h
-            JOIN (
-                SELECT 'community' AS lane, id, status FROM community_posts
-                WHERE workspace_id = $1
-                UNION ALL
-                SELECT 'telegram', id, status FROM telegram_posts
-                WHERE workspace_id = $1
-                UNION ALL
-                SELECT 'discord', id, status FROM discord_posts
-                WHERE workspace_id = $1
-                UNION ALL
-                SELECT 'social', id, status FROM social_posts
-                WHERE workspace_id = $1
-            ) ledger ON ledger.lane = h.lane AND ledger.id = h.post_id
-            GROUP BY h.source_id, h.lane, ledger.status
-            ",
-    ))
-    .bind(ws)
-    .bind(source_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(map_sqlx)?;
-
-    let mut ledgers: HashMap<Uuid, LanePostLedgers> = HashMap::new();
-    for (source_id, lane, status, count) in rows {
-        let counts = ledgers.entry(source_id).or_default();
-        let lane_counts = match lane.as_str() {
-            "community" => &mut counts.community,
-            "telegram" => &mut counts.telegram,
-            "discord" => &mut counts.discord,
-            _ => &mut counts.social,
-        };
-        let count = count.max(0) as u64;
-        match status.as_str() {
-            "posted" => lane_counts.posted = count,
-            "failed" | "cancelled" => lane_counts.failed = count,
-            "awaiting_manual_post" => {
-                lane_counts.awaiting_manual_post = count;
-                lane_counts.waiting += count;
-            }
-            _ => lane_counts.waiting += count,
-        }
     }
     Ok(ledgers)
 }

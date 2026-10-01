@@ -325,7 +325,17 @@ where
         WHERE measurement.workspace_id = $1
           AND measurement.action_id = owning_actions.action_id
           AND measurement.status = 'pending'
-          AND measurement.action_finished_at < owning_actions.posted_at
+          AND (
+              measurement.action_finished_at < owning_actions.posted_at
+              -- The content 7d kinds measure the publication itself, so
+              -- their window equals [posted_at, +7d) in both directions —
+              -- unlike the fan kinds, whose earliest honest anchor is the
+              -- action's own finish time and which therefore only move
+              -- later.
+              OR (measurement.measurement_kind IN
+                     ('content_link_clicks_7d', 'content_fan_acquisition_7d')
+                  AND measurement.action_finished_at > owning_actions.posted_at)
+          )
         "#,
     )
     .bind(workspace_id)
@@ -610,6 +620,14 @@ pub async fn register_manual_discord_post(
 /// the same re-anchor inside their mark-posted transaction — a post that
 /// sat `rate_limited` must not be observed across a window that started
 /// before anyone could see it.
+///
+/// The move is asymmetric on purpose. Fan-growth kinds keep the `GREATEST`
+/// rule — action-finish is the earliest anchor they can honestly claim, so
+/// their window only ever moves later. The content 7d kinds measure the
+/// *publication itself*, so their window equals `[posted_at, posted_at+7d)`
+/// in both directions: a post confirmed live before its action closed gets
+/// the same seven days as a late one, and the clicks it earned in the gap
+/// are not silently excluded.
 pub async fn anchor_content_measurements_to_publication(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: Uuid,
@@ -635,7 +653,12 @@ pub async fn anchor_content_measurements_to_publication(
         WHERE measurement.workspace_id = $1
           AND measurement.action_id = published.action_id
           AND measurement.status = 'pending'
-          AND measurement.action_finished_at < published.posted_at
+          AND (
+              measurement.action_finished_at < published.posted_at
+              OR (measurement.measurement_kind IN
+                     ('content_link_clicks_7d', 'content_fan_acquisition_7d')
+                  AND measurement.action_finished_at > published.posted_at)
+          )
         "#,
     );
     sqlx::query(&query)

@@ -862,6 +862,8 @@ async fn a_beacon_agent_lands_on_the_registry_and_the_approach_list()
         venue_played_here: false,
         matched_counterparty: None,
         counterparty_worked_with: false,
+        fan_qualified_at: None,
+        fan_qualified_by: None,
     };
     // The promote marks the drive contact promoted — the staging row must
     // exist for that update to land.

@@ -180,9 +180,12 @@ pub struct JoinAskPostRow {
     /// complete seven-day observation window and cannot train the selector.
     #[serde(with = "time::serde::rfc3339::option")]
     pub posted_at: Option<OffsetDateTime>,
-    /// Distinct fans acquired through this post's tracked link in its first
-    /// seven days. The loader computes the exact click→visitor→signup join.
-    pub fans_7d: u32,
+    /// Distinct fans this post acquired in its first seven days, per the
+    /// canonical ledger's `last_tracked_click` assignment — one signup
+    /// credits exactly one post. `None` means the post carries no tracked
+    /// link: unmeasurable, which the selector must keep separate from a
+    /// measured zero (a missing instrument is not evidence of failure).
+    pub fans_7d: Option<u32>,
 }
 
 /// Everything one cycle needs to decide this week's asks, assembled by the
@@ -472,14 +475,21 @@ fn choose_variant(
             // to the old text and must not silently transfer by array index.
             continue;
         };
+        let Some(fans_7d) = post.fans_7d else {
+            // No tracked link: the post ran but the outcome was never
+            // instrumented. Excluded entirely — it is not a trial the
+            // variant failed, and folding it in as zero would teach the
+            // bandit to abandon wordings for a measurement gap.
+            continue;
+        };
         if let (Some(trials_slot), Some(fans_slot), Some(reward_slot)) = (
             trials.get_mut(index),
             fans.get_mut(index),
             reward.get_mut(index),
         ) {
             *trials_slot = trials_slot.saturating_add(1);
-            *fans_slot = fans_slot.saturating_add(post.fans_7d);
-            *reward_slot += f64::from(post.fans_7d.min(JOIN_ASK_REWARD_FAN_CAP))
+            *fans_slot = fans_slot.saturating_add(fans_7d);
+            *reward_slot += f64::from(fans_7d.min(JOIN_ASK_REWARD_FAN_CAP))
                 / f64::from(JOIN_ASK_REWARD_FAN_CAP);
         }
     }
@@ -647,7 +657,7 @@ mod tests {
             created_at: datetime!(2026-09-20 10:00 UTC),
             text: "join us".to_owned(),
             posted_at: Some(datetime!(2026-09-20 10:00 UTC)),
-            fans_7d: 0,
+            fans_7d: Some(0),
         });
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
         assert_eq!(plan.asks.len(), 1);
@@ -669,7 +679,7 @@ mod tests {
             created_at: datetime!(2026-09-10 10:00 UTC),
             text: "join us".to_owned(),
             posted_at: Some(datetime!(2026-09-10 10:00 UTC)),
-            fans_7d: 0,
+            fans_7d: Some(0),
         });
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
         assert_eq!(plan.asks.len(), 2);
@@ -787,7 +797,7 @@ mod tests {
                 created_at: datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index),
                 text: "join us".to_owned(),
                 posted_at: Some(datetime!(2026-09-01 10:00 UTC) + time::Duration::days(index)),
-                fans_7d: 0,
+                fans_7d: Some(0),
             });
         }
         let plan = evaluate_join_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
@@ -883,7 +893,7 @@ mod tests {
             created_at: datetime!(2026-09-20 10:00 UTC),
             text: "join us".to_owned(),
             posted_at: Some(datetime!(2026-09-20 10:00 UTC)),
-            fans_7d: 0,
+            fans_7d: Some(0),
         });
         assert!(join_ask_readiness(&snapshot).is_empty());
         assert!(!JoinAskHold::OnCadence.needs_a_person());
@@ -957,5 +967,154 @@ mod tests {
             plan.held
         );
         assert!(!plan.held.is_empty());
+    }
+
+    fn mature_post(
+        platform: &str,
+        text: &str,
+        posted_at: time::OffsetDateTime,
+        fans_7d: Option<u32>,
+    ) -> JoinAskPostRow {
+        JoinAskPostRow {
+            platform: platform.to_owned(),
+            status: "posted".to_owned(),
+            created_at: posted_at,
+            text: text.to_owned(),
+            posted_at: Some(posted_at),
+            fans_7d,
+        }
+    }
+
+    fn facebook_ask(snapshot: &JoinAskSnapshot, now: time::OffsetDateTime) -> JoinAskAsk {
+        evaluate_join_ask(snapshot, now)
+            .asks
+            .into_iter()
+            .find(|ask| ask.platform == "facebook")
+            .expect("facebook is eligible in the fixture")
+    }
+
+    /// A post that went live without a tracked link is unmeasurable — it is
+    /// not a trial its variant failed. With one measured and one
+    /// unmeasurable post, the unmeasured variant still counts as unseen and
+    /// exploration must take it, not the bandit.
+    #[test]
+    fn an_unmeasurable_post_is_not_a_trial() {
+        let mut snapshot = snapshot();
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "join us",
+            datetime!(2026-09-10 10:00 UTC),
+            Some(2),
+        ));
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "come along",
+            datetime!(2026-09-11 10:00 UTC),
+            None,
+        ));
+        let ask = facebook_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(ask.variant_index, 1);
+        assert_eq!(ask.selection_reason, "explore_unseen");
+        assert_eq!(ask.variant_trials, 0);
+    }
+
+    /// A measured zero is real evidence: both variants tried once with no
+    /// fans is a finished exploration round, so the selector reports the
+    /// bandit, not another explore.
+    #[test]
+    fn a_measured_zero_counts_as_a_trial() {
+        let mut snapshot = snapshot();
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "join us",
+            datetime!(2026-09-10 10:00 UTC),
+            Some(0),
+        ));
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "come along",
+            datetime!(2026-09-11 10:00 UTC),
+            Some(0),
+        ));
+        let ask = facebook_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(ask.selection_reason, "fan_bandit");
+    }
+
+    /// The outcome clock starts at publication, not at action time. A post
+    /// created three weeks ago that only went live four days back is still
+    /// inside its observation window — its variant stays unexplored.
+    #[test]
+    fn a_late_publication_is_not_mature_evidence() {
+        let mut snapshot = snapshot();
+        let mut late = mature_post(
+            "facebook",
+            "join us",
+            datetime!(2026-09-19 10:00 UTC),
+            Some(3),
+        );
+        late.created_at = datetime!(2026-09-01 10:00 UTC);
+        snapshot.posts.push(late);
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "come along",
+            datetime!(2026-09-10 10:00 UTC),
+            Some(0),
+        ));
+        let ask = facebook_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(ask.selection_reason, "explore_unseen");
+        assert_eq!(ask.variant_trials, 0);
+    }
+
+    /// A corrected outcome must move the selector: re-run measurement that
+    /// re-credits the fans flips the next pick from one wording to the
+    /// other. This is the result→next-choice edge the measurement sprint
+    /// exists to prove.
+    #[test]
+    fn a_corrected_outcome_changes_the_next_choice() {
+        let now = datetime!(2026-09-23 10:00 UTC);
+        let mut snapshot = snapshot();
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "join us",
+            datetime!(2026-09-10 10:00 UTC),
+            Some(0),
+        ));
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "come along",
+            datetime!(2026-09-11 10:00 UTC),
+            Some(1),
+        ));
+        let before = facebook_ask(&snapshot, now);
+        assert_eq!(before.variant_index, 1);
+        assert_eq!(before.selection_reason, "fan_bandit");
+
+        // The re-read finds "join us" actually earned the fans and "come
+        // along" earned nobody — same posts, corrected numbers.
+        snapshot.posts[0].fans_7d = Some(2);
+        snapshot.posts[1].fans_7d = Some(0);
+        let after = facebook_ask(&snapshot, now);
+        assert_eq!(after.variant_index, 0);
+        assert_eq!(after.selection_reason, "fan_bandit");
+    }
+
+    /// Evidence belongs to the words that earned it. A post whose text the
+    /// operator has since edited out of the variant list must not bestow
+    /// its fans on whichever wording now sits at its old index — the
+    /// selector matches by text, so the orphaned outcome is skipped and the
+    /// current variants stay unexplored.
+    #[test]
+    fn a_removed_variant_does_not_bequeath_its_outcome() {
+        let mut snapshot = snapshot();
+        snapshot.posts.push(mature_post(
+            "facebook",
+            "the old ask nobody still ships",
+            datetime!(2026-09-10 10:00 UTC),
+            Some(9),
+        ));
+        let ask = facebook_ask(&snapshot, datetime!(2026-09-23 10:00 UTC));
+        assert_eq!(ask.selection_reason, "explore_unseen");
+        assert_eq!(ask.variant_trials, 0);
+        assert_eq!(ask.variant_fans, 0);
     }
 }
