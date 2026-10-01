@@ -428,11 +428,19 @@ async fn workspace(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
 }
 
 async fn city(pool: &PgPool) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let suffix = Uuid::now_v7().simple().to_string();
     Ok(sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO cities (slug, name, country_code, latitude, longitude)
-         VALUES ($1, 'Wrocław', 'PL', 51.1, 17.0) RETURNING id",
+         VALUES ($1, $2, 'PL', 51.1, 17.0) RETURNING id",
     )
-    .bind(format!("wroclaw-{}", Uuid::now_v7().simple()))
+    .bind(format!("wroclaw-{}", suffix))
+    // A unique name, not a bare `Wrocław`. These proofs share one database
+    // with the rest of the e2e suite in CI, and the city resolver refuses an
+    // ambiguous name rather than guess: three more `Wrocław` rows made an
+    // unrelated proof (`a_band_sheet_lands_as_attributed_peer_facts`) count
+    // two unresolved cities instead of one. The letter assertions use
+    // `contains("… Wrocław")`, which the suffix does not disturb.
+    .bind(format!("Wrocław {suffix}"))
     .fetch_one(pool)
     .await?)
 }
