@@ -189,6 +189,9 @@ where
         let mut report = AutopilotCycleReport::default();
 
         let loaded_causal_model = self.load_cycle_causal_model(&policies, &mut report).await?;
+        // Checkpoint replay before unrelated contexts can abort; the model is read-only below.
+        self.checkpoint_cycle_causal_model(loaded_causal_model.as_ref(), &mut report)
+            .await;
 
         for policy in policies.into_iter().filter(|policy| policy.enabled) {
             // Registered before the arm runs so a context that produced
@@ -922,9 +925,6 @@ where
                 }
             }
         }
-
-        self.checkpoint_cycle_causal_model(loaded_causal_model.as_ref(), &mut report)
-            .await;
 
         Ok(report)
     }
