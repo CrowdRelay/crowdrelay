@@ -40,20 +40,20 @@ struct DispatchSpec {
 
 fn fanbase_research_brief(snapshot: &GrowthIntelligenceSnapshot) -> String {
     let mut brief = String::from(
-        "You are a research worker delegated by CrowdRelay Brain. This run is discovery only:          find new public fan-bearing places and return evidence-backed targets for screening.          Do not contact people, do not post, and do not infer permission to promote. Search beyond          predefined forums: Reddit, Discord, Telegram, Facebook groups, independent forums, local          scene/community sites and other public places where the act's plausible fans already gather.          Prefer specific, live places over generic directories. Every proposed target needs a real URL          found in this run, and duplicates already known to the workspace are not useful."
+        "You are a research worker delegated by CrowdRelay Brain. This run is discovery only: find new public fan-bearing places and return evidence-backed targets for screening. Do not contact people, do not post, and do not infer permission to promote. Search beyond predefined forums: Reddit, Discord, Telegram, Facebook groups, independent forums, local scene/community sites and other public places where the act's plausible fans already gather. Prefer specific, live places over generic directories. Every proposed target needs a real URL found in this run, and duplicates already known to the workspace are not useful.",
     );
 
     if let Some(days) = snapshot.days_to_next_event
         && days <= 30
     {
         brief.push_str(&format!(
-            "\n\nEVENT-LOCAL MODE: the nearest published show is in {days} day(s).              The worker context includes that event's city, venue and date. Use them. Search the city              and surrounding scene for communities and public gathering places that can plausibly              affect attendance. Also look at adjacent local music/culture scenes rather than only              genre-labelled forums. This is research for relevance, not permission to promote."
+            "\n\nEVENT-LOCAL MODE: the nearest published show is in {days} day(s). The worker context includes that event's city, venue and date. Use them. Search the city and surrounding scene for communities and public gathering places that can plausibly affect attendance. Also look at adjacent local music/culture scenes rather than only genre-labelled forums. This is research for relevance, not permission to promote."
         ));
     }
 
     if let Some(objective) = &snapshot.world_model.objective {
         brief.push_str(&format!(
-            "\n\nDECLARED OBJECTIVE CONTEXT: {}:{} is currently {:?}; observed {:?}, target {} by {}.              Use this to understand what growth the operator cares about, but never turn deadline              pressure into lower relevance standards or more aggressive outreach.",
+            "\n\nDECLARED OBJECTIVE CONTEXT: {}:{} is currently {:?}; observed {:?}, target {} by {}. Use this to understand what growth the operator cares about, but never turn deadline pressure into lower relevance standards or more aggressive outreach.",
             objective.platform,
             objective.metric_key,
             objective.state,
@@ -65,7 +65,7 @@ fn fanbase_research_brief(snapshot: &GrowthIntelligenceSnapshot) -> String {
 
     if snapshot.fan_growth_stagnant {
         brief.push_str(
-            "\n\nFan growth is currently stagnant. Increase breadth of research, not outreach pressure:              explore genuinely new scenes, regions and community types, while keeping the same evidence              and fit bar."
+            "\n\nFan growth is currently stagnant. Increase breadth of research, not outreach pressure: explore genuinely new scenes, regions and community types, while keeping the same evidence and fit bar."
         );
     }
 
@@ -266,10 +266,7 @@ mod dispatch_rule_tests {
     #[test]
     fn fanbase_scout_receives_declared_objective_without_turning_it_into_spam_pressure() {
         use crowdrelay_brain::goal::ActiveObjective;
-        use crowdrelay_domain::{
-            growth_metrics::MetricDirection,
-            objectives::ObjectiveState,
-        };
+        use crowdrelay_domain::{growth_metrics::MetricDirection, objectives::ObjectiveState};
 
         let mut snapshot = snapshot_for("fanbase-scout");
         snapshot.world_model.objective = Some(ActiveObjective {
@@ -292,7 +289,11 @@ mod dispatch_rule_tests {
         let request = evaluate(&snapshot).expect("scout dispatch");
         assert!(request.prompt.contains("signal:active_fans"));
         assert!(request.prompt.contains("target 100"));
-        assert!(request.prompt.contains("never turn deadline pressure into lower relevance standards"));
+        assert!(
+            request
+                .prompt
+                .contains("never turn deadline pressure into lower relevance standards")
+        );
     }
 
     #[test]

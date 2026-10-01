@@ -211,7 +211,7 @@ class TeamAutopilotsContract(unittest.TestCase):
             "moderated_metal_communities_and_forums",
         ):
             self.assertIn(source_class, actions)
-        self.assertIn("never_treat_generic_local_businesses_as_scene_relevant_without_public_evidence", actions)
+        self.assertIn("a generic local business is not scene-relevant without public evidence", actions)
         self.assertIn("NULLIF(btrim(destination_url), '')", migration)
 
 
