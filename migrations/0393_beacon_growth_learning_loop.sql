@@ -22,7 +22,7 @@ ALTER TABLE smart_links
     ADD CONSTRAINT smart_links_action_fk
     FOREIGN KEY (workspace_id, action_id)
     REFERENCES autopilot_actions (workspace_id, id)
-    ON DELETE SET NULL;
+    ON DELETE RESTRICT;
 
 CREATE INDEX IF NOT EXISTS smart_links_action_idx
     ON smart_links (workspace_id, action_id)
@@ -52,7 +52,6 @@ ALTER TABLE autopilot_measurements
         'grassroots_activation_replies_14d',
         'beacon_outreach_reply_14d',
         'beacon_outreach_unique_visitors_14d',
-        'beacon_outreach_fan_acquisition_14d',
         'agent_run_fan_growth_14d','agent_run_signal_installs_7d',
         'agent_run_community_engagement_7d','incremental_fan_growth_14d',
         'durable_fan_growth_30d','scanner_discovery_quality_14d',
