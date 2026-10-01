@@ -300,8 +300,7 @@ async fn durable_counts_only_meaningfully_retained_consented_fans() {
     marketing_consent(&f, revoked, false, f.now - time::Duration::days(2)).await;
     meaningful_session(&f, revoked, returned_at).await;
 
-    let unsubscribed =
-        converted_fan(&f, action, converted, converted, "unsubscribed").await;
+    let unsubscribed = converted_fan(&f, action, converted, converted, "unsubscribed").await;
     marketing_consent(&f, unsubscribed, true, converted).await;
     meaningful_session(&f, unsubscribed, returned_at).await;
 

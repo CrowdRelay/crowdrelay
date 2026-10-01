@@ -667,11 +667,7 @@ mod tests {
     fn durable_evidence_still_outranks_more_fresh_conversions() {
         let mut telegram = yielded("telegram", 1, 0);
         telegram.durable_90d = 1;
-        let ranked = rank_templates(
-            PRIOR,
-            &[],
-            &[yielded("reddit", 100, 0), telegram],
-        );
+        let ranked = rank_templates(PRIOR, &[], &[yielded("reddit", 100, 0), telegram]);
 
         assert_eq!(
             ranked.first(),
