@@ -632,9 +632,6 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "beacon_outreach_unique_visitors_14d" => {
             Ok(AutopilotMeasurementKind::BeaconOutreachUniqueVisitors14d)
         }
-        "beacon_outreach_fan_acquisition_14d" => {
-            Ok(AutopilotMeasurementKind::BeaconOutreachFanAcquisition14d)
-        }
         "agent_run_fan_growth_14d" => Ok(AutopilotMeasurementKind::AgentRunFanGrowth14d),
         "incremental_fan_growth_14d" => Ok(AutopilotMeasurementKind::IncrementalFanGrowth14d),
         "incremental_fan_growth_3d" => Ok(AutopilotMeasurementKind::IncrementalFanGrowth3d),
