@@ -43,10 +43,6 @@ pub enum AutopilotMeasurementKind {
     /// exact Beacon outreach action. People, not raw clicks: refreshes and
     /// repeated taps from one browser do not make a relationship look larger.
     BeaconOutreachUniqueVisitors14d,
-    /// Fans whose canonical last-tracked-click conversion is owned by this
-    /// exact Beacon outreach action. This is the North-Star outcome of the
-    /// relationship lane; a reply or click is useful only as an earlier rung.
-    BeaconOutreachFanAcquisition14d,
     /// Fan count delta in the 14 days after an agent dispatch. Measures
     /// whether the worker's intelligence gathering actually aggregated
     /// new fans into the fanbase.
@@ -219,7 +215,6 @@ impl AutopilotMeasurementKind {
             Self::GrassrootsActivationReplies14d => "grassroots_activation_replies_14d",
             Self::BeaconOutreachReply14d => "beacon_outreach_reply_14d",
             Self::BeaconOutreachUniqueVisitors14d => "beacon_outreach_unique_visitors_14d",
-            Self::BeaconOutreachFanAcquisition14d => "beacon_outreach_fan_acquisition_14d",
             Self::AgentRunFanGrowth14d => "agent_run_fan_growth_14d",
             Self::IncrementalFanGrowth14d => "incremental_fan_growth_14d",
             Self::IncrementalFanGrowth3d => "incremental_fan_growth_3d",
@@ -306,7 +301,6 @@ impl AutopilotMeasurementKind {
             Self::GrassrootsActivationReplies14d => Some("activation_replies"),
             Self::BeaconOutreachReply14d => Some("beacon_outreach_replies"),
             Self::BeaconOutreachUniqueVisitors14d => Some("beacon_outreach_unique_visitors"),
-            Self::BeaconOutreachFanAcquisition14d => Some("beacon_outreach_fan_acquisitions"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
             Self::ScannerDiscoveryQuality14d => Some("scanner_discoveries"),
