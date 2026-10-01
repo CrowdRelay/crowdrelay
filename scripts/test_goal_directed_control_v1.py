@@ -103,7 +103,7 @@ class GoalDirectedControlContract(unittest.TestCase):
         )
 
     def test_the_goal_acts_only_on_the_ceiling_and_the_exploration_posture(self) -> None:
-        """The two places the contract allows, and only those."""
+        """The places the contract allows, and only those."""
         consumers = sorted(
             str(path.relative_to(ROOT))
             for path, text in rust_sources(EVALUATE)
@@ -113,12 +113,16 @@ class GoalDirectedControlContract(unittest.TestCase):
             consumers,
             [
                 "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence.rs",
+                "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence/scout_consult.rs",
                 "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs",
                 "crates/crowdrelay-application/src/autopilot/evaluate/portfolio.rs",
             ],
             f"{consumers} read the goal on a decision path. It may act on "
-            f"PortfolioConfig (portfolio.rs, called from the context arm) and "
-            f"on the exploration boost (growth_intelligence.rs), nowhere else",
+            f"PortfolioConfig (portfolio.rs, called from the context arm), "
+            f"on the exploration boost (growth_intelligence.rs), and as "
+            f"declared context in the scout's research brief "
+            f"(scout_consult.rs — prompt text only; it must never gate or "
+            f"size the dispatch), nowhere else",
         )
         portfolio = (EVALUATE / "portfolio.rs").read_text()
         self.assertIn("goal.applied_max_dispatches", portfolio)

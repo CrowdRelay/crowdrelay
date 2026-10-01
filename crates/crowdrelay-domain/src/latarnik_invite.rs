@@ -44,6 +44,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
+use crate::tracked_link::TrackedLink;
 
 /// Days of silence an invitation waits for after any outward contact.
 ///
@@ -235,7 +236,7 @@ pub fn compose(
     sender: &SenderIdentity,
     standing: &ContactStanding,
     reason: &InviteReason,
-    member_area_url: &str,
+    member_area_url: &TrackedLink,
     language: LetterLanguage,
 ) -> Invite {
     let act = sender.act_name.trim();
@@ -246,7 +247,7 @@ pub fn compose(
     }
 }
 
-fn polish(act: &str, name: &str, reason: &InviteReason, url: &str) -> Invite {
+fn polish(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> Invite {
     let opening = match reason {
         InviteReason::UpcomingShowInTheirCity { city, when } => format!(
             "Gramy w {city} {when}. Zanim to wyjdzie oficjalnie, chcieliśmy dać znać Tobie."
@@ -285,7 +286,7 @@ fn polish(act: &str, name: &str, reason: &InviteReason, url: &str) -> Invite {
     }
 }
 
-fn english(act: &str, name: &str, reason: &InviteReason, url: &str) -> Invite {
+fn english(act: &str, name: &str, reason: &InviteReason, url: &TrackedLink) -> Invite {
     let opening = match reason {
         InviteReason::UpcomingShowInTheirCity { city, when } => format!(
             "We are playing {city} on {when}. Before it goes public, we wanted you to know."
@@ -489,13 +490,19 @@ mod tests {
             act_name: "Virya".to_owned(),
             style: Some("modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.music/".to_owned()),
+            site_url: Some(TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("site").unwrap(),
+            )),
         };
         let invite = compose(
             &sender,
             &known_promoter(),
             &reason(),
-            "https://virya.music/pl/latarnik",
+            &TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("latarnik").unwrap(),
+            ),
             LetterLanguage::Polish,
         );
         assert_eq!(invite.subject, "Terminy zanim wyjdą oficjalnie — Virya");
@@ -507,7 +514,7 @@ mod tests {
         assert!(invite.body.contains("Kilka wiadomości na kwartał"));
         assert!(invite.body.contains("Wypisanie się to jedno kliknięcie"));
         assert!(invite.body.contains("nie wracamy z tym drugi raz"));
-        assert!(invite.body.contains("https://virya.music/pl/latarnik"));
+        assert!(invite.body.contains("https://virya.music/l/latarnik"));
         // Register: no exclamation marks, no hashtags, no emoji-bait.
         assert!(!invite.body.contains('!'), "{}", invite.body);
         assert!(!invite.body.contains('#'), "{}", invite.body);
@@ -527,7 +534,10 @@ mod tests {
             &InviteReason::RecentRelease {
                 title: "Nowy Świat".to_owned(),
             },
-            "https://virya.music/en/lighthouse",
+            &TrackedLink::for_site(
+                "https://virya.music",
+                &crate::SmartLinkSlug::parse("lighthouse").unwrap(),
+            ),
             LetterLanguage::English,
         );
         assert!(invite.body.contains("Our new record is out — Nowy Świat"));

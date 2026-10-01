@@ -13,10 +13,11 @@
     "crates/crowdrelay-brain/src/causal_model/tests.rs": 1208,
     "crates/crowdrelay-brain/src/experiment.rs": 1801,
     "crates/crowdrelay-domain/src/growth_metrics.rs": 1651,
+    "crates/crowdrelay-domain/src/outreach_letter.rs": 1209,
     "crates/crowdrelay-domain/src/plays.rs": 1727,
     "crates/crowdrelay-domain/src/roster_plan.rs": 1707,
     "crates/crowdrelay-domain/src/show_growth.rs": 1228,
-    "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1516,
+    "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1615,
     "crates/crowdrelay-infra/src/autopilot/control.rs": 1215,
     "crates/crowdrelay-infra/src/autopilot/control_mutations.rs": 1208,
     "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs": 1667,
@@ -30,16 +31,16 @@
     "crates/crowdrelay-infra/tests/postgres/autopilot_experiment_integrity.rs": 4485,
     "crates/crowdrelay-infra/tests/postgres/autopilot_measurement_spine.rs": 1550,
     "crates/crowdrelay-infra/tests/postgres/autopilot_plays.rs": 1381,
+    "crates/crowdrelay-infra/tests/postgres/autopilot_world_model.rs": 1284,
     "crates/crowdrelay-infra/tests/postgres/events.rs": 1287,
     "crates/crowdrelay-infra/tests/postgres/gig_outreach.rs": 1251,
     "crates/crowdrelay-worker/src/ad_conversion.rs": 1364,
-    "crates/crowdrelay-worker/src/agent_outcomes.rs": 1793,
+    "crates/crowdrelay-worker/src/agent_outcomes.rs": 1882,
     "crates/crowdrelay-worker/src/autopilot.rs": 1337,
     "crates/crowdrelay-worker/src/community_executor.rs": 2238,
     "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2251,
     "crates/crowdrelay-worker/src/main.rs": 1515,
     "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1630,
-    "crates/crowdrelay-worker/tests/postgres/community_relay_batch.rs": 1370,
-    "crates/crowdrelay-infra/tests/postgres/autopilot_world_model.rs": 1284
+    "crates/crowdrelay-worker/tests/postgres/community_relay_batch.rs": 1370
   }
 }

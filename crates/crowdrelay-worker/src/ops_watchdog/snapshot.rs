@@ -210,6 +210,38 @@ async fn load_snapshot(
                AND NOT (e.payload ? 'recipient_email')
                AND NOT (e.payload ? 'recipients')
             )::bigint AS refused_other_deliveries,
+            -- Outbound letters carrying a URL no smart link resolves. The
+            -- letter set is the payload predicate the refused-deliveries
+            -- count uses — `contact_email`, `recipient_email`, `recipients`
+            -- — so a letter type added tomorrow is already watched. Tracked
+            -- means exactly one thing: the URL begins with the workspace's
+            -- own member-site `/l/` prefix — a foreign host wearing the
+            -- path's shape is a click on somebody else's redirect, not ours.
+            -- With no member site configured nothing can verify, and every
+            -- URL convicts — the same fail-closed the emit gate uses. Per
+            -- letter, not per URL: one untracked link in the body convicts.
+            (SELECT count(DISTINCT e.id)
+             FROM outbox_events e
+             CROSS JOIN LATERAL (
+                 SELECT (m.match)[1] AS url
+                 FROM regexp_matches(
+                     COALESCE(e.payload->>'body', e.payload->'draft'->>'body', ''),
+                     'https?://[^[:space:]"''<>)\]]+',
+                     'g'
+                 ) AS m(match)
+             ) urls
+             LEFT JOIN tenant_settings ts
+               ON ts.workspace_id = e.workspace_id
+              AND ts.key = 'member_site_base_url'
+             WHERE e.workspace_id = $1
+               AND e.created_at > now() - interval '24 hours'
+               AND (e.payload ? 'contact_email'
+                    OR e.payload ? 'recipient_email'
+                    OR e.payload ? 'recipients')
+               AND NOT starts_with(
+                   urls.url,
+                   rtrim(COALESCE(ts.value, ''), '/') || '/l/')
+            )::bigint AS untracked_letter_sends_24h,
             -- Live opportunities the brain scored and then denied.
             --
             -- Read off the decisions the brain actually recorded rather than by

@@ -7,7 +7,7 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 30 conditions. The count and this list are
+//! The watchdog monitors 31 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
@@ -43,6 +43,15 @@
 //! - `delivery.event_refused` — refused deliveries carrying no named
 //!   recipient: stale consumer contracts and unrouted internal events in the
 //!   same cancelled-instead-of-dead blind spot. Warning, not critical.
+//! - `outreach.untracked_link_sent` — an outbound letter reached the send
+//!   ledger carrying a URL that is not the tenant's own redirect. The typed
+//!   composers and the emission gate refuse these, so a counted row means
+//!   something bypassed both — a hand-edited draft, an executor rewrite, a
+//!   payload written before the gate existed. A bare destination click leaves
+//!   no `click_events` row: the channel that sent it teaches the brain
+//!   nothing, which is how 111 outreach emails once produced zero
+//!   attributable fans. Critical, because the bypass is invisible everywhere
+//!   else by construction.
 //! - `growth.unscoreable_live_opportunities` — the brain scored live
 //!   opportunities and denied every one. Read off its own denied decisions, not
 //!   off a guess at why: the first version counted rows missing strategic value
@@ -510,6 +519,19 @@ struct OpsSnapshot {
     /// the count exists so a non-letter event type dying at the bridge is
     /// visible without alarming at letter severity.
     refused_other_deliveries: i64,
+    /// Outbound letters sent in the last day carrying a URL that is not the
+    /// workspace's own `{member_site}/l/{slug}` redirect — a bare destination,
+    /// a foreign host, or a link wearing the redirect's shape on somebody
+    /// else's origin.
+    ///
+    /// The composer gate (`TrackedLink`) makes a bare URL unrepresentable in
+    /// new letters; this condition watches for the paths that predate or
+    /// bypass it — a hand-edited draft, an executor that rewrites the body,
+    /// a letter type that never went through the composer. One untracked URL
+    /// convicts the letter: the click a stranger was asked for leaves no
+    /// row, and the channel that sent it teaches the brain nothing — the
+    /// exact failure 111 untracked emails already paid for once.
+    untracked_letter_sends_24h: i64,
     /// Live opportunities whose score ceiling is below the score floor.
     ///
     /// Not "none scored well" — *cannot* score well. With no strategic value and
@@ -830,3 +852,5 @@ include!("ops_watchdog/tests.rs");
 include!("ops_watchdog/tests_video.rs");
 
 include!("ops_watchdog/tests_acquisition.rs");
+
+include!("ops_watchdog/tests_outreach.rs");

@@ -26,6 +26,7 @@
 use crate::gig_letter::SenderIdentity;
 use crate::outreach::OutreachTargetKind;
 use crate::outreach_letter::OutreachLetter;
+use crate::tracked_link::TrackedLink;
 
 /// What the reply's disposition told us, decided before composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +52,10 @@ pub struct ReplyLetterInput<'a> {
     pub shape: ReplyShape,
     /// The pitched release — the reply threads onto it.
     pub pitch_title: &'a str,
-    pub pitch_url: &'a str,
+    /// A tracked link to the release when one exists. `None` shortens the
+    /// pitch line rather than refusing: the reply still owes the thread its
+    /// answer. Never a bare destination — a link the ledger cannot see.
+    pub pitch_url: Option<TrackedLink>,
 }
 
 /// Why a reply letter could not be composed.
@@ -102,12 +106,10 @@ pub fn compose_reply_letter(
         subject
     };
 
-    let listen = (!input.pitch_url.trim().is_empty()).then(|| {
-        format!(
-            "Here it is again in case it helps: {}",
-            input.pitch_url.trim()
-        )
-    });
+    let listen = input
+        .pitch_url
+        .as_ref()
+        .map(|link| format!("Here it is again in case it helps: {}", link.as_str()));
     let signoff = format!("Best,\n{act}");
 
     let body = match input.shape {
@@ -209,7 +211,10 @@ mod tests {
             target_kind: Some(OutreachTargetKind::Radio),
             shape,
             pitch_title: "Technophobia",
-            pitch_url: "https://virya.example/listen",
+            pitch_url: Some(TrackedLink::for_site(
+                "https://virya.example",
+                &crate::SmartLinkSlug::parse("listen").unwrap(),
+            )),
         }
     }
 
@@ -218,7 +223,7 @@ mod tests {
         let letter = compose_reply_letter(&input(ReplyShape::Positive)).expect("composes");
         assert_eq!(letter.subject, "Re: VIRYA — Technophobia");
         assert!(letter.body.contains("Thank you"));
-        assert!(letter.body.contains("https://virya.example/listen"));
+        assert!(letter.body.contains("https://virya.example/l/listen"));
         assert!(letter.body.ends_with("VIRYA"));
     }
 
@@ -253,7 +258,7 @@ mod tests {
     fn a_reply_needs_no_pitch_link() {
         let mut no_pitch = input(ReplyShape::Holding);
         no_pitch.pitch_title = "";
-        no_pitch.pitch_url = "";
+        no_pitch.pitch_url = None;
         let letter =
             compose_reply_letter(&no_pitch).expect("reply does not refuse on a missing pitch");
         assert_eq!(letter.subject, "Re: VIRYA");

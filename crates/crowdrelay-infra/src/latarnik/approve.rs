@@ -127,7 +127,7 @@ pub async fn approve_latarnik_invite(
     let sender = crate::gig_outreach::sender_identity(pool, workspace_id).await?;
     // A letter with nowhere to point is worse than no letter — refuse rather
     // than embed a dead link.
-    let member_area = member_area_url(pool, workspace_id).await?.ok_or_else(|| {
+    let member_area = member_area_link(pool, workspace_id).await?.ok_or_else(|| {
         InviteError::Refused(
             "the member-site address is not configured for this workspace — the letter has nowhere to point"
                 .to_owned(),
@@ -333,10 +333,14 @@ async fn contact_language(
 /// Where the invitation points. The stored override only: a shipped default
 /// would send an industry contact to somebody else's website, and a missing
 /// row must produce no letter rather than a dead link.
-async fn member_area_url(
+/// The member-area address the invite prints — as the `latarnik` smart link,
+/// not the bare path: the invitation's job is to move a contact onto the
+/// site, and an untracked link would leave the one click that proves it
+/// worked invisible.
+async fn member_area_link(
     pool: &PgPool,
     workspace_id: Uuid,
-) -> Result<Option<String>, sqlx::Error> {
+) -> Result<Option<crowdrelay_domain::TrackedLink>, sqlx::Error> {
     let Some(base) = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings
          WHERE workspace_id = $1 AND key = 'member_site_base_url'",
@@ -344,7 +348,8 @@ async fn member_area_url(
     .bind(workspace_id)
     .fetch_optional(pool)
     .await?
-    .filter(|value| !value.trim().is_empty())
+    .map(|value| value.trim().trim_end_matches('/').to_owned())
+    .filter(|value| !value.is_empty())
     else {
         return Ok(None);
     };
@@ -355,11 +360,17 @@ async fn member_area_url(
     .fetch_optional(pool)
     .await?
     .unwrap_or_else(|| crate::tenant_settings::DEFAULT_MEMBER_AREA_PATH.to_owned());
-    Ok(Some(format!(
-        "{}/{}",
-        base.trim_end_matches('/'),
-        path.trim_matches('/')
-    )))
+    let destination = format!("{}/{}", base, path.trim_matches('/'));
+    crate::tracked_links::ensure_smart_link_on_pool(
+        pool,
+        workspace_id,
+        "latarnik",
+        &destination,
+        Some(&base),
+        Some("email"),
+        Some("latarnik-invite"),
+    )
+    .await
 }
 
 /// Has this key already produced an invitation?

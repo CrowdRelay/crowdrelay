@@ -12,7 +12,7 @@ async fn enrich_booking_draft(
     workspace_id: WorkspaceId,
     action: &mut AutopilotActionPayload,
 ) -> Result<(), RepositoryError> {
-    use crowdrelay_domain::booking_letter::{compose_booking_letter, BookingLetterInput};
+    use crowdrelay_domain::booking_letter::{BookingLetterInput, compose_booking_letter};
     use crowdrelay_domain::gig_letter::LetterLanguage;
     use crowdrelay_domain::venue_evidence::{EvidenceLocale, booking_evidence_line};
 
@@ -67,6 +67,27 @@ async fn enrich_booking_draft(
     Ok(())
 }
 
+/// The tenant's member-site origin as stored — trimmed, `None` when blank.
+/// Letters print their links under this origin: the site's `/l/{slug}` path
+/// proxies to the API's click-recording redirect, so it is the one surface a
+/// tracked link can be printed on.
+async fn member_site_root_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: uuid::Uuid,
+) -> Result<Option<String>, RepositoryError> {
+    Ok(
+        sqlx::query_scalar::<_, String>(
+            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty()),
+    )
+}
+
 /// The sender half of every letter — act name, declared style, the city the
 /// act calls home and its own site. Shared by the booking and outreach
 /// enrichers; reads run inside the caller's transaction so the letter is
@@ -75,10 +96,30 @@ async fn enrich_booking_draft(
 /// `tenant_settings` holds only the stored override: a default site URL in a
 /// stranger's inbox is a link to somebody else's website, so an unset field
 /// shortens the sentence instead of borrowing one.
+///
+/// The site line prints `{site}/l/site`, not the bare origin — the signature
+/// is the one link every letter carries, and untracked it would be the one
+/// link nobody could count. The `site` smart link points back at the origin
+/// itself; the upsert is the same `ensure_smart_link` every link gets.
 async fn sender_identity_in_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: uuid::Uuid,
 ) -> Result<crowdrelay_domain::gig_letter::SenderIdentity, RepositoryError> {
+    let site_root = member_site_root_in_tx(transaction, workspace_id).await?;
+    let site_url = match site_root.as_deref() {
+        Some(root) => crate::tracked_links::ensure_smart_link_in_tx(
+            transaction,
+            workspace_id,
+            "site",
+            root,
+            Some(root),
+            Some("email"),
+            Some("signature"),
+        )
+        .await
+        .map_err(map_sqlx)?,
+        None => None,
+    };
     Ok(crowdrelay_domain::gig_letter::SenderIdentity {
         act_name: sqlx::query_scalar::<_, String>("SELECT name FROM workspaces WHERE id = $1")
             .bind(workspace_id)
@@ -108,15 +149,7 @@ async fn sender_identity_in_tx(
         .map_err(map_sqlx)?
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty()),
-        site_url: sqlx::query_scalar::<_, String>(
-            "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
-        )
-        .bind(workspace_id)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(map_sqlx)?
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty()),
+        site_url,
     })
 }
 
@@ -135,7 +168,7 @@ async fn enrich_outreach_draft(
     action: &mut AutopilotActionPayload,
 ) -> Result<(), RepositoryError> {
     use crowdrelay_domain::outreach::OutreachTargetKind;
-    use crowdrelay_domain::outreach_letter::{compose_outreach_letter, OutreachLetterInput};
+    use crowdrelay_domain::outreach_letter::{OutreachLetterInput, compose_outreach_letter};
 
     let AutopilotActionPayload::RequestOutreach {
         draft,
@@ -170,11 +203,20 @@ async fn enrich_outreach_draft(
         return Ok(());
     };
     // The same pitch the supply refresh keys opportunities by: a release
-    // plan with a listen link, else the newest dated catalogue release.
+    // plan with a listen link, else the newest dated catalogue release. The
+    // letter carries its tracked link — a bare listen URL in a hundred
+    // inboxes taught the ledger nothing once already.
     let pitch = crate::autopilot::outreach_supply::outreach_pitch(transaction, ws).await?;
-    let (pitch_title, pitch_url) = pitch
-        .map(|pitch| (pitch.title, pitch.url))
-        .unwrap_or_default();
+    let site_root = member_site_root_in_tx(transaction, ws).await?;
+    let (pitch_title, pitch_url) = match pitch {
+        Some(pitch) => {
+            let link = pitch
+                .tracked_link(transaction, ws, site_root.as_deref())
+                .await?;
+            (pitch.title, link)
+        }
+        None => (String::new(), None),
+    };
     // An organiser letter cites the act's next confirmed show as the reason
     // the ask is serious. Only that kind reads the field; the nearest
     // published show is a fact, and a calendar without one writes no line.
@@ -210,9 +252,29 @@ async fn enrich_outreach_draft(
     // An organiser is the exception: its letter asks for a slot and
     // already cites the calendar.
     if kind != OutreachTargetKind::Organiser
-        && let Some(show) = show_for_opportunity(transaction, ws, opportunity_id.into_uuid()).await?
+        && let Some(show) =
+            show_for_opportunity(transaction, ws, opportunity_id.into_uuid()).await?
     {
         use crowdrelay_domain::show_pitch_letter::{ShowPitchInput, compose_show_pitch_letter};
+        // The ticket line prints the show's canonical `show-{slug}` link —
+        // the same slug the growth executor mints, so a click here and a
+        // click on the printed QR land on one row. No channel identity: the
+        // link is shared across surfaces — QR poster, social, this letter —
+        // and claiming "email" on the row would mislabel every scan.
+        let ticket_url = match show.ticket_url.as_deref() {
+            Some(destination) => crate::tracked_links::ensure_smart_link_in_tx(
+                transaction,
+                ws,
+                &format!("show-{}", show.event_slug),
+                destination,
+                site_root.as_deref(),
+                None,
+                None,
+            )
+            .await
+            .map_err(map_sqlx)?,
+            None => None,
+        };
         match compose_show_pitch_letter(&ShowPitchInput {
             sender: &sender,
             target_name: &target_name,
@@ -222,8 +284,8 @@ async fn enrich_outreach_draft(
             show_date: show.starts_at.date(),
             city: &show.city,
             venue: show.venue.as_deref(),
-            ticket_url: show.ticket_url.as_deref(),
-            listen_url: Some(pitch_url.as_str()),
+            ticket_url,
+            listen_url: pitch_url.clone(),
         }) {
             Ok(letter) => {
                 *draft = letter;
@@ -245,7 +307,7 @@ async fn enrich_outreach_draft(
         target_name: &target_name,
         target_kind: kind,
         pitch_title: &pitch_title,
-        pitch_url: &pitch_url,
+        pitch_url,
         phase: *phase,
         language: crowdrelay_domain::outreach_letter::language_for_contact(&contact_email),
         next_show,
@@ -299,8 +361,9 @@ async fn enrich_reply_draft(
     };
     let shape = if reply_disposition == OutreachReplyDisposition::Positive.as_str()
         || sheet_verdict.as_deref().map(map_sheet_verdict)
-            == Some(ImportedVerdict::Terminal(OutreachReplyDisposition::Positive))
-    {
+            == Some(ImportedVerdict::Terminal(
+                OutreachReplyDisposition::Positive,
+            )) {
         ReplyShape::Positive
     } else if sheet_verdict
         .as_deref()
@@ -311,16 +374,19 @@ async fn enrich_reply_draft(
         ReplyShape::Holding
     };
     // The reply threads onto the same pitch the conversation started on —
-    // the most recent active release with a link, same rule the pitch uses.
-    // Absent, the letter shortens rather than refusing.
-    let pitch = sqlx::query_as::<_, (String, String)>(
-        "SELECT title, listen_url FROM release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
-    )
-    .bind(ws)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
-    let (pitch_title, pitch_url) = pitch.unwrap_or_default();
+    // the supply's own rule, so the follow-up names the same link the pitch
+    // letter printed. Absent, the letter shortens rather than refusing.
+    let pitch = crate::autopilot::outreach_supply::outreach_pitch(transaction, ws).await?;
+    let site_root = member_site_root_in_tx(transaction, ws).await?;
+    let (pitch_title, pitch_url) = match pitch {
+        Some(pitch) => {
+            let link = pitch
+                .tracked_link(transaction, ws, site_root.as_deref())
+                .await?;
+            (pitch.title, link)
+        }
+        None => (String::new(), None),
+    };
     let sender = sender_identity_in_tx(transaction, ws).await?;
     if let Ok(letter) = compose_reply_letter(&ReplyLetterInput {
         sender: &sender,
@@ -328,7 +394,7 @@ async fn enrich_reply_draft(
         target_kind: OutreachTargetKind::parse(&target_kind),
         shape,
         pitch_title: &pitch_title,
-        pitch_url: &pitch_url,
+        pitch_url,
     }) {
         *draft = letter;
     }
@@ -404,7 +470,9 @@ async fn enrich_application_draft(
     workspace_id: WorkspaceId,
     action: &mut AutopilotActionPayload,
 ) -> Result<(), RepositoryError> {
-    use crowdrelay_domain::application_letter::{compose_application_letter, ApplicationLetterInput};
+    use crowdrelay_domain::application_letter::{
+        ApplicationLetterInput, compose_application_letter,
+    };
     use crowdrelay_domain::gig_letter::LetterLanguage;
 
     let AutopilotActionPayload::ApplyLiveOpportunity {
@@ -438,13 +506,17 @@ async fn enrich_application_draft(
         return Err(RepositoryError::NotFound);
     };
     let language = LetterLanguage::for_country(country_code.as_deref().unwrap_or(""));
-    let pitch = sqlx::query_as::<_, (String, String)>(
-        "SELECT title, listen_url FROM release_plans WHERE workspace_id = $1 AND active AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> '' ORDER BY release_at DESC LIMIT 1",
-    )
-    .bind(ws)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(map_sqlx)?;
+    let pitch = crate::autopilot::outreach_supply::outreach_pitch(transaction, ws).await?;
+    let site_root = member_site_root_in_tx(transaction, ws).await?;
+    let (pitch_title, pitch_url) = match pitch {
+        Some(pitch) => {
+            let link = pitch
+                .tracked_link(transaction, ws, site_root.as_deref())
+                .await?;
+            (Some(pitch.title), link)
+        }
+        None => (None, None),
+    };
     let sender = sender_identity_in_tx(transaction, ws).await?;
     if let Ok(letter) = compose_application_letter(&ApplicationLetterInput {
         language,
@@ -453,8 +525,8 @@ async fn enrich_application_draft(
         organization: &organization,
         kind: *opportunity_kind,
         deadline,
-        pitch_title: pitch.as_ref().map(|(t, _)| t.as_str()),
-        pitch_url: pitch.as_ref().map(|(_, u)| u.as_str()),
+        pitch_title: pitch_title.as_deref(),
+        pitch_url,
     }) {
         *draft = letter;
     }
@@ -541,7 +613,8 @@ impl PostgresAutopilotRepository {
                 }
                 _ => continue,
             }
-            let recomposed = serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
+            let recomposed =
+                serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
             if recomposed == stored {
                 continue;
             }
@@ -614,7 +687,9 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?
             .ok_or(RepositoryError::NotFound)?;
             transaction.commit().await.map_err(map_sqlx)?;
-            return Ok(crowdrelay_domain::draft_revision::revisable_fields(&payload));
+            return Ok(crowdrelay_domain::draft_revision::revisable_fields(
+                &payload,
+            ));
         }
         let Some(mut payload) = sqlx::query_scalar::<_, serde_json::Value>(
             "SELECT payload FROM autopilot_actions \
@@ -674,13 +749,18 @@ impl PostgresAutopilotRepository {
             .map_err(map_sqlx)?;
         }
         transaction.commit().await.map_err(map_sqlx)?;
-        Ok(crowdrelay_domain::draft_revision::revisable_fields(&payload))
+        Ok(crowdrelay_domain::draft_revision::revisable_fields(
+            &payload,
+        ))
     }
 }
 
 /// The show a show opportunity is about, with what its letter cites.
 struct OpportunityShow {
     starts_at: OffsetDateTime,
+    /// The event's own slug — names its canonical `show-{slug}` smart link,
+    /// the same one the growth executor mints for print.
+    event_slug: String,
     city: String,
     venue: Option<String>,
     ticket_url: Option<String>,
@@ -694,9 +774,9 @@ async fn show_for_opportunity(
     ws: Uuid,
     opportunity_id: Uuid,
 ) -> Result<Option<OpportunityShow>, RepositoryError> {
-    let row = sqlx::query_as::<_, (OffsetDateTime, String, Option<String>, Option<String>, Option<String>, String)>(
+    let row = sqlx::query_as::<_, (OffsetDateTime, String, String, Option<String>, Option<String>, Option<String>, String)>(
         r#"
-        SELECT event.starts_at, event.timezone, city.name, event.venue, event.ticket_url,
+        SELECT event.starts_at, event.timezone, event.slug, city.name, event.venue, event.ticket_url,
                opportunity.template_key
         FROM outreach_opportunities AS opportunity
         JOIN events AS event
@@ -713,11 +793,16 @@ async fn show_for_opportunity(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
-    Ok(row.map(|(starts_at, timezone, city, venue, ticket_url, template_key)| OpportunityShow {
-        starts_at: crate::regional::at_event_timezone(starts_at, &timezone),
-        city: city.unwrap_or_default(),
-        venue,
-        ticket_url,
-        template_key,
-    }))
+    Ok(row.map(
+        |(starts_at, timezone, event_slug, city, venue, ticket_url, template_key)| {
+            OpportunityShow {
+                starts_at: crate::regional::at_event_timezone(starts_at, &timezone),
+                event_slug,
+                city: city.unwrap_or_default(),
+                venue,
+                ticket_url,
+                template_key,
+            }
+        },
+    ))
 }

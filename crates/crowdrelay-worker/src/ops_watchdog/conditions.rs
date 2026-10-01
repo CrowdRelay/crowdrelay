@@ -93,6 +93,31 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             }),
         },
         Condition {
+            // Critical: a letter with an untracked link is the one failure
+            // the whole funnel exists to prevent — it asks a stranger to do
+            // the thing we can then never see them do. The composer gate
+            // makes it unrepresentable in new code; this watches the paths
+            // around the gate — a hand-edited draft body, an executor
+            // rewrite, a letter type that never met the composer. It fired
+            // silently for a month once already: 111 sends, zero
+            // attributable clicks.
+            key: "outreach.untracked_link_sent",
+            severity: "critical",
+            summary: "An outbound letter carried a link the ledger cannot count",
+            active: snapshot.untracked_letter_sends_24h > 0,
+            details: json!({
+                "letters": snapshot.untracked_letter_sends_24h,
+                "window": "24 hours",
+                "remedy": "the letter's body (payload->>'body' or \
+                           payload->'draft'->>'body') carries a URL that does \
+                           not start with this workspace's member-site /l/ \
+                           prefix — read outbox_events for the last day and \
+                           find the convicting link; either the letter needs \
+                           a minted smart link, or a draft was hand-edited \
+                           past the composer",
+            }),
+        },
+        Condition {
             // Warning, not critical: these refused deliveries carry no named
             // recipient — status pings, internal markers, unrouted events that
             // never drafted anything. The same cancelled-instead-of-dead blind

@@ -11,7 +11,10 @@ use axum::{
         Path, Query, State,
         rejection::{JsonRejection, QueryRejection},
     },
-    http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{CACHE_CONTROL, SET_COOKIE},
+    },
     response::{IntoResponse, Response},
 };
 use crowdrelay_application::{
@@ -26,7 +29,11 @@ use sqlx::{FromRow, PgPool};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use crate::{Problem, acquisition::fan_session_from_headers, request_id};
+use crate::{
+    Problem,
+    acquisition::{attribution_cookie, attribution_visitor, fan_session_from_headers},
+    request_id,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -627,6 +634,13 @@ pub async fn check_in(
         policy_version: consent.policy_version.trim().chars().take(64).collect(),
     });
 
+    // The visitor id the scanning browser carries — the one a `/l/` or `/go/`
+    // click recorded — or a fresh one minted here. Either way the response
+    // marks the browser and, when this scan creates the fan, the acquisition
+    // row carries the same id, so a later signup on this browser joins the
+    // arrival rather than reading as a stranger.
+    let visitor_id = attribution_visitor(&headers).unwrap_or_default();
+
     let command = CheckinCommand {
         workspace_id: state.concert_qr.workspace_id.into_uuid(),
         event_slug: event_slug.as_str().to_owned(),
@@ -635,6 +649,7 @@ pub async fn check_in(
         expires_at: claims.expires_at,
         session_token: session.map(|session| session.as_str().to_owned()),
         email,
+        anonymous_visitor_id: Some(visitor_id.into_uuid()),
         consent,
         now,
         request_id: request_id_value.clone(),
@@ -667,7 +682,7 @@ pub async fn check_in(
     } else {
         StatusCode::OK
     };
-    (
+    let mut response = (
         status,
         [(CACHE_CONTROL, PRIVATE_NO_STORE)],
         Json(CheckinResponse {
@@ -679,7 +694,24 @@ pub async fn check_in(
             identity: result.identity.as_str().to_owned(),
         }),
     )
-        .into_response()
+        .into_response();
+    // Mark the scanning browser — the same cookie the smart-link redirect
+    // sets — so a later signup or tracked click joins the visitor this scan
+    // recorded. A malformed cookie string would be a build bug, not a
+    // request fault, but the check-in itself already succeeded: log and
+    // still answer, never fail the scan over an analytic header.
+    match HeaderValue::from_str(&attribution_cookie(
+        visitor_id,
+        state.acquisition.secure_cookies,
+    )) {
+        Ok(cookie) => {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
+        Err(error) => {
+            tracing::error!(%error, "check-in attribution cookie could not be encoded");
+        }
+    }
+    response
 }
 
 /// Free-text context fields are bounded and control-char-free — they land in

@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::outreach::{OutreachPhase, OutreachTargetKind};
+use crate::tracked_link::TrackedLink;
 use time::Date;
 
 /// A finished letter — the wire shape every letter executor reads.
@@ -40,8 +41,11 @@ pub struct OutreachLetterInput<'a> {
     pub target_kind: OutreachTargetKind,
     /// The release being pitched — a title from the tenant's release plans.
     pub pitch_title: &'a str,
-    /// Where the target listens to it.
-    pub pitch_url: &'a str,
+    /// Where the target listens to it — a tracked redirect, never the bare
+    /// destination. `None` refuses the letter (`NoPitch`): a pitch without a
+    /// link asks a stranger to go hunting, and an untracked one teaches the
+    /// ledger nothing about whether the letter worked.
+    pub pitch_url: Option<TrackedLink>,
     pub phase: OutreachPhase,
     /// The language the recipient reads. See [`language_for_contact`].
     pub language: LetterLanguage,
@@ -149,7 +153,7 @@ pub fn compose_outreach_letter(
     let target = salutation_name(input.target_name);
     let act = input.sender.act_name.trim();
     let title = input.pitch_title.trim();
-    let url = input.pitch_url.trim();
+    let url = input.pitch_url.as_ref().map(TrackedLink::as_str);
     if target.is_empty() {
         return Err(OutreachLetterRefusal::NoTarget);
     }
@@ -160,7 +164,7 @@ pub fn compose_outreach_letter(
     // and its calendar, so the propose-a-release skeleton does not fit. The
     // listen link still carries the newest material; a missing one refuses.
     if input.target_kind == OutreachTargetKind::Organiser {
-        if url.is_empty() {
+        if url.is_none() {
             return Err(OutreachLetterRefusal::NoPitch);
         }
         return Ok(match (input.language, input.phase) {
@@ -181,7 +185,10 @@ pub fn compose_outreach_letter(
     let Some(ask) = purpose(input.target_kind) else {
         return Err(OutreachLetterRefusal::RepresentationTarget);
     };
-    if title.is_empty() || url.is_empty() {
+    let Some(url) = url else {
+        return Err(OutreachLetterRefusal::NoPitch);
+    };
+    if title.is_empty() {
         return Err(OutreachLetterRefusal::NoPitch);
     }
     Ok(match (input.language, input.phase) {
@@ -297,13 +304,8 @@ pub(crate) fn introduction_pl(sender: &SenderIdentity, act: &str) -> String {
 
 pub(crate) fn sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
     let mut lines = vec![String::new(), "Pozdrawiamy,".to_owned(), act.to_owned()];
-    if let Some(url) = sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
-        lines.push(url.to_owned());
+    if let Some(link) = &sender.site_url {
+        lines.push(link.as_str().to_owned());
     }
     lines
 }
@@ -411,7 +413,10 @@ fn organiser_initial_en(
         lines.push(format!("Next confirmed show: {when_where}."));
     }
     lines.push(String::new());
-    lines.push(format!("Listen: {}", input.pitch_url.trim()));
+    lines.push(format!(
+        "Listen: {}",
+        input.pitch_url.as_ref().map_or("", |l| l.as_str())
+    ));
     lines.push(String::new());
     lines
         .push("If it is not a fit, no worries — just say so and we will not follow up.".to_owned());
@@ -434,7 +439,10 @@ fn organiser_follow_up_en(
          If it is not a fit, a short \"no\" is just as useful as a yes."
             .to_owned(),
         String::new(),
-        format!("Listen: {}", input.pitch_url.trim()),
+        format!(
+            "Listen: {}",
+            input.pitch_url.as_ref().map_or("", |l| l.as_str())
+        ),
     ];
     lines.extend(sign_off(input.sender, act));
     OutreachLetter {
@@ -465,7 +473,10 @@ fn organiser_initial_pl(
         lines.push(format!("Najbliższy potwierdzony koncert: {when_where}."));
     }
     lines.push(String::new());
-    lines.push(format!("Do posłuchania: {}", input.pitch_url.trim()));
+    lines.push(format!(
+        "Do posłuchania: {}",
+        input.pitch_url.as_ref().map_or("", |l| l.as_str())
+    ));
     lines.push(String::new());
     lines.push(
         "Jeśli to nie dla Was, nic nie szkodzi — wystarczy krótka odpowiedź \
@@ -491,7 +502,10 @@ fn organiser_follow_up_pl(
          nadal stoi. Jeśli to nie dla Was, krótkie „nie” też bardzo nam pomoże."
             .to_owned(),
         String::new(),
-        format!("Do posłuchania: {}", input.pitch_url.trim()),
+        format!(
+            "Do posłuchania: {}",
+            input.pitch_url.as_ref().map_or("", |l| l.as_str())
+        ),
     ];
     lines.extend(sign_off_pl(input.sender, act));
     OutreachLetter {
@@ -662,13 +676,8 @@ fn format_thread_date_pl(at: OffsetDateTime) -> String {
 /// rest of the letter is in.
 fn thread_sign_off_pl(sender: &SenderIdentity, act: &str) -> Vec<String> {
     let mut lines = vec![String::new(), "Pozdrawiam,".to_owned(), act.to_owned()];
-    if let Some(url) = sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
-        lines.push(url.to_owned());
+    if let Some(link) = &sender.site_url {
+        lines.push(link.as_str().to_owned());
     }
     lines
 }
@@ -700,13 +709,8 @@ pub(crate) fn introduction(sender: &SenderIdentity, act: &str) -> String {
 /// its own site. No link line when there is no link to give.
 pub(crate) fn sign_off(sender: &SenderIdentity, act: &str) -> Vec<String> {
     let mut lines = vec![String::new(), "Best,".to_owned(), act.to_owned()];
-    if let Some(url) = sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
-        lines.push(url.to_owned());
+    if let Some(link) = &sender.site_url {
+        lines.push(link.as_str().to_owned());
     }
     lines
 }
@@ -722,12 +726,16 @@ pub(crate) fn truncate(value: String, max: usize) -> String {
 mod tests {
     use super::*;
 
+    fn slug(value: &str) -> crate::SmartLinkSlug {
+        crate::SmartLinkSlug::parse(value).unwrap()
+    }
+
     fn sender() -> SenderIdentity {
         SenderIdentity {
             act_name: "VIRYA".to_owned(),
             style: Some("modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.music".to_owned()),
+            site_url: Some(TrackedLink::for_site("https://virya.music", &slug("site"))),
         }
     }
 
@@ -741,7 +749,10 @@ mod tests {
             target_name: "Metal Playlists Weekly",
             target_kind: kind,
             pitch_title: "our new single \"Rytuał\"",
-            pitch_url: "https://virya.music/f/rytual",
+            pitch_url: Some(TrackedLink::for_site(
+                "https://virya.music",
+                &slug("rytual"),
+            )),
             phase,
             language: LetterLanguage::English,
             next_show: None,
@@ -768,7 +779,7 @@ mod tests {
                 .body
                 .contains("\"Rytuał\" for playlist consideration")
         );
-        assert!(letter.body.contains("Listen: https://virya.music/f/rytual"));
+        assert!(letter.body.contains("Listen: https://virya.music/l/rytual"));
         assert!(
             letter
                 .body
@@ -777,7 +788,7 @@ mod tests {
         // A stranger reads this. It is a letter from a band, and it says so
         // in the band's words, not the machinery's.
         assert!(!letter.body.to_lowercase().contains("automat"));
-        assert!(letter.body.ends_with("https://virya.music"));
+        assert!(letter.body.ends_with("https://virya.music/l/site"));
         assert_eq!(letter.subject, "VIRYA — our new single \"Rytuał\"");
     }
 
@@ -807,7 +818,7 @@ mod tests {
             Err(OutreachLetterRefusal::NoTarget)
         );
         let no_pitch = OutreachLetterInput {
-            pitch_url: "",
+            pitch_url: None,
             ..input(&sender, OutreachTargetKind::Press, OutreachPhase::Initial)
         };
         assert_eq!(
@@ -962,12 +973,12 @@ mod tests {
         assert!(
             letter
                 .body
-                .contains("Do posłuchania: https://virya.music/f/rytual")
+                .contains("Do posłuchania: https://virya.music/l/rytual")
         );
         assert!(
             letter
                 .body
-                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music")
+                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music/l/site")
         );
         assert!(
             !letter.body.contains("Hi "),
@@ -1046,9 +1057,9 @@ mod tests {
             "{}",
             letter.body
         );
-        assert!(letter.body.contains("Listen: https://virya.music/f/rytual"));
+        assert!(letter.body.contains("Listen: https://virya.music/l/rytual"));
         assert!(letter.body.contains("will not follow up"));
-        assert!(letter.body.ends_with("https://virya.music"));
+        assert!(letter.body.ends_with("https://virya.music/l/site"));
         assert_eq!(letter.subject, "VIRYA — gig request");
         // The failure this kind exists to end: no review request to a
         // festival organiser.
@@ -1119,13 +1130,13 @@ mod tests {
         assert!(
             letter
                 .body
-                .contains("Do posłuchania: https://virya.music/f/rytual")
+                .contains("Do posłuchania: https://virya.music/l/rytual")
         );
         assert!(letter.body.contains("i nie będziemy się więcej odzywać"));
         assert!(
             letter
                 .body
-                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music")
+                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music/l/site")
         );
         assert!(!letter.body.contains("recenzj"), "{}", letter.body);
         assert!(!letter.body.contains("omówienia"), "{}", letter.body);
@@ -1160,7 +1171,7 @@ mod tests {
     fn an_organiser_still_refuses_without_a_listen_link() {
         let sender = sender();
         let no_pitch = OutreachLetterInput {
-            pitch_url: "",
+            pitch_url: None,
             ..input(
                 &sender,
                 OutreachTargetKind::Organiser,

@@ -20,6 +20,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::live_opportunities::LiveOpportunityKind;
+use crate::tracked_link::TrackedLink;
 
 /// A finished letter — the wire shape every letter executor reads.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -44,8 +45,9 @@ pub struct ApplicationLetterInput<'a> {
     pub deadline: Option<OffsetDateTime>,
     /// The release being pointed at, when one carries a listen link.
     pub pitch_title: Option<&'a str>,
-    /// Where the organiser listens to it.
-    pub pitch_url: Option<&'a str>,
+    /// Where the organiser listens to it — a tracked redirect, so the
+    /// letter's effect lands in the ledger. `None` shortens the letter.
+    pub pitch_url: Option<TrackedLink>,
 }
 
 /// Why a letter could not be composed — each a missing fact, shown to the
@@ -198,7 +200,7 @@ fn push_listen(
 ) {
     let (Some(title), Some(url)) = (
         input.pitch_title.map(str::trim).filter(|t| !t.is_empty()),
-        input.pitch_url.map(str::trim).filter(|u| !u.is_empty()),
+        input.pitch_url.as_ref().map(TrackedLink::as_str),
     ) else {
         return;
     };
@@ -266,13 +268,8 @@ fn sign_off(sender: &SenderIdentity, act: &str, language: LetterLanguage) -> Vec
         },
         act.to_owned(),
     ];
-    if let Some(url) = sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
-        lines.push(url.to_owned());
+    if let Some(link) = &sender.site_url {
+        lines.push(link.as_str().to_owned());
     }
     lines
 }
@@ -301,7 +298,7 @@ mod tests {
             act_name: "VIRYA".to_owned(),
             style: Some("modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.music".to_owned()),
+            site_url: Some(tracked("site")),
         }
     }
 
@@ -317,10 +314,16 @@ mod tests {
             kind: LiveOpportunityKind::Festival,
             deadline: Some(datetime!(2027-02-01 23:59 UTC)),
             pitch_title: Some("our new single \"Rytuał\""),
-            pitch_url: Some("https://virya.music/f/rytual"),
+            pitch_url: Some(tracked("rytual")),
         }
     }
 
+    fn tracked(slug: &str) -> TrackedLink {
+        TrackedLink::for_site(
+            "https://virya.music",
+            &crate::SmartLinkSlug::parse(slug).unwrap(),
+        )
+    }
     #[test]
     fn an_application_names_the_opportunity_the_organiser_and_the_act() {
         let sender = sender();
@@ -339,7 +342,7 @@ mod tests {
         );
         assert!(letter.body.contains("2027-02-01"));
         assert!(letter.body.contains("Listen (our new single"));
-        assert!(letter.body.ends_with("https://virya.music"));
+        assert!(letter.body.ends_with("https://virya.music/l/site"));
         assert_eq!(
             letter.subject,
             "VIRYA — application for Summerfest 2027 open call"

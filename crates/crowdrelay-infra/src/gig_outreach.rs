@@ -349,15 +349,32 @@ pub(crate) async fn sender_identity(
         .and_then(crowdrelay_domain::gig_letter::letter_style);
     // The stored override only. `brand_settings` would fall back to a shipped
     // default, and a default URL in a letter to a stranger is a link to
-    // somebody else's website.
-    let site_url = sqlx::query_scalar::<_, String>(
+    // somebody else's website. What the letter prints is the `site` smart
+    // link — `{site}/l/site` — so even the signature is a click the ledger
+    // counts; the upsert points it back at the origin.
+    let site_root = sqlx::query_scalar::<_, String>(
         "SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = 'member_site_base_url'",
     )
     .bind(workspace_id)
     .fetch_optional(pool)
     .await?
-    .map(|value| value.trim().to_owned())
+    .map(|value| value.trim().trim_end_matches('/').to_owned())
     .filter(|value| !value.is_empty());
+    let site_url = match site_root.as_deref() {
+        Some(root) => {
+            crate::tracked_links::ensure_smart_link_on_pool(
+                pool,
+                workspace_id,
+                "site",
+                root,
+                Some(root),
+                Some("email"),
+                Some("signature"),
+            )
+            .await?
+        }
+        None => None,
+    };
     // The home city is what the act declares (`act_home_city`), never a
     // measurement: the old most-played-city query counted upcoming shows as
     // played and once named an act after the city of its next gig. Unset

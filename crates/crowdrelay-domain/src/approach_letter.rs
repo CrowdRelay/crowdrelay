@@ -354,13 +354,8 @@ fn listing_stub(sender: &SenderIdentity) -> BandListing {
 /// its own site. No link line when there is no link to give.
 fn sign_off(sender: &SenderIdentity) -> Vec<String> {
     let mut lines = vec![String::new(), format!("— {}", sender.act_name.trim())];
-    if let Some(url) = sender
-        .site_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
-        lines.push(url.to_owned());
+    if let Some(link) = &sender.site_url {
+        lines.push(link.as_str().to_owned());
     }
     lines
 }
@@ -369,6 +364,7 @@ fn sign_off(sender: &SenderIdentity) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::listing::{ListedClaim, ListingVisibility};
+    use crate::tracked_link::TrackedLink;
     use crate::value_tier::MetricValueTier;
 
     fn sender() -> SenderIdentity {
@@ -376,7 +372,10 @@ mod tests {
             act_name: "Virya".to_owned(),
             style: Some("modern metal".to_owned()),
             home_city: Some("Wrocław".to_owned()),
-            site_url: Some("https://virya.example".to_owned()),
+            site_url: Some(TrackedLink::for_site(
+                "https://virya.example",
+                &crate::SmartLinkSlug::parse("site").unwrap(),
+            )),
         }
     }
 
