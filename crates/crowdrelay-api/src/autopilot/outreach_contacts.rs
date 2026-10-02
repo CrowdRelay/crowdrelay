@@ -650,6 +650,11 @@ fn conversation_next(
                 "they answered — the reply is logged under their name".to_owned(),
                 None,
             ),
+            OutreachHoldReason::NeedsResearch => (
+                "not read yet — the research agent looks at their recent work before anything is sent"
+                    .to_owned(),
+                None,
+            ),
             OutreachHoldReason::IneligibleTarget => (
                 if contact.do_not_contact {
                     "do not contact — you marked them".to_owned()

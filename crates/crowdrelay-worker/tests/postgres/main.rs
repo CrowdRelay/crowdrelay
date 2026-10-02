@@ -18,6 +18,7 @@ mod community_relay_batch;
 mod community_replies_lane;
 mod community_tracked_links;
 mod contact_research_outcome;
+mod contact_research_sweep;
 mod content_source_upsert;
 mod growth_metric_sync_schedule;
 mod import_opportunities;

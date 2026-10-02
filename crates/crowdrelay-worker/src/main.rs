@@ -890,6 +890,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let discord_executor_shutdown = shutdown_receiver.clone();
     let social_post_executor_shutdown = shutdown_receiver.clone();
     let community_join_executor_shutdown = shutdown_receiver.clone();
+    let contact_research_shutdown = shutdown_receiver.clone();
     let community_rules_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let video_source_sync_shutdown = shutdown_receiver.clone();
@@ -1115,6 +1116,23 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     if let Some(worker) = community_join_executor {
         spawn_named(&mut runtime_tasks, "community join executor", async move {
             worker.run(community_join_executor_shutdown).await;
+        });
+    }
+    // Premium-model spend, so it is the operator's decision, made once: off
+    // unless explicitly enabled. See `contact_research_sweep`.
+    if std::env::var("CROWDRELAY_CONTACT_RESEARCH_SWEEP").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    }) {
+        let worker = crowdrelay_worker::contact_research_sweep::ContactResearchSweep::new(
+            database.clone(),
+            workspace_id,
+            config.database.operation_timeout,
+        );
+        spawn_named(&mut runtime_tasks, "contact research sweep", async move {
+            worker.run(contact_research_shutdown).await;
         });
     }
     if let Some(worker) = community_rules::CommunityRulesWorker::new(

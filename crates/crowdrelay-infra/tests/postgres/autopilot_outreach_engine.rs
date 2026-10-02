@@ -102,6 +102,11 @@ impl Fixture {
         domain: &str,
     ) -> Result<Uuid, Box<dyn std::error::Error>> {
         let id = Uuid::now_v7();
+        let email = format!(
+            "{}-{}@{domain}",
+            name.to_lowercase().replace(' ', "-"),
+            id.simple()
+        );
         sqlx::query(
             "INSERT INTO outreach_targets
                  (id, workspace_id, target_kind, display_name, contact_email,
@@ -112,17 +117,34 @@ impl Fixture {
         .bind(self.ws())
         .bind(kind)
         .bind(name)
-        .bind(format!(
-            "{}-{}@{domain}",
-            name.to_lowercase().replace(' ', "-"),
-            id.simple()
-        ))
+        .bind(&email)
         .bind(verified)
         .bind(do_not_contact)
         .bind(last_reply)
         .execute(&self.pool)
         .await?;
+        // Nobody is pitched unread: every fixture contact has been read, so the
+        // tests below are about what they were written to prove. The ones about
+        // being unread live in `autopilot_outreach_research`.
+        self.read(&email).await?;
         Ok(id)
+    }
+
+    /// The band has read this address: one recent, sourced fact on file.
+    pub(crate) async fn read(&self, email: &str) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "INSERT INTO contact_research
+                 (workspace_id, normalized_email, fact, praise, source_url, observed_on,
+                  researched_by)
+             VALUES ($1, lower($2), 'recenzja płyty „Szum” w audycji „Metalowy Wieczór”',
+                     'Rzadko ktoś omawia tę płytę tak konkretnie.', 'https://example.test/' || $2,
+                     (now() AT TIME ZONE 'UTC')::date - 10, 'test')",
+        )
+        .bind(self.ws())
+        .bind(email)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn release_source(
@@ -620,11 +642,13 @@ async fn a_polish_address_gets_a_polish_letter() -> Result<(), Box<dyn std::erro
     )
     .await?;
     let polish = f.target("Polski Zin", "press", true, false, None).await?;
+    let polish_email = format!("redakcja-{}@zin.pl", polish.simple());
     sqlx::query("UPDATE outreach_targets SET contact_email = $2 WHERE id = $1")
         .bind(polish)
-        .bind(format!("redakcja-{}@zin.pl", polish.simple()))
+        .bind(&polish_email)
         .execute(&f.pool)
         .await?;
+    f.read(&polish_email).await?;
     f.target("English Zine", "press", true, false, None).await?;
 
     f.repository
