@@ -140,11 +140,22 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
         "second pass changes nothing: {again:?}"
     );
 
+    let (asked, confidence): (String, i16) = sqlx::query_as(
+        "SELECT observation_kind, confidence_basis_points FROM fan_prospect_observations
+         WHERE workspace_id = $1 AND evidence = 'Kiedy gracie Wrocław?'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        (asked.as_str(), confidence) == ("asked_about_show", 8_000),
+        "a public question about a show is the strongest evidence this source gives: {asked} {confidence}"
+    );
     let (evidence, url, kind): (String, Option<String>, String) = sqlx::query_as(
         "SELECT o.evidence, o.source_url, o.observation_kind
          FROM fan_prospect_observations o
          JOIN fan_prospects p ON p.workspace_id = o.workspace_id AND p.id = o.prospect_id
-         WHERE p.workspace_id = $1 AND lower(p.external_identity) = 'zine_pl'",
+         WHERE p.workspace_id = $1 AND ltrim(lower(p.external_identity), '@') = 'zine_pl'",
     )
     .bind(ws.into_uuid())
     .fetch_one(&pool)
@@ -171,7 +182,7 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
     // A person who said no is not collected against, even when they comment again.
     sqlx::query(
         "UPDATE fan_prospects SET status = 'suppressed', status_reason = 'asked to stop'
-         WHERE workspace_id = $1 AND lower(external_identity) = 'zine_pl'",
+         WHERE workspace_id = $1 AND ltrim(lower(external_identity), '@') = 'zine_pl'",
     )
     .bind(ws.into_uuid())
     .execute(&pool)
@@ -191,7 +202,7 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
         "kuba_metal lapses, the suppression is kept: {expired:?}"
     );
     let left: Vec<(String,)> = sqlx::query_as(
-        "SELECT lower(external_identity) FROM fan_prospects WHERE workspace_id = $1",
+        "SELECT ltrim(lower(external_identity), '@') FROM fan_prospects WHERE workspace_id = $1",
     )
     .bind(ws.into_uuid())
     .fetch_all(&pool)
