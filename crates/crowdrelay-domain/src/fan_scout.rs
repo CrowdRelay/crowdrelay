@@ -130,9 +130,7 @@ impl FanProspectIdentity {
         let platform_ok = !platform.is_empty()
             && platform.len() <= 32
             && platform.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || matches!(byte, b'_' | b'-')
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
             });
         if !platform_ok {
             return Err(FanProspectIdentityError::InvalidPlatform);
@@ -222,20 +220,10 @@ mod tests {
     #[test]
     fn platform_names_are_deliberately_strict() {
         assert!(
-            FanProspectIdentity::new(
-                "Instagram",
-                FanProspectIdentityKind::Handle,
-                "fan",
-            )
-            .is_err()
+            FanProspectIdentity::new("Instagram", FanProspectIdentityKind::Handle, "fan",).is_err()
         );
         assert!(
-            FanProspectIdentity::new(
-                "instagram",
-                FanProspectIdentityKind::Handle,
-                "@",
-            )
-            .is_err()
+            FanProspectIdentity::new("instagram", FanProspectIdentityKind::Handle, "@",).is_err()
         );
     }
 }

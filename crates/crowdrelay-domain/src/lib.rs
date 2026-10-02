@@ -90,11 +90,11 @@ pub mod events;
 pub mod experimentation;
 pub mod fan_activation;
 pub mod fan_demand;
-pub mod fan_scout;
 pub mod fan_identity;
 pub mod fan_landing;
 pub mod fan_lifecycle;
 pub mod fan_prospect;
+pub mod fan_scout;
 pub mod fanbase;
 pub mod festival_seed;
 pub mod free_reach;
@@ -213,11 +213,11 @@ pub use ids::{
     AutopilotMeasurementId, BeaconId, BookingAgentId, BookingTargetId, CampaignId, CapturePlanId,
     CityId, ContentSourceId, ContentSuggestionId, ContentTrendId, EventId, ExperimentId,
     ExperimentVariantId, FanId, FanProspectId, FanProspectObservationId, GrowthMetricSeriesId,
-    MarketSignalId, MerchCouponId,
-    MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PeerId,
-    PlayId, ProductionEventId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId,
-    RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId,
-    TicketTypeId, VenueId, VisitorId, WorkspaceId, WorkspaceMemberId, WorkspaceMemberSessionId,
+    MarketSignalId, MerchCouponId, MerchProductId, MerchVariantId, OutreachOpportunityId,
+    OutreachTargetId, PassSessionId, PeerId, PlayId, ProductionEventId, PromotionCampaignId,
+    ReferralAttributionId, ReleasePlanId, RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId,
+    TeamAssignmentId, TeamOpportunityId, TicketTypeId, VenueId, VisitorId, WorkspaceId,
+    WorkspaceMemberId, WorkspaceMemberSessionId,
 };
 pub use referrals::{
     CouponCode, CouponCodeError, CouponRedemptionResult, CouponStatus, FanSessionToken,

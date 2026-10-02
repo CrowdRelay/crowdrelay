@@ -44,7 +44,9 @@ fn bounded_optional(
         .map(|value| {
             let value = value.trim().to_owned();
             if value.is_empty() || value.chars().count() > max_chars {
-                Err(FanScoutStoreError::InvalidInput("optional text out of bounds"))
+                Err(FanScoutStoreError::InvalidInput(
+                    "optional text out of bounds",
+                ))
             } else {
                 Ok(value)
             }
@@ -56,11 +58,11 @@ fn valid_source_kind(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
         && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
                 || byte.is_ascii_digit()
-                || matches!(byte, b'_' | b'.' | b':' | b'-'))
+                || matches!(byte, b'_' | b'.' | b':' | b'-')
+        })
 }
 
 /// Records one public person plus one sourced observation idempotently.
@@ -82,7 +84,9 @@ pub async fn observe(
         return Err(FanScoutStoreError::InvalidInput("invalid source_id"));
     }
     if !request.evidence.is_object() {
-        return Err(FanScoutStoreError::InvalidInput("evidence must be a JSON object"));
+        return Err(FanScoutStoreError::InvalidInput(
+            "evidence must be a JSON object",
+        ));
     }
     let display_name = bounded_optional(request.display_name, 200)?;
     let profile_url = bounded_optional(request.profile_url, 1000)?;

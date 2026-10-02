@@ -9,9 +9,7 @@ use crowdrelay_domain::{
     FanId, WorkspaceId,
     fan_scout::{FanProspectIdentity, FanProspectIdentityKind, FanProspectObservationKind},
 };
-use crowdrelay_infra::fan_scout::{
-    ObserveProspectRequest, link_verified_fan, observe,
-};
+use crowdrelay_infra::fan_scout::{ObserveProspectRequest, link_verified_fan, observe};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -37,12 +35,8 @@ fn observation(
 ) -> ObserveProspectRequest {
     ObserveProspectRequest {
         workspace_id,
-        identity: FanProspectIdentity::new(
-            "reddit",
-            FanProspectIdentityKind::Handle,
-            handle,
-        )
-        .expect("valid handle"),
+        identity: FanProspectIdentity::new("reddit", FanProspectIdentityKind::Handle, handle)
+            .expect("valid handle"),
         display_name: Some(handle.trim_start_matches('@').to_owned()),
         profile_url: None,
         observation_kind: FanProspectObservationKind::PublicEngagement,
@@ -82,7 +76,12 @@ async fn rediscovery_dedupes_and_never_clears_refusal() -> Result<(), Box<dyn st
     let first = observe(&pool, observation(ws, "@MetalFanPL", "comment-1", now)).await?;
     let same = observe(
         &pool,
-        observation(ws, "metalfanpl", "comment-1", now + time::Duration::minutes(1)),
+        observation(
+            ws,
+            "metalfanpl",
+            "comment-1",
+            now + time::Duration::minutes(1),
+        ),
     )
     .await?;
     assert_eq!(first, same, "handle case and @ are one prospect");
@@ -108,24 +107,28 @@ async fn rediscovery_dedupes_and_never_clears_refusal() -> Result<(), Box<dyn st
 
     observe(
         &pool,
-        observation(ws, "METALFANPL", "comment-2", now + time::Duration::minutes(2)),
+        observation(
+            ws,
+            "METALFANPL",
+            "comment-2",
+            now + time::Duration::minutes(2),
+        ),
     )
     .await?;
-    let status: String = sqlx::query_scalar(
-        "SELECT status FROM fan_prospects WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(ws.into_uuid())
-    .bind(first.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM fan_prospects WHERE workspace_id=$1 AND id=$2")
+            .bind(ws.into_uuid())
+            .bind(first.into_uuid())
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(status, "refused", "rediscovery cannot resurrect a refusal");
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn conversion_only_links_an_existing_verified_same_workspace_fan(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn conversion_only_links_an_existing_verified_same_workspace_fan()
+-> Result<(), Box<dyn std::error::Error>> {
     let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
     let ws = workspace(&pool, "fan-scout-link").await?;
     let foreign_ws = workspace(&pool, "fan-scout-foreign").await?;
@@ -139,13 +142,11 @@ async fn conversion_only_links_an_existing_verified_same_workspace_fan(
     );
 
     let local_fan = active_fan(&pool, ws, "local@fan.test").await?;
-    sqlx::query(
-        "DELETE FROM fan_identifiers WHERE workspace_id=$1 AND fan_id=$2",
-    )
-    .bind(ws.into_uuid())
-    .bind(local_fan.into_uuid())
-    .execute(&pool)
-    .await?;
+    sqlx::query("DELETE FROM fan_identifiers WHERE workspace_id=$1 AND fan_id=$2")
+        .bind(ws.into_uuid())
+        .bind(local_fan.into_uuid())
+        .execute(&pool)
+        .await?;
     assert!(
         !link_verified_fan(&pool, ws, prospect, local_fan, now).await?,
         "an unverified public identity cannot be promoted into first-party fanhood"
