@@ -126,6 +126,7 @@ mod roster_weekly_brief;
 mod routing;
 mod security;
 mod signal_installations;
+mod viral_coefficient_routes;
 pub use rate_limit::{RateLimitPolicy, RateLimiter};
 mod curator_queue;
 mod staff_sessions;

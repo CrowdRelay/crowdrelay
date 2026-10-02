@@ -48,4 +48,5 @@ mod strategy_proposals;
 mod ticketmaster_sweep;
 mod video_promotion_links;
 mod video_release_plan;
+mod viral_coefficient;
 mod zz_wire_dates;

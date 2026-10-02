@@ -177,6 +177,7 @@ pub mod venue_seed;
 pub mod venue_terms;
 pub mod video_promotion;
 pub mod video_scorecard;
+pub mod viral_coefficient;
 pub mod wire_time;
 pub mod worker_template;
 
