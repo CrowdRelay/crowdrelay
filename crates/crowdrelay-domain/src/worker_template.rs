@@ -156,6 +156,27 @@ impl WorkerTemplate {
         }
     }
 
+    /// Whether a dispatch can plausibly create a new first-party fan.
+    ///
+    /// This is deliberately narrower than "reaches an audience". SignalInviter
+    /// reaches people who are already fans, and press outreach can create
+    /// awareness but is not one of the action-owned tracked publication rails
+    /// the verified-organic cohort can credit today. Scanners and consultants
+    /// replenish supply but do not acquire anybody themselves. The closed
+    /// vocabulary keeps acquisition-capacity accounting from growing another
+    /// hand-written template list.
+    #[must_use]
+    pub const fn can_acquire_new_fans(self) -> bool {
+        matches!(
+            self,
+            Self::SocialPost
+                | Self::TelegramPoster
+                | Self::DiscordPoster
+                | Self::CommunityEngager
+                | Self::CommunityRepost
+        )
+    }
+
     /// Whether this template is currently disabled because the agent service
     /// lacks the tools (web access, browser) to execute it.
     ///
@@ -277,7 +298,6 @@ mod tests {
     #[test]
     fn everything_that_posts_shares_the_bands_own_audience() {
         for template in [
-            WorkerTemplate::PressPitch,
             WorkerTemplate::SocialPost,
             WorkerTemplate::TelegramPoster,
             WorkerTemplate::DiscordPoster,
@@ -288,6 +308,33 @@ mod tests {
                 TemplateAudience::Workspace,
                 "{template:?}"
             );
+        }
+    }
+
+    #[test]
+    fn new_fan_acquisition_is_a_closed_template_vocabulary() {
+        for template in [
+            WorkerTemplate::PressPitch,
+            WorkerTemplate::SocialPost,
+            WorkerTemplate::TelegramPoster,
+            WorkerTemplate::DiscordPoster,
+            WorkerTemplate::CommunityEngager,
+            WorkerTemplate::CommunityRepost,
+        ] {
+            assert!(template.can_acquire_new_fans(), "{template:?}");
+        }
+        for template in [
+            WorkerTemplate::PressPitch,
+            WorkerTemplate::SignalInviter,
+            WorkerTemplate::RedditScanner,
+            WorkerTemplate::TelegramScanner,
+            WorkerTemplate::MetalArchivesScanner,
+            WorkerTemplate::BandcampScanner,
+            WorkerTemplate::GrowthStrategist,
+            WorkerTemplate::FanbaseScout,
+            WorkerTemplate::StrategyConsult,
+        ] {
+            assert!(!template.can_acquire_new_fans(), "{template:?}");
         }
     }
 

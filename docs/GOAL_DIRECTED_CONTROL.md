@@ -112,7 +112,7 @@ Three things, small on purpose, in the places the contract names.
    fans to be compared. No observation or no time left means no pace, not a
    guessed one.
 
-3. **Two places the pace acts, and no others.**
+3. **Three places the pace acts, and no others.**
 
    - **`PortfolioConfig::max_dispatches`, as a constraint.** On track, the
      sized budget stands. Behind, it is scaled by the pace ratio and clamped to
@@ -134,6 +134,18 @@ Three things, small on purpose, in the places the contract names.
      boost on the EFE weights, so candidate generation leans on what is known
      to work. It changes which candidates rank first for generation; it does
      not change what any of them is worth.
+   - **Action-space replenishment, only for the verified-organic monthly
+     target.** If that target is Behind and fewer normal acquisition candidates
+     survive the existing gates than the exact dispatch capacity this cycle
+     could spend, the evaluator may pull the read-only `fanbase-scout` forward.
+     This is not an extra dispatch entitlement and not a value bonus: the scout
+     remains in the ordinary portfolio and can lose to WAIT or a better action.
+     It reuses the failed-run retry gate, standing and hypothesis gates, and its
+     findings still pass normal community screening. It may search for more
+     qualified places; it may not contact anyone, post, relax relevance, bypass
+     membership/room-reading, or make `signal-inviter` count as acquiring a
+     new fan. The capacity comparison uses the same helper as the optimizer so
+     degraded execution health cannot create a fictional supply deficit.
 
    The pace must **not** enter `DecisionValue::total()`, and does not, nor the
    optimizer's marginal. Urgency is not value: a candidate is worth what it is
@@ -182,8 +194,9 @@ meaning.
 
 `scripts/test_goal_directed_control_v1.py` pins the wiring: the objective is
 read in the brain by `goal.rs` alone, reaches the evaluation path only in the
-portfolio stage and the exploration boost, and never appears in
-`decision_value.rs` or the optimizer. Widening any of that has to change this
+portfolio ceiling, exploration posture, research-brief context and the bounded
+verified-organic supply-recovery check, and never appears in
+`decision_value.rs` or the optimizer's marginal value. Widening any of that has to change this
 document and the gate in the same commit, and the section it has to change is
 "What was built", not "What must not be built".
 

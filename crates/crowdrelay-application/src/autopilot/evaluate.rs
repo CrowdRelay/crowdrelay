@@ -101,7 +101,7 @@ use commercial::{
     venue_fit_candidate,
 };
 use content_strategy::{content_arc_candidate, content_strategy_candidate};
-use crowdrelay_domain::worker_template::WorkerTemplate;
+use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
 use growth_debt::growth_debt_candidate;
 use growth_intelligence::{
     ScoredCandidate, build_dispatch_context, cooldown_window, growth_intelligence_candidate,

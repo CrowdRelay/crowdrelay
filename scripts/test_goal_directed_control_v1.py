@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The operator's goal, and the only two places it may change a decision.
+"""The operator's goal, and the bounded places it may change control.
 
 `domain::objectives::GrowthObjective` is an operator-declared target on a
 measured series: platform, metric key, scope, direction, a frozen baseline, a
@@ -16,8 +16,9 @@ and the code to it:
 1. The document exists and still names the four things it forbids.
 2. The objective reaches the brain through `goal.rs` alone, on
    `WorldModel.objective`.
-3. It acts on the dispatch ceiling and the exploration boost, and nowhere else
-   on the evaluation path.
+3. It acts on the dispatch ceiling, exploration posture, and the narrow
+   verified-organic read-only supply-recovery path, and nowhere else on the
+   evaluation path.
 4. It never enters `DecisionValue`, the optimizer's marginal, or anything about
    authority and approval.
 """
@@ -102,7 +103,7 @@ class GoalDirectedControlContract(unittest.TestCase):
             "cannot see what the operator asked for",
         )
 
-    def test_the_goal_acts_only_on_the_ceiling_and_the_exploration_posture(self) -> None:
+    def test_the_goal_acts_only_in_the_declared_control_paths(self) -> None:
         """The places the contract allows, and only those."""
         consumers = sorted(
             str(path.relative_to(ROOT))
@@ -119,15 +120,19 @@ class GoalDirectedControlContract(unittest.TestCase):
             ],
             f"{consumers} read the goal on a decision path. It may act on "
             f"PortfolioConfig (portfolio.rs, called from the context arm), "
-            f"on the exploration boost (growth_intelligence.rs), and as "
-            f"declared context in the scout's research brief "
-            f"(scout_consult.rs — prompt text only; it must never gate or "
-            f"size the dispatch), nowhere else",
+            f"on the exploration boost (growth_intelligence.rs), as declared "
+            f"context in the scout's research brief, and in the context arm's "
+            f"verified-organic supply-recovery gate. No other evaluator file "
+            f"may consume it.",
         )
         portfolio = (EVALUATE / "portfolio.rs").read_text()
         self.assertIn("goal.applied_max_dispatches", portfolio)
         scoring = (EVALUATE / "growth_intelligence.rs").read_text()
         self.assertIn("ActiveObjective::is_behind", scoring)
+        context = (EVALUATE / "growth_intelligence_context.rs").read_text()
+        self.assertIn("organic_supply_recovery", context)
+        self.assertIn('"verified_organic_acquisitions"', context)
+        self.assertIn("supply_recovery_scout_candidate", context)
 
     def test_urgency_never_enters_the_value(self) -> None:
         """A deadline does not make a bad action better."""

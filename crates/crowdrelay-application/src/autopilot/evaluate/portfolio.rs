@@ -109,6 +109,44 @@ pub(super) struct PortfolioRun {
     pub goal: Option<GoalConstraint>,
 }
 
+/// The dispatch capacity the current brain state and goal permit.
+///
+/// Kept as one helper because supply recovery and the portfolio must agree on
+/// what "room to act" means. A duplicated sizing formula would let the scout
+/// claim a shortage against slots the optimizer could never spend.
+pub(super) struct DispatchCapacity {
+    pub applied_max_dispatches: u32,
+    pub goal: Option<GoalConstraint>,
+}
+
+#[must_use]
+pub(super) fn dispatch_capacity(
+    policy: &GrowthIntelligencePolicy,
+    sizing_multiplier: f64,
+    objective: Option<&ActiveObjective>,
+    now: time::OffsetDateTime,
+) -> DispatchCapacity {
+    let base_max_dispatches = PortfolioConfig::default().max_dispatches;
+    let scaled_max_dispatches = ((f64::from(base_max_dispatches) * sizing_multiplier)
+        .round()
+        .max(1.0) as u32)
+        .max(1);
+    let goal_ceiling = ((f64::from(policy.goal_max_dispatches) * sizing_multiplier)
+        .round()
+        .max(1.0) as u32)
+        .max(1);
+    let goal = objective.and_then(|objective| {
+        GoalConstraint::apply(objective, now, scaled_max_dispatches, goal_ceiling)
+    });
+    let applied_max_dispatches = goal
+        .as_ref()
+        .map_or(scaled_max_dispatches, |goal| goal.applied_max_dispatches);
+    DispatchCapacity {
+        applied_max_dispatches,
+        goal,
+    }
+}
+
 /// What the cycle's evidence says about audiences, keyed like
 /// `audience_key_for`: the measured fatigue discount and how many days ago
 /// each community last heard from the band (WAIT's recovery), and which
@@ -301,38 +339,13 @@ pub(super) fn select_portfolio(
         fatigue_recovery,
     );
     // P0-2: Wire the experimental dispatch budget from the policy into the
-    // optimizer config. This allows additional treatment dispatches beyond
-    // max_dispatches when the candidate is part of an active experiment.
-    //
-    // Metacognition sizing_multiplier scales max_dispatches: when the brain
-    // is Initializing or Regressing, it acts cautiously (fewer dispatches).
-    // When Improving, it gets full budget. This is a constraint, not a value
-    // term — it does not enter DecisionValue.total().
-    let base_max_dispatches = PortfolioConfig::default().max_dispatches;
-    let scaled_max_dispatches = ((f64::from(base_max_dispatches) * sizing_multiplier)
-        .round()
-        .max(1.0) as u32)
-        .max(1);
-    // The operator's objective, as a constraint. Behind, the gap between the
-    // pace the deadline needs and the pace observed raises the ceiling —
-    // sized by the same multiplier, so a cautious or degraded brain stays
-    // cautious — and never past the operator's `goal_max_dispatches`.
-    //
-    // Only the ceiling moves. Every candidate still clears min_marginal_value
-    // on its own, WAIT still competes, and nothing here enters
-    // DecisionValue::total(): a deadline does not make a bad action better.
-    // See docs/GOAL_DIRECTED_CONTROL.md.
-    let goal_ceiling = ((f64::from(policy.goal_max_dispatches) * sizing_multiplier)
-        .round()
-        .max(1.0) as u32)
-        .max(1);
-    let goal = objective.and_then(|objective| {
-        GoalConstraint::apply(objective, now, scaled_max_dispatches, goal_ceiling)
-    });
+    // optimizer config. Capacity is computed by the shared helper so the
+    // portfolio and supply-recovery loop cannot disagree about how many slots
+    // this cycle may actually spend.
+    let capacity = dispatch_capacity(policy, sizing_multiplier, objective, now);
+    let goal = capacity.goal;
     let config = PortfolioConfig {
-        max_dispatches: goal
-            .as_ref()
-            .map_or(scaled_max_dispatches, |goal| goal.applied_max_dispatches),
+        max_dispatches: capacity.applied_max_dispatches,
         experimental_dispatch_budget: policy.experimental_dispatch_budget,
         ..Default::default()
     };
