@@ -144,6 +144,8 @@ impl ContactResearchSweep {
                   WHERE research.workspace_id = target.workspace_id
                     AND research.normalized_email = lower(btrim(target.contact_email))
                     AND research.observed_on >= (now() AT TIME ZONE 'UTC')::date - 120
+                  AND research.praise IS NOT NULL
+                  AND char_length(btrim(research.praise)) >= 40
               )
             ORDER BY live.relevance DESC, target.id
             LIMIT $2
