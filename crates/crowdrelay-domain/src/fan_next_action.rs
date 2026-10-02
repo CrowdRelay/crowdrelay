@@ -64,6 +64,11 @@ pub struct FanProspectActionInput {
     pub warm_engagement: bool,
     /// The tenant has an owned member site that can receive a tracked opt-in.
     pub member_site_ready: bool,
+    /// The band said something to this person inside the cooldown (a
+    /// `fan_prospect_touches` row). One voice at a time: a person who was just
+    /// answered is not answered again because the evidence that earned the
+    /// first answer is still on file.
+    pub recently_engaged: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -125,6 +130,14 @@ pub const fn evaluate_fan_prospect(input: FanProspectActionInput) -> FanProspect
             reason: "an invitation is already outstanding; do not ask again while waiting for a result",
             cooldown_hours: Some(168),
             measurement: "invite -> tracked_join_click -> verified_fan_or_timeout",
+        },
+        _ if input.recently_engaged => FanProspectDecision {
+            action: Action::Hold,
+            medium: None,
+            cta_intent: None,
+            reason: "the band spoke to this person recently; wait for them to answer before speaking again",
+            cooldown_hours: Some(72),
+            measurement: "touch -> reply_or_tracked_click -> reevaluate",
         },
         _ if input.explicit_join_or_follow_intent
             && input.has_same_thread_context
@@ -198,6 +211,7 @@ mod tests {
             question_intent: false,
             warm_engagement: false,
             member_site_ready: true,
+            recently_engaged: false,
         }
     }
 
@@ -249,6 +263,30 @@ mod tests {
             ..input(ProspectStatus::Warming)
         });
         assert_eq!(no_context.action, FanProspectActionKind::Hold);
+    }
+
+    #[test]
+    fn a_person_just_answered_is_not_answered_again_for_the_same_evidence() {
+        let asked = FanProspectActionInput {
+            question_intent: true,
+            ..input(ProspectStatus::Observed)
+        };
+        assert_eq!(
+            evaluate_fan_prospect(asked).action,
+            FanProspectActionKind::EngageInContext
+        );
+        let answered = evaluate_fan_prospect(FanProspectActionInput {
+            recently_engaged: true,
+            ..asked
+        });
+        assert_eq!(answered.action, FanProspectActionKind::Hold);
+        assert_eq!(answered.cooldown_hours, Some(72));
+        // A no still outranks the cooldown, and a fan still leaves the engine.
+        let refused = evaluate_fan_prospect(FanProspectActionInput {
+            recently_engaged: true,
+            ..input(ProspectStatus::Refused)
+        });
+        assert_eq!(refused.action, FanProspectActionKind::DoNotContact);
     }
 
     #[test]
