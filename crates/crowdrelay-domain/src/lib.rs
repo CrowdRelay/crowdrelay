@@ -90,6 +90,7 @@ pub mod events;
 pub mod experimentation;
 pub mod fan_activation;
 pub mod fan_demand;
+pub mod fan_scout;
 pub mod fan_identity;
 pub mod fan_landing;
 pub mod fan_lifecycle;
@@ -210,7 +211,8 @@ pub use ids::{
     AdmissionPassId, AdmissionPoolId, ArcId, AutopilotActionId, AutopilotDecisionId,
     AutopilotMeasurementId, BeaconId, BookingAgentId, BookingTargetId, CampaignId, CapturePlanId,
     CityId, ContentSourceId, ContentSuggestionId, ContentTrendId, EventId, ExperimentId,
-    ExperimentVariantId, FanId, GrowthMetricSeriesId, MarketSignalId, MerchCouponId,
+    ExperimentVariantId, FanId, FanProspectId, FanProspectObservationId, GrowthMetricSeriesId,
+    MarketSignalId, MerchCouponId,
     MerchProductId, MerchVariantId, OutreachOpportunityId, OutreachTargetId, PassSessionId, PeerId,
     PlayId, ProductionEventId, PromotionCampaignId, ReferralAttributionId, ReleasePlanId,
     RewardDrawId, RewardGrantId, RewardRuleId, SmartLinkId, TeamAssignmentId, TeamOpportunityId,
