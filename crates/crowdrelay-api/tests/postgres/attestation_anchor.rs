@@ -301,6 +301,8 @@ pub(crate) fn app_state(
         LoadReferralProgress::new(Arc::clone(&referral_repository)),
         RedeemCoupon::new(referral_repository),
         Url::parse("http://localhost:4321")?,
+        "pl/live".to_owned(),
+        "pl/latarnik".to_owned(),
         false,
     );
     let events = EventState::new(

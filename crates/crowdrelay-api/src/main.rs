@@ -215,6 +215,8 @@ async fn main() -> Result<()> {
         LoadReferralProgress::new(Arc::clone(&referral_repository)),
         RedeemCoupon::new(referral_repository),
         config.public_site_base_url.clone(),
+        brand.live_page_path.clone(),
+        brand.member_area_path.clone(),
         config.environment.is_production(),
     );
     let events = EventState::new(

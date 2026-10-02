@@ -37,6 +37,7 @@ const PRIVATE_NO_STORE: &str = "private, no-store";
 #[derive(Debug, Default, Deserialize)]
 struct ReferralDestinationQuery {
     event: Option<String>,
+    release: Option<String>,
     lang: Option<String>,
 }
 
@@ -48,6 +49,8 @@ pub struct ReferralState {
     load_referral_progress: LoadReferralProgress,
     redeem_coupon: RedeemCoupon,
     public_site_base_url: Url,
+    live_page_path: String,
+    member_area_path: String,
     secure_cookies: bool,
 }
 
@@ -61,6 +64,8 @@ impl ReferralState {
         load_referral_progress: LoadReferralProgress,
         redeem_coupon: RedeemCoupon,
         public_site_base_url: Url,
+        live_page_path: String,
+        member_area_path: String,
         secure_cookies: bool,
     ) -> Self {
         Self {
@@ -69,8 +74,23 @@ impl ReferralState {
             load_referral_progress,
             redeem_coupon,
             public_site_base_url,
+            live_page_path,
+            member_area_path,
             secure_cookies,
         }
+    }
+
+    fn localized_path(&self, configured: &str, language: Option<&str>) -> Option<String> {
+        let path = configured.trim_matches('/');
+        if path.is_empty() {
+            return None;
+        }
+        let path = if language.is_some_and(|lang| lang.starts_with("pl")) {
+            path
+        } else {
+            path.strip_prefix("pl/").unwrap_or(path)
+        };
+        (!path.is_empty()).then(|| path.to_owned())
     }
 }
 
@@ -104,18 +124,48 @@ pub async fn redirect_referral(
     }
 
     let requested_context = query.ok().map(|Query(query)| query);
-    let destination = requested_context.as_ref().and_then(|query| {
-        let slug = EventSlug::parse(query.event.as_ref()?.to_owned()).ok()?;
-        if !state.events.has_public_event(&slug) {
-            return None;
-        }
-        let prefix = if query.lang.as_deref() == Some("pl") {
-            "pl/live"
+    let destination = if let Some(query) = requested_context.as_ref() {
+        if let Some(slug) = query
+            .event
+            .as_ref()
+            .and_then(|raw| EventSlug::parse(raw.clone()).ok())
+            .filter(|slug| state.events.has_public_event(slug))
+        {
+            state
+                .referrals
+                .localized_path(&state.referrals.live_page_path, query.lang.as_deref())
+                .map(|prefix| format!("{prefix}/{}/", slug.as_str()))
+        } else if let Some(source_id) = query
+            .release
+            .as_deref()
+            .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
+        {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM content_sources
+                    WHERE workspace_id = $1 AND id = $2
+                      AND source_kind IN ('release', 'video') AND active
+                )",
+            )
+            .bind(state.referrals.workspace_id.into_uuid())
+            .bind(source_id)
+            .fetch_one(&state.database)
+            .await
+            .unwrap_or(false);
+            if exists {
+                state
+                    .referrals
+                    .localized_path(&state.referrals.member_area_path, query.lang.as_deref())
+                    .map(|path| format!("{path}/#wydania"))
+            } else {
+                None
+            }
         } else {
-            "live"
-        };
-        Some(format!("{prefix}/{}/", slug.as_str()))
-    });
+            None
+        }
+    } else {
+        None
+    };
     let location = match state
         .referrals
         .public_site_base_url

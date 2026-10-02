@@ -184,6 +184,14 @@ fn show_plan(language: Language, show: &ShowFact, link: &str) -> MissionPlan {
 }
 
 fn release_plan(language: Language, release: &ReleaseFact, link: &str) -> MissionPlan {
+    let lang = match language {
+        Language::Pl => "pl",
+        Language::En => "en",
+    };
+    let link = format!(
+        "{link}?release={}&lang={lang}",
+        release.content_source_id
+    );
     let (prompt, share) = match language {
         Language::Pl => (
             format!("Komu jednej osobie wysłałbyś „{}”?", release.title),
@@ -349,6 +357,8 @@ mod tests {
                 choose_mission(&MissionContext { shows, ..context() }, NOW).expect("release");
             assert_eq!(plan.kind, MissionKind::ReleaseOnePerson);
             assert!(plan.share_text.contains("Technophobia"));
+            assert!(plan.share_text.contains("?release="), "{}", plan.share_text);
+            assert!(plan.share_text.ends_with("&lang=pl"), "{}", plan.share_text);
         }
     }
 

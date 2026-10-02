@@ -356,6 +356,8 @@
             LoadReferralProgress::new(Arc::clone(&repository)),
             RedeemCoupon::new(repository),
             Url::parse("http://localhost:4321")?,
+            "pl/live".to_owned(),
+            "pl/latarnik".to_owned(),
             false,
         ))
     }
