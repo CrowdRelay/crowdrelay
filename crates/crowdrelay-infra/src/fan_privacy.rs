@@ -206,6 +206,14 @@ impl PostgresFanPrivacyRepository {
             "DELETE FROM persons WHERE workspace_id = $1 AND id IN (
                  SELECT person_id FROM fan_prospects
                  WHERE workspace_id = $1 AND linked_fan_id = $2)",
+            // The same person reached through the fan's email identity: a
+            // Latarnik role (and its frozen evidence) is erased with them.
+            "DELETE FROM persons WHERE workspace_id = $1 AND id IN (
+                 SELECT pi.person_id
+                 FROM person_identities pi
+                 JOIN fans f ON f.workspace_id = pi.workspace_id
+                            AND f.normalized_email = pi.value
+                 WHERE pi.workspace_id = $1 AND pi.kind = 'email' AND f.id = $2)",
         ] {
             sqlx::query(statement)
                 .bind(workspace_id)

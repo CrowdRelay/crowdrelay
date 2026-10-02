@@ -53,6 +53,7 @@ pub mod growth_metric_sync;
 pub mod growth_readiness;
 pub mod import_opportunities;
 pub mod import_outreach;
+pub mod latarnik_sweep;
 pub mod leadership;
 pub mod nearby_gigs;
 pub mod ops_watchdog;
