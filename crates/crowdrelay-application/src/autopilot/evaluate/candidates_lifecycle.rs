@@ -72,20 +72,26 @@ fn lifecycle_candidate(
     {
         disposition = PolicyDisposition::RequireApproval;
     }
+    let Some(episode) =
+        crowdrelay_domain::lifecycle_episode::LifecycleEpisode::for_message(&snapshot, template)
+    else {
+        return Ok(None);
+    };
+    let mut input_snapshot = serde_json::to_value(&snapshot)?;
+    input_snapshot["lifecycle_episode"] = serde_json::to_value(&episode)?;
     let subject = ActionSubject::Fan(snapshot.fan_id);
     // The recall names a specific night, so the night rides the action: the
     // snapshot's check-in fields freeze into the payload, and a fan with no
     // linked install additionally gets the tracked Signal CTA minted at
     // execution — the recall then doubles as their install ask.
     let show = if template == LifecycleTemplate::ShowRecall {
-        snapshot
-            .recent_checkin
-            .as_ref()
-            .map(|checkin| crate::autopilot::model::LifecycleShowContext {
+        snapshot.recent_checkin.as_ref().map(|checkin| {
+            crate::autopilot::model::LifecycleShowContext {
                 event_slug: checkin.event_slug.clone(),
                 event_title: checkin.event_title.clone(),
                 wants_install_url: !snapshot.has_signal_install,
-            })
+            }
+        })
     } else {
         None
     };
@@ -96,49 +102,25 @@ fn lifecycle_candidate(
         confidence,
         disposition,
         reason: "consented fan lifecycle has a deterministic communication step due",
-        input_snapshot: serde_json::to_value(&snapshot)?,
+        input_snapshot,
         policy_snapshot: policy_evidence(policy, domain_policy)?,
         action: AutopilotActionPayload::RequestFanLifecycleMessage {
             fan_id: snapshot.fan_id,
             template_key: template_key.to_owned(),
             show,
         },
-        // The check-in timestamp joins the key so a second show re-arms the
-        // recall instead of colliding with the pending decision for the
-        // first one — same night, same key; new night, new ask.
+        // One stable action per fan/template/episode. Marketing touches and
+        // policy versions may change the decision, never re-send the milestone.
         decision_key: format!(
-            "decision:lifecycle:v{}:{}:{}:{}:{}:{}",
-            policy.version,
-            snapshot.fan_id,
-            template_key,
-            snapshot
-                .last_marketing_touch_at
-                .map_or(0, OffsetDateTime::unix_timestamp),
-            snapshot
-                .last_event_interest_at
-                .map_or(0, OffsetDateTime::unix_timestamp),
-            snapshot
-                .recent_checkin
-                .as_ref()
-                .map_or(0, |checkin| checkin.checked_in_at.unix_timestamp()),
+            "decision:lifecycle-episode:v{}:{}:{template_key}:{}",
+            policy.version, snapshot.fan_id, episode.key
         ),
         action_idempotency_key: format!(
-            "action:lifecycle:{}:{template_key}:{}:{}",
-            snapshot.fan_id,
-            snapshot
-                .last_marketing_touch_at
-                .map_or(0, OffsetDateTime::unix_timestamp),
-            // The check-in joins the action key for the same reason it joins
-            // the decision key: a second show while the first recall is still
-            // pending is a new action, not a duplicate of the old one.
-            snapshot
-                .recent_checkin
-                .as_ref()
-                .map_or(0, |checkin| checkin.checked_in_at.unix_timestamp()),
+            "action:lifecycle-episode:{}:{template_key}:{}",
+            snapshot.fan_id, episode.key
         ),
     }))
 }
-
 
 /// Internal research for one warm relationship that is otherwise ready for a
 /// thoughtful next touch. This action reaches nobody; its result must still
@@ -160,9 +142,7 @@ fn relationship_research_candidate(
     ));
     if matches!(
         disposition,
-        PolicyDisposition::Deny
-            | PolicyDisposition::ObserveOnly
-            | PolicyDisposition::RecommendOnly
+        PolicyDisposition::Deny | PolicyDisposition::ObserveOnly | PolicyDisposition::RecommendOnly
     ) {
         return Ok(None);
     }
@@ -212,7 +192,6 @@ fn relationship_research_candidate(
     }))
 }
 
-
 impl<'a, R> EvaluateAutopilot<'a, R>
 where
     R: AutopilotDecisionRepository,
@@ -229,9 +208,7 @@ where
             .load_relationship_research_snapshots(self.workspace_id, now)
             .await?;
         for snapshot in research {
-            if let Some(candidate) =
-                relationship_research_candidate(snapshot, policy, now)?
-            {
+            if let Some(candidate) = relationship_research_candidate(snapshot, policy, now)? {
                 self.persist(&candidate, limits, report).await?;
             }
         }
