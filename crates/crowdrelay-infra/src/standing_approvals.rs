@@ -168,6 +168,12 @@ pub async fn candidates(
         LEFT JOIN fan_provenance_events AS provenance
           ON provenance.workspace_id = post.workspace_id
          AND provenance.action_id = post.action_id
+         -- Trust evidence must come from the same class of deliveries the
+         -- organiser actually approved. Historical policy:auto sends may
+         -- still have honest acquisition rows, but they are not evidence that
+         -- this person repeatedly trusted the target.
+         AND action.approved_by LIKE 'operator:%'
+         AND action.approved_by <> 'operator:standing_grant'
          AND provenance.event_kind = 'conversion'
          AND provenance.fan_id IS NOT NULL
          AND provenance.occurred_at >= $2 - INTERVAL '90 days'
