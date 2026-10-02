@@ -1,6 +1,6 @@
 # Signup promise → welcome → deliberate activation
 
-The v2 foundation is merged in #461. This follow-up finishes its tested rollout path and fixes an SQL parameter-type ambiguity found by executing the observer against PostgreSQL/PGlite. It also fixes doubled expression prefixes in the lifecycle workflow's claim/report URLs. No provider action is executed by these tests.
+The v2 foundation is merged in #461. This follow-up finishes its tested rollout path and fixes an SQL parameter-type ambiguity found by executing the observer against PostgreSQL/PGlite. It also aligns the lifecycle sample with the pinned API: valid expression URLs, a strict claim request, `disposition` response handling, required claim tokens, `occurred_at` receipts and stable receipt keys scoped to each attempt. Gmail errors use the separate failure branch. Only explicit safe rejection codes produce a failure receipt; timeouts, unknown results and server errors retain the execution claim for reconciliation. Rejected failure reports remain visible rather than being swallowed. No provider action is executed by these tests.
 
 ## What the system delivers
 
@@ -26,13 +26,14 @@ python scripts/test_n8n_workflow_attestation.py
 python scripts/test_lifecycle_template_contract_v1.py
 python scripts/test_executor_capability_parity_v1.py
 python scripts/test_autopilot_measurement_coverage_v1.py
+python -m unittest scripts.test_autopilot_measurement_contract.AutopilotMeasurementContract.test_db_enum_parser_and_rust_serializer_stay_aligned
 validation_dir=$(mktemp -d)
 npm install --prefix "$validation_dir" --no-save @electric-sql/pglite@0.5.8
 CROWDRELAY_VALIDATION_NODE_ROOT="$validation_dir" node scripts/check-welcome-activation-sql.mjs
 CROWDRELAY_VALIDATION_NODE_ROOT="$validation_dir" node scripts/check-lifecycle-episodes.mjs
 ```
 
-Verified here: 7 workflow tests, 23 Python tests including DB vocabulary alignment, 25 new PostgreSQL/PGlite assertions and 32 existing lifecycle SQL assertions. The SQL probes execute the actual source queries and migration-0397 helper with reduced fixtures. Native migrated PostgreSQL tests remain necessary to verify all schema constraints and Rust integration. Rust sources were parsed/formatted with actual rustfmt WASM; changed files satisfy size limits and the diff passes whitespace checks.
+Verified here: 10 workflow tests, 23 Python tests including DB vocabulary alignment, 25 new PostgreSQL/PGlite assertions and 32 existing lifecycle SQL assertions. The SQL probes execute the actual source queries and migration-0397 helper with reduced fixtures. Native migrated PostgreSQL tests remain necessary to verify all schema constraints and Rust integration. Rust sources were parsed/formatted with actual rustfmt WASM; changed files satisfy size limits and the diff passes whitespace checks.
 
 Added native regressions exercise missing/legacy/upgraded executors, v1→v2 replay suppression, the promised resource/action owner, consent withdrawal and real event-interest activation. An application test pins welcome v2 and Observe authority. Native cargo/rustc and a native disposable database are unavailable here, so compilation/clippy/native test execution are not claimed.
 
