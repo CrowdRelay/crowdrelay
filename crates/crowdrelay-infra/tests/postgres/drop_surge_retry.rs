@@ -15,7 +15,11 @@ async fn drop_surge_task_failures_are_target_scoped_and_never_counted_twice()
             "INSERT INTO content_sources (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
              VALUES ($1,'video','receipt-video','Real video',now()-interval '1 hour',now()+interval '30 days',$2)
              RETURNING id",
-        ).bind(ws.into_uuid()).bind(serde_json::json!({"url":"https://youtu.be/realvideo"}))
+        ).bind(ws.into_uuid()).bind(serde_json::json!({
+                "url": "https://youtu.be/realvideo",
+                "origin": "youtube_feed",
+                "youtube_format": "long_form",
+            }))
             .fetch_one(pool).await?;
         let first = seed_community(pool, ws, "firstreceipt", None).await?;
         let second = seed_community(pool, ws, "secondreceipt", None).await?;

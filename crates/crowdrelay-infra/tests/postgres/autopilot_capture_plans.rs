@@ -178,14 +178,18 @@ async fn seed_source(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         "INSERT INTO content_sources
-             (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
-         VALUES ($1,'video',$2,$3,$4,$5)",
+             (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+         VALUES ($1,'video',$2,$3,$4,$5,$6)",
     )
     .bind(workspace_id.into_uuid())
     .bind(source_key)
     .bind(format!("Material {source_key}"))
     .bind(occurred_at)
     .bind(occurred_at + time::Duration::days(45))
+    .bind(serde_json::json!({
+        "origin": "youtube_feed",
+        "youtube_format": "long_form",
+    }))
     .execute(pool)
     .await?;
     Ok(())

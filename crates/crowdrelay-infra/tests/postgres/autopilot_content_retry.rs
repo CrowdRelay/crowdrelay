@@ -81,13 +81,17 @@ async fn a_failed_artifact_is_retried_under_a_new_key() -> Result<(), Box<dyn st
     let now = OffsetDateTime::now_utc();
     let (source_uuid, version): (uuid::Uuid, i64) = sqlx::query_as(
         "INSERT INTO content_sources
-             (workspace_id, source_kind, source_key, title, occurred_at, expires_at)
-         VALUES ($1,'video','retry-video','A video',$2,$3)
+             (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+         VALUES ($1,'video','retry-video','A video',$2,$3,$4)
          RETURNING id, version",
     )
     .bind(workspace_id.into_uuid())
     .bind(now - time::Duration::days(1))
     .bind(now + time::Duration::days(30))
+    .bind(serde_json::json!({
+        "origin": "youtube_feed",
+        "youtube_format": "long_form",
+    }))
     .fetch_one(&pool)
     .await?;
     let source_id = ContentSourceId::from_uuid(source_uuid);
