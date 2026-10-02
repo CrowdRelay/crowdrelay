@@ -7,8 +7,8 @@ use crowdrelay_application::{RedeemCouponCommand, ReferralRepository, Repository
 use crowdrelay_domain::{
     CouponCode, CouponRedemptionResult, CouponStatus, FanId, FanSessionToken, MerchCoupon,
     MerchCouponId, PhysicalRewardGrant, PhysicalRewardStatus, ReferralCode, ReferralProgress,
-    RewardDrawId, RewardDrawPrizeKind, RewardGrantId, RewardRuleId, WeightedDrawEntry, WorkspaceId,
-    WorkspaceSlug,
+    RewardDrawId, RewardDrawPrizeKind, RewardGrantId, RewardRuleId, VisitorId, WeightedDrawEntry,
+    WorkspaceId, WorkspaceSlug,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -581,6 +581,53 @@ impl From<ReferralStoreError> for RepositoryError {
 
 fn duration_as_milliseconds(duration: Duration) -> Result<i64, ReferralStoreError> {
     i64::try_from(duration.as_millis()).map_err(|_| ReferralStoreError::Unexpected)
+}
+
+/// Appends the anonymous click half of a referral funnel to the canonical
+/// provenance ledger.
+///
+/// This is deliberately not a reward or a referral attribution. A click proves
+/// only that a real browser followed an active fan's referral link. The later
+/// signup path carries the same visitor id, links this interaction to the fan it
+/// became, and independently records the referral conversion.
+///
+/// The referral code itself is not copied into provenance. `source_target`
+/// uses the same stable `fan:{id}` target as referral conversion rows, so the
+/// measurement spine can join interaction → conversion without treating a
+/// rotating/shareable code as the durable identity.
+pub async fn record_referral_interaction(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    code: &ReferralCode,
+    visitor_id: VisitorId,
+    occurred_at: OffsetDateTime,
+) -> Result<bool, sqlx::Error> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO fan_provenance_events (
+            workspace_id, fan_id, event_kind, channel, source_target,
+            anonymous_visitor_id, attribution_method, attribution_confidence,
+            occurred_at
+        )
+        SELECT code.workspace_id, NULL, 'interaction', 'referral',
+               'fan:' || code.fan_id::text, $3, 'referral_click', 1.0, $4
+        FROM referral_codes AS code
+        JOIN fans AS owner
+          ON owner.workspace_id = code.workspace_id
+         AND owner.id = code.fan_id
+        WHERE code.workspace_id = $1
+          AND code.code = $2
+          AND code.active
+          AND owner.status = 'active'
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(code.as_str())
+    .bind(Into::<Uuid>::into(visitor_id))
+    .bind(occurred_at)
+    .execute(pool)
+    .await?;
+    Ok(inserted.rows_affected() == 1)
 }
 
 #[cfg(test)]
