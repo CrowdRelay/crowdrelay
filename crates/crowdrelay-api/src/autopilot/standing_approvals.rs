@@ -78,15 +78,25 @@ pub async fn grant_standing_approval(
 /// list that hides them cannot answer it.
 pub async fn list_standing_approvals(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let request_id_value = request_id(&headers);
-    match crowdrelay_infra::standing_approvals::list(
+    let workspace_id = state.ops.workspace_id().into_uuid();
+    let items = match crowdrelay_infra::standing_approvals::list(&state.database, workspace_id).await {
+        Ok(items) => items,
+        Err(error) => return standing_approval_problem(&error, request_id_value.clone()),
+    };
+    let candidates = match crowdrelay_infra::standing_approvals::candidates(
         &state.database,
-        state.ops.workspace_id().into_uuid(),
+        workspace_id,
+        OffsetDateTime::now_utc(),
     )
     .await
     {
-        Ok(items) => private_json(StatusCode::OK, serde_json::json!({ "items": items })),
-        Err(error) => standing_approval_problem(&error, request_id_value.clone()),
-    }
+        Ok(candidates) => candidates,
+        Err(error) => return standing_approval_problem(&error, request_id_value.clone()),
+    };
+    private_json(
+        StatusCode::OK,
+        serde_json::json!({ "items": items, "candidates": candidates }),
+    )
 }
 
 /// `DELETE /v1/control-plane/autopilot/standing-approvals/{action_kind}/{target_key}`
