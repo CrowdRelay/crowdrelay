@@ -2,7 +2,10 @@
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE},
@@ -13,7 +16,7 @@ use crowdrelay_application::{
     IdempotencyKey, LoadReferralProgress, RedeemCoupon, RedeemCouponCommand, RepositoryError,
     RequestId, ResolveReferralCode,
 };
-use crowdrelay_domain::{CouponCode, ReferralCode, WorkspaceId};
+use crowdrelay_domain::{CouponCode, EventSlug, ReferralCode, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -24,6 +27,12 @@ use crate::{
 const REFERRAL_COOKIE: &str = "crowdrelay_referral";
 const REFERRAL_COOKIE_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
 const PRIVATE_NO_STORE: &str = "private, no-store";
+
+#[derive(Debug, Default, Deserialize)]
+struct ReferralDestinationQuery {
+    event: Option<String>,
+    lang: Option<String>,
+}
 
 /// Dependencies used by referral, fan-progress, and commerce routes.
 #[derive(Clone)]
@@ -63,6 +72,7 @@ impl ReferralState {
 pub async fn redirect_referral(
     State(state): State<crate::AppState>,
     Path(raw_code): Path<String>,
+    query: Result<Query<ReferralDestinationQuery>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
@@ -86,10 +96,27 @@ pub async fn redirect_referral(
         Err(error) => return repository_problem(error, request_id_value).into_response(),
     }
 
-    let location = match state.referrals.public_site_base_url.join("join") {
+    let requested_context = query.ok().map(|Query(query)| query);
+    let destination = requested_context.as_ref().and_then(|query| {
+        let slug = EventSlug::parse(query.event.as_ref()?.to_owned()).ok()?;
+        if !state.events.has_public_event(&slug) {
+            return None;
+        }
+        let prefix = if query.lang.as_deref() == Some("pl") {
+            "pl/live"
+        } else {
+            "live"
+        };
+        Some(format!("{prefix}/{}/", slug.as_str()))
+    });
+    let location = match state
+        .referrals
+        .public_site_base_url
+        .join(destination.as_deref().unwrap_or("join"))
+    {
         Ok(url) => url,
         Err(_) => {
-            tracing::error!("configured public site URL could not form the join URL");
+            tracing::error!("configured public site URL could not form the referral landing URL");
             return Problem::internal(request_id_value)
                 .private()
                 .into_response();
