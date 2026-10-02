@@ -132,7 +132,14 @@ class GoalDirectedControlContract(unittest.TestCase):
         context = (EVALUATE / "growth_intelligence_context.rs").read_text()
         self.assertIn("organic_supply_recovery", context)
         self.assertIn('"verified_organic_acquisitions"', context)
-        self.assertIn("supply_recovery_scout_candidate", context)
+        # The replenishment call stays in the context arm; the scout-candidate
+        # builder it gates lives in the extracted supply_recovery submodule —
+        # same contract, new home.
+        self.assertIn("maybe_replenish_acquisition_supply", context)
+        supply_recovery = (
+            EVALUATE / "growth_intelligence" / "supply_recovery.rs"
+        ).read_text()
+        self.assertIn("supply_recovery_scout_candidate", supply_recovery)
 
     def test_urgency_never_enters_the_value(self) -> None:
         """A deadline does not make a bad action better."""
