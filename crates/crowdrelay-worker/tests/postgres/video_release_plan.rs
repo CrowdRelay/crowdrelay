@@ -134,7 +134,6 @@ async fn a_ten_day_old_video_opens_no_plan() -> Result<()> {
     Ok(())
 }
 
-
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_confirmed_short_retires_source_release_plan_and_campaign() -> Result<()> {
@@ -157,13 +156,12 @@ async fn a_confirmed_short_retires_source_release_plan_and_campaign() -> Result<
     .await?;
     assert_eq!(source_format, "long_form");
 
-    let plan_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM release_plans WHERE workspace_id=$1 AND source_key=$2",
-    )
-    .bind(workspace_id)
-    .bind(format!("youtube:{video_id}"))
-    .fetch_one(&pool)
-    .await?;
+    let plan_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM release_plans WHERE workspace_id=$1 AND source_key=$2")
+            .bind(workspace_id)
+            .bind(format!("youtube:{video_id}"))
+            .fetch_one(&pool)
+            .await?;
 
     let campaign_id: Uuid = sqlx::query_scalar(
         "INSERT INTO campaigns (workspace_id,name,release_plan_id)
@@ -208,7 +206,10 @@ async fn a_confirmed_short_retires_source_release_plan_and_campaign() -> Result<
             .bind(campaign_id)
             .fetch_one(&pool)
             .await?;
-    assert!(!campaign_active, "a Short's release campaign must not survive");
+    assert!(
+        !campaign_active,
+        "a Short's release campaign must not survive"
+    );
 
     Ok(())
 }

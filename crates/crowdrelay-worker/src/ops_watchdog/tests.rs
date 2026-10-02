@@ -97,6 +97,8 @@ mod tests {
             // The capture page is configured, so capture-channel clicks in a
             // test do not raise `fans.capture_disabled` unless asked to.
             capture_page_configured: true,
+            // No FAN SCOUT breach unless a test asks for one.
+            scout_breaches: Vec::new(),
         }
     }
 

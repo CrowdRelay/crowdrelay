@@ -168,9 +168,7 @@ pub const fn evaluate_fan_prospect(input: FanProspectActionInput) -> FanProspect
                 measurement: "safe_contact_context -> reevaluate",
             }
         }
-        _ if input.explicit_join_or_follow_intent
-            && !input.same_thread_join_capture_supported =>
-        {
+        _ if input.explicit_join_or_follow_intent && !input.same_thread_join_capture_supported => {
             FanProspectDecision {
                 action: Action::Hold,
                 medium: None,

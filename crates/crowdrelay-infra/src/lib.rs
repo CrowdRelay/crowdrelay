@@ -92,6 +92,7 @@ pub mod roster_portfolio;
 pub mod roster_release_calendar;
 pub mod roster_source_roi;
 pub mod roster_weekly_brief;
+pub mod scout_lane;
 pub mod sensitive_response;
 pub mod sent_record;
 pub mod show_helpers;
