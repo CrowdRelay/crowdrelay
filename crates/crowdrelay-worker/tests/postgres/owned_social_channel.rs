@@ -45,11 +45,7 @@ async fn create_foreign_task_table(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn pinned_task(
-    pool: &PgPool,
-    workspace_id: WorkspaceId,
-    platform: &str,
-) -> Result<Uuid> {
+async fn pinned_task(pool: &PgPool, workspace_id: WorkspaceId, platform: &str) -> Result<Uuid> {
     create_foreign_task_table(pool).await?;
     let decision_id = Uuid::now_v7();
     let action_id = Uuid::now_v7();
@@ -186,15 +182,19 @@ async fn a_model_cannot_substitute_the_measured_social_winner() -> Result<()> {
 
     worker(&pool, ws).run_once().await?;
 
-    let (status, reason): (String, Option<String>) = sqlx::query_as(
-        "SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1",
-    )
-    .bind(outcome_id)
-    .fetch_one(&pool)
-    .await?;
-    ensure!(status == "rejected", "mismatched draft must be rejected: {status}");
+    let (status, reason): (String, Option<String>) =
+        sqlx::query_as("SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1")
+            .bind(outcome_id)
+            .fetch_one(&pool)
+            .await?;
     ensure!(
-        reason.as_deref().is_some_and(|r| r.contains("SOCIAL_PLATFORM_MISMATCH")),
+        status == "rejected",
+        "mismatched draft must be rejected: {status}"
+    );
+    ensure!(
+        reason
+            .as_deref()
+            .is_some_and(|r| r.contains("SOCIAL_PLATFORM_MISMATCH")),
         "rejection must name the channel contract: {reason:?}"
     );
     let outward: i64 = sqlx::query_scalar(
@@ -223,6 +223,9 @@ async fn the_measured_social_winner_flows_through_normally() -> Result<()> {
     .bind(ws.into_uuid())
     .fetch_one(&pool)
     .await?;
-    ensure!(outward == 1, "matching draft must reach the normal approval action");
+    ensure!(
+        outward == 1,
+        "matching draft must reach the normal approval action"
+    );
     Ok(())
 }

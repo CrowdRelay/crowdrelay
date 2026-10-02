@@ -282,11 +282,7 @@ pub fn preferred_owned_social_platform(channel_yield: &[ChannelYield]) -> Option
                     (evidence != (0, 0, 0)).then_some((platform, evidence, index))
                 })
         })
-        .max_by(|left, right| {
-            left.1
-                .cmp(&right.1)
-                .then_with(|| right.2.cmp(&left.2))
-        })
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.2.cmp(&left.2)))
         .map(|(platform, _, _)| platform)
 }
 
@@ -454,10 +450,7 @@ mod tests {
     #[test]
     fn owned_social_ties_are_stable() {
         assert_eq!(
-            preferred_owned_social_platform(&[
-                yielded("x", 1, 0),
-                yielded("facebook", 1, 0),
-            ]),
+            preferred_owned_social_platform(&[yielded("x", 1, 0), yielded("facebook", 1, 0),]),
             Some("facebook")
         );
     }
