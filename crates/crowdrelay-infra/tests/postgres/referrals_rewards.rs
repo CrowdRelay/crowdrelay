@@ -68,10 +68,7 @@ async fn qualifies_referrals_grants_one_coupon_and_redeems_idempotently()
         .await?;
 
     let visitor_id = VisitorId::new();
-    let referral_code = referrer
-        .referral_code
-        .as_ref()
-        .ok_or("referrer code")?;
+    let referral_code = referrer.referral_code.as_ref().ok_or("referrer code")?;
     assert!(
         record_referral_interaction(
             &pool,
