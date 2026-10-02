@@ -108,6 +108,9 @@ pub enum HookRefusal {
     MetaResearchVoice,
     /// Empty flattery can be pasted into anybody's inbox.
     GenericPraise,
+    /// The opener shares no concrete term with the sourced fact and could be
+    /// pasted into an unrelated email.
+    UngroundedOpening,
     /// An exclamation mark or a hashtag: not the band's register.
     NotOurRegister,
     /// A link in the text: the letter's links are tracked ones only.
@@ -134,6 +137,7 @@ impl HookRefusal {
             }
             Self::MetaResearchVoice => "do not tell the recipient that software researched them — open on the concrete thing itself".to_owned(),
             Self::GenericPraise => "generic praise is not personalization — the opening must contain a concrete observation that could not fit everyone".to_owned(),
+            Self::UngroundedOpening => "the opening does not name any concrete detail from the sourced fact — it could be pasted into somebody else's email".to_owned(),
             Self::NotOurRegister => "no exclamation marks or hashtags — a colleague writing, not \
                  a campaign"
                 .to_owned(),
@@ -165,6 +169,18 @@ fn collapse(text: &str) -> String {
 fn has_link(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("http://") || lower.contains("https://") || lower.contains("www.")
+}
+
+fn grounded_opening(opening: &str, fact: &str) -> bool {
+    let words = |text: &str| {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() >= 4)
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let fact_words = words(fact);
+    words(opening).iter().any(|word| fact_words.contains(word))
 }
 
 impl PersonalHook {
@@ -215,6 +231,9 @@ impl PersonalHook {
             ];
             if GENERIC.iter().any(|needle| lower.contains(needle)) {
                 return Err(HookRefusal::GenericPraise);
+            }
+            if !grounded_opening(opening, &fact) {
+                return Err(HookRefusal::UngroundedOpening);
             }
         }
         for text in std::iter::once(fact.as_str()).chain(praise.as_deref()) {
@@ -476,6 +495,16 @@ mod tests {
             ),
             Err(HookRefusal::PraiseTooShort)
         );
+        assert_eq!(
+            PersonalHook::new(
+                fact,
+                Some("To bardzo konkretny materiał i naprawdę dobrze się go czyta od początku do końca"),
+                "https://e.test/x",
+                day,
+                TODAY
+            ),
+            Err(HookRefusal::UngroundedOpening)
+        );
     }
 
     #[test]
@@ -505,10 +534,10 @@ mod tests {
         let fact = "recenzja płyty „Szum” w audycji „Metalowy Wieczór”";
         let day = date!(2026 - 09 - 20);
         for (praise, expected) in [
-            ("Świetna robota!", HookRefusal::NotOurRegister),
-            ("Super #metal", HookRefusal::NotOurRegister),
-            ("Zobacz https://e.test/x", HookRefusal::LinkInText),
-            ("Zajrzyj na www.e.test", HookRefusal::LinkInText),
+            ("W recenzji „Szum” podoba nam się konkret, ale świetna robota!", HookRefusal::NotOurRegister),
+            ("W recenzji „Szum” jest konkretny detal, ale Super #metal", HookRefusal::NotOurRegister),
+            ("W recenzji „Szum” jest konkretny detal — zobacz https://e.test/x", HookRefusal::LinkInText),
+            ("W recenzji „Szum” jest konkretny detal — zajrzyj na www.e.test", HookRefusal::LinkInText),
         ] {
             assert_eq!(
                 PersonalHook::new(fact, Some(praise), "https://e.test/x", day, TODAY),
@@ -538,7 +567,11 @@ mod tests {
         for refusal in [
             HookRefusal::FactTooShort,
             HookRefusal::FactTooLong,
+            HookRefusal::PraiseTooShort,
             HookRefusal::PraiseTooLong,
+            HookRefusal::MetaResearchVoice,
+            HookRefusal::GenericPraise,
+            HookRefusal::UngroundedOpening,
             HookRefusal::NotOurRegister,
             HookRefusal::LinkInText,
             HookRefusal::SourceNotHttps,
@@ -575,14 +608,13 @@ mod tests {
         assert!(colleague.contains("W recenzji „Szum”"), "{colleague}");
         let english = known_paragraph(&hook, LetterLanguage::English, Register::Outlet);
         assert!(!english.contains("Before writing"), "{english}");
-        assert!(
-            open_with_known(
-                "no greeting break",
-                &hook,
-                LetterLanguage::English,
-                Register::Outlet
-            )
-            .starts_with("Before writing")
+        let no_break = open_with_known(
+            "no greeting break",
+            &hook,
+            LetterLanguage::English,
+            Register::Outlet
         );
+        assert!(no_break.starts_with("W recenzji „Szum”"), "{no_break}");
+        assert!(!no_break.contains("Before writing"), "{no_break}");
     }
 }
