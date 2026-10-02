@@ -266,6 +266,10 @@ impl CommunityExecutorWorker {
             return Ok(0);
         }
         let ws = self.workspace_id.into_uuid();
+        if let Some(breaches) = crowdrelay_infra::scout_lane::halted(&self.pool, ws).await {
+            tracing::warn!(?breaches, "scout lane halted; owned replies are held");
+            return Ok(0);
+        }
         let (sent_24h, last_sent): (i64, Option<OffsetDateTime>) = sqlx::query_as(
             r#"
             SELECT count(*) FILTER (WHERE replied_at > now() - INTERVAL '24 hours'),

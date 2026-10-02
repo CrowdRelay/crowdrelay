@@ -7,12 +7,27 @@
 //! not actionable from there. FakAP remains the external health probe for
 //! API reachability; this watchdog catches silent failures FakAP cannot see.
 //!
-//! The watchdog monitors 32 conditions. The count and this list are
+//! The watchdog monitors 36 conditions. The count and this list are
 //! gated against `conditions()` by `test_watchdog_conditions_documented_v1.py`:
 //! it said "ten" while seven alarms went undocumented, including two criticals,
 //! and this repository has a record of concluding a live capability is missing
 //! by reading a stale list. Every condition below also has a test, so none is
 //! an alarm nobody has seen fire.
+//! - `scout.contacted_suppressed` — **critical.** The FAN SCOUT lane recorded a
+//!   touch to a prospect after that prospect refused or was suppressed. The lane
+//!   speaks to people the band has never met and is autonomous only because its
+//!   envelope holds; this is the breach that matters most, and the lane's
+//!   senders hold on the same read (`scout_lane::halted`).
+//! - `scout.over_rate` — **critical.** The lane made more touches in a rolling
+//!   day than its cap, or spoke twice to one person inside the 72-hour
+//!   one-voice window. The evaluator holds a recently-engaged person, so a
+//!   second touch means a sender bypassed it.
+//! - `scout.invite_without_route` — **critical.** An invitation went to someone
+//!   with no observation from a thread the band reads: a consumer is invited only
+//!   inside the conversation they started.
+//! - `scout.untracked_link` — **critical.** An invitation's tracked link is no
+//!   longer live, so a person following it reaches nothing and the click can
+//!   never be attributed.
 //! - `publishing.orphaned_draft` — a publishing action succeeded and no
 //!   executor produced a post for it. The three executors claim
 //!   `agent.content.request` by the agent task's `template_id`, and the social
@@ -242,6 +257,7 @@ use std::{collections::HashMap, time::Duration};
 use crowdrelay_application::autopilot::VideoScorecardView;
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::video_scorecard::{MissingReason, Pace};
+use crowdrelay_infra::scout_lane::Breach;
 
 use crate::auto_post_platforms::PublishingPosture;
 use serde_json::{Value, json};
@@ -393,6 +409,18 @@ impl OpsWatchdogWorker {
         let mut snapshot = load_snapshot(&mut transaction, self.workspace_id).await?;
         snapshot.video_cards = Json(video_cards);
         snapshot.capture_page_configured = self.capture_page_configured;
+        snapshot.scout_breaches = match crowdrelay_infra::scout_lane::breaches(
+            &self.pool,
+            self.workspace_id.into_uuid(),
+        )
+        .await
+        {
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, "scout lane tripwires unreadable; scout alarms skipped this cycle");
+                Vec::new()
+            }
+        };
         let conditions = conditions(&snapshot, self.posture);
         let states = load_states(&mut transaction, self.workspace_id).await?;
         let repeat_before = now
@@ -740,6 +768,11 @@ struct OpsSnapshot {
     /// a forgotten assignment raises the alarm rather than hiding it.
     #[sqlx(skip)]
     capture_page_configured: bool,
+    /// The FAN SCOUT lane's tripwires, read from the lane's own rows by
+    /// `crowdrelay_infra::scout_lane` — the same read its senders consult before
+    /// they speak. Set after the snapshot loads; empty means no breach.
+    #[sqlx(skip)]
+    scout_breaches: Vec<crowdrelay_infra::scout_lane::Breach>,
 }
 
 #[derive(Clone, Debug)]
@@ -868,3 +901,5 @@ include!("ops_watchdog/tests_video.rs");
 include!("ops_watchdog/tests_acquisition.rs");
 
 include!("ops_watchdog/tests_outreach.rs");
+#[cfg(test)]
+include!("ops_watchdog/tests_scout.rs");

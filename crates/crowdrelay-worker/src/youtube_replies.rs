@@ -424,6 +424,12 @@ impl YoutubeRepliesWorker {
         if !flag("CROWDRELAY_SOCIAL_AUTO_POST") {
             return Ok(0);
         }
+        if let Some(breaches) =
+            crowdrelay_infra::scout_lane::halted(&self.pool, self.workspace_id).await
+        {
+            tracing::warn!(?breaches, "scout lane halted; youtube replies are held");
+            return Ok(0);
+        }
         // One cap and one spacing across the band's own channels.
         let (sent_24h, last_sent): (i64, Option<OffsetDateTime>) = sqlx::query_as(
             r#"

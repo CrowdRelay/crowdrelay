@@ -344,7 +344,11 @@ impl VideoSourceSyncWorker {
     pub async fn retire_youtube_short(&self, video_id: &str) -> Result<(), String> {
         let source_key = format!("youtube:{video_id}");
         let short_marker = json!("short");
-        let mut tx = self.pool.begin().await.map_err(|e| format!("begin short retire: {e}"))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| format!("begin short retire: {e}"))?;
 
         let changed_source: Option<(Uuid, i64)> = sqlx::query_as(
             r#"

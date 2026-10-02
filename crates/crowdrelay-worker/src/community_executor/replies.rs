@@ -462,7 +462,10 @@ impl CommunityExecutorWorker {
 
         if matches!(row.platform.as_str(), "instagram" | "facebook") {
             use crowdrelay_domain::fan_next_action::FanProspectActionKind as FanAction;
-            match fan_scout_action.as_ref().map(|action| action.decision.action) {
+            match fan_scout_action
+                .as_ref()
+                .map(|action| action.decision.action)
+            {
                 Some(FanAction::EngageInContext | FanAction::InviteToFanbase) => {}
                 Some(FanAction::DoNotContact) => {
                     sqlx::query(
@@ -505,12 +508,10 @@ impl CommunityExecutorWorker {
                     )
                     .bind(row.id)
                     .bind(ws)
-                    .bind(
-                        fan_scout_action.as_ref().map_or_else(
-                            || "FAN SCOUT: held".to_owned(),
-                            |action| format!("FAN SCOUT: {}", action.decision.reason),
-                        ),
-                    )
+                    .bind(fan_scout_action.as_ref().map_or_else(
+                        || "FAN SCOUT: held".to_owned(),
+                        |action| format!("FAN SCOUT: {}", action.decision.reason),
+                    ))
                     .execute(&self.pool)
                     .await?;
                     return Ok(());
@@ -869,6 +870,10 @@ impl CommunityExecutorWorker {
             return Ok(0);
         }
         let ws = self.workspace_id.into_uuid();
+        if let Some(breaches) = crowdrelay_infra::scout_lane::halted(&self.pool, ws).await {
+            tracing::warn!(?breaches, "scout lane halted; replies are held");
+            return Ok(0);
+        }
         let history = standing::post_history(&self.pool, ws).await?;
         if let RedditStanding::Halted(reason) = reddit_standing(&history, OffsetDateTime::now_utc())
         {

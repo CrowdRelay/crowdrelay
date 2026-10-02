@@ -860,7 +860,66 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
             active: !stale_autopost_parked(snapshot).is_empty(),
             details: stale_autopost_details(snapshot),
         },
+        // FAN SCOUT lane tripwires (plan §3.18). The lane speaks to people the
+        // band has never met, and runs autonomously only because its envelope is
+        // enforced; each of these is a sign the envelope was breached. All
+        // critical, and the lane's senders hold on the same read
+        // (`scout_lane::halted`), so the alarm and the halt cannot disagree.
+        Condition {
+            key: "scout.contacted_suppressed",
+            severity: "critical",
+            summary: "The scout lane spoke to someone after they refused or were suppressed",
+            active: scout_breach(snapshot, Breach::ContactedAfterNo),
+            details: json!({
+                "remedy": "the lane is halted. Find the touch recorded after the \
+                           prospect's refusal (fan_prospect_touches joined to \
+                           fan_prospects where touched_at > updated_at), confirm \
+                           which sender made it, and fix that path before the \
+                           30-day window lets the lane resume.",
+            }),
+        },
+        Condition {
+            key: "scout.over_rate",
+            severity: "critical",
+            summary: "The scout lane exceeded its daily cap or spoke twice to one person inside the cooldown",
+            active: scout_breach(snapshot, Breach::OverRate),
+            details: json!({
+                "daily_touch_cap": crowdrelay_infra::scout_lane::DAILY_TOUCH_CAP,
+                "one_voice_hours": crowdrelay_infra::scout_lane::ONE_VOICE_HOURS,
+                "remedy": "the lane is halted. Read the touches of the last day \
+                           (cap) or the prospect with two touches inside the \
+                           cooldown; the evaluator holds a recently-engaged \
+                           person, so a second touch means a sender bypassed it.",
+            }),
+        },
+        Condition {
+            key: "scout.invite_without_route",
+            severity: "critical",
+            summary: "The scout lane invited someone who never spoke in a thread the band reads",
+            active: scout_breach(snapshot, Breach::InviteWithoutRoute),
+            details: json!({
+                "remedy": "the lane is halted. A consumer is invited only inside the \
+                           conversation they started; find the invite touch whose \
+                           prospect has no own_comments observation.",
+            }),
+        },
+        Condition {
+            key: "scout.untracked_link",
+            severity: "critical",
+            summary: "A scout invitation carried a tracked link that is no longer live",
+            active: scout_breach(snapshot, Breach::UntrackedLink),
+            details: json!({
+                "remedy": "the lane is halted. Reactivate the smart link or find what \
+                           deactivated it; until then a person following the \
+                           invitation reaches nothing and the click cannot be \
+                           attributed.",
+            }),
+        },
     ]
+}
+
+fn scout_breach(snapshot: &OpsSnapshot, breach: Breach) -> bool {
+    snapshot.scout_breaches.contains(&breach)
 }
 
 /// Seven days without a join is a stall, not a slow week — the cadence a
