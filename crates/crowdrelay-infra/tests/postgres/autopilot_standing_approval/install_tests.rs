@@ -6,7 +6,7 @@ use crowdrelay_domain::FanId;
 const INSTALL_TEMPLATE: &str = "crowdrelay.fan.signal_install_ask.v1";
 const INSTALL_TARGET: &str = "template:crowdrelay.fan.signal_install_ask.v1";
 
-async fn install_fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
+pub(super) async fn install_fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Error>> {
     let f = fixture(label).await?;
     let configured = sqlx::query(
         "UPDATE autopilot_policies SET enabled=true, autonomy_level='require_approval' WHERE workspace_id=$1 AND context='fan_lifecycle'",
@@ -38,7 +38,7 @@ async fn install_fixture(label: &str) -> Result<Fixture, Box<dyn std::error::Err
     Ok(f)
 }
 
-async fn consented_fan(f: &Fixture) -> Result<FanId, Box<dyn std::error::Error>> {
+pub(super) async fn consented_fan(f: &Fixture) -> Result<FanId, Box<dyn std::error::Error>> {
     let fan = FanId::new();
     sqlx::query(
         "INSERT INTO fans(id,workspace_id,normalized_email,status) VALUES($1,$2,$3,'active')",
@@ -67,7 +67,7 @@ async fn emission_count(f: &Fixture) -> Result<i64, sqlx::Error> {
     .await
 }
 
-fn install_candidate(fan: FanId, key: &str) -> DecisionCandidate {
+pub(super) fn install_candidate(fan: FanId, key: &str) -> DecisionCandidate {
     let mut candidate = outreach_candidate(OutreachTargetId::new(), Uuid::now_v7());
     candidate.context = AutopilotContext::FanLifecycle;
     candidate.subject = ActionSubject::Fan(fan);

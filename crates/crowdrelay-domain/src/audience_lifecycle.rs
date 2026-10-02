@@ -102,10 +102,8 @@ pub struct FanLifecyclePolicy {
     pub referral_invite_after_days: u32,
     /// Days after signup past which the ask stops.
     ///
-    /// A bound, not a schedule. Nothing records that a fan has been asked, so
-    /// the window is what keeps "ask once or twice" from becoming "ask forever":
-    /// with the default cooldown of 120 hours, days 3 to 14 allow at most two.
-    /// A fan who has not invited anyone in two weeks has answered.
+    /// A stale-ask bound, not a schedule. The stable lifecycle episode permits
+    /// one onboarding invite; this window keeps it from arriving weeks late.
     pub referral_invite_until_days: u32,
     /// Minimum signup age before a fan without Signal is asked to open it.
     ///
@@ -114,10 +112,8 @@ pub struct FanLifecyclePolicy {
     pub signal_install_ask_after_days: u32,
     /// Days after signup past which the install ask stops.
     ///
-    /// Same bound shape as the referral invite: nothing records that a fan was
-    /// asked, so the window is what keeps "ask once" honest — days 2 to 9
-    /// against the default 120-hour cooldown admit exactly one. A fan who has
-    /// not opened Signal in that window has answered.
+    /// The stable episode permits one onboarding ask. The age window and
+    /// contact cooldown still gate when that ask may happen.
     pub signal_install_ask_until_days: u32,
     /// Hours after a check-in before the show recall may send.
     ///
@@ -128,9 +124,8 @@ pub struct FanLifecyclePolicy {
     pub show_recall_after_hours: u32,
     /// Hours after a check-in past which the recall stops referencing it.
     ///
-    /// A window rather than an "asked" flag: the 120-hour marketing cooldown
-    /// already guarantees a recall fires at most once per check-in, so the
-    /// bound exists only to keep "you were there" from arriving a week late.
+    /// The episode identifies the check-in; this bound keeps "you were there"
+    /// from arriving a week late even when the request was never made.
     pub show_recall_until_hours: u32,
 }
 
@@ -190,9 +185,8 @@ pub enum LifecycleTemplate {
     /// scan created, the recall *is* the welcome.
     ///
     /// Not a milestone and not a standing approach either: it is a windowed
-    /// acknowledgement that still waits out the cooldown, and the cooldown is
-    /// what keeps it to once per night even though nothing records that a
-    /// recall was sent.
+    /// acknowledgement that still waits out the cooldown. Its episode identity
+    /// keeps it to one request for that check-in.
     ShowRecall,
 }
 
@@ -367,8 +361,8 @@ pub fn evaluate_fan_lifecycle(
     // The install ask. Placed after the welcome so it is never a fan's first
     // contact, and before the referral invite: a fan who opens Signal becomes
     // push-reachable, which is worth more to every later ask than an install
-    // deferred behind one. Bounded like the referral invite — a window, not
-    // an "asked" flag — so it asks once, then stops.
+    // deferred behind one. Its episode permits one request, and the age
+    // window prevents a stale onboarding ask.
     if !snapshot.has_signal_install
         && snapshot.last_marketing_touch_at.is_some()
         && now - snapshot.created_at
@@ -390,8 +384,8 @@ pub fn evaluate_fan_lifecycle(
     let engaged = snapshot
         .latest_engagement_at()
         .is_some_and(|at| at >= snapshot.created_at && at <= now);
-    // Bounded by a window rather than by an "asked" flag: outside the
-    // window the fan is left alone, including fans with no observed activity.
+    // The episode bounds the request; outside this age window the fan is
+    // left alone, including fans with no observed activity.
     if engaged
         && snapshot.qualified_referrals == 0
         && snapshot.last_marketing_touch_at.is_some()
@@ -404,9 +398,12 @@ pub fn evaluate_fan_lifecycle(
         };
     }
 
+    // An old quiz follow-up must not win forever over a new dormancy episode.
+    // Stop treating it as onboarding once the engagement is dormant.
     if !snapshot.has_paid_ticket
         && let Some(completed_at) = snapshot.synesthesia_completed_at
         && now - completed_at >= Duration::hours(i64::from(policy.minimum_hours_after_synesthesia))
+        && now - completed_at < Duration::days(i64::from(policy.dormant_after_days))
     {
         return FanLifecycleDecision::RequestMessage {
             template: LifecycleTemplate::SynesthesiaFollowUp,
@@ -675,7 +672,7 @@ mod tests {
 
     #[test]
     fn the_install_ask_stops_outside_its_window() {
-        // The window is the bound, not an "asked" flag: past it the fan is
+        // The episode bounds repetition; past the age window the fan is
         // left alone rather than nagged forever.
         let mut data = eligible();
         data.has_signal_install = false;
@@ -915,9 +912,8 @@ mod tests {
 
     #[test]
     fn the_ask_stops_at_the_end_of_its_window() {
-        // Nothing records that a fan has been asked, so the window is the only
-        // thing stopping "ask once or twice" becoming "ask forever". Someone who
-        // has invited nobody in two weeks has answered.
+        // The episode bounds repeated requests; the age window also prevents
+        // stale onboarding invitations.
         let mut snapshot = eligible();
         snapshot.created_at = now() - Duration::days(30);
         snapshot.last_marketing_touch_at = Some(now() - Duration::days(30));
@@ -940,5 +936,71 @@ mod tests {
             evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::Hold(FanLifecycleHoldReason::CooldownActive)
         ));
+    }
+
+    #[test]
+    fn an_old_quiz_does_not_swallow_a_dormancy_episode() {
+        let mut fan = eligible();
+        fan.created_at = now() - Duration::days(120);
+        fan.last_marketing_touch_at = Some(now() - Duration::days(90));
+        fan.synesthesia_completed_at = Some(now() - Duration::days(60));
+        assert!(matches!(
+            evaluate_fan_lifecycle(fan, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::DormantReactivation,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_old_quiz_does_not_trigger_onboarding_after_recent_attendance() {
+        let mut fan = eligible();
+        fan.created_at = now() - Duration::days(120);
+        fan.last_marketing_touch_at = Some(now() - Duration::days(90));
+        fan.synesthesia_completed_at = Some(now() - Duration::days(90));
+        fan.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(12),
+            event_slug: "real-show".to_owned(),
+            event_title: "Real show".to_owned(),
+        });
+        assert_eq!(
+            evaluate_fan_lifecycle(fan, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoLifecycleOpportunity)
+        );
+    }
+
+    #[test]
+    fn a_genuine_checkin_can_earn_a_referral_invite_without_a_purchase_or_quiz() {
+        let mut fan = eligible();
+        fan.last_marketing_touch_at = Some(now() - Duration::days(6));
+        fan.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::days(3),
+            event_slug: "real-show".to_owned(),
+            event_title: "Real show".to_owned(),
+        });
+        assert!(matches!(
+            evaluate_fan_lifecycle(fan, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn recent_attendance_is_not_dormancy() {
+        let mut fan = eligible();
+        fan.created_at = now() - Duration::days(90);
+        fan.last_marketing_touch_at = Some(now() - Duration::days(10));
+        fan.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now() - Duration::hours(12),
+            event_slug: "real-show".to_owned(),
+            event_title: "Real show".to_owned(),
+        });
+        assert_eq!(
+            evaluate_fan_lifecycle(fan, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::Hold(FanLifecycleHoldReason::NoLifecycleOpportunity)
+        );
     }
 }

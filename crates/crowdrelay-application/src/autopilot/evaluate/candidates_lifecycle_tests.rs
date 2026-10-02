@@ -34,7 +34,9 @@ mod lifecycle_tests {
         }
     }
 
-    fn policy(autonomy_level: AutonomyLevel) -> Result<AutopilotPolicy, Box<dyn std::error::Error>> {
+    fn policy(
+        autonomy_level: AutonomyLevel,
+    ) -> Result<AutopilotPolicy, Box<dyn std::error::Error>> {
         Ok(AutopilotPolicy {
             context: AutopilotContext::FanLifecycle,
             enabled: true,
@@ -64,9 +66,7 @@ mod lifecycle_tests {
         )?
         .expect("a check-in inside the window must propose");
         let AutopilotActionPayload::RequestFanLifecycleMessage {
-            template_key,
-            show,
-            ..
+            template_key, show, ..
         } = &candidate.action
         else {
             panic!("expected a lifecycle message, got {:?}", candidate.action);
@@ -160,7 +160,57 @@ mod lifecycle_tests {
                     if template_key == "crowdrelay.fan.show_recall.v1"
             )
         });
-        assert!(!fired_recall, "a check-in past the window must not recall it");
+        assert!(
+            !fired_recall,
+            "a check-in past the window must not recall it"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_ticket_thank_you_does_not_rearm_when_contacts_interest_or_policy_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = datetime!(2026-10-18 18:00 UTC);
+        let mut fan = snapshot();
+        fan.has_paid_ticket = true;
+        fan.paid_ticket_count = 1;
+        fan.last_paid_ticket_at = Some(now - time::Duration::hours(2));
+        let mut policy = policy(AutonomyLevel::BoundedAuto)?;
+        let first = lifecycle_candidate(fan.clone(), &policy, now)?.expect("first ticket");
+        fan.last_marketing_touch_at = Some(now - time::Duration::minutes(1));
+        fan.last_event_interest_at = Some(now - time::Duration::minutes(2));
+        fan.recent_checkin = Some(LifecycleCheckin {
+            checked_in_at: now - time::Duration::minutes(3),
+            event_slug: "other-night".to_owned(),
+            event_title: "Other night".to_owned(),
+        });
+        policy.version += 1;
+        let next = lifecycle_candidate(fan, &policy, now)?.expect("same milestone");
+        assert_ne!(first.decision_key, next.decision_key);
+        assert_eq!(first.action_idempotency_key, next.action_idempotency_key);
+        assert_eq!(
+            first.input_snapshot.get("lifecycle_episode"),
+            next.input_snapshot.get("lifecycle_episode")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn each_new_qualified_referral_can_receive_its_own_thanks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = datetime!(2026-10-18 18:00 UTC);
+        let policy = policy(AutonomyLevel::BoundedAuto)?;
+        let mut fan = snapshot();
+        fan.qualified_referrals = 1;
+        fan.last_qualified_referral_at = Some(now - time::Duration::hours(3));
+        let first = lifecycle_candidate(fan.clone(), &policy, now)?.expect("qualified referral");
+        fan.last_marketing_touch_at = Some(now - time::Duration::hours(1));
+        let repeat = lifecycle_candidate(fan.clone(), &policy, now)?.expect("same referral");
+        assert_eq!(first.action_idempotency_key, repeat.action_idempotency_key);
+        fan.qualified_referrals = 2;
+        fan.last_qualified_referral_at = Some(now - time::Duration::minutes(30));
+        let second = lifecycle_candidate(fan, &policy, now)?.expect("new referral");
+        assert_ne!(first.action_idempotency_key, second.action_idempotency_key);
         Ok(())
     }
 }
