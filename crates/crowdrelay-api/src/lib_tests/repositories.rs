@@ -323,10 +323,17 @@
     }
 
     fn event_state(workspace_id: WorkspaceId) -> EventState {
+        event_state_with_cache(workspace_id, Arc::new(EventCache::new()))
+    }
+
+    fn event_state_with_cache(
+        workspace_id: WorkspaceId,
+        cache: Arc<EventCache>,
+    ) -> EventState {
         let repository: Arc<dyn EventRepository> = Arc::new(TestEventRepository);
         EventState::new(
             workspace_id,
-            Arc::new(EventCache::new()),
+            cache,
             RegisterEventInterest::new(Arc::clone(&repository)),
             ListFanEventInterests::new(Arc::clone(&repository)),
             crowdrelay_application::CreateEvent::new(Arc::clone(&repository)),
