@@ -156,7 +156,9 @@ impl ProspectSweep {
                 &ObservedPerson {
                     source: ProspectSource::OwnComments,
                     platform: &comment.platform,
-                    handle: &comment.author,
+                    platform_user_id: None,
+                    handle: Some(&comment.author),
+                    display_identity: &comment.author,
                     display_name: None,
                     profile_url: None,
                     kind: ObservationKind::ActiveUnderOurPost,
@@ -176,6 +178,13 @@ impl ProspectSweep {
                 } => report.already_known += 1,
                 ObserveOutcome::NotCollected { .. } => report.not_collected += 1,
                 ObserveOutcome::NotAnIdentity => report.not_an_identity += 1,
+                ObserveOutcome::IdentityConflict => {
+                    tracing::warn!(
+                        platform = %comment.platform,
+                        "prospect identity conflict; observation held"
+                    );
+                    report.not_an_identity += 1;
+                }
             }
         }
         report.expired = expire(&self.pool, ws, now, EXPIRE_PER_PASS).await?;
