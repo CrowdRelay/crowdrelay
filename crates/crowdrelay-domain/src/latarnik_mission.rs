@@ -184,6 +184,14 @@ fn show_plan(language: Language, show: &ShowFact, link: &str) -> MissionPlan {
 }
 
 fn release_plan(language: Language, release: &ReleaseFact, link: &str) -> MissionPlan {
+    let lang = match language {
+        Language::Pl => "pl",
+        Language::En => "en",
+    };
+    let link = format!(
+        "{link}?release={}&lang={lang}",
+        release.content_source_id
+    );
     let (prompt, share) = match language {
         Language::Pl => (
             format!("Komu jednej osobie wysłałbyś „{}”?", release.title),
