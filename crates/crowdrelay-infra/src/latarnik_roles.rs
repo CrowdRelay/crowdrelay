@@ -209,11 +209,12 @@ async fn resolve_person_for_email(
         return Ok(person_id);
     }
 
-    let person_id =
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id")
-            .bind(workspace_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    let person_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id",
+    )
+    .bind(workspace_id)
+    .fetch_one(&mut **tx)
+    .await?;
     let claimed = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO person_identities (workspace_id, person_id, kind, platform, value, source)
          VALUES ($1, $2, 'email', NULL, $3, 'fan_evidence_sweep')

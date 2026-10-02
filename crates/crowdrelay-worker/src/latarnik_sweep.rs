@@ -109,15 +109,9 @@ impl LatarnikSweep {
                 }
                 LatarnikMove::AskForReferral => {
                     report.light_ask_ready += 1;
-                    if record_referral_opportunity(
-                        &self.pool,
-                        ws,
-                        &fan.email,
-                        &fan.evidence,
-                        now,
-                    )
-                    .await?
-                    .is_some()
+                    if record_referral_opportunity(&self.pool, ws, &fan.email, &fan.evidence, now)
+                        .await?
+                        .is_some()
                     {
                         report.referral_opportunities_recorded += 1;
                     }

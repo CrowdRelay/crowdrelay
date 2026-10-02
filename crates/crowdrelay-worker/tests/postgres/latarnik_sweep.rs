@@ -186,19 +186,17 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
     .bind(ws.into_uuid())
     .fetch_one(&pool)
     .await?;
-    ensure!(opportunities == 1, "the light ask becomes one durable opportunity");
+    ensure!(
+        opportunities == 1,
+        "the light ask becomes one durable opportunity"
+    );
 
     // A second pass cannot create another ask or upgrade the same person into
     // a role behind the first plan's back.
     let second = sweep.run_once(now + Span::hours(1)).await?;
     ensure!(second.referral_opportunities_recorded == 0, "{second:?}");
-    let observed_again = load_fan_evidence(
-        &pool,
-        ws.into_uuid(),
-        now + Span::hours(1),
-        100,
-    )
-    .await?;
+    let observed_again =
+        load_fan_evidence(&pool, ws.into_uuid(), now + Span::hours(1), 100).await?;
     ensure!(
         observed_again
             .iter()
