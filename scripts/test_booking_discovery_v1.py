@@ -27,7 +27,7 @@ MODEL = ROOT / "crates/crowdrelay-application/src/autopilot/model.rs"
 ACTION_KIND = ROOT / "crates/crowdrelay-application/src/autopilot/model/action_kind.rs"
 CANDIDATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate/outreach_supply.rs"
 EVALUATE = ROOT / "crates/crowdrelay-application/src/autopilot/evaluate.rs"
-SNAPSHOTS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/snapshots.rs"
+SNAPSHOTS = ROOT / "crates/crowdrelay-infra/src/autopilot/operations/booking_supply_snapshot.rs"
 INGRESS = (
     ROOT / "crates/crowdrelay-infra/src/autopilot/operations/ingress/booking_discovery.rs"
 )

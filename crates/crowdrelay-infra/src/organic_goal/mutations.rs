@@ -90,16 +90,22 @@ pub async fn declare(
     Ok(result)
 }
 
+/// One operator exclusion of a fan from the verified-organic count: who, why.
+pub struct Exclusion<'a> {
+    pub fan: Uuid,
+    pub reason: Option<&'a str>,
+    pub actor: &'a str,
+}
+
 pub async fn exclude(
     pool: &PgPool,
     workspace: Uuid,
-    fan: Uuid,
-    reason: Option<&str>,
-    actor: &str,
+    exclusion: Exclusion<'_>,
     key: &str,
     request: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<GoalMutation, GoalError> {
+    let Exclusion { fan, reason, actor } = exclusion;
     let mut tx = pool.begin().await?;
     if sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM fans WHERE workspace_id=$1 AND id=$2 FOR SHARE",

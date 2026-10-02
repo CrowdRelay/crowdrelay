@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod mutations;
-pub use mutations::{GoalError, GoalMutation, declare, exclude};
+pub use mutations::{Exclusion, GoalError, GoalMutation, declare, exclude};
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct OrganicGoal {

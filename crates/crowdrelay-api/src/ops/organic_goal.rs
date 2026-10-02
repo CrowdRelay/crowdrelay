@@ -110,9 +110,11 @@ pub async fn set_organic_exclusion(
     let result = crowdrelay_infra::organic_goal::exclude(
         &state.ops.pool,
         state.ops.workspace_id().into_uuid(),
-        fan_id,
-        request.reason.as_deref(),
-        request.declared_by.trim(),
+        crowdrelay_infra::organic_goal::Exclusion {
+            fan: fan_id,
+            reason: request.reason.as_deref(),
+            actor: request.declared_by.trim(),
+        },
         &key,
         rid.as_deref(),
         OffsetDateTime::now_utc(),

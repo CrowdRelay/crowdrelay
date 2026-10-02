@@ -13,7 +13,6 @@
     "crates/crowdrelay-brain/src/causal_model/tests.rs": 1208,
     "crates/crowdrelay-brain/src/experiment.rs": 1801,
     "crates/crowdrelay-domain/src/growth_metrics.rs": 1651,
-    "crates/crowdrelay-domain/src/outreach_letter.rs": 1209,
     "crates/crowdrelay-domain/src/plays.rs": 1727,
     "crates/crowdrelay-domain/src/roster_plan.rs": 1707,
     "crates/crowdrelay-domain/src/show_growth.rs": 1228,
@@ -41,7 +40,6 @@
     "crates/crowdrelay-worker/src/community_executor.rs": 2238,
     "crates/crowdrelay-worker/src/growth_metric_sync.rs": 2251,
     "crates/crowdrelay-worker/src/main.rs": 1515,
-    "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1630,
-    "crates/crowdrelay-worker/tests/postgres/community_relay_batch.rs": 1370
+    "crates/crowdrelay-worker/src/receipt_reconciliation.rs": 1630
   }
 }

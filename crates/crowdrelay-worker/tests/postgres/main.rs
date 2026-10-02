@@ -15,6 +15,7 @@ mod community_draft_language;
 mod community_drip_order;
 mod community_recovery;
 mod community_relay_batch;
+mod community_relay_revisions;
 mod community_replies_lane;
 mod community_tracked_links;
 mod contact_research_outcome;
