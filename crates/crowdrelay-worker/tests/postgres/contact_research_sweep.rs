@@ -177,9 +177,10 @@ async fn it_reads_only_the_people_the_engine_would_pitch() -> Result<()> {
     .await?;
     sqlx::query(
         "INSERT INTO contact_research
-            (workspace_id, normalized_email, fact, source_url, observed_on, researched_by)
+            (workspace_id, normalized_email, fact, praise, source_url, observed_on, researched_by)
          VALUES ($1, 'przeczytany@gazeta.example.test',
                  'recenzja płyty „Szum” w audycji „Metalowy Wieczór”',
+                 'W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.',
                  'https://example.test/a', (now() AT TIME ZONE 'UTC')::date - 5, 'test')",
     )
     .bind(ws.into_uuid())
