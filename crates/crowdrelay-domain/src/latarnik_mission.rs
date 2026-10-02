@@ -357,6 +357,8 @@ mod tests {
                 choose_mission(&MissionContext { shows, ..context() }, NOW).expect("release");
             assert_eq!(plan.kind, MissionKind::ReleaseOnePerson);
             assert!(plan.share_text.contains("Technophobia"));
+            assert!(plan.share_text.contains("?release="), "{}", plan.share_text);
+            assert!(plan.share_text.ends_with("&lang=pl"), "{}", plan.share_text);
         }
     }
 
