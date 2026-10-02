@@ -496,6 +496,16 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .await
     }
 
+    async fn load_organic_funnel_control(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Option<crowdrelay_application::autopilot::OrganicFunnelControl>, RepositoryError> {
+        crate::organic_funnel::control(&self.pool, workspace_id.into_uuid(), now)
+            .await
+            .map_err(map_sqlx)
+    }
+
     async fn load_open_content_suggestions(
         &self,
         workspace_id: WorkspaceId,
