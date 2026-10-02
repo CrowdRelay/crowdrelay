@@ -483,6 +483,11 @@ pub(super) fn application_routes(state: AppState) -> Router {
             "/v1/me/latarnik/answer",
             post(fan_latarnik::answer_my_latarnik),
         )
+        .route("/v1/me/latarnik/mission", get(fan_latarnik::get_my_mission))
+        .route(
+            "/v1/me/latarnik/mission/{mission_id}/answer",
+            post(fan_latarnik::answer_my_mission_route),
+        )
         .route(
             "/v1/commerce/coupons/redeem",
             post(referrals::redeem_coupon),

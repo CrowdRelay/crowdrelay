@@ -209,11 +209,12 @@ async fn resolve_person_for_email(
         return Ok(person_id);
     }
 
-    let person_id =
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id")
-            .bind(workspace_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    let person_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id",
+    )
+    .bind(workspace_id)
+    .fetch_one(&mut **tx)
+    .await?;
     let claimed = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO person_identities (workspace_id, person_id, kind, platform, value, source)
          VALUES ($1, $2, 'email', NULL, $3, 'fan_evidence_sweep')
@@ -562,6 +563,26 @@ pub async fn answer_my_role(
         )
         .bind(workspace_id)
         .bind(role_id)
+        .execute(pool)
+        .await?;
+        // They carry their *own* link, so it must exist. The same code the fan
+        // gets everywhere else (`load_or_create_fan_referral_code`): one active
+        // code per fan, so this is a no-op for a fan who already has one.
+        sqlx::query(
+            "INSERT INTO referral_codes (workspace_id, fan_id, code)
+             SELECT fan.workspace_id, fan.id, encode(gen_random_bytes(18), 'hex')
+             FROM fan_sessions session
+             JOIN fans fan
+               ON fan.workspace_id = session.workspace_id AND fan.id = session.fan_id
+             WHERE session.workspace_id = $1
+               AND session.session_token_hash = digest($2, 'sha256')
+               AND NOT EXISTS (
+                   SELECT 1 FROM referral_codes rc
+                   WHERE rc.workspace_id = fan.workspace_id AND rc.fan_id = fan.id AND rc.active)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(workspace_id)
+        .bind(session_token)
         .execute(pool)
         .await?;
     }

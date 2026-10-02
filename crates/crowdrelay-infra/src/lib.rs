@@ -62,6 +62,7 @@ pub mod gig_planning;
 pub mod join_ask;
 pub mod lapsed_approvals;
 pub mod latarnik;
+pub mod latarnik_missions;
 pub mod latarnik_roles;
 pub mod measurement_queries;
 pub mod media;
