@@ -148,6 +148,54 @@ pub enum VerificationStatus {
     NotVerified,
 }
 
+/// What the separate senior content reviewer concluded.
+///
+/// This is deliberately NOT part of grounding. A grounded draft may still be
+/// badly timed, low-value or wrong for the tenant's current situation.
+/// Unknown/missing values are `NotReviewed`, never an implicit pass.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategicReviewStatus {
+    StrategicReviewPassed,
+    StrategicReviewRejected,
+    #[default]
+    #[serde(other)]
+    NotReviewed,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct StrategicReviewProvenance {
+    #[serde(default)]
+    pub status: StrategicReviewStatus,
+    #[serde(default)]
+    pub issues: Vec<String>,
+    #[serde(default)]
+    pub revision_brief: String,
+    #[serde(default)]
+    pub reviewer_error: Option<String>,
+}
+
+impl StrategicReviewProvenance {
+    /// A strategic review never grants authority by itself. A pass only lets
+    /// an authority the operator already granted (for example one community
+    /// standing grant) remain usable.
+    #[must_use]
+    pub const fn passed(&self) -> bool {
+        matches!(self.status, StrategicReviewStatus::StrategicReviewPassed)
+    }
+
+    #[must_use]
+    pub fn human_hold_reason(&self) -> Option<&str> {
+        self.issues
+            .first()
+            .map(String::as_str)
+            .or_else(|| self.reviewer_error.as_deref())
+            .or_else(|| {
+                (!self.revision_brief.trim().is_empty()).then_some(self.revision_brief.as_str())
+            })
+    }
+}
+
 /// Where the number in `agent_outcomes.confidence_basis_points` came from.
 ///
 /// Today there is exactly one producer and it is a language model scoring its
@@ -229,6 +277,8 @@ pub struct ModelProvenance {
 pub struct OutcomeProvenance {
     #[serde(default)]
     pub verification: VerificationProvenance,
+    #[serde(default)]
+    pub strategic_review: StrategicReviewProvenance,
     #[serde(default)]
     pub context: ContextProvenance,
     #[serde(default)]
@@ -767,6 +817,45 @@ mod tests {
         assert!(
             provenance.context.any_source_failed,
             "an unrecorded context must not be read as a healthy one",
+        );
+    }
+
+    #[test]
+    fn missing_strategic_review_is_not_an_implicit_pass() {
+        let outcome = outcome_with(
+            "social_post",
+            &provenance_json("grounding_check_passed", false),
+            8_000,
+        );
+        let strategic = &outcome
+            .payload
+            .provenance
+            .as_ref()
+            .expect("provenance")
+            .strategic_review;
+        assert_eq!(strategic.status, StrategicReviewStatus::NotReviewed);
+        assert!(!strategic.passed());
+    }
+
+    #[test]
+    fn strategic_rejection_does_not_delete_a_grounded_draft() {
+        let mut payload = provenance_json("grounding_check_passed", false);
+        payload["provenance"]["strategic_review"] = serde_json::json!({
+            "status": "strategic_review_rejected",
+            "issues": ["no current reason to publish this"],
+            "revision_brief": "tie the post to the release tomorrow"
+        });
+        let outcome = outcome_with("social_post", &payload, 8_000);
+        assert_eq!(
+            provenance_admission(outcome.kind, outcome.payload.provenance.as_ref()),
+            Ok(()),
+            "strategic review controls unattended authority/revision, not whether a grounded draft can reach a human"
+        );
+        let review = &outcome.payload.provenance.expect("provenance").strategic_review;
+        assert!(!review.passed());
+        assert_eq!(
+            review.human_hold_reason(),
+            Some("no current reason to publish this")
         );
     }
 

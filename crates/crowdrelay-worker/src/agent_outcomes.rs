@@ -520,17 +520,43 @@ impl AgentOutcomeWorker {
         // so multi-byte UTF-8 (Polish diacritics, emoji) doesn't
         // exceed the char_length CHECK. The full rationale is
         // preserved in input_snapshot.payload.rationale.
-        let decision_reason = {
-            let r = outcome.payload.rationale.trim();
-            if r.is_empty() {
-                "Outcome supplied no rationale."
-            } else if r.chars().count() <= 240 {
-                r
-            } else {
-                let byte_end = r.char_indices().nth(240).map_or(r.len(), |(b, _)| b);
-                // Safety: char_indices always lands on a UTF-8 boundary.
-                r.get(..byte_end).unwrap_or(r)
-            }
+        let decision_reason_owned = outcome
+            .payload
+            .provenance
+            .as_ref()
+            .filter(|_| {
+                matches!(
+                    outcome.kind,
+                    OutcomeKind::PressPitch | OutcomeKind::SocialPost | OutcomeKind::SignalPush
+                )
+            })
+            .and_then(|provenance| {
+                (!provenance.strategic_review.passed()).then(|| {
+                    let detail = provenance
+                        .strategic_review
+                        .human_hold_reason()
+                        .unwrap_or("strategic review did not produce a passing verdict");
+                    format!("Human review required after AI cross-review: {detail}")
+                })
+            });
+        let decision_reason_source = decision_reason_owned
+            .as_deref()
+            .unwrap_or_else(|| {
+                let rationale = outcome.payload.rationale.trim();
+                if rationale.is_empty() {
+                    "Outcome supplied no rationale."
+                } else {
+                    rationale
+                }
+            });
+        let decision_reason = if decision_reason_source.chars().count() <= 240 {
+            decision_reason_source
+        } else {
+            let byte_end = decision_reason_source
+                .char_indices()
+                .nth(240)
+                .map_or(decision_reason_source.len(), |(byte, _)| byte);
+            decision_reason_source.get(..byte_end).unwrap_or(decision_reason_source)
         };
 
         // A social_post from the community-engager worker targets a specific
@@ -1073,6 +1099,11 @@ impl AgentOutcomeWorker {
                     // A push has no single target to have judged, so it looks
                     // for no grant and answers to the two axes alone.
                     let target_key = community_target_id.map(|id| id.to_string());
+                    let strategic_review_passed = outcome
+                        .payload
+                        .provenance
+                        .as_ref()
+                        .is_some_and(|provenance| provenance.strategic_review.passed());
                     model_text_authority(
                         self.may_auto_execute(
                             &mut tx,
@@ -1083,6 +1114,7 @@ impl AgentOutcomeWorker {
                             OffsetDateTime::now_utc(),
                         )
                         .await?,
+                        strategic_review_passed,
                     )
                 } else {
                     // Press pitches and everything unrecognised: a person

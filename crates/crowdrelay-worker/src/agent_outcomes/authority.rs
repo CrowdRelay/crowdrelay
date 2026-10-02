@@ -139,7 +139,13 @@ impl AgentOutcomeWorker {
 /// who looked at one named community and said "stop asking me about this
 /// one", and it is revocable per target. That, an approved relay card, or a
 /// person approving the action itself are the only ways model text leaves.
-fn model_text_authority(authority: UnattendedAuthority) -> UnattendedAuthority {
+fn model_text_authority(
+    authority: UnattendedAuthority,
+    strategic_review_passed: bool,
+) -> UnattendedAuthority {
+    if !strategic_review_passed {
+        return UnattendedAuthority::Denied;
+    }
     match authority {
         UnattendedAuthority::Policy => UnattendedAuthority::Denied,
         other => other,
@@ -230,6 +236,24 @@ mod authority_tests {
                     "body": "test",
                 })),
             )
+        }
+
+        #[test]
+        fn model_text_needs_both_a_strategic_pass_and_existing_target_authority() {
+            assert_eq!(
+                model_text_authority(UnattendedAuthority::Grant, true),
+                UnattendedAuthority::Grant
+            );
+            assert_eq!(
+                model_text_authority(UnattendedAuthority::Grant, false),
+                UnattendedAuthority::Denied,
+                "a reviewer outage or negative review sends the draft to a person instead of using the standing grant"
+            );
+            assert_eq!(
+                model_text_authority(UnattendedAuthority::Policy, true),
+                UnattendedAuthority::Denied,
+                "the reviewer is never a new source of workspace-wide authority"
+            );
         }
 
         /// The whole of fix one: a forum post no longer answers to the money
