@@ -8,8 +8,8 @@
 //! validator refuses stays untracked — the post still goes out, and its
 //! measurement abandons as `no_tracked_link` rather than recording a zero
 //! that was never observable. Facebook/X drafts with no CTA are different:
- //! the executor itself can safely choose the tenant's Signal/home destination,
- //! so missing model copy cannot silently remove acquisition instrumentation.
+//! the executor itself can safely choose the tenant's Signal/home destination,
+//! so missing model copy cannot silently remove acquisition instrumentation.
 
 use uuid::Uuid;
 
@@ -85,7 +85,7 @@ impl SocialPostExecutorWorker {
             match crowdrelay_domain::acquisition::agent_smart_link_destination(
                 cta_url, &allowed, None,
             ) {
-                Ok(destination) => destination.into_owned(),
+                Ok(destination) => destination.as_str().to_owned(),
                 Err(refusal) => {
                     tracing::warn!(
                         action_id = %row.action_id,
@@ -187,7 +187,6 @@ impl SocialPostExecutorWorker {
         }
     }
 }
-
 
 /// A deterministic destination the executor may choose without model input.
 ///

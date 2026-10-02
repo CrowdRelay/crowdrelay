@@ -291,8 +291,9 @@ async fn facebook_without_model_cta_gets_an_owned_tracked_fallback() -> Result<(
     .fetch_one(&database)
     .await?;
     ensure!(row.0.is_some(), "facebook fallback must bind a smart_link_id");
+    let expected_link = format!("/l/social-{}", action_id.simple());
     ensure!(
-        row.1.as_deref() == Some(format!("/l/social-{}", action_id.simple()).as_str()),
+        row.1.as_deref() == Some(expected_link.as_str()),
         "facebook fallback must use the action-owned deterministic slug: {row:?}"
     );
     ensure!(
