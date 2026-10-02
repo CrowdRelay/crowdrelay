@@ -18,7 +18,11 @@ async fn late_publication_reopens_only_never_observed_failures() {
     .await;
     sqlx::query("UPDATE autopilot_measurements SET status='failed',attempt_count=1,finished_at=$2,last_error_kind='no_tracked_link' WHERE id=$1")
         .bind(m.id.into_uuid()).bind(f.now-time::Duration::days(2)).execute(&f.pool).await.expect("failure");
-    let posted = f.now - time::Duration::days(1);
+    // Postgres keeps microseconds; the due_at assert below compares against
+    // this value, so it must be whole-second to round-trip.
+    let posted = (f.now - time::Duration::days(1))
+        .replace_nanosecond(0)
+        .expect("zero nanoseconds is valid");
     live_post(&f, action, "late-recovery", posted).await;
     assert!(
         f.repository

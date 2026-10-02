@@ -39,6 +39,15 @@ pub enum OutcomeRejection {
     /// a refused community (off-topic, too small, previously refused) posts
     /// past the screen that rejected it.
     UnvettedCommunity { target_id: Uuid },
+    /// A community post that names no thread the band read in that room. The
+    /// drafter is shown the threads the community sweep recorded for the room
+    /// and must say which one its post sits next to; a missing citation, one
+    /// the sweep never recorded, or a room that no longer has enough recent
+    /// threads, is a post written for a room nobody looked into.
+    UnreadRoom {
+        target_id: Uuid,
+        cited: Option<String>,
+    },
     /// A community draft written in a language other than the community's
     /// (English when none is recorded). A Polish caption relayed word for
     /// word into r/melodicdeathmetal was removed by its moderators on
@@ -82,8 +91,9 @@ pub enum OutcomeRejection {
     /// bad event identity, unsupported kind, or a URL/contact the source data
     /// never contained.
     UngroundedBeaconCandidate { reason: String },
-    /// Relationship research did not match the Brain-pinned Beacon, cited a
-    /// source URL the task never saw, or failed the PersonalHook domain rules.
+    /// A researched fact CrowdRelay could not check against what the model was
+    /// shown: wrong person, a source it never saw, a date that is not the one
+    /// recorded for that page, or text outside the band's register.
     UngroundedContactResearch { reason: String },
     /// The source owner excluded this destination from the promotion.
     PlatformExcluded { platform: String },
@@ -110,6 +120,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::UnvettedCommunity { target_id } => write!(
                 f,
                 "UNVETTED_COMMUNITY: target_id {target_id} is not an admitted, promoted community target"
+            ),
+            Self::UnreadRoom { target_id, cited } => write!(
+                f,
+                "UNREAD_ROOM: {cited:?} is not one of the recent threads read in community {target_id}, or the room has too few recent threads to count as read"
             ),
             Self::CommunityLanguageMismatch { expected, found } => write!(
                 f,

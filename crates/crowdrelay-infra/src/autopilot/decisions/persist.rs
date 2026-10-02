@@ -176,8 +176,7 @@ async fn persist_decision_and_action_tx(
         }
         _ => {}
     }
-    let action_json =
-        serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
+    let action_json = serde_json::to_value(&action).map_err(|_| RepositoryError::Unexpected)?;
     let inserted_decision = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO autopilot_decisions (
@@ -266,7 +265,6 @@ async fn persist_decision_and_action_tx(
         .fetch_one(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
-
     }
     // The standing-grant half of the same gate: an operator who already
     // answered "this target is fine, stop asking" is not asked again. Read
@@ -334,13 +332,17 @@ async fn persist_decision_and_action_tx(
             decision_created: inserted_decision.is_some(),
         });
     };
+    // The enabled policy row remains locked from the quota check. Both
+    // persistence paths therefore serialize this historical compatibility
+    // check with action insertion, without broadening outward authority.
+    if lifecycle_episode_already_answered(transaction, workspace_id, candidate).await? {
+        return Ok(DecisionActionOutcome::NoAction {
+            decision_created: inserted_decision.is_some(),
+        });
+    }
     let action_id = Uuid::now_v7();
-    let action_trace = TraceContext::for_action(
-        workspace_id,
-        trace.trace_id(),
-        action_id,
-        Some(decision_id),
-    );
+    let action_trace =
+        TraceContext::for_action(workspace_id, trace.trace_id(), action_id, Some(decision_id));
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO autopilot_actions (
@@ -461,9 +463,8 @@ async fn persist_decision_and_action_tx(
             // Try 2: inflight-subject partial unique index conflict
             let existing_id = match existing_id {
                 Some(id) => Some(id),
-                None => {
-                    sqlx::query_scalar::<_, Uuid>(
-                        r#"
+                None => sqlx::query_scalar::<_, Uuid>(
+                    r#"
                         SELECT id FROM autopilot_actions
                         WHERE workspace_id = $1
                           AND context = $2
@@ -471,15 +472,14 @@ async fn persist_decision_and_action_tx(
                           AND subject_id = $4
                           AND status IN ('awaiting_approval', 'queued', 'processing')
                         "#,
-                    )
-                    .bind(workspace_id.into_uuid())
-                    .bind(candidate.context.as_str())
-                    .bind(candidate.action.action_kind())
-                    .bind(candidate.subject.uuid())
-                    .fetch_optional(&mut **transaction)
-                    .await
-                    .map_err(map_sqlx)?
-                }
+                )
+                .bind(workspace_id.into_uuid())
+                .bind(candidate.context.as_str())
+                .bind(candidate.action.action_kind())
+                .bind(candidate.subject.uuid())
+                .fetch_optional(&mut **transaction)
+                .await
+                .map_err(map_sqlx)?,
             };
 
             match existing_id {
@@ -568,8 +568,8 @@ async fn record_prediction_and_evidence_tx(
     is_interference_controllable: bool,
 ) -> Result<crowdrelay_brain::GrowthEvidence, RepositoryError> {
     // ── Dispatch prediction ──
-    let pred_context_json = serde_json::to_value(&prediction.context)
-        .unwrap_or(serde_json::json!({}));
+    let pred_context_json =
+        serde_json::to_value(&prediction.context).unwrap_or(serde_json::json!({}));
     sqlx::query(
         r#"
         INSERT INTO dispatch_predictions
@@ -586,8 +586,10 @@ async fn record_prediction_and_evidence_tx(
     .bind(prediction.expected_new_fans)
     .bind(prediction.expected_signal_installs)
     .bind(&pred_context_json)
-    .bind(serde_json::to_value(&prediction.expected_metrics)
-        .unwrap_or_else(|_| serde_json::json!({})))
+    .bind(
+        serde_json::to_value(&prediction.expected_metrics)
+            .unwrap_or_else(|_| serde_json::json!({})),
+    )
     .execute(&mut **transaction)
     .await
     .map_err(map_sqlx)?;
@@ -645,15 +647,10 @@ async fn record_prediction_and_evidence_tx(
         strategy.map(|s| s.to_owned()),
         evidence_quality,
     );
-    super::operations::evidence::record_growth_evidence_in_tx(
-        transaction,
-        workspace_id,
-        &evidence,
-    )
-    .await?;
+    super::operations::evidence::record_growth_evidence_in_tx(transaction, workspace_id, &evidence)
+        .await?;
     Ok(evidence)
 }
-
 
 macro_rules! decision_persist {
     () => {

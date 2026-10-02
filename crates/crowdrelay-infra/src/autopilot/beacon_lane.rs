@@ -92,9 +92,6 @@ pub struct BeaconAskPrepared {
 /// retry always reports against the current attempt.
 pub struct BeaconAskSendClaim {
     pub claim_token: Uuid,
-    /// The claim already closed `succeeded` — the receipt dedupe answers
-    /// replayed and nothing else moves.
-    pub already_reported: bool,
 }
 
 #[derive(FromRow)]
@@ -517,6 +514,21 @@ pub async fn prepare_beacon_ask(
 ) -> Result<BeaconAskPrepared, RepositoryError> {
     let mut transaction = pool.begin().await.map_err(map_sqlx)?;
     let now = OffsetDateTime::now_utc();
+    // Claim row before action row: `record_execution_report` locks them in
+    // that order, so the lane must too or a racing `sent` deadlocks.
+    let operator_claim = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT status FROM autopilot_execution_claims
+        WHERE workspace_id = $1 AND action_id = $2 AND executor_id = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(OPERATOR_EXECUTOR_ID)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_sqlx)?;
     let row = sqlx::query_as::<_, (String, String, Option<String>, Value)>(
         r#"
         SELECT status, action_kind, last_error_kind, payload
@@ -535,18 +547,6 @@ pub async fn prepare_beacon_ask(
         return Err(RepositoryError::NotFound);
     }
     let (status, _kind, last_error_kind, payload) = row;
-    let operator_claim = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT status FROM autopilot_execution_claims
-        WHERE workspace_id = $1 AND action_id = $2 AND executor_id = $3
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .bind(OPERATOR_EXECUTOR_ID)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(map_sqlx)?;
     let eligible = match status.as_str() {
         // The parked state, plus a queued row the operator already claimed —
         // a lease sweep can bounce `processing` back and the claim is the
@@ -562,8 +562,11 @@ pub async fn prepare_beacon_ask(
         // correction — never a second send. `unknown` is the same action a
         // receipt-gap sweep older; the receipt resolves it through the
         // legal Unknown→Succeeded edge when the operator marks sent.
+        // `claimed` included: a lost letter is unrecoverable any other way
+        // (letters are not persisted), so re-prepare must rebuild it —
+        // `record_touch` still holds the campaign counts back.
         "succeeded" | "unknown" => {
-            operator_claim.is_none()
+            operator_claim.as_deref() != Some("succeeded")
                 && emission_never_delivered(&mut transaction, workspace_id, action_id).await?
         }
         _ => false,
@@ -775,6 +778,39 @@ pub async fn beacon_ask_send_claim(
     action_id: Uuid,
 ) -> Result<BeaconAskSendClaim, RepositoryError> {
     let mut transaction = pool.begin().await.map_err(map_sqlx)?;
+    // Claim row before action row — `record_execution_report` takes them in
+    // that order, and a lane that locks the other way deadlocks against it.
+    let claim = sqlx::query_as::<_, (String, Uuid)>(
+        r#"
+        SELECT status, claim_token FROM autopilot_execution_claims
+        WHERE workspace_id = $1 AND action_id = $2 AND executor_id = $3
+        FOR UPDATE
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(action_id)
+    .bind(OPERATOR_EXECUTOR_ID)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(map_sqlx)?;
+    let Some((claim_status, claim_token)) = claim else {
+        // A bogus id reads NotFound like every other endpoint; an existing
+        // ask that was never prepared reads Conflict — unlocked existence
+        // check keeps the two answers apart without inverting the locks.
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM autopilot_actions WHERE workspace_id = $1 AND id = $2)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(action_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
+        return Err(if exists {
+            RepositoryError::Conflict
+        } else {
+            RepositoryError::NotFound
+        });
+    };
     let row = sqlx::query_as::<_, (String, String)>(
         r#"
         SELECT status, action_kind
@@ -793,30 +829,11 @@ pub async fn beacon_ask_send_claim(
         return Err(RepositoryError::NotFound);
     }
     let (status, _kind) = row;
-    let claim = sqlx::query_as::<_, (String, Uuid)>(
-        r#"
-        SELECT status, claim_token FROM autopilot_execution_claims
-        WHERE workspace_id = $1 AND action_id = $2 AND executor_id = $3
-        FOR UPDATE
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(action_id)
-    .bind(OPERATOR_EXECUTOR_ID)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(map_sqlx)?;
-    let Some((claim_status, claim_token)) = claim else {
-        return Err(RepositoryError::Conflict);
-    };
     // The receipt already landed — a retried `sent` must answer replayed
     // whatever sweeps did to the action row since.
     if claim_status == "succeeded" {
         transaction.commit().await.map_err(map_sqlx)?;
-        return Ok(BeaconAskSendClaim {
-            claim_token,
-            already_reported: true,
-        });
+        return Ok(BeaconAskSendClaim { claim_token });
     }
     match (status.as_str(), claim_status.as_str()) {
         // A sweep bounced the action back to queued while the operator held
@@ -848,8 +865,5 @@ pub async fn beacon_ask_send_claim(
         _ => return Err(RepositoryError::Conflict),
     }
     transaction.commit().await.map_err(map_sqlx)?;
-    Ok(BeaconAskSendClaim {
-        claim_token,
-        already_reported: false,
-    })
+    Ok(BeaconAskSendClaim { claim_token })
 }

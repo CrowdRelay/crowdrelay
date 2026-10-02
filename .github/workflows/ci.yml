@@ -393,6 +393,10 @@ jobs:
             the_invitation_carries_its_letter_and_refuses_the_rest \
             the_preview_is_the_letter_the_click_would_send \
             nobody_is_written_to_unread \
+            only_people_worth_reading_are_sent_to_the_research_agent \
+            outreach_targets_are_researched_too_when_still_open \
+            autopilot_outreach_research \
+            autopilot_room_threads \
             autopilot_show_growth_retry \
             autopilot_past_show_sources \
             autopilot_relay_pacing \
@@ -413,6 +417,9 @@ jobs:
             video_promotion_links \
             community_tracked_links \
             ops_watchdog \
+            contact_research_outcome \
+            contact_research_sweep \
+            room_reading_gate \
             source_refresh_preserves_promotion_policy_campaign_and_request
           # The join executor against a stand-in agents service: the stand-in
           # answers every request itself, so the URL and key are placeholders

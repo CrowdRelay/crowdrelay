@@ -26,7 +26,8 @@ use std::time::Duration;
 use crate::common;
 use crowdrelay_application::RepositoryError;
 use crowdrelay_application::autopilot::{
-    AutopilotRuntimeRepository, ExecutorReportStatus, RecordExecutionReport,
+    AutopilotActionRepository, AutopilotRuntimeRepository, ExecutorReportStatus,
+    RecordExecutionReport,
 };
 use crowdrelay_domain::{AutopilotActionId, WorkspaceId};
 use crowdrelay_infra::{
@@ -440,5 +441,130 @@ async fn unreached_action_resurfaces_and_completes() -> Result<(), Box<dyn std::
 
     assert!(!operator_send(&f, action_id).await?);
     assert_eq!(action_status(&f, action_id).await?, "succeeded");
+    Ok(())
+}
+
+/// The claim is the whole of the human lane's protection: while it stands
+/// open, no automated sweep may touch the action. The stale-lease reclaim
+/// must skip it (re-dispatch would re-run preparation: a second campaign
+/// touch, a real outbox emission, a partner contacted twice behind the
+/// operator's back), the no-executor cancel must skip it, and the
+/// abandoned-claim settlement must leave the claim standing — the action is
+/// still live, and for this lane the claim IS the work: a person mid-send
+/// is not a dead lease, and no machine route exists to take the ask over.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn an_open_operator_claim_fences_the_sweeps() -> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    // One live ask per beacon — the inflight-subject index forbids two.
+    let (beacon_id, beacon_version, event_id) = pair(&f, 14).await?;
+    let held = parked_ask(&f, beacon_id, beacon_version, event_id).await?;
+    prepare_beacon_ask(&f.pool, f.workspace_id, held).await?;
+
+    // A sibling at the same staleness minus the claim — the control that
+    // proves the candidacy below was live.
+    let (beacon_id, beacon_version, event_id) = pair(&f, 14).await?;
+    let control = parked_ask(&f, beacon_id, beacon_version, event_id).await?;
+    for action_id in [held, control] {
+        sqlx::query(
+            "UPDATE autopilot_actions SET status='processing', \
+             started_at=now() - INTERVAL '20 minutes', last_error_kind=NULL, \
+             updated_at=now() WHERE workspace_id=$1 AND id=$2",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(action_id)
+        .execute(&f.pool)
+        .await?;
+    }
+
+    let reclaimed = f
+        .repository
+        .claim_due_actions(f.workspace_id, 10, OffsetDateTime::now_utc())
+        .await?;
+    let reclaimed_ids: Vec<Uuid> = reclaimed
+        .iter()
+        .map(|action| action.id.into_uuid())
+        .collect();
+    assert!(
+        !reclaimed_ids.contains(&held),
+        "a stale lease behind an open operator claim must not reclaim"
+    );
+    assert!(
+        reclaimed_ids.contains(&control),
+        "the same staleness without the claim must still reclaim"
+    );
+    assert_eq!(action_status(&f, held).await?, "processing");
+
+    // Queued + claimed is the lease-bounce shape the lane admits — an old
+    // approval behind it is still no reason to cancel.
+    let (beacon_id, beacon_version, event_id) = pair(&f, 14).await?;
+    let bounced = parked_ask(&f, beacon_id, beacon_version, event_id).await?;
+    let (beacon_id, beacon_version, event_id) = pair(&f, 14).await?;
+    let cancel_control = parked_ask(&f, beacon_id, beacon_version, event_id).await?;
+    sqlx::query(
+        "UPDATE autopilot_actions SET approved_at = now() - INTERVAL '2 days', \
+         available_at = now() - INTERVAL '1 minute' \
+         WHERE workspace_id=$1 AND id IN ($2,$3)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(bounced)
+    .bind(cancel_control)
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO autopilot_execution_claims \
+         (workspace_id, action_id, executor_id, claim_token, status, claimed_at) \
+         VALUES ($1,$2,$3,$4,'claimed',now() - INTERVAL '3 hours')",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(bounced)
+    .bind(OPERATOR_EXECUTOR_ID)
+    .bind(Uuid::now_v7())
+    .execute(&f.pool)
+    .await?;
+
+    f.repository
+        .cancel_unexecutable_actions(f.workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    assert_eq!(action_status(&f, bounced).await?, "queued");
+    assert_eq!(action_status(&f, cancel_control).await?, "cancelled");
+
+    // Queued and due is a stale-claim candidate too — same fence.
+    let reclaimed_again = f
+        .repository
+        .claim_due_actions(f.workspace_id, 10, OffsetDateTime::now_utc())
+        .await?;
+    assert!(
+        reclaimed_again
+            .iter()
+            .all(|action| action.id.into_uuid() != bounced),
+        "a queued ask behind an open operator claim must not be dispatched"
+    );
+
+    // Age every open claim past the abandonment grace — the settlement must
+    // still leave them standing while the action rows say the work is live.
+    sqlx::query(
+        "UPDATE autopilot_execution_claims SET claimed_at = now() - INTERVAL '3 hours' \
+         WHERE workspace_id=$1 AND executor_id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(OPERATOR_EXECUTOR_ID)
+    .execute(&f.pool)
+    .await?;
+    f.repository
+        .settle_abandoned_execution_claims(f.workspace_id, OffsetDateTime::now_utc())
+        .await?;
+    let open_claims = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM autopilot_execution_claims \
+         WHERE workspace_id=$1 AND executor_id=$2 AND status='claimed'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(OPERATOR_EXECUTOR_ID)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        open_claims, 2,
+        "claims on live actions are work in progress, not leaks to settle"
+    );
     Ok(())
 }

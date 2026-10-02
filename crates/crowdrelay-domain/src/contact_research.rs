@@ -33,6 +33,7 @@
 //! event scout uses) or a person. Both go through [`PersonalHook::new`], so the
 //! checks below apply to either.
 
+use crate::gig_letter::LetterLanguage;
 use time::{Date, Duration};
 
 /// How old the researched thing may be. A review from last spring is not
@@ -43,7 +44,10 @@ pub const HOOK_MAX_AGE_DAYS: i64 = 120;
 /// Shorter than this is a label, not a fact ("a show", "new episode").
 pub const FACT_MIN_CHARS: usize = 20;
 pub const FACT_MAX_CHARS: usize = 400;
-pub const PRAISE_MAX_CHARS: usize = 300;
+/// The wire field is still called `praise` in v1, but for outward mail it is
+/// the human opening sentence. Too short reads generic; too long reads generated.
+pub const PRAISE_MIN_CHARS: usize = 40;
+pub const PRAISE_MAX_CHARS: usize = 260;
 
 /// Research attention is spent only on a real, rested relationship. These
 /// thresholds deliberately describe the professional relationship, not fan or
@@ -71,8 +75,8 @@ pub fn relationship_is_worth_researching(
         return false;
     }
     let known = has_replied || relationship_score >= RELATIONSHIP_RESEARCH_MIN_SCORE;
-    let rested = days_since_last_contact
-        .is_some_and(|days| days >= RELATIONSHIP_RESEARCH_QUIET_DAYS);
+    let rested =
+        days_since_last_contact.is_some_and(|days| days >= RELATIONSHIP_RESEARCH_QUIET_DAYS);
     known && rested
 }
 
@@ -98,7 +102,15 @@ pub struct PersonalHook {
 pub enum HookRefusal {
     FactTooShort,
     FactTooLong,
+    PraiseTooShort,
     PraiseTooLong,
+    /// Describing the research process is the voice of software, not a person.
+    MetaResearchVoice,
+    /// Empty flattery can be pasted into anybody's inbox.
+    GenericPraise,
+    /// The opener shares no concrete term with the sourced fact and could be
+    /// pasted into an unrelated email.
+    UngroundedOpening,
     /// An exclamation mark or a hashtag: not the band's register.
     NotOurRegister,
     /// A link in the text: the letter's links are tracked ones only.
@@ -117,9 +129,15 @@ impl HookRefusal {
                  {FACT_MIN_CHARS} characters"
             ),
             Self::FactTooLong => format!("the fact is over {FACT_MAX_CHARS} characters"),
+            Self::PraiseTooShort => format!(
+                "the opening sentence is under {PRAISE_MIN_CHARS} characters — name one concrete detail instead of a generic compliment"
+            ),
             Self::PraiseTooLong => {
-                format!("the appreciation is over {PRAISE_MAX_CHARS} characters")
+                format!("the opening sentence is over {PRAISE_MAX_CHARS} characters")
             }
+            Self::MetaResearchVoice => "do not tell the recipient that software researched them — open on the concrete thing itself".to_owned(),
+            Self::GenericPraise => "generic praise is not personalization — the opening must contain a concrete observation that could not fit everyone".to_owned(),
+            Self::UngroundedOpening => "the opening does not name any concrete detail from the sourced fact — it could be pasted into somebody else's email".to_owned(),
             Self::NotOurRegister => "no exclamation marks or hashtags — a colleague writing, not \
                  a campaign"
                 .to_owned(),
@@ -153,6 +171,18 @@ fn has_link(text: &str) -> bool {
     lower.contains("http://") || lower.contains("https://") || lower.contains("www.")
 }
 
+fn grounded_opening(opening: &str, fact: &str) -> bool {
+    let words = |text: &str| {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() >= 4)
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let fact_words = words(fact);
+    words(opening).iter().any(|word| fact_words.contains(word))
+}
+
 impl PersonalHook {
     /// Validates and normalises a candidate. This is the only constructor, so
     /// everything that reaches a letter has passed it.
@@ -178,11 +208,33 @@ impl PersonalHook {
             .map(collapse)
             .map(|text| text.trim().to_owned())
             .filter(|text| !text.is_empty());
-        if praise
-            .as_deref()
-            .is_some_and(|text| text.chars().count() > PRAISE_MAX_CHARS)
-        {
-            return Err(HookRefusal::PraiseTooLong);
+        if let Some(opening) = praise.as_deref() {
+            let len = opening.chars().count();
+            if len < PRAISE_MIN_CHARS {
+                return Err(HookRefusal::PraiseTooShort);
+            }
+            if len > PRAISE_MAX_CHARS {
+                return Err(HookRefusal::PraiseTooLong);
+            }
+            let lower = opening.to_lowercase();
+            const META: [&str; 8] = [
+                "before writing", "we looked at", "we researched", "we checked",
+                "zanim napisaliśmy", "zajrzeliśmy", "sprawdziliśmy", "przejrzeliśmy",
+            ];
+            if META.iter().any(|needle| lower.contains(needle)) {
+                return Err(HookRefusal::MetaResearchVoice);
+            }
+            const GENERIC: [&str; 6] = [
+                "świetna robota", "great work", "love what you do",
+                "thanks for supporting the scene", "dzięki za wspieranie sceny",
+                "dziękujemy za wspieranie sceny",
+            ];
+            if GENERIC.iter().any(|needle| lower.contains(needle)) {
+                return Err(HookRefusal::GenericPraise);
+            }
+            if !grounded_opening(opening, &fact) {
+                return Err(HookRefusal::UngroundedOpening);
+            }
         }
         for text in std::iter::once(fact.as_str()).chain(praise.as_deref()) {
             if text.contains('!') || text.contains('#') {
@@ -227,6 +279,58 @@ impl PersonalHook {
     }
 }
 
+/// How the letter addresses its reader, which decides how the opening speaks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Register {
+    /// One working person writing to another they already know: "you".
+    Colleague,
+    /// A pitch to an outlet, a programme or a desk: no assumption about who is
+    /// reading, so no "you".
+    Outlet,
+}
+
+/// The paragraph a letter opens with: what the band read, before anything it
+/// wants. The source is deliberately not in it — every URL in a letter is a
+/// tracked link, and a research link is not one.
+#[must_use]
+pub fn known_paragraph(
+    hook: &PersonalHook,
+    _language: LetterLanguage,
+    _register: Register,
+) -> String {
+    // The old implementation literally announced the research process
+    // ("Before writing we looked at..." / "Zanim napisaliśmy..."). That is
+    // exactly how an AI assistant explains itself and exactly how a real
+    // curator spots automation. The research worker now supplies one grounded
+    // human sentence in `praise`; render that sentence, not the machinery.
+    hook.praise_sentence().unwrap_or_else(|| {
+        if hook.fact.ends_with(['.', '?']) {
+            hook.fact.clone()
+        } else {
+            format!("{}.", hook.fact)
+        }
+    })
+}
+
+/// Inserts the opening after a letter's greeting line.
+///
+/// Letters here are a greeting, a blank line, then the body; the opening goes
+/// between them, so it is the first thing the reader meets after their name.
+/// A body with no blank line gets the opening in front.
+#[must_use]
+pub fn open_with_known(
+    body: &str,
+    hook: &PersonalHook,
+    language: LetterLanguage,
+    register: Register,
+) -> String {
+    let paragraph = known_paragraph(hook, language, register);
+    match body.split_once("\n\n") {
+        Some((greeting, rest)) => format!("{greeting}\n\n{paragraph}\n\n{rest}"),
+        None => format!("{paragraph}\n\n{body}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,7 +341,7 @@ mod tests {
     fn ok() -> PersonalHook {
         PersonalHook::new(
             "recenzja płyty „Szum” w audycji „Metalowy Wieczór”",
-            Some("Dobrze, że ktoś mówi o tej płycie tak konkretnie."),
+            Some("W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie."),
             "https://example.test/audycje/metalowy-wieczor",
             date!(2026 - 09 - 20),
             TODAY,
@@ -248,25 +352,60 @@ mod tests {
     #[test]
     fn deep_research_is_for_warm_rested_relationships_only() {
         assert!(relationship_is_worth_researching(
-            true, 20, true, false, Some(40), false
+            true,
+            20,
+            true,
+            false,
+            Some(40),
+            false
         ));
         assert!(relationship_is_worth_researching(
-            false, RELATIONSHIP_RESEARCH_MIN_SCORE, true, false, Some(40), false
+            false,
+            RELATIONSHIP_RESEARCH_MIN_SCORE,
+            true,
+            false,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            false, 50, true, false, Some(40), false
+            false,
+            50,
+            true,
+            false,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, true, false, Some(3), false
+            true,
+            90,
+            true,
+            false,
+            Some(3),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, false, false, Some(40), false
+            true,
+            90,
+            false,
+            false,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, true, true, Some(40), false
+            true,
+            90,
+            true,
+            true,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, true, false, Some(40), true
+            true,
+            90,
+            true,
+            false,
+            Some(40),
+            true
         ));
     }
 
@@ -288,7 +427,7 @@ mod tests {
         assert!(hook.praise.is_none());
         assert_eq!(
             ok().praise_sentence().as_deref(),
-            Some("Dobrze, że ktoś mówi o tej płycie tak konkretnie.")
+            Some("W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.")
         );
     }
 
@@ -323,6 +462,52 @@ mod tests {
     }
 
     #[test]
+    fn an_email_opener_must_sound_like_a_person_not_research_software() {
+        let fact = "recenzja płyty „Szum” w audycji „Metalowy Wieczór”";
+        let day = date!(2026 - 09 - 20);
+        assert_eq!(
+            PersonalHook::new(
+                fact,
+                Some("Zanim napisaliśmy, zajrzeliśmy do tego, co ostatnio u Was"),
+                "https://e.test/x",
+                day,
+                TODAY
+            ),
+            Err(HookRefusal::MetaResearchVoice)
+        );
+        assert_eq!(
+            PersonalHook::new(
+                fact,
+                Some("Świetna robota i dzięki za wspieranie sceny od tylu lat"),
+                "https://e.test/x",
+                day,
+                TODAY
+            ),
+            Err(HookRefusal::GenericPraise)
+        );
+        assert_eq!(
+            PersonalHook::new(
+                fact,
+                Some("Fajny materiał."),
+                "https://e.test/x",
+                day,
+                TODAY
+            ),
+            Err(HookRefusal::PraiseTooShort)
+        );
+        assert_eq!(
+            PersonalHook::new(
+                fact,
+                Some("To bardzo konkretny materiał i naprawdę dobrze się go czyta od początku do końca"),
+                "https://e.test/x",
+                day,
+                TODAY
+            ),
+            Err(HookRefusal::UngroundedOpening)
+        );
+    }
+
+    #[test]
     fn the_source_must_be_a_checkable_https_address() {
         let fact = "recenzja płyty „Szum” w audycji „Metalowy Wieczór”";
         for bad in [
@@ -349,10 +534,10 @@ mod tests {
         let fact = "recenzja płyty „Szum” w audycji „Metalowy Wieczór”";
         let day = date!(2026 - 09 - 20);
         for (praise, expected) in [
-            ("Świetna robota!", HookRefusal::NotOurRegister),
-            ("Super #metal", HookRefusal::NotOurRegister),
-            ("Zobacz https://e.test/x", HookRefusal::LinkInText),
-            ("Zajrzyj na www.e.test", HookRefusal::LinkInText),
+            ("W recenzji „Szum” podoba nam się konkret, ale świetna robota!", HookRefusal::NotOurRegister),
+            ("W recenzji „Szum” jest konkretny detal, ale Super #metal", HookRefusal::NotOurRegister),
+            ("W recenzji „Szum” jest konkretny detal — zobacz https://e.test/x", HookRefusal::LinkInText),
+            ("W recenzji „Szum” jest konkretny detal — zajrzyj na www.e.test", HookRefusal::LinkInText),
         ] {
             assert_eq!(
                 PersonalHook::new(fact, Some(praise), "https://e.test/x", day, TODAY),
@@ -382,7 +567,11 @@ mod tests {
         for refusal in [
             HookRefusal::FactTooShort,
             HookRefusal::FactTooLong,
+            HookRefusal::PraiseTooShort,
             HookRefusal::PraiseTooLong,
+            HookRefusal::MetaResearchVoice,
+            HookRefusal::GenericPraise,
+            HookRefusal::UngroundedOpening,
             HookRefusal::NotOurRegister,
             HookRefusal::LinkInText,
             HookRefusal::SourceNotHttps,
@@ -391,5 +580,41 @@ mod tests {
         ] {
             assert!(refusal.message().len() > 20, "{refusal:?}");
         }
+    }
+
+    #[test]
+    fn the_opening_goes_between_the_greeting_and_the_body() {
+        let hook = ok();
+        let letter = open_with_known(
+            "Dzień dobry, Radio Lokalne,\n\nPiszemy w sprawie płyty.\n\nPozdrawiamy",
+            &hook,
+            LetterLanguage::Polish,
+            Register::Outlet,
+        );
+        let greeting = letter.find("Dzień dobry").unwrap();
+        let read = letter.find("recenzja płyty „Szum”").unwrap();
+        let ask = letter.find("Piszemy w sprawie").unwrap();
+        assert!(greeting < read && read < ask, "{letter}");
+        assert!(
+            letter.contains("W recenzji „Szum” zwróciło nam uwagę"),
+            "grounded human opener: {letter}"
+        );
+        assert!(!letter.contains("Zanim napisaliśmy"), "{letter}");
+        assert!(
+            !letter.contains("example.test"),
+            "the source stays out of the letter"
+        );
+        let colleague = known_paragraph(&hook, LetterLanguage::Polish, Register::Colleague);
+        assert!(colleague.contains("W recenzji „Szum”"), "{colleague}");
+        let english = known_paragraph(&hook, LetterLanguage::English, Register::Outlet);
+        assert!(!english.contains("Before writing"), "{english}");
+        let no_break = open_with_known(
+            "no greeting break",
+            &hook,
+            LetterLanguage::English,
+            Register::Outlet
+        );
+        assert!(no_break.starts_with("W recenzji „Szum”"), "{no_break}");
+        assert!(!no_break.contains("Before writing"), "{no_break}");
     }
 }

@@ -116,6 +116,7 @@ include!("agent_outcomes/opportunity_findings.rs");
 include!("agent_outcomes/strategy_proposals.rs");
 include!("agent_outcomes/creative_family.rs");
 include!("agent_outcomes/community_engagement.rs");
+include!("agent_outcomes/room_reading.rs");
 
 /// True for a relative in-app route the Signal app can resolve.
 ///
@@ -458,9 +459,7 @@ impl AgentOutcomeWorker {
                 beacon_candidate_subject(&mut tx, outcome, producing_task.as_ref()).await?
             }
             OutcomeKind::ContactResearch => {
-                let beacon_id =
-                    contact_research_beacon_id(outcome).map_err(AgentOutcomeError::Rejected)?;
-                ("beacon", beacon_id)
+                contact_research_subject(&mut tx, outcome, producing_task.as_ref()).await?
             }
             _ => ("agent_outcome", outcome.id),
         };
@@ -615,9 +614,6 @@ impl AgentOutcomeWorker {
                         .await?;
                 }
             }
-            OutcomeKind::ContactResearch => {
-                let _ = persist_contact_research(&mut tx, outcome, producing_task.as_ref()).await?;
-            }
             _ => {}
         }
 
@@ -640,7 +636,6 @@ impl AgentOutcomeWorker {
         let action_id = if outcome.kind.disposition() == "require_approval"
             && outcome.kind != OutcomeKind::OpportunityFindings
             && outcome.kind != OutcomeKind::BeaconCandidates
-            && outcome.kind != OutcomeKind::ContactResearch
             && outcome.kind != OutcomeKind::StrategyProposals
             && outcome.payload.item.is_some()
         {
@@ -705,6 +700,17 @@ impl AgentOutcomeWorker {
                     )
                 {
                     let rejection = OutcomeRejection::CommunityLanguageMismatch { expected, found };
+                    tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
+                    drop(tx);
+                    self.reject_outcome(outcome.id, &rejection.to_string())
+                        .await?;
+                    return Ok((None, None));
+                }
+
+                if let Some(rejection) = self
+                    .room_not_read(&mut tx, outcome, target_id, producing_template)
+                    .await?
+                {
                     tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
                     drop(tx);
                     self.reject_outcome(outcome.id, &rejection.to_string())
@@ -1877,9 +1883,6 @@ struct AgentSmartLinkRequest<'a> {
     channel_creative: Option<&'a str>,
     source_canonical_url: Option<&'a str>,
 }
-
-#[cfg(test)]
-include!("agent_outcomes/contact_research_tests.rs");
 
 #[cfg(test)]
 mod tests;

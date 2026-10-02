@@ -12,8 +12,8 @@ use crowdrelay_domain::posting_window::{
     default_active_hours, learned_active_hours, wait_before_posting,
 };
 use crowdrelay_domain::reddit_standing::{
-    COMMUNITY_REMOVED_US, PostRecord, RedditStanding, RemovalCause, community_removed_us,
-    reddit_standing,
+    COMMUNITY_REMOVED_US, PostRecord, RedditStanding, RemovalCause, autonomy_proven,
+    community_removed_us, reddit_standing,
 };
 
 /// How far back the standing reads. Covers the longest window it uses — a
@@ -103,6 +103,16 @@ impl CommunityExecutorWorker {
         let now = OffsetDateTime::now_utc();
         if let RedditStanding::Halted(reason) = reddit_standing(&history, now) {
             return Ok(Some(reason.as_str().to_owned()));
+        }
+        if !autonomy_proven(&history, now) {
+            return Ok(Some(
+                concat!(
+                    "held: unattended Reddit posting is not earned yet — publish and observe ",
+                    "at least three posts manually first; a clean account is not evidence ",
+                    "that the machine understands the room"
+                )
+                .to_owned(),
+            ));
         }
         if community_removed_us(&history, &normalized_subreddit(&action.subreddit), now) {
             return Ok(Some(COMMUNITY_REMOVED_US.to_owned()));

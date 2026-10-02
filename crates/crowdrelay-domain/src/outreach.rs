@@ -157,6 +157,11 @@ pub struct OutreachSnapshot {
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_declined_at: Option<OffsetDateTime>,
     pub in_flight: bool,
+    /// The band has read this person: a recent, sourced fact about what they did
+    /// lately is on file (`crate::contact_research`). Nobody is pitched unread —
+    /// a pitch that could have gone to anybody is the letter that reads as a
+    /// bot, and the one that gets the lowest answer rate.
+    pub has_recent_research: bool,
     /// The opportunity may only be pitched inside a wave. Catalogue pitches
     /// are evergreen and plentiful — 196 contacts for one album in
     /// production — so outside a wave they would arrive as one approval card
@@ -263,10 +268,38 @@ pub enum OutreachHoldReason {
     /// This relationship has had every touch it is ever going to get without
     /// answering one. Unlike the other holds this one does not expire.
     ContactExhausted,
+    /// Everything else says yes, but the band has not read this person yet.
+    /// Held, not refused: the research agent is sent for them, and the pitch
+    /// can go once there is something true to open with.
+    NeedsResearch,
+}
+
+/// Whether this relationship may be pitched now, and in which phase.
+///
+/// Nobody is pitched unread: where every relationship test passes, a person
+/// with no recent, sourced fact on file is held as [`OutreachHoldReason::NeedsResearch`].
+/// The relationship holds are checked first on purpose — research is paid for,
+/// and only people who could otherwise be pitched are worth it. A follow-up on
+/// a thread the act started by hand is exempt: that conversation is already the
+/// band's own.
+#[must_use]
+pub fn evaluate_outreach(
+    snapshot: OutreachSnapshot,
+    policy: OutreachPolicy,
+    now: OffsetDateTime,
+) -> OutreachDecision {
+    match evaluate_relationship(snapshot, policy, now) {
+        OutreachDecision::Request { .. }
+            if !snapshot.thread_followup && !snapshot.has_recent_research =>
+        {
+            OutreachDecision::Hold(OutreachHoldReason::NeedsResearch)
+        }
+        decision => decision,
+    }
 }
 
 #[must_use]
-pub fn evaluate_outreach(
+fn evaluate_relationship(
     snapshot: OutreachSnapshot,
     policy: OutreachPolicy,
     now: OffsetDateTime,
@@ -493,6 +526,7 @@ mod tests {
             last_reply: OutreachReplyDisposition::None,
             last_declined_at: None,
             in_flight: false,
+            has_recent_research: true,
             wave_only: false,
             thread_followup: false,
         }
@@ -678,5 +712,69 @@ mod tests {
             evaluate_outreach(replied, OutreachPolicy::default(), now()),
             OutreachDecision::Hold(OutreachHoldReason::AlreadyReplied)
         );
+    }
+
+    /// The rule: nobody is pitched unread, however good the opportunity.
+    #[test]
+    fn nobody_is_pitched_unread() {
+        let now = now();
+        let unread = OutreachSnapshot {
+            has_recent_research: false,
+            ..eligible()
+        };
+        assert_eq!(
+            evaluate_outreach(unread, OutreachPolicy::default(), now),
+            OutreachDecision::Hold(OutreachHoldReason::NeedsResearch)
+        );
+        assert!(matches!(
+            evaluate_outreach(eligible(), OutreachPolicy::default(), now),
+            OutreachDecision::Request { .. }
+        ));
+    }
+
+    /// Research is paid for, so it is only asked for people who could otherwise
+    /// be pitched: every relationship hold outranks it.
+    #[test]
+    fn a_relationship_hold_outranks_the_research_hold() {
+        let now = now();
+        let replied_and_unread = OutreachSnapshot {
+            has_recent_research: false,
+            last_reply: OutreachReplyDisposition::Positive,
+            ..eligible()
+        };
+        assert_eq!(
+            evaluate_outreach(replied_and_unread, OutreachPolicy::default(), now),
+            OutreachDecision::Hold(OutreachHoldReason::AlreadyReplied)
+        );
+        let closed_and_unread = OutreachSnapshot {
+            has_recent_research: false,
+            accepts_outreach: false,
+            ..eligible()
+        };
+        assert_eq!(
+            evaluate_outreach(closed_and_unread, OutreachPolicy::default(), now),
+            OutreachDecision::Hold(OutreachHoldReason::IneligibleTarget)
+        );
+    }
+
+    /// A nudge on a thread the act started by hand is the band's own
+    /// conversation; it is not a stranger being pitched.
+    #[test]
+    fn a_hand_started_thread_is_not_a_stranger() {
+        let now = now();
+        let thread = OutreachSnapshot {
+            has_recent_research: false,
+            thread_followup: true,
+            last_outreach_at: None,
+            target_last_outreach_at: Some(now - Duration::days(20)),
+            ..eligible()
+        };
+        assert!(matches!(
+            evaluate_outreach(thread, OutreachPolicy::default(), now),
+            OutreachDecision::Request {
+                phase: OutreachPhase::FollowUp,
+                ..
+            }
+        ));
     }
 }

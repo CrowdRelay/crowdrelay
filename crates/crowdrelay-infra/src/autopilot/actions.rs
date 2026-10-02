@@ -70,7 +70,14 @@ impl PostgresAutopilotRepository {
                   AND claim.status = 'claimed'
                   AND claim.claimed_at <= $2 - $3
                   -- Only once the action itself has stopped. A live action
-                  -- with an open claim is work in progress, not a leak.
+                  -- with an open claim is work in progress, not a leak —
+                  -- and that holds for the operator lane too: a person
+                  -- mid-send is the lease, the ask queue is the holding
+                  -- pen, and settling the claim while the action still
+                  -- says `processing` would only strand it (a parked
+                  -- re-dispatch candidate can never leave `processing`
+                  -- without a live executor route, and no arm would then
+                  -- let the operator back in).
                   AND action.status IN ('succeeded', 'failed', 'cancelled')
                 "#,
             )
@@ -106,12 +113,22 @@ impl PostgresAutopilotRepository {
                 SELECT id, payload FROM autopilot_actions
                 WHERE workspace_id = $1 AND status = 'queued'
                   AND approved_at IS NOT NULL AND approved_at <= $2 - $3
+                  -- An open operator claim means a person is mid-send —
+                  -- the missing machine executor is no reason to cancel.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM autopilot_execution_claims claim
+                      WHERE claim.workspace_id = autopilot_actions.workspace_id
+                        AND claim.action_id = autopilot_actions.id
+                        AND claim.executor_id = $4
+                        AND claim.status = 'claimed'
+                  )
                 LIMIT 200
                 "#,
             )
             .bind(workspace_id.into_uuid())
             .bind(now)
             .bind(NO_EXECUTOR_GRACE)
+            .bind(OPERATOR_EXECUTOR_ID)
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx)?;
@@ -400,6 +417,18 @@ impl PostgresAutopilotRepository {
                           )
                       )
                   )
+                  -- An open operator claim is a person mid-send — not a
+                  -- dead lease to reclaim. Without this the 15-minute stale
+                  -- rule would hand a prepared beacon ask back to dispatch:
+                  -- the partner gets the executor's emission AND the
+                  -- operator's letter, and the campaign touch double-counts.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM autopilot_execution_claims claim
+                      WHERE claim.workspace_id = autopilot_actions.workspace_id
+                        AND claim.action_id = autopilot_actions.id
+                        AND claim.executor_id = $6
+                        AND claim.status = 'claimed'
+                  )
                 ORDER BY available_at, id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $3
@@ -410,6 +439,7 @@ impl PostgresAutopilotRepository {
             .bind(i64::from(limit.min(100)))
             .bind(include_action_kind)
             .bind(exclude_action_kind)
+            .bind(OPERATOR_EXECUTOR_ID)
             .fetch_all(&mut *transaction)
             .await
             .map_err(map_sqlx)?;

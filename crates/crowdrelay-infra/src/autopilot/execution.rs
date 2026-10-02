@@ -680,7 +680,7 @@ pub(super) async fn schedule_effect_measurement(
             // forgot fanbase-scout and strategy-consult, so two intelligence
             // workers were measured as if they directly acquired fans.
             let known_template = WorkerTemplate::parse(template_id);
-            let is_relationship_research = template_id == "contact-research";
+            let is_relationship_research = template_id == "contact-researcher";
             let is_intelligence = is_relationship_research
                 || known_template.is_some_and(|template| {
                     template.audience() == TemplateAudience::Intelligence

@@ -116,7 +116,16 @@ impl PostgresAutopilotRepository {
                         || (template_key == "crowdrelay.fan.show_recall.v1"
                             && show.as_ref().is_some_and(|show| show.wants_install_url));
                     let install_url =
-                        if wants_install_url {
+                        // The fan may have opened Signal since the recall's
+                        // decision. Keep the recall, drop the stale install CTA.
+                        if wants_install_url && !sqlx::query_scalar::<_, bool>(
+                            "SELECT EXISTS(SELECT 1 FROM signal_installations WHERE workspace_id=$1 AND fan_id=$2)",
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(fan_id.into_uuid())
+                        .fetch_one(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)? {
                             let brand = crate::tenant_settings::TenantSettingsRepository::new(
                                 self.pool.clone(),
                             )
@@ -154,12 +163,10 @@ impl PostgresAutopilotRepository {
                         } else {
                             None
                         };
-                    // The recall carries a tracked link back to the show's
-                    // own page — `recall-{slug}`, distinct from the shared
-                    // `show-{slug}` the pitches print, so a click here reads
-                    // as a fan revisiting their night rather than another
-                    // channel's traffic. A recall without its show page is
-                    // refused, same as the ask without its install link.
+                    // Each recall owns its redirect. A show-wide redirect
+                    // would pool different recipients' clicks rather than
+                    // attributing them to the message that carried the link.
+                    // Historical redirects are left untouched.
                     let show_url = if let Some(show) = show.as_ref() {
                         let brand = crate::tenant_settings::TenantSettingsRepository::new(
                             self.pool.clone(),
@@ -173,7 +180,7 @@ impl PostgresAutopilotRepository {
                             .ok_or(RepositoryError::ConflictBecause(
                                 "show recall refused: tenant has no member site URL",
                             ))?;
-                        let slug = format!("recall-{}", show.event_slug);
+                        let slug = format!("show-recall-{}", action.id.into_uuid().simple());
                         let link = crate::tracked_links::ensure_smart_link_in_tx(
                             &mut transaction,
                             workspace_id.into_uuid(),
@@ -188,6 +195,20 @@ impl PostgresAutopilotRepository {
                         .ok_or(RepositoryError::ConflictBecause(
                             "show recall refused: event page is not a printable URL",
                         ))?;
+                        let bound = sqlx::query(
+                            "UPDATE smart_links SET action_id=$3 WHERE workspace_id=$1 AND slug=$2 AND (action_id IS NULL OR action_id=$3)",
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(&slug)
+                        .bind(action.id.into_uuid())
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)?;
+                        if bound.rows_affected() != 1 {
+                            return Err(RepositoryError::ConflictBecause(
+                                "show recall link belongs to another action",
+                            ));
+                        }
                         Some(link.as_str().to_owned())
                     } else {
                         None

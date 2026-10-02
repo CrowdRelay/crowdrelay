@@ -44,10 +44,13 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
 
     // The model's own report about its own output. A cheap filter that a
     // failing connector happens to trip, not a statement about evidence.
+    let honest_empty_contact_research =
+        outcome.kind == OutcomeKind::ContactResearch && outcome.payload.item.is_none();
     if outcome
         .self_reported_confidence
         .self_reported_basis_points()
         == 0
+        && !honest_empty_contact_research
     {
         return Err(OutcomeRejection::InsufficientEvidence {
             reason: "the model reported zero confidence in its own output".to_owned(),

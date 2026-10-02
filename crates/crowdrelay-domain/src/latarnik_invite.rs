@@ -46,7 +46,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::contact_research::PersonalHook;
+use crate::contact_research::{PersonalHook, Register, known_paragraph};
 use crate::gig_letter::{LetterLanguage, SenderIdentity};
 use crate::tracked_link::TrackedLink;
 
@@ -285,13 +285,7 @@ fn polish(
             format!("Wyszła nasza nowa rzecz — {title}. Piszemy w jednej sprawie.")
         }
     };
-    let known = format!(
-        "Zanim napisaliśmy, zajrzeliśmy do tego, co ostatnio robisz — {}.{}",
-        hook.fact,
-        hook.praise_sentence()
-            .map(|sentence| format!(" {sentence}"))
-            .unwrap_or_default()
-    );
+    let known = known_paragraph(hook, LetterLanguage::Polish, Register::Colleague);
     let body = format!(
         "Cześć {name},\n\
          \n\
@@ -340,13 +334,7 @@ fn english(
             format!("Our new record is out — {title}. One thing we wanted to ask.")
         }
     };
-    let known = format!(
-        "Before writing we looked at what you have been doing lately — {}.{}",
-        hook.fact,
-        hook.praise_sentence()
-            .map(|sentence| format!(" {sentence}"))
-            .unwrap_or_default()
-    );
+    let known = known_paragraph(hook, LetterLanguage::English, Register::Colleague);
     let body = format!(
         "Hi {name},\n\
          \n\
@@ -400,7 +388,7 @@ mod tests {
     fn hook() -> PersonalHook {
         PersonalHook {
             fact: "recenzja płyty „Szum” w audycji „Metalowy Wieczór”".to_owned(),
-            praise: Some("Rzadko ktoś omawia tę płytę tak konkretnie".to_owned()),
+            praise: Some("W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie".to_owned()),
             source_url: "https://example.test/audycje/metalowy-wieczor".to_owned(),
             observed_on: time::macros::date!(2026 - 09 - 20),
         }
@@ -690,7 +678,7 @@ mod tests {
         assert!(
             polish
                 .body
-                .contains("Rzadko ktoś omawia tę płytę tak konkretnie.")
+                .contains("W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.")
         );
         assert!(!polish.body.contains("example.test"), "{}", polish.body);
         assert!(!polish.body.contains('!'), "{}", polish.body);
@@ -706,8 +694,9 @@ mod tests {
         assert!(
             english
                 .body
-                .contains("Before writing we looked at what you have been doing lately")
+                .contains("W recenzji „Szum” zwróciło nam uwagę")
         );
+        assert!(!english.body.contains("Before writing"), "{}", english.body);
         assert!(
             english
                 .body

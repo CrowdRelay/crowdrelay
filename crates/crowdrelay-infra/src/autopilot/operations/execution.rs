@@ -1117,22 +1117,9 @@ pub(in crate::autopilot) async fn execute_agent_run(
     // outcome produced was recorded uncorrelated — 67 of 67 agent outcomes and
     // 42 of 42 agent-sourced decisions in production had a NULL trace. Read it
     // in the same transaction that creates the task so the two cannot disagree.
-    let (trace_id, action_subject_kind, action_subject_id) =
-        sqlx::query_as::<_, (Option<uuid::Uuid>, String, uuid::Uuid)>(
-            r#"
-            SELECT trace_id, subject_kind, subject_id
-            FROM autopilot_actions
-            WHERE workspace_id = $1 AND id = $2
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(action_id.into_uuid())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(map_sqlx)?
-        .ok_or(RepositoryError::Conflict)?;
-    let subject_beacon_id =
-        (action_subject_kind == "beacon").then_some(action_subject_id);
+    let subject =
+        super::agent_run_subject::resolve_run_subject(tx, workspace_id, action_id).await?;
+    let trace_id = subject.trace_id;
 
     // Insert a task row into agent_service_tasks. The TS agent service's
     // scheduler claims due tasks and runs them. model_id = "auto" tells the
@@ -1157,10 +1144,11 @@ pub(in crate::autopilot) async fn execute_agent_run(
         // THIS event rather than trusting a UUID mentioned in prompt prose —
         // prompt text is a request, this is the record of what was asked.
         "subject_event_id": subject_event_id,
-        // Relationship research is pinned to the action's Beacon subject.
-        // The model receives this through task metadata; it never gets to pick
-        // a different person simply because another search result is easier.
-        "subject_beacon_id": subject_beacon_id,
+        // Internal relationship research is bound to the action subject, not
+        // to anything the model says. The id remains audit-only; the agents
+        // tool receives the address and never returns it to the model.
+        "subject_beacon_id": subject.beacon_id,
+        "subject_contact_email": subject.contact_email,
     }))
     .execute(&mut **tx)
     .await

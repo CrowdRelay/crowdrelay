@@ -95,6 +95,12 @@ pub const SURVIVAL_AGE: Duration = Duration::days(7);
 /// acts at once and moderators within a day or two; a post last checked an
 /// hour after going up has not survived anything.
 pub const SURVIVAL_OBSERVED_AFTER: Duration = Duration::hours(48);
+/// A fresh automation does not get to experiment on the band's public
+/// identity. At least this many posts must have been published and then
+/// observed alive past the moderation window before unattended posting is
+/// earned. Those seed posts may be published manually; the point is that a
+/// person proves the room/copy fit before the machine is trusted with it.
+pub const MIN_SURVIVED_POSTS_FOR_AUTONOMY: usize = 3;
 /// Survived posts that earn one more post per day.
 pub const SURVIVED_POSTS_PER_STEP: usize = 5;
 /// The floor: one post a day, which reads as somebody who posts occasionally.
@@ -166,6 +172,17 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
     }
 }
 
+/// Whether unattended posting has earned the right to use the account.
+///
+/// Rate limits answer "how much"; this answers the prior question "may the
+/// machine publish at all yet?". A clean slate is not evidence of judgement.
+/// The first posts are the calibration set a person publishes and the worker
+/// observes for removals. Only then may automation take over.
+#[must_use]
+pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
+    history.iter().filter(|post| survived(post, now)).count() >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
+}
+
 /// Whether a community's moderators (or its AutoModerator) removed one of our
 /// posts recently enough that its drafts should go to a person instead.
 #[must_use]
@@ -226,6 +243,28 @@ mod tests {
             reddit_standing(&[], now()),
             RedditStanding::Open { daily_cap: 1 }
         );
+    }
+
+    #[test]
+    fn a_fresh_account_has_not_earned_unattended_posting() {
+        assert!(!autonomy_proven(&[], now()));
+
+        let two: Vec<_> = (8..10).map(live).collect();
+        assert!(!autonomy_proven(&two, now()));
+
+        let three: Vec<_> = (8..11).map(live).collect();
+        assert!(autonomy_proven(&three, now()));
+    }
+
+    #[test]
+    fn unchecked_posts_do_not_earn_autonomy() {
+        let history: Vec<_> = (8..20)
+            .map(|days| PostRecord {
+                last_seen_live_at: None,
+                ..live(days)
+            })
+            .collect();
+        assert!(!autonomy_proven(&history, now()));
     }
 
     #[test]

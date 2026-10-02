@@ -28,10 +28,10 @@
 
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
-use crowdrelay_domain::{BeaconId, WorkspaceId};
 use crowdrelay_domain::contact_research::relationship_is_worth_researching;
 use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, decide};
 use crowdrelay_domain::trace::TraceContext;
+use crowdrelay_domain::{BeaconId, WorkspaceId};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -212,6 +212,8 @@ const DUAL_ROLE_CORE: &str = r#"
               AND research.normalized_email = lower(btrim(beacon.contact_email))
               AND research.observed_on <= ($2::timestamptz AT TIME ZONE 'UTC')::date
               AND research.observed_on >= ($2::timestamptz AT TIME ZONE 'UTC')::date - 120
+              AND research.praise IS NOT NULL
+              AND char_length(btrim(research.praise)) >= 40
         ) AS has_recent_research
     FROM beacons AS beacon
     LEFT JOIN cities AS city ON city.id = beacon.city_id
@@ -331,20 +333,19 @@ pub async fn dual_role_contact(
     Ok(row.map(|row| row_to_contact(&row, reason_available).0))
 }
 
-
 /// The small queue of warm relationships worth learning about now.
 ///
-/// This is not an invitation queue. It asks a narrower question: which people
-/// have already earned a relationship, are rested, have not opted out, are not
-/// already fans/pending, and have something concrete the act could eventually
-/// tell them — but are missing the recent sourced context required for a
-/// thoughtful message.
+/// This is not an invitation queue. It asks a narrower question: which warm,
+/// rested professional relationships are worth learning about now because the
+/// act has a concrete row-backed reason that may make the context useful soon.
 ///
-/// The domain rule remains authoritative. We reconstruct the standing and ask
-/// `decide` for `NeedsResearch`; then we additionally require a real
-/// database-backed invite reason rather than the review screen's placeholder.
-/// At most eight contacts enter one cycle: research attention is scarce and
-/// quality falls before throughput becomes useful.
+/// Fan/marketing state is deliberately not part of this eligibility decision:
+/// somebody may already be a fan, have a pending opt-in, or have withdrawn
+/// marketing consent while still remaining a journalist/promoter/creator the
+/// act legitimately works with. Those states constrain later sends, not memory.
+///
+/// At most three contacts enter one cycle: deep-research attention is scarce
+/// and quality falls before throughput becomes useful.
 pub async fn relationship_research_queue(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -388,15 +389,17 @@ pub async fn relationship_research_queue(
             continue;
         }
 
-        queue.push(crowdrelay_application::autopilot::RelationshipResearchSnapshot {
-            beacon_id: BeaconId::from_uuid(contact.beacon_id),
-            display_name: contact.display_name,
-            role: contact.role,
-            city: contact.city,
-            relationship_score: contact.relationship_score,
-            has_replied: contact.has_replied,
-            days_since_last_contact: contact.days_since_last_contact,
-        });
+        queue.push(
+            crowdrelay_application::autopilot::RelationshipResearchSnapshot {
+                beacon_id: BeaconId::from_uuid(contact.beacon_id),
+                display_name: contact.display_name,
+                role: contact.role,
+                city: contact.city,
+                relationship_score: contact.relationship_score,
+                has_replied: contact.has_replied,
+                days_since_last_contact: contact.days_since_last_contact,
+            },
+        );
     }
     Ok(queue)
 }

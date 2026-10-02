@@ -50,6 +50,7 @@ type CommunityTargetRow = (
     i64,
     i64,
     i64,
+    serde_json::Value,
 );
 
 /// Loads the communities the growth loop may engage this cycle.
@@ -84,7 +85,8 @@ pub(super) async fn load_community_targets(
                place.membership_state,
                provenance.converted_fans,
                provenance.interactions,
-               durable.durable_fans
+               durable.durable_fans,
+               room.threads
         FROM agent_outreach_targets AS t
         LEFT JOIN discovery_places AS place
                ON place.id = t.place_id
@@ -162,6 +164,29 @@ pub(super) async fn load_community_targets(
               AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
                   >= now() - interval '30 days'
         ) AS durable ON true
+        -- What the room is discussing now: the threads the community sweep
+        -- read there, newest first. The sweep records each thread with its own
+        -- date and permalink (`fan_observations`, kind 'post'); the model never
+        -- supplies either. The window is `room_reading::READ_MAX_AGE_DAYS`, and
+        -- a test holds this literal to it.
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                       'title', recent.fact,
+                       'url', recent.url,
+                       'posted_on', recent.observed_on) ORDER BY recent.observed_on DESC, recent.url), '[]'::jsonb)
+                       AS threads
+            FROM (
+                SELECT DISTINCT ON (fo.url) fo.fact, fo.url, fo.observed_at::date AS observed_on
+                FROM fan_observations AS fo
+                WHERE fo.workspace_id = t.workspace_id
+                  AND fo.place_id = t.place_id
+                  AND fo.kind = 'post'
+                  AND fo.url IS NOT NULL
+                  AND fo.observed_at >= current_date - 14
+                  AND fo.observed_at <= current_date
+                ORDER BY fo.url, fo.observed_at DESC
+            ) AS recent
+        ) AS room ON true
         WHERE t.workspace_id = $1
           AND t.status = 'promoted'
           AND t.target_kind = 'community'
@@ -224,6 +249,7 @@ pub(super) async fn load_community_targets(
                 converted_fans,
                 interactions,
                 durable_fans,
+                threads,
             )| UnengagedTarget {
                 target_id,
                 display_name,
@@ -246,7 +272,33 @@ pub(super) async fn load_community_targets(
                 converted_fans_90d: u32::try_from(converted_fans.max(0)).unwrap_or(u32::MAX),
                 interactions_90d: u32::try_from(interactions.max(0)).unwrap_or(u32::MAX),
                 durable_fans_90d: u32::try_from(durable_fans.max(0)).unwrap_or(u32::MAX),
+                recent_threads: read_threads(&threads),
             },
         )
         .collect())
+}
+
+/// The room's threads, newest first and bounded to what the drafter is shown.
+///
+/// A malformed row is dropped rather than failing the load: one bad thread must
+/// not take every community candidate with it, and a dropped thread can only
+/// make a room look less read, never more.
+pub(in crate::autopilot) fn read_threads(
+    raw: &serde_json::Value,
+) -> Vec<crowdrelay_domain::room_reading::RoomThread> {
+    let mut threads: Vec<crowdrelay_domain::room_reading::RoomThread> = raw
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| serde_json::from_value(row.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    threads.sort_by(|a, b| {
+        b.posted_on
+            .cmp(&a.posted_on)
+            .then_with(|| a.url.cmp(&b.url))
+    });
+    threads.truncate(crowdrelay_domain::room_reading::PROMPT_THREADS);
+    threads
 }

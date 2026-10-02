@@ -256,6 +256,7 @@ struct OutreachRow {
     last_reply_disposition: String,
     last_declined_at: Option<OffsetDateTime>,
     in_flight: bool,
+    has_recent_research: bool,
     wave_only: bool,
     thread_followup: bool,
 }
@@ -352,6 +353,19 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
                   AND action.subject_id = opportunity.id
                   AND action.status IN ('awaiting_approval','queued','processing')
             ) AS in_flight,
+            -- Nobody is pitched unread: a dated, sourced fact about what this
+            -- address did lately (`contact_research`). The window is
+            -- `crowdrelay_domain::contact_research::HOOK_MAX_AGE_DAYS`, pinned
+            -- by a test because a SQL literal cannot import a constant.
+            EXISTS (
+                SELECT 1 FROM contact_research AS research
+                WHERE research.workspace_id = opportunity.workspace_id
+                  AND research.normalized_email = lower(btrim(target.contact_email))
+                  AND research.observed_on <= (now() AT TIME ZONE 'UTC')::date
+                  AND research.observed_on >= (now() AT TIME ZONE 'UTC')::date - 120
+                  AND research.praise IS NOT NULL
+                  AND char_length(btrim(research.praise)) >= 40
+            ) AS has_recent_research,
             -- Catalogue pitches and hand-thread follow-ups go out in waves or
             -- not at all; see `OutreachSnapshot::wave_only`.
             opportunity.source IN ('catalogue_autopilot', 'thread_followup') AS wave_only,
@@ -395,6 +409,7 @@ fn outreach_row_to_snapshot(row: OutreachRow) -> Result<OutreachSnapshot, Reposi
         last_reply: parse_outreach_reply(&row.last_reply_disposition)?,
         last_declined_at: row.last_declined_at,
         in_flight: row.in_flight,
+        has_recent_research: row.has_recent_research,
         wave_only: row.wave_only,
         thread_followup: row.thread_followup,
     })

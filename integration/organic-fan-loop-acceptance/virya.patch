@@ -1,0 +1,26 @@
+diff --git a/tests/event-detail-scope.test.ts b/tests/event-detail-scope.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/event-detail-scope.test.ts
+@@ -0,0 +1,21 @@
++import { test } from "node:test"
++import assert from "node:assert/strict"
++import { fileURLToPath } from "node:url"
++import ts from "typescript"
++
++test("concert signup has no unbound identifiers in its component scope", () => {
++  const file = fileURLToPath(new URL("../src/components/preact/signal/EventDetail.tsx", import.meta.url))
++  const program = ts.createProgram([file], {
++    target: ts.ScriptTarget.ES2022,
++    jsx: ts.JsxEmit.ReactJSX,
++    noResolve: true,
++    skipLibCheck: true,
++  })
++  // Check the actual component's lexical bindings. Transpilation and the
++  // context-helper tests both missed the out-of-scope `slug` in CheckinPanel.
++  // The repository's normal tsc check still validates imported types.
++  const missing = ts.getPreEmitDiagnostics(program)
++    .filter(diagnostic => diagnostic.file?.fileName === file && diagnostic.code === 2304)
++    .map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, " "))
++  assert.deepEqual(missing, [])
++})

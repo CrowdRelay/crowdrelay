@@ -263,10 +263,27 @@ pub fn review_outbound_post(body: &str, context: &PublishContext<'_>) -> Publish
     if trimmed.is_empty() {
         return PublishVerdict::HoldForHuman(HoldReason::Empty);
     }
-    let length = trimmed.chars().count();
-    if length < context.channel.minimum_characters() {
+    // The transport may append a tracked URL after the model/person wrote the
+    // draft. That URL is attribution plumbing, not content. Counting it toward
+    // the channel's minimum lets an empty community draft become "long enough"
+    // only because `https://.../l/...` was appended at dispatch — exactly the
+    // link-only spam shape this guard exists to stop.
+    //
+    // `dedupe_text` is already the canonical pre-transport draft when a
+    // caller adds transport text. When it is absent, strip URLs from the
+    // reviewed body itself. In both cases the minimum is measured on what a
+    // human actually wrote, not on tracking infrastructure.
+    let substantive_basis = context.dedupe_text.unwrap_or(trimmed);
+    let mut substantive = substantive_basis.to_owned();
+    for link in extract_links(substantive_basis) {
+        substantive = substantive.replace(link, " ");
+    }
+    let substantive = substantive.split_whitespace().collect::<Vec<_>>().join(" ");
+    if substantive.chars().count() < context.channel.minimum_characters() {
         return PublishVerdict::HoldForHuman(HoldReason::TooShort);
     }
+
+    let length = trimmed.chars().count();
     if length > context.channel.maximum_characters() {
         return PublishVerdict::HoldForHuman(HoldReason::TooLong);
     }
@@ -758,6 +775,42 @@ mod tests {
         assert_eq!(
             review_outbound_post(&body, &context),
             PublishVerdict::HoldForHuman(HoldReason::DuplicateOfRecentPost)
+        );
+    }
+
+    #[test]
+    fn a_transport_link_cannot_turn_an_empty_draft_into_content() {
+        let draft = "";
+        let reviewed = "https://virya.music/l/community-1234567890";
+        let context = PublishContext {
+            channel: PublishChannel::Community,
+            approved_origins: ORIGINS,
+            approved_links: &[],
+            recent_content_hashes: &BTreeSet::new(),
+            dedupe_text: Some(draft),
+        };
+        assert_eq!(
+            review_outbound_post(reviewed, &context),
+            PublishVerdict::HoldForHuman(HoldReason::TooShort),
+            "tracking infrastructure is not reader-facing substance"
+        );
+    }
+
+    #[test]
+    fn a_transport_link_cannot_rescue_a_bot_fragment() {
+        let draft = "new video";
+        let reviewed = format!("{draft}\n\nhttps://virya.music/l/community-1234567890");
+        let context = PublishContext {
+            channel: PublishChannel::Community,
+            approved_origins: ORIGINS,
+            approved_links: &[],
+            recent_content_hashes: &BTreeSet::new(),
+            dedupe_text: Some(draft),
+        };
+        assert_eq!(
+            review_outbound_post(&reviewed, &context),
+            PublishVerdict::HoldForHuman(HoldReason::TooShort),
+            "a long tracked URL must not make a low-effort draft publishable"
         );
     }
 

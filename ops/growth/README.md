@@ -4,6 +4,14 @@ The goal is more real, engaged fans for each tenant, followed by ticket purchase
 merch purchases, and attendance. Imported contacts, generated content, and successful
 autopilot actions are intermediate state, not evidence of that goal.
 
+**Standing mandate (owner directive, 2026-10-02):** ≥100 system-attributed new
+fans EVERY month (October 2026 first; prod objective `signal/active_fans`
+20 → 120 by 2026-10-31) and every promoted video ≥1,000 organic views /
+≥10 likes / ≥5 comments via CrowdRelay operations. A fan counts only when a
+`fan_provenance_events`/`fan_acquisition_events` row traces them to a CrowdRelay
+action — manual invites and imports do not count. Working plan:
+`~/.devin/plans/FAN_100_PLAN.md`.
+
 ## Reproduce the read-only snapshot
 
 Use a database role with read access. Do not put a database password in a report or

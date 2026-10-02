@@ -58,15 +58,24 @@ fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
 /// post passes before authority is consulted at all.
 async fn admitted_community(pool: &PgPool, workspace_id: WorkspaceId) -> Result<(Uuid, Uuid)> {
     let target_id = Uuid::now_v7();
+    // In a room the band has read: a community post must cite a thread the
+    // community sweep recorded there.
+    let place_id = super::community_relay_batch::read_room(
+        pool,
+        workspace_id,
+        &format!("deathcore{}", target_id.simple()),
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO agent_outreach_targets \
-         (id, workspace_id, target_kind, display_name, subreddit, status, screening_verdict) \
-         VALUES ($1,$2,'community',$3,$4,'promoted','admitted')",
+         (id, workspace_id, target_kind, display_name, subreddit, status, screening_verdict, place_id) \
+         VALUES ($1,$2,'community',$3,$4,'promoted','admitted',$5)",
     )
     .bind(target_id)
     .bind(workspace_id.into_uuid())
     .bind(format!("r/deathcore{}", target_id.simple()))
     .bind(format!("deathcore{}", target_id.simple()))
+    .bind(place_id)
     .execute(pool)
     .await
     .context("insert admitted community")?;
@@ -96,11 +105,13 @@ async fn insert_community_post(
     source_id: Uuid,
 ) -> Result<()> {
     let id = Uuid::now_v7();
+    let thread = super::community_relay_batch::cited_thread(pool, workspace_id, target_id).await?;
     let payload = json!({
         "item": {
             "platform": "reddit",
             "target_id": target_id.to_string(),
             "source_id": source_id.to_string(),
+            "fits_thread_url": thread,
             "subreddit": "deathcore",
             "title": "new track",
             "body": "we put out a new one",

@@ -26,8 +26,6 @@ pub enum OutcomeKind {
     /// Event-scoped public network research. Items are reviewed Beacon
     /// candidates, never outreach instructions.
     BeaconCandidates,
-    /// Recent sourced context about one warm relationship contact. Internal evidence only.
-    ContactResearch,
     CampaignInsight,
     ReleasePlanNote,
     GenericInsight,
@@ -39,6 +37,11 @@ pub enum OutcomeKind {
     /// and implemented within bounded authority, or rejected with the
     /// reason the next consultation reads back.
     StrategyProposals,
+    /// One dated, sourced thing a person did lately, found by the
+    /// `contact-researcher` agent so the band can write to them knowing
+    /// something true. Lands as a `contact_research` row if CrowdRelay can
+    /// check the citation; never as an action, because it contacts nobody.
+    ContactResearch,
 }
 
 impl OutcomeKind {
@@ -51,12 +54,12 @@ impl OutcomeKind {
             Self::AudienceSegments => "audience_segments",
             Self::OutreachTargets => "outreach_targets",
             Self::BeaconCandidates => "beacon_candidates",
-            Self::ContactResearch => "contact_research",
             Self::CampaignInsight => "campaign_insight",
             Self::ReleasePlanNote => "release_plan_note",
             Self::GenericInsight => "generic_insight",
             Self::OpportunityFindings => "opportunity_findings",
             Self::StrategyProposals => "strategy_proposals",
+            Self::ContactResearch => "contact_research",
         }
     }
 
@@ -67,8 +70,7 @@ impl OutcomeKind {
             Self::PressPitch | Self::SocialPost => "promotion_budget",
             Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
-            Self::BeaconCandidates => "beacon",
-            Self::ContactResearch => "fan_lifecycle",
+            Self::BeaconCandidates | Self::ContactResearch => "beacon",
             Self::CampaignInsight
             | Self::ReleasePlanNote
             | Self::GenericInsight
@@ -95,10 +97,10 @@ impl OutcomeKind {
             | Self::OpportunityFindings
             | Self::StrategyProposals => "require_approval",
             Self::AudienceSegments
-            | Self::ContactResearch
             | Self::CampaignInsight
             | Self::ReleasePlanNote
-            | Self::GenericInsight => "recommend_only",
+            | Self::GenericInsight
+            | Self::ContactResearch => "recommend_only",
         }
     }
 
@@ -111,9 +113,9 @@ impl OutcomeKind {
             Self::AudienceSegments => "agent_segment_proposal",
             Self::OutreachTargets => "agent_target_proposal",
             Self::BeaconCandidates => "agent_beacon_candidate",
-            Self::ContactResearch => "agent_contact_research",
             Self::OpportunityFindings => "agent_opportunity_finding",
             Self::StrategyProposals => "agent_strategy_consult",
+            Self::ContactResearch => "agent_contact_research",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
         }
     }
@@ -402,12 +404,12 @@ pub fn validate(
         "audience_segments" => OutcomeKind::AudienceSegments,
         "outreach_targets" => OutcomeKind::OutreachTargets,
         "beacon_candidates" => OutcomeKind::BeaconCandidates,
-        "contact_research" => OutcomeKind::ContactResearch,
         "campaign_insight" => OutcomeKind::CampaignInsight,
         "release_plan_note" => OutcomeKind::ReleasePlanNote,
         "generic_insight" => OutcomeKind::GenericInsight,
         "opportunity_findings" => OutcomeKind::OpportunityFindings,
         "strategy_proposals" => OutcomeKind::StrategyProposals,
+        "contact_research" => OutcomeKind::ContactResearch,
         other => return Err(OutcomeValidationError::UnknownKind(other.to_owned())),
     };
     let self_reported_confidence = ModelSelfReportedConfidence::parse(confidence_basis_points)?;
@@ -489,9 +491,8 @@ pub fn provenance_admission(
     provenance: Option<&OutcomeProvenance>,
 ) -> Result<(), ProvenanceRejection> {
     // ContactResearch is internal evidence, not an approval card, but it can
-    // later shape text sent to a real person. It therefore gets the same
-    // provenance bar as outward proposals without pretending a human must
-    // approve the act of learning.
+    // later shape text sent to a real person. Hold it to the same provenance
+    // bar as outward proposals without pretending research itself is a send.
     if kind.disposition() != "require_approval" && kind != OutcomeKind::ContactResearch {
         return Ok(());
     }
@@ -827,11 +828,7 @@ mod tests {
 
     #[test]
     fn contact_research_is_internal_but_still_requires_grounded_provenance() {
-        let unverified = outcome_with(
-            "contact_research",
-            &payload("internal evidence"),
-            8_000,
-        );
+        let unverified = outcome_with("contact_research", &payload("internal evidence"), 8_000);
         assert_eq!(unverified.kind.disposition(), "recommend_only");
         assert_eq!(
             provenance_admission(unverified.kind, unverified.payload.provenance.as_ref()),

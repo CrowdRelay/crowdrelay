@@ -35,6 +35,19 @@ pub(crate) async fn live_post(
     slug: &str,
     posted_at: OffsetDateTime,
 ) {
+    // A real posted community link was minted as a smart_link first — the
+    // content-window query joins the post to that row, so the fixture must
+    // exist for the publication clock to see the post at all.
+    sqlx::query(
+        "INSERT INTO smart_links (workspace_id, slug, destination_url, active) \
+         VALUES ($1,$2,'https://example.test/go',true) \
+         ON CONFLICT (workspace_id, slug) DO NOTHING",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(slug)
+    .execute(&f.pool)
+    .await
+    .expect("smart link");
     sqlx::query(
         r#"INSERT INTO community_posts
            (workspace_id, action_id, subreddit, title, body, status, posted_at, smart_link)

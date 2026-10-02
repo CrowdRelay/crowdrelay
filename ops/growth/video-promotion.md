@@ -2,6 +2,8 @@
 
 Promotion uses the existing content-source, drop-surge, community relay, smart-link, and approval machinery. Requesting a cycle is not publishing a post, producing an artifact, or acquiring a fan.
 
+**Acceptance bar (owner mandate, 2026-10-02):** a video push is *done* only when the promoted video reaches **≥1,000 organic views, ≥10 likes and ≥5 comments driven by CrowdRelay operations** — measured on the `youtube` outcome series and per-video stats. Dispatched tasks, drafts, and even published posts do not clear the bar; only the numbers do.
+
 ## Platform policy
 
 The source owns `metadata.promotion_excluded_platforms`. Videos and their recognized YouTube release projections without an explicit policy exclude Facebook and Instagram. An explicit empty array permits them. Invalid policy values exclude every recognized promotion platform. Other source kinds retain their existing defaults.
