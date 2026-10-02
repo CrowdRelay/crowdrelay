@@ -18,8 +18,8 @@
 
 use crowdrelay_domain::{
     fan_next_action::{
-        FanProspectActionInput, FanProspectActionKind, FanProspectCtaIntent,
-        FanProspectMedium, evaluate_fan_prospect,
+        FanProspectActionInput, FanProspectActionKind, FanProspectCtaIntent, FanProspectMedium,
+        evaluate_fan_prospect,
     },
     fan_prospect::{
         ObservationKind, ProspectSource, ProspectStatus, display_handle, normalize_handle,
@@ -506,7 +506,6 @@ pub async fn expire(
     tx.commit().await?;
     Ok(u64::try_from(expired.len()).unwrap_or(u64::MAX))
 }
-
 
 const MAX_ACTION_READ_ROWS: i64 = 500;
 const MAX_ACTION_VIEW_ROWS: usize = 100;

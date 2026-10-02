@@ -7,10 +7,7 @@ use crowdrelay_infra::fan_prospects::{ObservedPerson, next_actions, observe};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-async fn workspace(
-    pool: &sqlx::PgPool,
-    label: &str,
-) -> Result<Uuid, Box<dyn std::error::Error>> {
+async fn workspace(pool: &sqlx::PgPool, label: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,$3)")
         .bind(id)
@@ -160,7 +157,8 @@ async fn explicit_join_intent_holds_when_the_tenant_has_no_owned_destination()
         .ok_or("missing prospect")?;
     assert_eq!(format!("{:?}", item.action), "Hold");
     assert!(
-        item.reason.contains("no configured first-party member site"),
+        item.reason
+            .contains("no configured first-party member site"),
         "{}",
         item.reason
     );
