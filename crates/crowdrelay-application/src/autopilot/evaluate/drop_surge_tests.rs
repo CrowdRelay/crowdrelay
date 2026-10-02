@@ -51,6 +51,19 @@ fn surge_policy() -> AutopilotPolicy {
     }
 }
 
+/// A room the band has read: three threads from the last few days, each with
+/// its own permalink. The drop surge posts only into a room like this one.
+pub(super) fn read_room() -> Vec<crowdrelay_domain::room_reading::RoomThread> {
+    let today = OffsetDateTime::now_utc().date();
+    (1..=3)
+        .map(|n| crowdrelay_domain::room_reading::RoomThread {
+            title: format!("What is everyone listening to, week {n}"),
+            url: format!("https://www.reddit.com/comments/room{n}"),
+            posted_on: today - time::Duration::days(i64::from(n)),
+        })
+        .collect()
+}
+
 fn surge_community() -> crowdrelay_domain::content_supply::CommunityRelayTarget {
     use crowdrelay_domain::{OutreachTargetId, content_supply::CommunityRelayTarget};
     CommunityRelayTarget {
@@ -60,6 +73,7 @@ fn surge_community() -> crowdrelay_domain::content_supply::CommunityRelayTarget 
         community_url: None,
         language: Some("en".to_owned()),
         relay_failures: Vec::new(),
+ recent_threads: read_room(),
     }
 }
 
@@ -455,6 +469,7 @@ fn a_failed_community_relay_retries_under_an_attempt_key()
             community_url: None,
             language: Some("en".to_owned()),
             relay_failures: failures,
+ recent_threads: read_room(),
         }
     };
     let failure = |failures: u32, ago: time::Duration| RelayLaneFailure {
@@ -498,5 +513,51 @@ fn a_failed_community_relay_retries_under_an_attempt_key()
         last_failed_at: now - time::Duration::days(30),
     }])])?;
     assert!(foreign.is_some_and(|key| !key.contains(":attempt")));
+    Ok(())
+}
+
+fn community_drafts(
+    communities: &[crowdrelay_domain::content_supply::CommunityRelayTarget],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let now = OffsetDateTime::now_utc();
+    let candidates = content_candidates(
+        &fresh_video_snapshot(now),
+        &surge_policy(),
+        communities,
+        None,
+        ContextEvidence::UNPROVEN,
+        now,
+    )?;
+    Ok(candidates
+        .iter()
+        .filter_map(|candidate| match &candidate.action {
+            AutopilotActionPayload::RequestAgentRun { prompt, .. } => Some(prompt.clone()),
+            _ => None,
+        })
+        .collect())
+}
+
+/// A fresh drop is time-sensitive, and still not worth a post into a room nobody
+/// looked into: the community lane waits on the band having read the room.
+#[test]
+fn the_drop_surge_does_not_post_into_a_room_the_band_has_not_read() -> Result<(), Box<dyn std::error::Error>>
+{
+    let read = surge_community();
+    let mut unread = surge_community();
+    unread.subreddit = "quietplace".to_owned();
+    unread.recent_threads.truncate(2);
+    let mut forum = surge_community();
+    forum.platform = "forum".to_owned();
+    forum.community_url = Some("https://forum.example/music".to_owned());
+    forum.recent_threads.clear();
+
+    let drafts = community_drafts(&[read.clone(), unread, forum])?;
+    assert_eq!(drafts.len(), 1, "only the read room is drafted for: {drafts:?}");
+    assert!(drafts[0].contains("r/industrialmusic"));
+    // The draft is told what the room is discussing, with the URLs it may cite.
+    for thread in &read.recent_threads {
+        assert!(drafts[0].contains(&thread.url), "{}", drafts[0]);
+    }
+    assert!(drafts[0].contains("fits_thread_url"));
     Ok(())
 }

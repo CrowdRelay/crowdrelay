@@ -125,6 +125,12 @@ pub struct AutopilotCycleReport {
     /// Each entry is `(community, posts_waiting)`, most-wanted first. Empty
     /// when nothing is blocked, which is the healthy case.
     pub blocked_on_membership: Vec<(String, u32)>,
+    /// Communities the brain would post to but has not read: fewer than
+    /// `room_reading::MIN_THREADS` recent threads on record. Same reason
+    /// `blocked_on_membership` exists — a gate that drops candidates silently
+    /// reads exactly like a brain with nothing to say. Today every platform but
+    /// Reddit is here by construction, because only Reddit has a reader.
+    pub rooms_unread: Vec<String>,
     /// Join-ask platforms the evaluator looked at and held this cycle —
     /// `(platform, hold)`. Same reason `blocked_on_membership` exists: a
     /// configured platform that stays quiet is work waiting on a person (no

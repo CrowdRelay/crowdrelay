@@ -88,24 +88,87 @@ pub(crate) async fn content_source(pool: &PgPool, workspace_id: WorkspaceId) -> 
     Ok(id)
 }
 
-/// A screened-and-admitted community — the bar the ingest gate checks.
+/// A room the band has read: a place with three recent threads recorded by the
+/// community sweep, which is what a community draft must cite. Reuses the place
+/// when the caller already seeded one at the same address.
+pub(crate) async fn read_room(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    subreddit: &str,
+) -> Result<Uuid> {
+    let place_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO discovery_places (id, workspace_id, place_kind, platform, name, url)
+         VALUES ($1,$2,'subreddit','reddit',$3,$4)
+         ON CONFLICT (workspace_id, platform, url) DO UPDATE SET name = discovery_places.name
+         RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(format!("r/{subreddit}"))
+    .bind(format!("https://www.reddit.com/r/{subreddit}"))
+    .fetch_one(pool)
+    .await
+    .context("insert community place")?;
+    for n in 1..=3 {
+        sqlx::query(
+            "INSERT INTO fan_observations
+                 (workspace_id, place_id, observed_at, platform, kind, fact, url)
+             VALUES ($1,$2, current_date - $3::int, 'reddit', 'post', $4, $5)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(place_id)
+        .bind(n)
+        .bind(format!("Thread {n} in r/{subreddit}"))
+        .bind(format!("https://www.reddit.com/comments/{subreddit}{n}"))
+        .execute(pool)
+        .await
+        .context("insert room thread")?;
+    }
+    Ok(place_id)
+}
+
+/// A thread the sweep recorded in this target's room — what a draft cites.
+pub(crate) async fn cited_thread(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    target_id: Uuid,
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT fo.url FROM fan_observations fo
+         JOIN agent_outreach_targets t
+           ON t.workspace_id = fo.workspace_id AND t.place_id = fo.place_id
+         WHERE t.workspace_id = $1 AND t.id = $2 AND fo.kind = 'post'
+         ORDER BY fo.url LIMIT 1",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// A screened-and-admitted community — the bar the ingest gate checks — in a
+/// room the band has read (`read_room`); `engage_outcome` cites one of its
+/// threads.
 pub(crate) async fn community_target(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     subreddit: &str,
 ) -> Result<Uuid> {
+    let place_id = read_room(pool, workspace_id, subreddit).await?;
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO agent_outreach_targets (
              id, workspace_id, target_kind, display_name, why_fit, status,
-             screening_verdict, subreddit
+             screening_verdict, subreddit, place_id
          ) VALUES ($1,$2,'community',$3,'active metal community','promoted',
-                   'admitted',$4)",
+                   'admitted',$4,$5)",
     )
     .bind(id)
     .bind(workspace_id.into_uuid())
     .bind(format!("r/{subreddit}"))
     .bind(subreddit)
+    .bind(place_id)
     .execute(pool)
     .await
     .context("insert community target")?;
@@ -143,6 +206,9 @@ pub(crate) async fn engage_outcome_text(
     title: &str,
     body: &str,
 ) -> Result<Uuid> {
+    // The thread the draft cites: one the community sweep recorded in THIS
+    // target's room, whatever label the draft gives the subreddit.
+    let thread = cited_thread(pool, workspace_id, target_id).await?;
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -164,6 +230,7 @@ pub(crate) async fn engage_outcome_text(
             "title": title,
             "body": body,
             "source_id": source_id.to_string(),
+            "fits_thread_url": thread,
         },
         "rationale": "the community takes band news",
         "provenance": {

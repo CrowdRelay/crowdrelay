@@ -193,6 +193,13 @@ pub struct UnengagedTarget {
     /// what it signs up.
     #[serde(default)]
     pub durable_fans_90d: u32,
+    /// What the room has been discussing lately, as the community sweep read it:
+    /// newest first, at most `PROMPT_THREADS`, none older than
+    /// `READ_MAX_AGE_DAYS`. Empty means nobody has looked — a room the sweep
+    /// cannot read (every platform but Reddit today) or has not reached — and
+    /// the engager does not post into a room it has not read.
+    #[serde(default)]
+    pub recent_threads: Vec<crowdrelay_domain::room_reading::RoomThread>,
 }
 
 impl UnengagedTarget {

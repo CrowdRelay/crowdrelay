@@ -35,6 +35,8 @@ mod bridge_lifecycle_tests;
 mod causal_cursor;
 mod channel_yield;
 mod community_targets;
+
+pub(in crate::autopilot) use community_targets::read_threads as read_room_threads;
 mod evidence_replay;
 mod exchange;
 mod fatigue;

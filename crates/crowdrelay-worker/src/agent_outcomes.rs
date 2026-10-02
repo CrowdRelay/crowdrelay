@@ -116,6 +116,7 @@ include!("agent_outcomes/opportunity_findings.rs");
 include!("agent_outcomes/strategy_proposals.rs");
 include!("agent_outcomes/creative_family.rs");
 include!("agent_outcomes/community_engagement.rs");
+include!("agent_outcomes/room_reading.rs");
 
 /// True for a relative in-app route the Signal app can resolve.
 ///
@@ -699,6 +700,17 @@ impl AgentOutcomeWorker {
                     )
                 {
                     let rejection = OutcomeRejection::CommunityLanguageMismatch { expected, found };
+                    tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
+                    drop(tx);
+                    self.reject_outcome(outcome.id, &rejection.to_string())
+                        .await?;
+                    return Ok((None, None));
+                }
+
+                if let Some(rejection) = self
+                    .room_not_read(&mut tx, outcome, target_id, producing_template)
+                    .await?
+                {
                     tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
                     drop(tx);
                     self.reject_outcome(outcome.id, &rejection.to_string())

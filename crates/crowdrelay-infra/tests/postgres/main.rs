@@ -63,6 +63,7 @@ mod autopilot_release_tier;
 mod autopilot_reply_model;
 mod autopilot_reply_negotiation;
 mod autopilot_reply_resolution;
+mod autopilot_room_threads;
 mod autopilot_show_cost;
 mod autopilot_show_growth_retry;
 mod autopilot_show_ladder;
