@@ -188,10 +188,7 @@ fn release_plan(language: Language, release: &ReleaseFact, link: &str) -> Missio
         Language::Pl => "pl",
         Language::En => "en",
     };
-    let link = format!(
-        "{link}?release={}&lang={lang}",
-        release.content_source_id
-    );
+    let link = format!("{link}?release={}&lang={lang}", release.content_source_id);
     let (prompt, share) = match language {
         Language::Pl => (
             format!("Komu jednej osobie wysłałbyś „{}”?", release.title),
@@ -321,9 +318,10 @@ mod tests {
         assert!(plan.prompt.contains("jedną osobę"), "{}", plan.prompt);
         assert!(plan.prompt.ends_with("(17.10)?"), "{}", plan.prompt);
         assert!(plan.share_text.contains("Gorzów Wielkopolski"));
-        assert!(plan.share_text.ends_with(
-            "https://virya.music/r/abc123?event=virya-furydate-impala&lang=pl"
-        ));
+        assert!(
+            plan.share_text
+                .ends_with("https://virya.music/r/abc123?event=virya-furydate-impala&lang=pl")
+        );
         assert!(plan.event_id.is_some() && plan.content_source_id.is_none());
     }
 
@@ -427,7 +425,10 @@ mod tests {
             },
             ..context()
         };
-        assert!(choose_mission(&one_quiet, NOW).is_some(), "one miss keeps baseline cadence");
+        assert!(
+            choose_mission(&one_quiet, NOW).is_some(),
+            "one miss keeps baseline cadence"
+        );
 
         let ignored_twice = MissionContext {
             last_offered_at: Some(NOW - Duration::days(30)),
