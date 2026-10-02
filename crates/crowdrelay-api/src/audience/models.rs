@@ -549,15 +549,35 @@ pub struct PrivateVenueFactRow {
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct ReferralConversionRow {
-    /// Total referral attributions (people who used a code).
+    /// Total referral attributions (people who used a code), across all time.
+    /// Kept for API compatibility; this is not a count of share-button taps.
     referrals_sent: i64,
-    /// Attributions that reached 'qualified' status (referred fan qualified).
+    /// Attributions that reached 'qualified' status, across all time.
     qualified: i64,
-    /// Qualified referrals whose referred fan is 30d-active (consented +
-    /// meaningful action in last 30 days).
+    /// Qualified referrals whose referred fan is currently 30d-active.
     activated: i64,
-    /// Qualified referrals that were later reversed (e.g. fan unsubscribed).
+    /// Referral attributions that were later reversed.
     reversed: i64,
+
+    /// Latarnik missions offered in the rolling 30-day North Star window.
+    latarnik_offered_30d: i64,
+    /// Offered missions where the Latarnik actually opened the share action.
+    /// A tap is intent, not evidence that another person saw anything.
+    latarnik_tapped_30d: i64,
+    /// Distinct anonymous human visitors who followed a referral during a
+    /// tapped mission's attribution window. Bot/unfurl fetches never enter
+    /// the provenance ledger and therefore cannot inflate this denominator.
+    latarnik_human_clickers_30d: i64,
+    /// Distinct people who became referred fans inside a tapped mission's
+    /// attribution window.
+    latarnik_joined_30d: i64,
+    /// Those mission-window referrals that currently satisfy the existing
+    /// qualified-referral rules.
+    latarnik_qualified_30d: i64,
+    /// Those mission-window referred fans that are currently 30d-active
+    /// (marketing consent + a meaningful action). This is a quality outcome
+    /// independent of referral qualification, not a fabricated funnel step.
+    latarnik_activated_30d: i64,
 }
 
 #[derive(Debug, Serialize, FromRow)]
