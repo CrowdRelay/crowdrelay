@@ -1,6 +1,6 @@
 // Drop-surge fan-out for fresh videos and releases, split out of
-// `candidates.rs`: the moment a new video lands in the supply, every owned
-// lane gets its own idempotent action instead of waiting on the generic
+// `candidates.rs`: the moment a new video or release lands in the supply,
+// every lane gets its own idempotent action instead of waiting on the generic
 // posting cadence — the failure this lane closes was measured on
 // 2026-09-28, when a premiere got fifty-nine artifact requests and zero
 // fan-facing posts in its first day.
@@ -119,9 +119,11 @@ fn drop_surge_candidates(
             continue;
         }
         if lane == "community" {
-            if snapshot.source_kind != crowdrelay_domain::content_supply::ContentSourceKind::Video {
-                continue;
-            }
+            // `drop_surge_eligible` already limits this path to fresh,
+            // linked videos and releases. Community distribution must follow
+            // the same contract: a release is not less capable of finding a
+            // new listener merely because its public destination is Spotify,
+            // Bandcamp or another canonical listen URL.
             for target in communities.iter().filter(|target| {
                 !snapshot
                     .promotion_excluded_platforms
@@ -154,7 +156,7 @@ fn drop_surge_candidates(
                     decision_kind: "drop_surge_fanout",
                     confidence,
                     disposition: crowdrelay_domain::autonomy::internal_work_disposition(outward),
-                    reason: "fresh video drafted for one admitted community; publication requires approval",
+                    reason: "fresh drop drafted for one admitted community; publication follows the existing community authority gate",
                     input_snapshot: input_snapshot.clone(),
                     policy_snapshot: policy_snapshot.clone(),
                     action: AutopilotActionPayload::RequestAgentRun {
@@ -200,7 +202,7 @@ fn drop_surge_candidates(
             policy.version
         );
         let action_idempotency_key = format!("action:drop_surge:{source}:{lane}{retry}");
-        let reason = "fresh drop — the first hours are where a new video earns its fans";
+        let reason = "fresh drop — the first hours are where new material earns its fans";
         let action = match lane {
             "signal_push" => AutopilotActionPayload::RequestSignalPush {
                 task_id: source,
