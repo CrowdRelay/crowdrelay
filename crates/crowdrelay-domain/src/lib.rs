@@ -94,6 +94,7 @@ pub mod fan_scout;
 pub mod fan_identity;
 pub mod fan_landing;
 pub mod fan_lifecycle;
+pub mod fan_prospect;
 pub mod fanbase;
 pub mod festival_seed;
 pub mod free_reach;
