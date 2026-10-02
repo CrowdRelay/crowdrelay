@@ -548,7 +548,9 @@ async fn nobody_is_written_to_unread() -> Result<(), Box<dyn std::error::Error>>
     let preview = preview_latarnik_invite(&pool, act, anna, now).await?;
     assert!(preview.body.contains(fact), "{}", preview.body);
     assert!(
-        preview.body.contains("Rzadko ktoś omawia"),
+        preview
+            .body
+            .contains("W recenzji „Szum” zwróciło nam uwagę"),
         "{}",
         preview.body
     );
