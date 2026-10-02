@@ -86,6 +86,8 @@ typed_uuid_id!(
     CampaignId,
     SmartLinkId,
     FanId,
+    FanProspectId,
+    FanProspectObservationId,
     CityId,
     VisitorId,
     ReferralAttributionId,

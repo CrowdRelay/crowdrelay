@@ -100,6 +100,7 @@ mod duplicate_refused_letters;
 mod ecosystem;
 mod events;
 mod fan_demand;
+mod fan_scout;
 mod fan_identity;
 mod fan_lifecycle;
 mod fan_privacy_unpublish;

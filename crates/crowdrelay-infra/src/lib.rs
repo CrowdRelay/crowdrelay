@@ -49,6 +49,7 @@ pub mod database;
 pub mod ecosystem;
 pub mod events;
 pub mod fan_demand;
+pub mod fan_scout;
 pub mod fan_identity;
 pub mod fan_import;
 pub mod fan_lifecycle;
