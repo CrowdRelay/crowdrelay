@@ -15,3 +15,16 @@ Start each implementation checkpoint with the measured limiting stage of the exi
 The next checkpoint should make this goal and its exclusions visible using the existing acquisition/attribution ledgers, then give the autonomous engine a bounded next action for the actual bottleneck: unverified delivery, no audience visits, failed signup/confirmation, or missing fan value. Mature measured zero differs from an immature or uninstrumented window. Stop repeating failing lanes; preserve receipt reconciliation, existing approvals, consent, removal holds, contact ceilings and the booker's ownership. No bulk inviting archives, fabricated engagement or extra contact grants.
 
 A production read after authorized deployment must establish the current baseline and usable publishing lanes. Use a real upcoming show or owned release with a concrete promise and a live tracked placement. Track the full path to confirmed acquisition; fix the largest observed loss before adding more machinery. Do not claim the target is guaranteed by code alone.
+
+
+## Checkpoint — quality-first fresh-drop audience pockets
+
+The fresh release/video surge no longer chooses its bounded community set by rotation alone. The relay still considers only screened, admitted, currently usable communities and still caps one source-bound spread at three communities, but selection now uses first-party 90-day outcome evidence inside a rested candidate pool:
+
+- two slots prefer communities that previously produced durable fans, then confirmed fan conversions, then distinct human interactions;
+- one slot is deliberately reserved for an unmeasured community so exploration never disappears;
+- if there is not enough measured history, remaining slots fall back to the existing least-recently-drafted rotation.
+
+This changes which audience pockets get the scarce fresh-drop slots without raising send ceilings, bypassing approval/standing rules, repeating a source into the same target, or treating follower/member counts as fan growth. A merged PR is still not progress toward 100; production acceptance is a higher share of delivered fresh-drop placements producing real tracked visitors, confirmed fans and later durable fans.
+
+Next bottleneck after this checkpoint: make the autonomous loop consume the live organic-funnel stage so it expands reach only when traffic is the constraint and switches to conversion/activation recovery when people are already arriving.
