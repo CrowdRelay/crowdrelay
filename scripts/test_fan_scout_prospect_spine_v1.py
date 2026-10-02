@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
-"""FAN SCOUT prospect-spine contract."""
+"""FAN SCOUT canonical prospect-spine contract."""
 
 from pathlib import Path
 
 R = Path(__file__).resolve().parents[1]
-migration = (R / "migrations/0404_fan_scout_prospect_spine.sql").read_text()
-infra = (R / "crates/crowdrelay-infra/src/fan_scout.rs").read_text()
-domain = (R / "crates/crowdrelay-domain/src/fan_scout.rs").read_text()
+migration = (R / "migrations/0406_reconcile_fan_scout_prospect_spines.sql").read_text()
+infra = (R / "crates/crowdrelay-infra/src/fan_prospects.rs").read_text()
+domain = (R / "crates/crowdrelay-domain/src/fan_prospect.rs").read_text()
+domain_lib = (R / "crates/crowdrelay-domain/src/lib.rs").read_text()
+infra_lib = (R / "crates/crowdrelay-infra/src/lib.rs").read_text()
 
-assert "CREATE TABLE scout_prospects" in migration
-assert "CREATE TABLE scout_prospect_observations" in migration
-assert "linked_fan_id" in migration
-assert "UNIQUE (workspace_id, platform, identity_kind, identity_key)" in migration
-assert "INSERT INTO fans" not in migration
+assert "legacy_0404_scout_prospects" in migration
+assert "platform_user_id" in migration
+assert "fan_prospects_one_per_person_platform" in migration
+assert "DROP INDEX IF EXISTS fan_prospects_one_per_handle" in migration
+
+assert "pub platform_user_id: Option<&'a str>" in infra
+assert "person_id=$2 AND platform=$3" in infra
+assert "identifier.verified_at IS NOT NULL" in infra
+assert "fan.status='active'" in infra
+assert "prospect.status NOT IN ('refused','suppressed')" in infra
 assert "INSERT INTO fans" not in infra
 
-assert "ON CONFLICT (workspace_id, platform, identity_kind, identity_key)" in infra
-upsert = infra.split("ON CONFLICT (workspace_id, platform, identity_kind, identity_key)", 1)[1]
-upsert = upsert.split("RETURNING id", 1)[0]
-assert "status =" not in upsert
+assert "normalize_platform_user_id" in domain
+assert "pub mod fan_scout;" not in domain_lib
+assert "pub mod fan_scout;" not in infra_lib
 
-assert "identifier.verified_at IS NOT NULL" in infra
-assert "fan.status = 'active'" in infra
-assert "prospect.status NOT IN ('refused', 'suppressed')" in infra
-assert "status = 'converted'" in infra
-
-assert "PlatformUserId" in domain
-assert "Handle" in domain
-assert "raw.to_lowercase()" in domain
-assert "raw.to_owned()" in domain
-
-print("FAN_SCOUT_PROSPECT_SPINE=PASS")
+print("FAN_SCOUT_CANONICAL_PROSPECT_SPINE=PASS")
