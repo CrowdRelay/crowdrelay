@@ -95,6 +95,14 @@ pub enum OutcomeRejection {
     /// shown: wrong person, a source it never saw, a date that is not the one
     /// recorded for that page, or text outside the band's register.
     UngroundedContactResearch { reason: String },
+    /// The social-content worker returned a different channel from the one
+    /// Brain selected from measured first-party yield. Letting the model
+    /// substitute a platform would break the feedback loop: the system would
+    /// measure Facebook winning and still be free to publish on Instagram.
+    SocialPlatformMismatch {
+        expected: String,
+        found: Option<String>,
+    },
     /// The source owner excluded this destination from the promotion.
     PlatformExcluded { platform: String },
 }
@@ -102,6 +110,10 @@ pub enum OutcomeRejection {
 impl std::fmt::Display for OutcomeRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SocialPlatformMismatch { expected, found } => write!(
+                f,
+                "SOCIAL_PLATFORM_MISMATCH: Brain selected {expected:?}, agent returned {found:?}"
+            ),
             Self::PlatformExcluded { platform } => write!(f, "PLATFORM_EXCLUDED: {platform}"),
             Self::InsufficientEvidence { reason } => {
                 write!(f, "INSUFFICIENT_EVIDENCE: {reason}")

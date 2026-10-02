@@ -746,7 +746,16 @@ pub fn evaluate_growth_intelligence(
 
     // Rule 3: Draft social content on a 2-day cadence.
     if snapshot.template_id == "social-post" && effective_hours >= social_post_cd && retry_ready {
+        let selected_platform =
+            crowdrelay_brain::platform_yield::preferred_owned_social_platform(
+                &snapshot.world_model.channel_yield,
+            );
         let mut prompt = "Create social media content for the band. Reference upcoming events, recent releases, or fan milestones. Write in Polish for the primary audience. Include suggested hashtags.".to_owned();
+        if let Some(platform) = selected_platform {
+            prompt.push_str(&format!(
+                "\n\nTARGET PLATFORM: {platform}. Produce exactly one social-post draft with platform=\"{platform}\". This channel was selected deterministically from attributed fan yield. Do not substitute another platform."
+            ));
+        }
         let fan_yield_history = social_content_performance_block(&snapshot.social_content_history);
         if !fan_yield_history.is_empty() {
             prompt.push_str("\n\n");

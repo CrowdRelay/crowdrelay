@@ -69,6 +69,13 @@ NEXT DECISION
   reads the trend, `from_world_model_with_posterior` may override that
   incumbent when a challenger's posterior clears P(Δ ≥ 1 fan) ≥ 0.6, and
   template priority within a strategy is ordered by measured platform yield.
+  For the multi-platform `social-post` template, direct first-party channel
+  yield goes one step further: durable attributed fans → fresh conversions →
+  tracked clickers deterministically select Facebook/Instagram/X for the next
+  draft. The selected channel is frozen into decision provenance and outcome
+  ingestion rejects a model draft that substitutes another platform. With no
+  direct channel evidence, no platform is pinned and exploration stays as it
+  was.
 
 ### WORLD STATE → BELIEF → PREDICTION
 
