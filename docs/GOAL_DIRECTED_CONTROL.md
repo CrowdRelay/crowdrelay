@@ -64,8 +64,12 @@ REPLAN        the difference between the two, acted on
 
 Most of it, and the parts that exist are the parts that are usually done badly.
 
-- **GOAL.** `GrowthObjective { platform, metric_key, scope, direction,
-  baseline_value, target_value, declared_at, deadline }`. Complete.
+- **GOAL.** Two operator surfaces feed one control type. Series-backed
+  `GrowthObjective { platform, metric_key, scope, direction, baseline_value,
+  target_value, declared_at, deadline }` remains unchanged. The monthly
+  `organic_fan_goals` surface supplies the explicit verified-organic target
+  and its Warsaw-month deadline; its progress is the shared
+  `organic_fan_cohort`, not a raw fan count.
 - **BASELINE.** Frozen at declaration, deliberately: "progress measured from a
   baseline that moves is not progress."
 - **REMAINING and DEADLINE.** `assess_objective` returns `Met`, `OnTrack`,
@@ -79,8 +83,10 @@ Most of it, and the parts that exist are the parts that are usually done badly.
 - **PORTFOLIO.** `PortfolioOptimizer` selects on `DecisionValue::total()`, in
   expected incremental Y30 fans, with WAIT competing. Deadline-free, but the
   unit is already the unit a goal is denominated in.
-- **ACTUAL.** `growth_metric_points` — the same series the objective is
-  declared against. One source, no second reading.
+- **ACTUAL.** Each objective keeps one canonical reading:
+  `growth_metric_points` for series-backed objectives, and
+  `organic_fan_cohort` for the verified-organic monthly target. The chooser
+  consumes those assessments; it never recomputes progress.
 
 ## What was built
 
@@ -88,13 +94,15 @@ Three things, small on purpose, in the places the contract names.
 
 1. **An objective the brain can see.** `WorldModel.objective` carries the live
    workspace-scoped objective with the nearest deadline, as `assess_objective`
-   judged it (`crowdrelay_brain::goal::ActiveObjective`). The snapshot loader
-   gets it from the same read the objectives endpoint serves
-   (`infra/autopilot/objectives.rs::assessed_objectives`), so the operator and
-   the brain see one verdict. City, event and release-plan objectives stay
-   readouts: the portfolio selects for the whole workspace, and a city being
-   behind is not a reason to send more everywhere. Met, missed and
-   unmeasurable objectives steer nothing.
+   judged it (`crowdrelay_brain::goal::ActiveObjective`). The chooser folds
+   the ordinary series-backed assessments with the monthly
+   `verified_organic_acquisitions` assessment from `organic_goal::read`.
+   Each surface owns its own canonical observation; the chooser only compares
+   their already-assessed live deadlines. Monthly renewal is worker-cycle work,
+   not a side effect of reading join-ask or an operator page. City, event and
+   release-plan objectives stay readouts: the portfolio selects for the whole
+   workspace, and a city being behind is not a reason to send more everywhere.
+   Met, missed and unmeasurable objectives steer nothing.
 
 2. **A required pace.** `GoalPace::from_objective` is arithmetic on the
    assessment and the deadline: the remaining distance (the assessment's own
@@ -155,10 +163,12 @@ meaning.
 
 - **A second planner.** The portfolio optimiser is the selector. A goal supplies
   a constraint and a posture; it does not get its own ranking.
-- **A second definition of progress.** `assess_objective` is the only one.
-  `GrowthTargetProgress` may keep its monthly bucket as an operator readout,
-  but if a declared objective exists it is the goal, and the derived table is
-  not a competing answer to the same question.
+- **A second definition of progress.** `assess_objective` is the only
+  objective-state judge. A source still owns its observation:
+  `growth_metric_points` for a declared series and `organic_fan_cohort` for
+  verified organic acquisition. `GrowthTargetProgress` may keep its derived
+  monthly bucket as an operator readout, but it is not a competing control
+  target.
 - **A trajectory model.** "Expected trajectory" is the portfolio's own expected
   Y30, recorded per decision beside the pace it was chosen under. It needs no
   new estimator, and one would only be a second opinion about a number the
@@ -185,7 +195,11 @@ resolved rows the brain needs before uncertainty can enter selection, and how
 long people take to approve what it drafts (standing grants and ladders
 excluded), with the oldest item still waiting.
 
-The wiring is exercised by unit tests, not yet by a real deadline. Whether the
-raised ceiling produces more durable fans or only more dispatches is a
-question for resolved outcomes, and the `goal` provenance block is there so
-it can be answered.
+The wiring is exercised by unit tests plus a PostgreSQL bridge regression:
+monthly renewal receives its own stable objective identity, raw fan rows do not
+advance the verified-organic target, the objective reaches the world model, and
+the existing behind-goal constraint raises a 5-slot base only to its bounded
+10-slot ceiling. A nearer ordinary workspace objective still wins the same
+chooser. Whether that raised ceiling produces more durable fans or only more
+dispatches remains a production outcome question, and the `goal` provenance
+block is there so it can be answered.

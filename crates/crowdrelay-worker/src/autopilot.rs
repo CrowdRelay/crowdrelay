@@ -50,6 +50,10 @@ const REPLY_TRIAGE_BATCH_SIZE: u32 = 50;
 /// part of a contract: renaming one silently re-labels history. They are
 /// deliberately not the log messages, which are prose and change freely.
 mod phase {
+    /// Rolling an enrolled monthly organic target is cycle work, not a read
+    /// side effect. Failure leaves the prior goal intact and degrades only
+    /// this phase; already-authorized execution and evidence resolution continue.
+    pub const ORGANIC_GOAL_RENEWAL: &str = "organic_goal_renewal";
     pub const GROWTH_METRIC_CAPTURE: &str = "growth_metric_capture";
     /// Keeping outreach opportunities current: the pitch, the next shows,
     /// and contacts imported since. A failure leaves last cycle's
@@ -493,6 +497,23 @@ impl AutopilotWorker {
         let mut north_star_observed = None;
         let mut north_star_metric = None;
         let mut wait_reason = None;
+
+        // Renew before any evaluation read. The monthly organic target is a
+        // control input, so a new Warsaw month must exist before the world
+        // model chooses its active objective. This is deliberately cycle-owned:
+        // join-ask and operator reads stay pure.
+        if let Err(error) = self
+            .repository
+            .renew_organic_goal(self.workspace_id, now)
+            .await
+        {
+            let error_kind = repository_error_kind(error);
+            degraded.failed(phase::ORGANIC_GOAL_RENEWAL, error_kind);
+            tracing::warn!(
+                error_kind,
+                "monthly organic goal renewal failed; evaluation will use the last durable goal"
+            );
+        }
 
         // Letters waiting on a person follow the act's current sender line:
         // a home city fixed after they were composed, or composed by the old
