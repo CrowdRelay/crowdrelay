@@ -615,9 +615,9 @@ pub(super) async fn schedule_effect_measurement(
         AutopilotActionPayload::RequestFanLifecycleMessage { .. } => {
             // Re-bind fan_id from the reference — the { .. } pattern keeps
             // the contract test happy while still extracting the subject.
-            if let AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, .. } = payload {
+            if let AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, template_key, .. } = payload {
                 plans.push((
-                    AutopilotMeasurementKind::FanLifecycleEngagement7d,
+                    if template_key == WELCOME_V2_TEMPLATE { AutopilotMeasurementKind::FanLifecycleActivation7d } else { AutopilotMeasurementKind::FanLifecycleEngagement7d },
                     fan_id.into_uuid(),
                     0.0,
                     now + time::Duration::days(7),
@@ -968,4 +968,3 @@ pub(super) async fn schedule_effect_measurement(
     }
     Ok(())
 }
-

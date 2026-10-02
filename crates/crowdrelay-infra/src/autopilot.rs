@@ -31,6 +31,7 @@ mod lapsed_sweep;
 mod relay_mutations;
 pub use lapsed_sweep::{LapsedSweepStats, sweep_lapsed_approval_asks};
 pub use outreach_supply::OutreachSupplyRefresh;
+mod lifecycle_activation;
 mod lifecycle_grants;
 mod measurement;
 mod objectives;

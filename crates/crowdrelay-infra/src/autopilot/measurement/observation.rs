@@ -672,6 +672,22 @@ pub(super) async fn observe_with_metrics(
             // from passive to active. The baseline is 0 — lifecycle
             // messages target new or dormant fans. A positive observed
             // value means the message worked; 0 means it didn't.
+            AutopilotMeasurementKind::FanLifecycleActivation7d => {
+                sqlx::query_scalar::<_, f64>(
+                    r#"
+                    SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM fans fan WHERE fan.workspace_id=$1 AND fan.id=$2
+                          AND fan.status='active' AND fan.deleted_at IS NULL
+                          AND COALESCE((SELECT granted FROM fan_consents WHERE workspace_id=$1
+                            AND fan_id=fan.id AND purpose='marketing' AND recorded_at<=$4
+                            ORDER BY recorded_at DESC,id DESC LIMIT 1),false)
+                          AND fan_has_engagement_between($1,fan.id,fan.normalized_email,$3,LEAST($4,$3+INTERVAL '7 days'))
+                    ) THEN 1.0::double precision ELSE 0.0::double precision END
+                    "#,
+                ).bind(workspace_id.into_uuid()).bind(measurement.subject_id)
+                 .bind(measurement.action_finished_at).bind(now)
+                 .fetch_one(pool).await.map_err(map_sqlx)?
+            }
             AutopilotMeasurementKind::FanLifecycleEngagement7d => {
                 let admission_passes = sqlx::query_scalar::<_, f64>(
                     r#"

@@ -70,6 +70,20 @@ impl PostgresAutopilotRepository {
                     .fetch_one(&mut *transaction)
                     .await
                     .map_err(map_sqlx)?;
+                    let activation = if template_key == WELCOME_V2_TEMPLATE {
+                        if !executor_capability_available(&mut transaction, workspace_id, WELCOME_V2_CAPABILITY).await? {
+                            return Err(RepositoryError::Unavailable);
+                        }
+                        let brand = crate::tenant_settings::TenantSettingsRepository::new(self.pool.clone())
+                            .brand_settings(workspace_id.into_uuid()).await.map_err(map_sqlx)?;
+                        lifecycle_activation::prepare(
+                            &mut transaction, &brand,
+                            lifecycle_activation::WelcomeRequest {
+                                workspace_id, action_id: action.id, fan_id: *fan_id,
+                                locale: fan.2.as_deref().unwrap_or_default(), now,
+                            },
+                        ).await?
+                    } else { None };
                     // The referral invite is the fan→fan growth loop: the
                     // executor receives a complete first-party URL rather
                     // than reconstructing one from the code, and a missing
@@ -236,6 +250,7 @@ impl PostgresAutopilotRepository {
                                 "referral_code": referral_code,
                                 "referral_url": referral_url,
                                 "install_url": install_url,
+                                "activation": activation,
                                 // The night the recall names — the template's
                                 // only subject. Both are None for every other
                                 // lifecycle key.

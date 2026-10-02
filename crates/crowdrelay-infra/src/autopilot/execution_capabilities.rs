@@ -98,6 +98,9 @@ fn executor_capability_for_event(event_type: &str) -> &'static str {
 /// journalist. No executor claims it: the social, telegram and discord
 /// executors claim `social-post`, `telegram-poster` and `discord-poster`
 /// respectively, by direct SQL on the agent task's `template_id`.
+pub(in crate::autopilot) const WELCOME_V2_TEMPLATE: &str = "crowdrelay.fan.welcome.v2";
+pub(in crate::autopilot) const WELCOME_V2_CAPABILITY: &str = "fan.lifecycle.welcome.v2";
+
 pub(in crate::autopilot) const PRESS_PITCH_TEMPLATE: &str = "press-pitch";
 
 /// The capability a press pitch needs, deliberately separate from
@@ -127,6 +130,11 @@ fn executor_capability_for_emission(event_type: &str, payload: &Value) -> &'stat
         && payload.get("template_id").and_then(Value::as_str) == Some(PRESS_PITCH_TEMPLATE)
     {
         return PRESS_PITCH_CAPABILITY;
+    }
+    if event_type == "crowdrelay.fan_lifecycle.message_requested"
+        && payload.get("template_key").and_then(Value::as_str) == Some(WELCOME_V2_TEMPLATE)
+    {
+        return WELCOME_V2_CAPABILITY;
     }
     executor_capability_for_event(event_type)
 }
@@ -172,12 +180,11 @@ pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool
                 | AutopilotActionPayload::PrepareFundingPackage { .. }
                 | AutopilotActionPayload::SubmitFundingApplication { .. }
                 | AutopilotActionPayload::RunPlayStep { .. }
-                | AutopilotActionPayload::SendTeamAssignmentEmail { .. }
-                // `RequestOutreachTarget` is deliberately absent: it executes
-                // as an in-process UPDATE on `agent_outreach_targets` — no
-                // event is emitted and no executor ever files a receipt for
-                // it, so the flag only deferred its outcome write to a report
-                // that cannot arrive.
+                | AutopilotActionPayload::SendTeamAssignmentEmail { .. } // `RequestOutreachTarget` is deliberately absent: it executes
+                                                                         // as an in-process UPDATE on `agent_outreach_targets` — no
+                                                                         // event is emitted and no executor ever files a receipt for
+                                                                         // it, so the flag only deferred its outcome write to a report
+                                                                         // that cannot arrive.
         ),
     }
 }
@@ -201,6 +208,11 @@ pub(in crate::autopilot) fn executor_capability_for_payload(
         && template_id.as_deref() == Some(PRESS_PITCH_TEMPLATE)
     {
         return Some(PRESS_PITCH_CAPABILITY);
+    }
+    if let AutopilotActionPayload::RequestFanLifecycleMessage { template_key, .. } = payload
+        && template_key == WELCOME_V2_TEMPLATE
+    {
+        return Some(WELCOME_V2_CAPABILITY);
     }
     if !payload_requires_executor(payload) {
         return None;
@@ -684,7 +696,16 @@ pub async fn executor_capability_posture(
 
     // Advertised half: every capability row on a live or dead executor, with
     // what makes it usable or not — expiry on either row and the breaker.
-    let advertised = sqlx::query_as::<_, (String, String, OffsetDateTime, OffsetDateTime, Option<OffsetDateTime>)>(
+    let advertised = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            OffsetDateTime,
+            OffsetDateTime,
+            Option<OffsetDateTime>,
+        ),
+    >(
         r#"
         SELECT capability.capability, capability.executor_id,
                capability.expires_at, executor.expires_at, breaker.guarded_until
@@ -739,14 +760,15 @@ pub async fn executor_capability_posture(
         let live = cap_expires > now
             && exec_expires > now
             && guarded_until.is_none_or(|until| until <= now);
-        let entry = by_capability
-            .entry(capability.clone())
-            .or_insert_with(|| ExecutorCapabilityPosture {
-                capability: capability.clone(),
-                state: "blocked",
-                executors: Vec::new(),
-                awaiting: 0,
-            });
+        let entry =
+            by_capability
+                .entry(capability.clone())
+                .or_insert_with(|| ExecutorCapabilityPosture {
+                    capability: capability.clone(),
+                    state: "blocked",
+                    executors: Vec::new(),
+                    awaiting: 0,
+                });
         entry.executors.push(executor_id);
         // One live advertisement makes the lane live; the rest staying blocked
         // is detail the executor list already carries.

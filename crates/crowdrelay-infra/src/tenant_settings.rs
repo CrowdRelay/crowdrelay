@@ -280,6 +280,20 @@ impl TenantBrandSettings {
         Some(format!("{}/{path}/{slug}", self.site_root()?))
     }
 
+    /// The tenant's public watch page, never an executor-built external URL.
+    #[must_use]
+    pub fn watch_page_url(&self, locale: &str, video_id: &str) -> Option<String> {
+        if video_id.len() != 11
+            || !video_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return None;
+        }
+        let prefix = if locale.starts_with("pl") { "pl/" } else { "" };
+        Some(format!("{}/{prefix}watch/{video_id}", self.site_root()?))
+    }
+
     /// The public Signal page — where a fan installs the app or opens the web
     /// hub. Locale forks the same way `member_area_path_for` does: the Polish
     /// route carries its `pl/` prefix.

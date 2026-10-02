@@ -8,7 +8,7 @@ Each active blue/green instance posts `/v1/internal/autopilot/executors/heartbea
 
 `team.email` is additionally fail-closed at the API boundary: a heartbeat advertising it is rejected unless `metadata.workflow_attestation_sha` is a SHA-256, `metadata.workflow_attestation_manifest_sha` equals the heartbeat manifest SHA, and `metadata.workflow_attested_at` is at most 14 days old. A successful heartbeat updates the `n8n` production component in the release ledger. Same-manifest heartbeats preserve attestation evidence; a manifest change clears old evidence automatically. Once the first executor registers, CrowdRelay permanently fails closed for missing/expired capabilities rather than silently returning to legacy mode.
 
-Capabilities: `fan.lifecycle.message`, `merch.reorder`, `booking.outreach`, `merch.bundle`, `outreach.send`, `outreach.discovery`, `beacon.invite_batch`, `beacon.outreach`, `beacon.release.mail`, `beacon.network.discovery`, `beacon.network.invite`, `latarnik.invite`, `show.growth`, `content.artifact`, `show.escalation`, `ops.alert`, `promotion.budget`, `opportunity.application`, `opportunity.terms`, `funding.package`, `funding.submit`, `calendar.upsert`, `team.email`, `play.step`, `play.step.third_party`, `playlist.verify`, `booking.discovery`, `agent.content`, `agent.content.press_pitch`, `community.engage`, `representation.approach`, `gig.outreach`, `booking_agent.approach`.
+Capabilities: `fan.lifecycle.message`, `fan.lifecycle.welcome.v2`, `merch.reorder`, `booking.outreach`, `merch.bundle`, `outreach.send`, `outreach.discovery`, `beacon.invite_batch`, `beacon.outreach`, `beacon.release.mail`, `beacon.network.discovery`, `beacon.network.invite`, `latarnik.invite`, `show.growth`, `content.artifact`, `show.escalation`, `ops.alert`, `promotion.budget`, `opportunity.application`, `opportunity.terms`, `funding.package`, `funding.submit`, `calendar.upsert`, `team.email`, `play.step`, `play.step.third_party`, `playlist.verify`, `booking.discovery`, `agent.content`, `agent.content.press_pitch`, `community.engage`, `representation.approach`, `gig.outreach`, `booking_agent.approach`.
 
 The last three were missing from this list while CrowdRelay routed by them, and that omission is what the `agent.content_requested` refusals were: an executor registering from this list could not advertise a capability it does not mention, so the events reached a webhook that had never been told about them and answered 422. `scripts/test_executor_capability_parity_v1.py` now compares this list against `executor_capability_for_event`, so the two cannot drift again.
 
@@ -92,7 +92,7 @@ install ask: it is a tracked redirect the ledger counts, so send it verbatim or
 the ask teaches nothing.
 The executor renders the named template and sends it.
 
-Nine keys exist. An executor that handles some by name and lets the rest fall
+Ten keys exist, including the historical welcome v1. An executor that handles some by name and lets the rest fall
 through to a default is the failure this list exists to prevent: three of these
 were being rendered as the Synesthesia follow-up, including the one that thanks
 somebody for a referral that converted — the payoff of the only compounding
@@ -100,7 +100,8 @@ loop the product has.
 
 | `template_key` | When it is sent |
 | --- | --- |
-| `crowdrelay.fan.welcome.v1` | First contact after signup. |
+| `crowdrelay.fan.welcome.v1` | Historical pending requests only; preserve the original copy. |
+| `crowdrelay.fan.welcome.v2` | First contact after signup, continuing the immutable resource promise. Optional `fan.activation` contains `kind` (`event` or `video`), canonical `title`, and complete action-owned tracked `url`. Send that URL verbatim. Missing activation means no suitable public resource; do not invent a reward, route or install ask. Requires an active executor advertising `fan.lifecycle.welcome.v2`, including before any registry exists. Consent, policy and contact budgets remain binding. |
 | `crowdrelay.synesthesia.follow_up.v1` | Completed Synesthesia and has not bought a ticket. |
 | `crowdrelay.fan.reactivation.v1` | Gone quiet past the dormancy window. |
 | `crowdrelay.fan.first_ticket_thanks.v1` | Bought their first ticket. The single best moment to turn a buyer into a fan. |
@@ -109,6 +110,8 @@ loop the product has.
 | `crowdrelay.fan.referral_invite.v1` | Has referred nobody; asks them to. Carries `fan.referral_code` **and the complete tenant-native `fan.referral_url`**. Send `fan.referral_url` verbatim; never construct a hostname or referral path in the executor. |
 | `crowdrelay.fan.signal_install_ask.v1` | Confirmed fan with no Signal install (app or identified web session); asks them to open it. Carries **the complete tracked `fan.install_url`** — the tenant's `/l/` redirect to the Signal page. Send it verbatim; a link the executor rebuilds bypasses the click ledger, and a missing `fan.install_url` is a send-stopper, not a detail to work around. A send requires per-action approval or a live, expiring grant for exactly `template:crowdrelay.fan.signal_install_ask.v1`. Grant, lifecycle policy and installation status are checked again at dispatch. Observe/Recommend, consent, cooldown and budgets still apply. A new template version needs a new grant; never edit the approved version's words in place. Each message owns its tracked redirect. |
 | `crowdrelay.fan.show_recall.v1` | Checked in at a show within the recall window — the next-day message referencing that night. Carries `fan.show_title` and **the complete tracked `fan.show_url`** — the tenant's `/l/` redirect to the show's own page. Send `fan.show_url` verbatim; a missing `show_url` is a send-stopper. Each message owns its `fan.show_url` redirect, bound to its action; never substitute a shared show link. When `fan.install_url` is present the fan still has no linked Signal installation at dispatch — the recall then doubles as their install ask and the link belongs in the same mail. The scan itself sent nothing; this is the first message that fan hears. Every send waits for a person's approval. |
+
+Welcome v2 gets a separate `fan_lifecycle_activation_7d` observation: a binary deliberate fan action in the seven days after the successful provider receipt, with current consent. It excludes sessions, confirmation, link clicks and push endpoint creation. Its metric key and template posterior are separate from v1; this is observational activation, not causal lift or proof of inbox delivery. Old v1 requests and episodes suppress a new v2 welcome for the same fan. Deploy the capable workflow and advertise the new capability before enabling this lane; do not edit v1 copy in place.
 
 **Fail on a key you do not know.** A default branch sends the wrong message,
 which is worse than sending none: it is indistinguishable from working, and the
