@@ -88,6 +88,7 @@ mod events;
 mod fan_context;
 mod fan_demand_routes;
 mod fan_identity;
+mod fan_latarnik;
 mod fan_lifecycle;
 mod fan_privacy;
 mod fan_prospect_routes;

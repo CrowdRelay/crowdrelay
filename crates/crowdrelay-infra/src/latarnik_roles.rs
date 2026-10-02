@@ -368,3 +368,142 @@ pub async fn list_roles(
     .fetch_all(pool)
     .await?)
 }
+
+/// What a signed-in fan sees of their own Latarnik role. Counts and states
+/// only: the evidence the system used to detect them is not shown to the person
+/// it describes, and nothing here names anyone else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MyRoleState {
+    /// No role row, or one the band has only noted internally (`candidate`):
+    /// nothing has been asked, so there is nothing to show.
+    None,
+    /// The band has asked; the person has not answered.
+    Invited,
+    Active,
+    Paused,
+    /// Ended, by either side. Terminal; shown so the Signal surface never
+    /// offers the role again.
+    Ended,
+}
+
+/// What the person may answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MyAnswer {
+    Accept,
+    Decline,
+    Pause,
+    Resume,
+    Leave,
+}
+
+/// The fan's own role, resolved from their session through their email
+/// identity. `Ok(None)` is an unauthenticated session; a fan with no role is
+/// `Some(MyRoleState::None)`.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn my_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    session_token: &str,
+) -> Result<Option<(MyRoleState, Option<Uuid>)>, LatarnikError> {
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<String>)>(
+        "SELECT lr.id, lr.status
+         FROM fan_sessions session
+         JOIN fans fan
+           ON fan.workspace_id = session.workspace_id AND fan.id = session.fan_id
+         LEFT JOIN person_identities pi
+           ON pi.workspace_id = fan.workspace_id
+          AND pi.kind = 'email' AND pi.platform IS NULL
+          AND pi.value = fan.normalized_email
+         LEFT JOIN latarnik_roles lr
+           ON lr.workspace_id = pi.workspace_id AND lr.person_id = pi.person_id
+         WHERE session.workspace_id = $1
+           AND session.session_token_hash = digest($2, 'sha256')
+           AND session.revoked_at IS NULL
+           AND session.expires_at > now()
+           AND fan.status = 'active'
+           AND fan.deleted_at IS NULL
+         LIMIT 1",
+    )
+    .bind(workspace_id)
+    .bind(session_token)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(role_id, status)| {
+        let state = match status.as_deref().and_then(RoleStatus::parse) {
+            None | Some(RoleStatus::Candidate) => MyRoleState::None,
+            Some(RoleStatus::Invited) => MyRoleState::Invited,
+            Some(RoleStatus::Active) => MyRoleState::Active,
+            Some(RoleStatus::Paused) => MyRoleState::Paused,
+            Some(RoleStatus::Revoked) => MyRoleState::Ended,
+        };
+        (state, role_id.filter(|_| state != MyRoleState::None))
+    }))
+}
+
+/// The person's answer to the role. Runs through the same status machine as
+/// the operator's decision, so a person cannot skip the invitation any more
+/// than the band can: accepting needs `invited`, declining needs `invited`,
+/// pause/resume/leave need the matching live state. A decline is an ended role
+/// with a recorded reason — terminal, so one ask is one ask.
+///
+/// # Errors
+///
+/// [`LatarnikError::NotFound`] for an unauthenticated session or a fan with no
+/// asked role; [`LatarnikError::IllegalMove`] when the answer does not fit the
+/// role's state.
+pub async fn answer_my_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    session_token: &str,
+    answer: MyAnswer,
+    now: OffsetDateTime,
+) -> Result<RoleStatus, LatarnikError> {
+    let Some((state, Some(role_id))) = my_role(pool, workspace_id, session_token).await? else {
+        return Err(LatarnikError::NotFound);
+    };
+    let (next, reason, valid) = match answer {
+        MyAnswer::Accept => (RoleStatus::Active, None, state == MyRoleState::Invited),
+        MyAnswer::Decline => (
+            RoleStatus::Revoked,
+            Some("declined_by_person"),
+            state == MyRoleState::Invited,
+        ),
+        MyAnswer::Pause => (RoleStatus::Paused, None, state == MyRoleState::Active),
+        MyAnswer::Resume => (RoleStatus::Active, None, state == MyRoleState::Paused),
+        MyAnswer::Leave => (
+            RoleStatus::Revoked,
+            Some("left_by_person"),
+            matches!(state, MyRoleState::Active | MyRoleState::Paused),
+        ),
+    };
+    if !valid {
+        return Err(LatarnikError::IllegalMove {
+            from: match state {
+                MyRoleState::None => "none",
+                MyRoleState::Invited => "invited",
+                MyRoleState::Active => "active",
+                MyRoleState::Paused => "paused",
+                MyRoleState::Ended => "revoked",
+            },
+            to: next.as_str(),
+        });
+    }
+    transition_role(pool, workspace_id, role_id, next, reason, now).await?;
+    if answer == MyAnswer::Accept {
+        // The one thing an active Latarnik may do today is carry a personal
+        // referral link; missions arrive with slice 3.
+        sqlx::query(
+            "UPDATE latarnik_roles SET capabilities = '[\"referral_link\"]'::jsonb
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace_id)
+        .bind(role_id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(next)
+}
