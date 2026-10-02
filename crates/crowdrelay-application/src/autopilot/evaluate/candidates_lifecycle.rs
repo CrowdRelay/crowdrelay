@@ -78,7 +78,11 @@ fn lifecycle_candidate(
         return Ok(None);
     };
     let mut input_snapshot = serde_json::to_value(&snapshot)?;
-    input_snapshot["lifecycle_episode"] = serde_json::to_value(&episode)?;
+    // A snapshot is a struct, so it serialises to an object; the guard keeps
+    // the indexing lint satisfied without a panic path.
+    if let Some(object) = input_snapshot.as_object_mut() {
+        object.insert("lifecycle_episode".to_owned(), serde_json::to_value(&episode)?);
+    }
     let subject = ActionSubject::Fan(snapshot.fan_id);
     // The recall names a specific night, so the night rides the action: the
     // snapshot's check-in fields freeze into the payload, and a fan with no
