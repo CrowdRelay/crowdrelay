@@ -91,8 +91,8 @@ pub async fn load_carriers(
     .await?;
 
     // Shows and releases are the same for every Latarnik; their *city* is not.
-    let shows = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<String>, OffsetDateTime)>(
-        "SELECT e.id, e.title, e.city_id, c.name, e.starts_at
+    let shows = sqlx::query_as::<_, (Uuid, String, String, Option<Uuid>, Option<String>, OffsetDateTime)>(
+        "SELECT e.id, e.title, e.slug, e.city_id, c.name, e.starts_at
          FROM events e
          LEFT JOIN cities c ON c.id = e.city_id
          WHERE e.workspace_id = $1
@@ -146,8 +146,9 @@ pub async fn load_carriers(
                 referral_url,
                 shows: shows
                     .iter()
-                    .map(|(event_id, title, city_id, city, starts_at)| ShowFact {
+                    .map(|(event_id, title, slug, city_id, city, starts_at)| ShowFact {
                         event_id: *event_id,
+                        slug: slug.clone(),
                         title: title.clone(),
                         city: city.clone(),
                         starts_on: starts_at.date(),
