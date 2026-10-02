@@ -71,7 +71,14 @@ async fn seed_drafted_action(
     template_id: &str,
     platform: &str,
 ) -> Result<Uuid> {
-    seed_drafted_action_with_cta(pool, workspace_id, template_id, platform, Some("https://virya.music")).await
+    seed_drafted_action_with_cta(
+        pool,
+        workspace_id,
+        template_id,
+        platform,
+        Some("https://virya.music"),
+    )
+    .await
 }
 
 async fn seed_drafted_action_with_cta(
@@ -290,7 +297,10 @@ async fn facebook_without_model_cta_gets_an_owned_tracked_fallback() -> Result<(
     .bind(action_id)
     .fetch_one(&database)
     .await?;
-    ensure!(row.0.is_some(), "facebook fallback must bind a smart_link_id");
+    ensure!(
+        row.0.is_some(),
+        "facebook fallback must bind a smart_link_id"
+    );
     let expected_link = format!("/l/social-{}", action_id.simple());
     ensure!(
         row.1.as_deref() == Some(expected_link.as_str()),
