@@ -107,3 +107,104 @@ async fn inflight_drafts_wait_but_failed_dispatches_do_not_block_targets()
     assert_eq!(targets[0].target_id.into_uuid(), failed);
     Ok(())
 }
+
+
+async fn seed_community_clicks(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    community: &str,
+    count: usize,
+) -> Result<(), sqlx::Error> {
+    for _ in 0..count {
+        sqlx::query(
+            "INSERT INTO fan_provenance_events
+                 (id, workspace_id, event_kind, channel, community,
+                  anonymous_visitor_id, attribution_method, attribution_confidence, occurred_at)
+             VALUES ($1,$2,'interaction','reddit',$3,$4,'tracked_click',1.0,now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(community)
+        .bind(Uuid::now_v7())
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn seed_community_conversion(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    community: &str,
+) -> Result<(), sqlx::Error> {
+    let fan_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status)
+         VALUES ($1,$2,$3,'active')",
+    )
+    .bind(fan_id)
+    .bind(workspace_id.into_uuid())
+    .bind(format!("{fan_id}@relay-quality.test"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (id, workspace_id, fan_id, event_kind, channel, community,
+              attribution_method, attribution_confidence, occurred_at)
+         VALUES ($1,$2,$3,'conversion','reddit',$4,'last_tracked_click',1.0,now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id)
+    .bind(community)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
+async fn fresh_drop_selection_exploits_real_yield_but_keeps_one_exploration_slot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let ws = WorkspaceId::new();
+    seed_workspace(&pool, ws).await?;
+
+    let converted = seed_community(&pool, ws, "convertedroom", None).await?;
+    let strong_clicks = seed_community(&pool, ws, "strongclicks", None).await?;
+    let weak_click = seed_community(&pool, ws, "weakclick", None).await?;
+    let explore_a = seed_community(&pool, ws, "explorea", None).await?;
+    let explore_b = seed_community(&pool, ws, "exploreb", None).await?;
+    let explore_c = seed_community(&pool, ws, "explorec", None).await?;
+
+    seed_community_conversion(&pool, ws, "convertedroom").await?;
+    seed_community_clicks(&pool, ws, "strongclicks", 3).await?;
+    seed_community_clicks(&pool, ws, "weakclick", 1).await?;
+
+    let targets = repo.load_relay_community_targets(ws).await?;
+    let picked: std::collections::BTreeSet<Uuid> =
+        targets.iter().map(|target| target.target_id.into_uuid()).collect();
+    let exploration = [explore_a, explore_b, explore_c]
+        .into_iter()
+        .filter(|target| picked.contains(target))
+        .count();
+
+    assert_eq!(targets.len(), 3);
+    assert!(
+        picked.contains(&converted),
+        "a community that already converted a real fan must get an exploit slot"
+    );
+    assert!(
+        picked.contains(&strong_clicks),
+        "stronger observed human traffic must win the second exploit slot"
+    );
+    assert!(
+        !picked.contains(&weak_click),
+        "the weaker measured room must not crowd out deliberate exploration"
+    );
+    assert_eq!(
+        exploration, 1,
+        "exactly one slot stays open for an unmeasured audience pocket"
+    );
+    Ok(())
+}
