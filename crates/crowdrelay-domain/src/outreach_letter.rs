@@ -191,15 +191,25 @@ pub fn compose_outreach_letter(
     if title.is_empty() {
         return Err(OutreachLetterRefusal::NoPitch);
     }
-    Ok(match (input.language, input.phase) {
-        (LetterLanguage::English, OutreachPhase::Initial) => {
+    Ok(match (input.language, input.phase, input.target_kind) {
+        (LetterLanguage::English, OutreachPhase::Initial, OutreachTargetKind::Playlist) => {
+            playlist_initial_en(input, target, act, title, url)
+        }
+        (LetterLanguage::Polish, OutreachPhase::Initial, OutreachTargetKind::Playlist) => {
+            playlist_initial_pl(input, act, title, url)
+        }
+        (LetterLanguage::English, OutreachPhase::Initial, _) => {
             initial(input, target, act, title, url, ask)
         }
-        (LetterLanguage::English, OutreachPhase::FollowUp) => {
+        (LetterLanguage::English, OutreachPhase::FollowUp, _) => {
             follow_up(input, target, act, title, url, ask)
         }
-        (LetterLanguage::Polish, OutreachPhase::Initial) => initial_pl(input, act, title, url),
-        (LetterLanguage::Polish, OutreachPhase::FollowUp) => follow_up_pl(input, act, title, url),
+        (LetterLanguage::Polish, OutreachPhase::Initial, _) => {
+            initial_pl(input, act, title, url)
+        }
+        (LetterLanguage::Polish, OutreachPhase::FollowUp, _) => {
+            follow_up_pl(input, act, title, url)
+        }
     })
 }
 
@@ -217,6 +227,48 @@ fn purpose_pl(kind: OutreachTargetKind) -> &'static str {
         // An organiser's ask lives in its own template — this arm answers so
         // the match stays whole, and is unreachable by construction.
         OutreachTargetKind::Organiser | OutreachTargetKind::Agent | OutreachTargetKind::Label => "",
+    }
+}
+
+/// A playlist curator does not need the band's mini-bio, a CRM disclaimer or
+/// "playlist consideration" language. Research supplies the specific opener;
+/// this composer only says what the band has and gives the one useful link.
+fn playlist_initial_pl(
+    input: &OutreachLetterInput<'_>,
+    act: &str,
+    title: &str,
+    url: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        greeting_pl(input.target_name),
+        String::new(),
+        format!("Mamy nowy numer — {title}. Jeśli pasuje do profilu playlisty, zostawiamy go tutaj:"),
+        url.to_owned(),
+    ];
+    lines.extend(sign_off_pl(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("{act} — {title}"), MAX_SUBJECT),
+        body: lines.join("\n"),
+    }
+}
+
+fn playlist_initial_en(
+    input: &OutreachLetterInput<'_>,
+    target: &str,
+    act: &str,
+    title: &str,
+    url: &str,
+) -> OutreachLetter {
+    let mut lines = vec![
+        format!("Hi {target},"),
+        String::new(),
+        format!("We have a new track — {title}. If it fits the playlist, here it is:"),
+        url.to_owned(),
+    ];
+    lines.extend(sign_off(input.sender, act));
+    OutreachLetter {
+        subject: truncate(format!("{act} — {title}"), MAX_SUBJECT),
+        body: lines.join("\n"),
     }
 }
 
@@ -760,36 +812,46 @@ mod tests {
     }
 
     #[test]
-    fn an_initial_pitch_names_the_target_the_release_and_the_ask() {
+    fn a_playlist_ask_is_short_human_and_not_a_crm_template() {
         let sender = sender();
-        let letter = compose_outreach_letter(&input(
+        let en = compose_outreach_letter(&input(
             &sender,
             OutreachTargetKind::Playlist,
             OutreachPhase::Initial,
         ))
         .expect("a complete input composes");
-        assert!(letter.body.contains("Hi Metal Playlists Weekly,"));
-        assert!(
-            letter
-                .body
-                .contains("VIRYA, a modern metal act from Wrocław")
-        );
-        assert!(
-            letter
-                .body
-                .contains("\"Rytuał\" for playlist consideration")
-        );
-        assert!(letter.body.contains("Listen: https://virya.music/l/rytual"));
-        assert!(
-            letter
-                .body
-                .contains("just say so and we will not follow up")
-        );
-        // A stranger reads this. It is a letter from a band, and it says so
-        // in the band's words, not the machinery's.
-        assert!(!letter.body.to_lowercase().contains("automat"));
-        assert!(letter.body.ends_with("https://virya.music/l/site"));
-        assert_eq!(letter.subject, "VIRYA — our new single \"Rytuał\"");
+        assert!(en.body.starts_with("Hi Metal Playlists Weekly,"));
+        assert!(en.body.contains("We have a new track — our new single \"Rytuał\"."));
+        assert!(en.body.contains("If it fits the playlist, here it is:"));
+        assert!(en.body.contains("https://virya.music/l/rytual"));
+        for bot in [
+            "I am writing from",
+            "we would love to submit",
+            "playlist consideration",
+            "just say so",
+            "will not follow up",
+        ] {
+            assert!(!en.body.contains(bot), "{bot}: {}", en.body);
+        }
+        assert!(en.body.ends_with("Best,\nVIRYA\nhttps://virya.music/l/site"));
+
+        let pl = compose_outreach_letter(&OutreachLetterInput {
+            language: LetterLanguage::Polish,
+            ..input(&sender, OutreachTargetKind::Playlist, OutreachPhase::Initial)
+        })
+        .expect("a complete Polish playlist ask composes");
+        assert!(pl.body.starts_with("Dzień dobry, Metal Playlists Weekly,"));
+        assert!(pl.body.contains("Mamy nowy numer — our new single \"Rytuał\"."));
+        assert!(pl.body.contains("Jeśli pasuje do profilu playlisty, zostawiamy go tutaj:"));
+        for bot in [
+            "Piszemy w imieniu",
+            "chcielibyśmy zaproponować",
+            "do Waszej playlisty",
+            "nie będziemy się więcej odzywać",
+        ] {
+            assert!(!pl.body.contains(bot), "{bot}: {}", pl.body);
+        }
+        assert!(pl.body.ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music/l/site"));
     }
 
     #[test]

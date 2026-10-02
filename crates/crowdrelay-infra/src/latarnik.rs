@@ -212,6 +212,8 @@ const DUAL_ROLE_CORE: &str = r#"
               AND research.normalized_email = lower(btrim(beacon.contact_email))
               AND research.observed_on <= ($2::timestamptz AT TIME ZONE 'UTC')::date
               AND research.observed_on >= ($2::timestamptz AT TIME ZONE 'UTC')::date - 120
+              AND research.praise IS NOT NULL
+              AND char_length(btrim(research.praise)) >= 40
         ) AS has_recent_research
     FROM beacons AS beacon
     LEFT JOIN cities AS city ON city.id = beacon.city_id

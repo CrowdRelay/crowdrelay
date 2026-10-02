@@ -363,6 +363,8 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
                   AND research.normalized_email = lower(btrim(target.contact_email))
                   AND research.observed_on <= (now() AT TIME ZONE 'UTC')::date
                   AND research.observed_on >= (now() AT TIME ZONE 'UTC')::date - 120
+                  AND research.praise IS NOT NULL
+                  AND char_length(btrim(research.praise)) >= 40
             ) AS has_recent_research,
             -- Catalogue pitches and hand-thread follow-ups go out in waves or
             -- not at all; see `OutreachSnapshot::wave_only`.

@@ -68,6 +68,11 @@ pub async fn latest_hook_on(
           AND normalized_email = $2
           AND observed_on <= $3
           AND observed_on >= $3 - $4::int
+          -- A sourced fact is research; a natural grounded opener is what
+          -- makes it usable in an outward letter. Old rows without one are
+          -- deliberately invisible so the sweep researches them again.
+          AND praise IS NOT NULL
+          AND char_length(btrim(praise)) >= $5
         ORDER BY observed_on DESC, researched_at DESC
         LIMIT 1
         "#,
@@ -76,16 +81,22 @@ pub async fn latest_hook_on(
     .bind(email.trim().to_ascii_lowercase())
     .bind(today)
     .bind(i32::try_from(HOOK_MAX_AGE_DAYS).unwrap_or(120))
+    .bind(i32::try_from(crowdrelay_domain::contact_research::PRAISE_MIN_CHARS).unwrap_or(40))
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(
-        row.map(|(fact, praise, source_url, observed_on)| PersonalHook {
-            fact,
-            praise,
-            source_url,
+    Ok(row.and_then(|(fact, praise, source_url, observed_on)| {
+        // Research quality evolves. Re-validate persisted rows against today's
+        // contract so an old generic/meta-AI opener cannot keep unlocking
+        // outward mail forever just because it was accepted by an older build.
+        PersonalHook::new(
+            &fact,
+            praise.as_deref(),
+            &source_url,
             observed_on,
-        }),
-    )
+            today,
+        )
+        .ok()
+    }))
 }
 
 /// Records an already-validated hook against an address on `conn`.
