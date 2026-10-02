@@ -10,7 +10,9 @@ use crate::latarnik::{
 };
 
 use crowdrelay_application::IdempotencyKey;
-use crowdrelay_infra::contact_research::{ResearchError, record_hook_for_beacon};
+use crowdrelay_infra::contact_research::{
+    ResearchError, queue_contact_research, queue_target_research, record_hook_for_beacon,
+};
 use crowdrelay_infra::latarnik::{
     InviteError, InviteOutcome, approve_latarnik_invite, dual_role_review, preview_latarnik_invite,
 };
@@ -581,5 +583,277 @@ async fn nobody_is_written_to_unread() -> Result<(), Box<dyn std::error::Error>>
     .fetch_one(&pool)
     .await?;
     assert_eq!(rows, 1);
+    Ok(())
+}
+
+/// `agent_service_tasks` belongs to the agents service; no CrowdRelay migration
+/// creates it, so the suite database needs the columns the queue reads.
+async fn create_foreign_task_table(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_service_tasks (
+            id uuid PRIMARY KEY,
+            workspace_id uuid NOT NULL,
+            template_id text NOT NULL,
+            model_id text NOT NULL,
+            prompt text NOT NULL,
+            status text NOT NULL DEFAULT 'queued',
+            tier text NOT NULL DEFAULT 'basic',
+            metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+            created_at timestamptz NOT NULL DEFAULT now()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn only_people_worth_reading_are_sent_to_the_research_agent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    create_foreign_task_table(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(&pool).await?;
+    let city = city(&pool).await?;
+
+    // Warm, askable, unread: exactly who research is for.
+    let anna = beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Anna",
+        "anna@example.test",
+        72,
+        true,
+    )
+    .await?;
+    replied(&pool, act, anna, city, now).await?;
+    contacted(
+        &pool,
+        act,
+        "anna@example.test",
+        "gig_outreach",
+        now - time::Duration::days(40),
+    )
+    .await?;
+    // Never written to: held as cold, and research would be wasted on someone who cannot be asked.
+    let dawid = beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Dawid",
+        "dawid@example.test",
+        95,
+        true,
+    )
+    .await?;
+    // Written to last week: held as too soon.
+    let ewa = beacon(
+        &pool,
+        act,
+        city,
+        "promoter",
+        "Ewa",
+        "ewa@example.test",
+        75,
+        true,
+    )
+    .await?;
+    replied(&pool, act, ewa, city, now).await?;
+    contacted(
+        &pool,
+        act,
+        "ewa@example.test",
+        "gig_outreach",
+        now - time::Duration::days(4),
+    )
+    .await?;
+    // Already read.
+    let bogdan = beacon(
+        &pool,
+        act,
+        city,
+        "local_press",
+        "Bogdan",
+        "bogdan@example.test",
+        80,
+        true,
+    )
+    .await?;
+    replied(&pool, act, bogdan, city, now).await?;
+    contacted(
+        &pool,
+        act,
+        "bogdan@example.test",
+        "gig_outreach",
+        now - time::Duration::days(40),
+    )
+    .await?;
+    researched(
+        &pool,
+        act,
+        "bogdan@example.test",
+        now - time::Duration::days(5),
+    )
+    .await?;
+
+    fn refused_with<T: std::fmt::Debug>(result: Result<T, ResearchError>, needle: &str) {
+        match result {
+            Err(ResearchError::Refused(sentence)) => {
+                assert!(sentence.contains(needle), "{sentence}")
+            }
+            other => panic!("expected a refusal containing {needle:?}, got {other:?}"),
+        }
+    }
+    refused_with(
+        queue_contact_research(&pool, act, dawid, now).await,
+        "no relationship",
+    );
+    refused_with(
+        queue_contact_research(&pool, act, ewa, now).await,
+        "recently",
+    );
+    refused_with(
+        queue_contact_research(&pool, act, bogdan, now).await,
+        "fact is on file",
+    );
+
+    // Anna is queued, pinned in metadata, as a premium read-only research task.
+    let task_id = queue_contact_research(&pool, act, anna, now).await?;
+    let (template, tier, status, metadata, prompt) = sqlx::query_as::<
+        _,
+        (String, String, String, serde_json::Value, String),
+    >(
+        "SELECT template_id, tier, status, metadata, prompt FROM agent_service_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(template, "contact-researcher");
+    assert_eq!(tier, "premium");
+    assert_eq!(status, "queued");
+    // The person is pinned by address in the record of what was asked; the
+    // prompt the model reads never carries that address.
+    assert_eq!(
+        metadata["subject_contact_email"].as_str(),
+        Some("anna@example.test")
+    );
+    assert!(
+        !prompt.contains("anna@example.test"),
+        "the address is not the agent's business: {prompt}"
+    );
+
+    // Asking again inside the week is refused; a failed attempt may be retried.
+    refused_with(
+        queue_contact_research(&pool, act, anna, now).await,
+        "last 7 days",
+    );
+    sqlx::query("UPDATE agent_service_tasks SET status = 'failed' WHERE id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await?;
+    queue_contact_research(&pool, act, anna, now).await?;
+
+    // It contacted nobody: no action, no outbox event.
+    let actions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM autopilot_actions WHERE workspace_id = $1")
+            .bind(act)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(actions, 0);
+    Ok(())
+}
+
+async fn target(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+    disposition: &str,
+    accepts: bool,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO outreach_targets
+            (workspace_id, target_kind, display_name, contact_email, accepts_outreach,
+             last_reply_disposition)
+         VALUES ($1, 'press', 'Redakcja Gazety Lokalnej', $2, $3, $4) RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .bind(accepts)
+    .bind(disposition)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// The engine pitches targets that are not beacons, and the rule is the same:
+/// nobody is pitched unread. Research is for those still open to contact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn outreach_targets_are_researched_too_when_still_open()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    create_foreign_task_table(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+    let act = workspace(&pool).await?;
+
+    let open = target(&pool, act, "redakcja@gazeta.example.test", "none", true).await?;
+    let declined = target(&pool, act, "nie@gazeta.example.test", "declined", true).await?;
+    let closed = target(&pool, act, "zamkniete@gazeta.example.test", "none", false).await?;
+    let read = target(&pool, act, "przeczytany@gazeta.example.test", "none", true).await?;
+    researched(
+        &pool,
+        act,
+        "przeczytany@gazeta.example.test",
+        now - time::Duration::days(5),
+    )
+    .await?;
+
+    fn refused_with<T: std::fmt::Debug>(result: Result<T, ResearchError>, needle: &str) {
+        match result {
+            Err(ResearchError::Refused(sentence)) => {
+                assert!(sentence.contains(needle), "{sentence}")
+            }
+            other => panic!("expected a refusal containing {needle:?}, got {other:?}"),
+        }
+    }
+    refused_with(
+        queue_target_research(&pool, act, declined, now).await,
+        "not open to contact",
+    );
+    refused_with(
+        queue_target_research(&pool, act, closed, now).await,
+        "not open to contact",
+    );
+    refused_with(
+        queue_target_research(&pool, act, read, now).await,
+        "fact is on file",
+    );
+
+    let task_id = queue_target_research(&pool, act, open, now).await?;
+    let (template, metadata, prompt) = sqlx::query_as::<_, (String, serde_json::Value, String)>(
+        "SELECT template_id, metadata, prompt FROM agent_service_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(template, "contact-researcher");
+    assert_eq!(
+        metadata["subject_contact_email"].as_str(),
+        Some("redakcja@gazeta.example.test")
+    );
+    assert!(!prompt.contains("redakcja@gazeta.example.test"), "{prompt}");
+    refused_with(
+        queue_target_research(&pool, act, open, now).await,
+        "last 7 days",
+    );
     Ok(())
 }

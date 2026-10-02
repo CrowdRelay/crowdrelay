@@ -116,7 +116,16 @@ impl PostgresAutopilotRepository {
                         || (template_key == "crowdrelay.fan.show_recall.v1"
                             && show.as_ref().is_some_and(|show| show.wants_install_url));
                     let install_url =
-                        if wants_install_url {
+                        // The fan may have opened Signal since the recall's
+                        // decision. Keep the recall, drop the stale install CTA.
+                        if wants_install_url && !sqlx::query_scalar::<_, bool>(
+                            "SELECT EXISTS(SELECT 1 FROM signal_installations WHERE workspace_id=$1 AND fan_id=$2)",
+                        )
+                        .bind(workspace_id.into_uuid())
+                        .bind(fan_id.into_uuid())
+                        .fetch_one(&mut *transaction)
+                        .await
+                        .map_err(map_sqlx)? {
                             let brand = crate::tenant_settings::TenantSettingsRepository::new(
                                 self.pool.clone(),
                             )
@@ -155,9 +164,9 @@ impl PostgresAutopilotRepository {
                             None
                         };
                     // Each recall owns its redirect. A show-wide redirect
-                    // would pool different recipients' outcomes and leave
-                    // the action-bound measurement unable to credit any one
-                    // message. Historical redirects are left untouched.
+                    // would pool different recipients' clicks rather than
+                    // attributing them to the message that carried the link.
+                    // Historical redirects are left untouched.
                     let show_url = if let Some(show) = show.as_ref() {
                         let brand = crate::tenant_settings::TenantSettingsRepository::new(
                             self.pool.clone(),

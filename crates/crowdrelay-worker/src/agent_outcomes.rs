@@ -110,6 +110,7 @@ include!("agent_outcomes/rejections.rs");
 
 include!("agent_outcomes/community_ingestion.rs");
 include!("agent_outcomes/beacon_candidates.rs");
+include!("agent_outcomes/contact_research.rs");
 include!("agent_outcomes/quality_guard.rs");
 include!("agent_outcomes/opportunity_findings.rs");
 include!("agent_outcomes/strategy_proposals.rs");
@@ -455,6 +456,9 @@ impl AgentOutcomeWorker {
             },
             OutcomeKind::BeaconCandidates => {
                 beacon_candidate_subject(&mut tx, outcome, producing_task.as_ref()).await?
+            }
+            OutcomeKind::ContactResearch => {
+                contact_research_subject(&mut tx, outcome, producing_task.as_ref()).await?
             }
             _ => ("agent_outcome", outcome.id),
         };
