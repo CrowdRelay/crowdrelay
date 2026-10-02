@@ -400,6 +400,104 @@ async fn load_trace_timeline(
              AND action.id = evidence.action_id
             CROSS JOIN LATERAL jsonb_each(evidence.observed_metrics) AS metric
             WHERE evidence.workspace_id = $1 AND action.trace_id = $2
+
+            UNION ALL
+
+            -- FAN SCOUT: what the band had read about the person before it
+            -- spoke. Kinds only: the words are a stranger's public comment and
+            -- the trace is an operator diagnostic, not an archive of them.
+            SELECT
+                o.observed_at AS occurred_at,
+                'scout_observation'::text AS source,
+                o.observation_kind::text AS kind,
+                o.source::text AS state,
+                NULL::text AS action_id,
+                NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                'obs:' || o.id::text AS event_id,
+                'FACT'::text AS certainty
+            FROM fan_prospect_touches AS touch
+            JOIN fan_prospect_observations AS o
+              ON o.workspace_id = touch.workspace_id AND o.prospect_id = touch.prospect_id
+            WHERE touch.workspace_id = $1 AND touch.trace_id = $2
+
+            UNION ALL
+
+            -- FAN SCOUT: the band speaking to the prospect, in their own thread.
+            SELECT
+                touch.touched_at AS occurred_at,
+                'scout_touch'::text AS source,
+                touch.kind::text AS kind,
+                touch.source::text AS state,
+                NULL::text AS action_id,
+                NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                touch.id::text AS event_id,
+                'FACT'::text AS certainty
+            FROM fan_prospect_touches AS touch
+            WHERE touch.workspace_id = $1 AND touch.trace_id = $2
+
+            UNION ALL
+
+            -- FAN SCOUT: the arrival the touch's tracked link is credited with.
+            -- INFERENCE, not fact: the chain is click -> same visitor -> arrival,
+            -- which is the best the system can see, and the label says so.
+            SELECT
+                arrival.occurred_at AS occurred_at,
+                'scout_arrival'::text AS source,
+                arrival.source::text AS kind,
+                'credited_by_visitor_continuity'::text AS state,
+                NULL::text AS action_id,
+                NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                'arrival:' || arrival.id::text AS event_id,
+                'INFERENCE'::text AS certainty
+            FROM fan_prospect_touches AS touch
+            JOIN fan_prospects AS prospect
+              ON prospect.workspace_id = touch.workspace_id AND prospect.id = touch.prospect_id
+            JOIN click_events AS click
+              ON click.workspace_id = touch.workspace_id
+             AND click.smart_link_id = touch.smart_link_id
+             AND click.anonymous_visitor_id IS NOT NULL
+             AND click.occurred_at >= touch.touched_at
+            JOIN fan_acquisition_events AS arrival
+              ON arrival.workspace_id = touch.workspace_id
+             AND arrival.fan_id = prospect.linked_fan_id
+             AND arrival.anonymous_visitor_id = click.anonymous_visitor_id
+             AND arrival.occurred_at >= click.occurred_at
+            WHERE touch.workspace_id = $1 AND touch.trace_id = $2
+
+            UNION ALL
+
+            -- FAN SCOUT: the prospect becoming a first-party fan — only on the
+            -- touch whose link the arriving visitor actually clicked.
+            SELECT
+                prospect.updated_at AS occurred_at,
+                'scout_conversion'::text AS source,
+                'prospect_converted'::text AS kind,
+                fan.status::text AS state,
+                NULL::text AS action_id,
+                NULL::text AS decision_id,
+                NULL::text AS causation_id,
+                'converted:' || prospect.id::text AS event_id,
+                'FACT'::text AS certainty
+            FROM fan_prospect_touches AS touch
+            JOIN fan_prospects AS prospect
+              ON prospect.workspace_id = touch.workspace_id AND prospect.id = touch.prospect_id
+             AND prospect.status = 'converted'
+            JOIN fans AS fan
+              ON fan.workspace_id = prospect.workspace_id AND fan.id = prospect.linked_fan_id
+            WHERE touch.workspace_id = $1 AND touch.trace_id = $2
+              AND EXISTS (
+                  SELECT 1
+                  FROM click_events AS click
+                  JOIN fan_acquisition_events AS arrival
+                    ON arrival.workspace_id = click.workspace_id
+                   AND arrival.fan_id = prospect.linked_fan_id
+                   AND arrival.anonymous_visitor_id = click.anonymous_visitor_id
+                  WHERE click.workspace_id = touch.workspace_id
+                    AND click.smart_link_id = touch.smart_link_id
+                    AND click.occurred_at >= touch.touched_at)
         ) AS timeline
         ORDER BY occurred_at ASC, source ASC
         LIMIT 500
