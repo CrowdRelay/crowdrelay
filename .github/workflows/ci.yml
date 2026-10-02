@@ -27,9 +27,15 @@ permissions:
   contents: read
   actions: write
 
+# PR runs are superseded by the next push to the same branch. Runs on main are
+# not: every merge cancelled the previous merge's run, so 10 of the last 12 main
+# runs ended `cancelled`, and a main HEAD with no completed run cannot deploy
+# (see the 60-minute timeout note below). GitHub keeps one pending run behind
+# the one in progress, so a burst of merges still collapses to "the run in
+# progress, then the newest".
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # One job, one compile, one database. The pipeline is exactly: compile the
