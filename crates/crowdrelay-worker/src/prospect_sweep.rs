@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crowdrelay_domain::{
     WorkspaceId,
-    fan_prospect::{ObservationKind, ProspectSource},
+    fan_prospect::{ObservationKind, ProspectSource, classify_comment},
 };
 use crowdrelay_infra::fan_prospects::{
     ObserveOutcome, ObservedPerson, ProspectError, expire, observe,
@@ -48,6 +48,9 @@ const LOOKBACK_DAYS: i32 = 30;
 /// A bare comment is weak evidence of anything; the evaluator needs more than
 /// one to qualify a person. Basis points.
 const COMMENT_CONFIDENCE: u16 = 3_000;
+/// A question the person put to the band in public is a stated, current ask —
+/// the strongest evidence this source can give.
+const QUESTION_CONFIDENCE: u16 = 8_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
@@ -150,6 +153,12 @@ impl ProspectSweep {
         .await?;
         for comment in &comments {
             let id = comment.id.to_string();
+            let kind = classify_comment(&comment.body);
+            let confidence = if kind == ObservationKind::ActiveUnderOurPost {
+                COMMENT_CONFIDENCE
+            } else {
+                QUESTION_CONFIDENCE
+            };
             let outcome = observe(
                 &self.pool,
                 ws,
@@ -159,12 +168,12 @@ impl ProspectSweep {
                     handle: &comment.author,
                     display_name: None,
                     profile_url: None,
-                    kind: ObservationKind::ActiveUnderOurPost,
+                    kind,
                     source_ref: &id,
                     source_url: comment.source_url.as_deref(),
                     observed_at: comment.created_at,
                     evidence: &comment.body,
-                    confidence_basis_points: COMMENT_CONFIDENCE,
+                    confidence_basis_points: confidence,
                 },
             )
             .await?;
