@@ -817,6 +817,7 @@ include!("autopilot/mapping.rs");
 
 include!("autopilot/approval_links.rs");
 include!("autopilot/execution.rs");
+include!("autopilot/execution_owned_social_tests.rs");
 include!("autopilot/execution_beacon.rs");
 include!("autopilot/execution_latarnik.rs");
 include!("autopilot/execution_beacon_discovery.rs");

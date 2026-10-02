@@ -69,6 +69,7 @@ CONTRACT = {
     "crates/crowdrelay-infra/src/autopilot.rs": [
         "autopilot/mapping.rs",
         "autopilot/execution.rs",
+        "autopilot/execution_owned_social_tests.rs",
         "autopilot/execution_dispatch.rs",
         "autopilot/execution_outcomes.rs",
         "autopilot/execution_capabilities.rs",
