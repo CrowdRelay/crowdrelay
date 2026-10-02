@@ -202,8 +202,8 @@ macro_rules! decision_core_reads {
                           AND code.fan_id = fan.id
                           AND code.active
                     ) AS has_referral_code,
-                    EXISTS (
-                        SELECT 1
+                    (
+                        SELECT opportunity.ready_at
                         FROM person_identities AS identity
                         JOIN fan_advocacy_opportunities AS opportunity
                           ON opportunity.workspace_id = identity.workspace_id
@@ -214,7 +214,9 @@ macro_rules! decision_core_reads {
                           AND identity.value = fan.normalized_email
                           AND opportunity.kind = 'personal_referral'
                           AND opportunity.status = 'ready'
-                    ) AS referral_ask_ready,
+                        ORDER BY opportunity.ready_at DESC, opportunity.id DESC
+                        LIMIT 1
+                    ) AS referral_ask_ready_at,
                     EXISTS (
                         SELECT 1
                         FROM signal_installations AS install
