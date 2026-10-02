@@ -167,8 +167,14 @@ pub async fn observe(
         .await?;
         let (kind, value) = if let Some(stable_id) = stable_id.as_deref() {
             ("platform_user_id", stable_id)
+        } else if let Some(handle) = handle.as_deref() {
+            ("platform_handle", handle)
         } else {
-            ("platform_handle", handle.as_deref().expect("handle exists"))
+            // Neither a stable id nor a handle is no identity at all; the
+            // caller rejects that case before here, so this is unreachable in
+            // practice and a refusal rather than a panic if it ever is not.
+            tx.rollback().await?;
+            return Ok(ObserveOutcome::NotAnIdentity);
         };
         let claimed = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO person_identities
