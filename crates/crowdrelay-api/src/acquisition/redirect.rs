@@ -23,9 +23,10 @@ pub async fn redirect_smart_link(
     // not an audience: no click row, no attribution cookie (see
     // `automated_fetch`). The visitor id is still minted so the response shape
     // is identical for every caller.
-    let automated = is_automated_fetch(&method, &headers);
+    let automated = automated_fetch(&method, &headers);
     let visitor_id = attribution_visitor(&headers).unwrap_or_default();
-    if automated {
+    if let Some(reason) = automated {
+        record_dropped(reason);
         tracing::debug!(smart_link_id = %link.id(), "tracked-link fetch by an automated agent not recorded as a click");
     } else {
         let referrer_host = referrer_host(&headers);
@@ -85,7 +86,7 @@ pub async fn redirect_smart_link(
         ],
     )
         .into_response();
-    if !automated {
+    if automated.is_none() {
         let Ok(cookie) = HeaderValue::from_str(&attribution_cookie(
             visitor_id,
             state.acquisition.secure_cookies,

@@ -929,6 +929,7 @@ crowdrelay_brain_signal_fans_push_enabled {}\n",
     }
 
     body.push_str(&http_metrics().route_prometheus());
+    body.push_str(&acquisition::dropped_prometheus());
     let pool = state.ticketing.pool();
     let pool_size = pool.size();
     let pool_idle = u32::try_from(pool.num_idle()).unwrap_or(u32::MAX);

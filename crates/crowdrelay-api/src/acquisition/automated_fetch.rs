@@ -16,7 +16,70 @@
 //! user-agent tokens). A bot that lies about being a browser is
 //! indistinguishable here; this removes the honest majority, not all noise.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axum::http::{HeaderMap, Method, header::USER_AGENT};
+
+/// Why a tracked-link fetch was not counted as a click. The reason is the
+/// metric label: a sudden rise in `declared_bot` after a post is the preview
+/// bot, a rise in `missing_agent` is a script, and a falling total of real
+/// clicks beside a flat total of fetches is the signal this module exists for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AutomatedFetch {
+    NotGet,
+    Prefetch,
+    MissingAgent,
+    DeclaredBot,
+}
+
+impl AutomatedFetch {
+    const ALL: [Self; 4] = [
+        Self::NotGet,
+        Self::Prefetch,
+        Self::MissingAgent,
+        Self::DeclaredBot,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NotGet => "not_get",
+            Self::Prefetch => "prefetch",
+            Self::MissingAgent => "missing_agent",
+            Self::DeclaredBot => "declared_bot",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+static DROPPED: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+pub(crate) fn record_dropped(reason: AutomatedFetch) {
+    DROPPED[reason.index()].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Prometheus text for the per-reason counters.
+pub(crate) fn dropped_prometheus() -> String {
+    let mut out = String::from(
+        "# HELP crowdrelay_tracked_link_fetches_not_clicked_total Tracked-link fetches served the redirect but not recorded as a click, by reason.\n\
+# TYPE crowdrelay_tracked_link_fetches_not_clicked_total counter\n",
+    );
+    for reason in AutomatedFetch::ALL {
+        out.push_str(&format!(
+            "crowdrelay_tracked_link_fetches_not_clicked_total{{reason=\"{}\"}} {}\n",
+            reason.label(),
+            DROPPED[reason.index()].load(Ordering::Relaxed)
+        ));
+    }
+    out
+}
 
 /// Substrings (lowercase) in a user-agent that declare an automated fetcher.
 /// `bot` covers Discordbot, TelegramBot, Googlebot, bingbot, Twitterbot,
@@ -51,9 +114,9 @@ const AUTOMATED_AGENT_TOKENS: &[&str] = &[
 /// Phone makers whose name contains `bot` — a real handset, not a fetcher.
 const HANDSET_EXCEPTIONS: &[&str] = &["cubot"];
 
-pub(crate) fn is_automated_fetch(method: &Method, headers: &HeaderMap) -> bool {
+pub(crate) fn automated_fetch(method: &Method, headers: &HeaderMap) -> Option<AutomatedFetch> {
     if method != Method::GET {
-        return true;
+        return Some(AutomatedFetch::NotGet);
     }
     for name in ["purpose", "sec-purpose", "x-moz", "x-purpose"] {
         if headers
@@ -64,7 +127,7 @@ pub(crate) fn is_automated_fetch(method: &Method, headers: &HeaderMap) -> bool {
                 value.contains("prefetch") || value.contains("preview")
             })
         {
-            return true;
+            return Some(AutomatedFetch::Prefetch);
         }
     }
     // Every browser sends a user-agent; a request without one is a script.
@@ -72,11 +135,11 @@ pub(crate) fn is_automated_fetch(method: &Method, headers: &HeaderMap) -> bool {
         .get(USER_AGENT)
         .and_then(|value| value.to_str().ok())
     else {
-        return true;
+        return Some(AutomatedFetch::MissingAgent);
     };
     let agent = agent.trim().to_ascii_lowercase();
     if agent.is_empty() {
-        return true;
+        return Some(AutomatedFetch::MissingAgent);
     }
     let agent_without_handsets = HANDSET_EXCEPTIONS
         .iter()
@@ -84,6 +147,7 @@ pub(crate) fn is_automated_fetch(method: &Method, headers: &HeaderMap) -> bool {
     AUTOMATED_AGENT_TOKENS
         .iter()
         .any(|token| agent_without_handsets.contains(token))
+        .then_some(AutomatedFetch::DeclaredBot)
 }
 
 #[cfg(test)]
@@ -111,7 +175,7 @@ mod tests {
     fn people_in_real_browsers_are_clicks() {
         for agent in [CHROME, SAFARI_IOS, ANDROID_FB_APP, CUBOT_PHONE] {
             assert!(
-                !is_automated_fetch(&Method::GET, &headers(agent)),
+                automated_fetch(&Method::GET, &headers(agent)).is_none(),
                 "{agent} is a person"
             );
         }
@@ -136,7 +200,7 @@ mod tests {
             "Mozilla/5.0 (compatible; SkypeUriPreview Preview/0.5)",
         ] {
             assert!(
-                is_automated_fetch(&Method::GET, &headers(agent)),
+                automated_fetch(&Method::GET, &headers(agent)) == Some(AutomatedFetch::DeclaredBot),
                 "{agent} is a fetcher"
             );
         }
@@ -144,13 +208,17 @@ mod tests {
 
     #[test]
     fn a_missing_or_blank_agent_is_a_script() {
-        assert!(is_automated_fetch(&Method::GET, &HeaderMap::new()));
-        assert!(is_automated_fetch(&Method::GET, &headers("  ")));
+        let missing = Some(AutomatedFetch::MissingAgent);
+        assert_eq!(automated_fetch(&Method::GET, &HeaderMap::new()), missing);
+        assert_eq!(automated_fetch(&Method::GET, &headers("  ")), missing);
     }
 
     #[test]
     fn head_and_prefetch_are_not_clicks() {
-        assert!(is_automated_fetch(&Method::HEAD, &headers(CHROME)));
+        assert_eq!(
+            automated_fetch(&Method::HEAD, &headers(CHROME)),
+            Some(AutomatedFetch::NotGet)
+        );
         for (name, value) in [
             ("purpose", "prefetch"),
             ("sec-purpose", "prefetch;prerender"),
@@ -158,7 +226,24 @@ mod tests {
         ] {
             let mut map = headers(CHROME);
             map.insert(name, HeaderValue::from_static(value));
-            assert!(is_automated_fetch(&Method::GET, &map), "{name}: {value}");
+            assert_eq!(
+                automated_fetch(&Method::GET, &map),
+                Some(AutomatedFetch::Prefetch),
+                "{name}: {value}"
+            );
         }
+    }
+
+    #[test]
+    fn every_reason_is_exported_with_its_own_label() {
+        record_dropped(AutomatedFetch::DeclaredBot);
+        let text = dropped_prometheus();
+        for reason in AutomatedFetch::ALL {
+            assert!(
+                text.contains(&format!("reason=\"{}\"", reason.label())),
+                "{reason:?} missing"
+            );
+        }
+        assert!(!text.contains("declared_bot\"} 0"), "the increment shows");
     }
 }
