@@ -109,6 +109,14 @@ impl EventState {
     pub fn metrics_snapshot(&self) -> EventActionMetricsSnapshot {
         (self.action_metrics_reader)()
     }
+
+    /// Returns whether this tenant currently exposes a published event under
+    /// the supplied slug. Referral redirects use this as a fail-closed guard
+    /// before preserving show context from a shared Latarnik link.
+    #[must_use]
+    pub(crate) fn has_public_event(&self, slug: &EventSlug) -> bool {
+        self.cache.resolve(self.workspace_id, slug).is_some()
+    }
 }
 
 /// Optional query parameters for the public event listing endpoint.

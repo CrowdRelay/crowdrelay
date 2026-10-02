@@ -12,7 +12,8 @@
 //! is a link to somebody else's website.
 
 use crowdrelay_domain::latarnik_mission::{
-    Language, MISSION_LIFETIME, MissionContext, MissionPlan, ReleaseFact, SHOW_HORIZON, ShowFact,
+    AdvocacyYield, Language, MISSION_LIFETIME, MissionContext, MissionPlan, ReleaseFact,
+    SHOW_HORIZON, ShowFact,
 };
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
@@ -28,6 +29,12 @@ struct CarrierRow {
     last_offered_at: Option<OffsetDateTime>,
     has_open_mission: bool,
     referral_code: Option<String>,
+    offered_90d: i64,
+    tapped_90d: i64,
+    human_clickers_90d: i64,
+    completed_90d: i64,
+    seen_event_ids: Vec<Uuid>,
+    seen_content_source_ids: Vec<Uuid>,
 }
 
 /// An active Latarnik and the facts their next mission would be made of.
@@ -63,14 +70,37 @@ pub async fn load_carriers(
         "SELECT lr.id AS role_id,
                 fan.id AS fan_id,
                 fan.locale,
-                (SELECT max(m.offered_at) FROM latarnik_missions m
-                  WHERE m.workspace_id = lr.workspace_id AND m.role_id = lr.id) AS last_offered_at,
-                EXISTS (SELECT 1 FROM latarnik_missions m
-                         WHERE m.workspace_id = lr.workspace_id AND m.role_id = lr.id
-                           AND m.status IN ('offered', 'tapped')) AS has_open_mission,
+                history.last_offered_at,
+                history.has_open_mission,
                 (SELECT rc.code FROM referral_codes rc
                   WHERE rc.workspace_id = fan.workspace_id AND rc.fan_id = fan.id AND rc.active
-                  ORDER BY rc.created_at, rc.id LIMIT 1) AS referral_code
+                  ORDER BY rc.created_at, rc.id LIMIT 1) AS referral_code,
+                history.offered_90d,
+                history.tapped_90d,
+                COALESCE((
+                    SELECT count(DISTINCT provenance.anonymous_visitor_id)::bigint
+                    FROM fan_provenance_events provenance
+                    WHERE provenance.workspace_id = lr.workspace_id
+                      AND provenance.event_kind = 'interaction'
+                      AND provenance.channel = 'referral'
+                      AND provenance.attribution_method = 'referral_click'
+                      AND provenance.anonymous_visitor_id IS NOT NULL
+                      AND provenance.source_target = 'fan:' || fan.id::text
+                      AND EXISTS (
+                          SELECT 1
+                          FROM latarnik_missions measured
+                          WHERE measured.workspace_id = lr.workspace_id
+                            AND measured.role_id = lr.id
+                            AND measured.offered_at >= $3 - interval '90 days'
+                            AND measured.tapped_at IS NOT NULL
+                            AND provenance.occurred_at >= measured.tapped_at
+                            AND provenance.occurred_at
+                                <= measured.expires_at + interval '7 days'
+                      )
+                ), 0)::bigint AS human_clickers_90d,
+                history.completed_90d,
+                history.seen_event_ids,
+                history.seen_content_source_ids
          FROM latarnik_roles lr
          JOIN person_identities pi
            ON pi.workspace_id = lr.workspace_id AND pi.person_id = lr.person_id
@@ -79,6 +109,36 @@ pub async fn load_carriers(
            ON fan.workspace_id = pi.workspace_id AND fan.normalized_email = pi.value
           AND fan.status = 'active' AND fan.deleted_at IS NULL
           AND fan.merged_into_fan_id IS NULL
+         LEFT JOIN LATERAL (
+             SELECT
+                 max(m.offered_at) AS last_offered_at,
+                 COALESCE(bool_or(m.status IN ('offered', 'tapped')), false)
+                     AS has_open_mission,
+                 count(*) FILTER (
+                     WHERE m.offered_at >= $3 - interval '90 days'
+                 )::bigint AS offered_90d,
+                 count(*) FILTER (
+                     WHERE m.offered_at >= $3 - interval '90 days'
+                       AND m.tapped_at IS NOT NULL
+                 )::bigint AS tapped_90d,
+                 count(*) FILTER (
+                     WHERE m.offered_at >= $3 - interval '90 days'
+                       AND m.status = 'completed'
+                 )::bigint AS completed_90d,
+                 COALESCE(
+                     array_agg(DISTINCT m.event_id)
+                         FILTER (WHERE m.event_id IS NOT NULL),
+                     ARRAY[]::uuid[]
+                 ) AS seen_event_ids,
+                 COALESCE(
+                     array_agg(DISTINCT m.content_source_id)
+                         FILTER (WHERE m.content_source_id IS NOT NULL),
+                     ARRAY[]::uuid[]
+                 ) AS seen_content_source_ids
+             FROM latarnik_missions m
+             WHERE m.workspace_id = lr.workspace_id
+               AND m.role_id = lr.id
+         ) history ON true
          WHERE lr.workspace_id = $1
            AND lr.status = 'active'
            AND lr.capabilities ? 'referral_link'
@@ -87,12 +147,13 @@ pub async fn load_carriers(
     )
     .bind(workspace_id)
     .bind(limit)
+    .bind(now)
     .fetch_all(pool)
     .await?;
 
     // Shows and releases are the same for every Latarnik; their *city* is not.
-    let shows = sqlx::query_as::<_, (Uuid, String, Option<Uuid>, Option<String>, OffsetDateTime)>(
-        "SELECT e.id, e.title, e.city_id, c.name, e.starts_at
+    let shows = sqlx::query_as::<_, (Uuid, String, String, Option<Uuid>, Option<String>, OffsetDateTime)>(
+        "SELECT e.id, e.title, e.slug, e.city_id, c.name, e.starts_at
          FROM events e
          LEFT JOIN cities c ON c.id = e.city_id
          WHERE e.workspace_id = $1
@@ -142,12 +203,22 @@ pub async fn load_carriers(
                 may_carry: true,
                 has_open_mission: row.has_open_mission,
                 last_offered_at: row.last_offered_at,
+                advocacy_yield: AdvocacyYield {
+                    offered_90d: u32::try_from(row.offered_90d).unwrap_or(u32::MAX),
+                    tapped_90d: u32::try_from(row.tapped_90d).unwrap_or(u32::MAX),
+                    human_clickers_90d: u32::try_from(row.human_clickers_90d)
+                        .unwrap_or(u32::MAX),
+                    completed_90d: u32::try_from(row.completed_90d).unwrap_or(u32::MAX),
+                },
+                seen_event_ids: row.seen_event_ids,
+                seen_content_source_ids: row.seen_content_source_ids,
                 language: Language::from_locale(row.locale.as_deref()),
                 referral_url,
                 shows: shows
                     .iter()
-                    .map(|(event_id, title, city_id, city, starts_at)| ShowFact {
+                    .map(|(event_id, title, slug, city_id, city, starts_at)| ShowFact {
                         event_id: *event_id,
+                        slug: slug.clone(),
                         title: title.clone(),
                         city: city.clone(),
                         starts_on: starts_at.date(),

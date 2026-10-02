@@ -7,13 +7,13 @@ use crowdrelay_application::{
 };
 use crowdrelay_domain::{
     CitySlug, CountryCode, FanActionToken, FanSignup, FanSignupInput, MarketingConsent,
-    NormalizedEmail, PhysicalRewardStatus, WorkspaceId, WorkspaceSlug,
+    NormalizedEmail, PhysicalRewardStatus, VisitorId, WorkspaceId, WorkspaceSlug,
 };
 use crowdrelay_infra::{
     acquisition::PostgresAcquisitionRepository,
     config::DatabaseConfig,
     fan_lifecycle::PostgresFanLifecycleRepository,
-    referrals::PostgresReferralRepository,
+    referrals::{PostgresReferralRepository, record_referral_interaction},
     sensitive_response::{SensitiveResponseCodec, SensitiveResponseKey},
 };
 use serde_json::Value;
@@ -66,6 +66,39 @@ async fn qualifies_referrals_grants_one_coupon_and_redeems_idempotently()
             "signup-referrer-0001",
         )?)
         .await?;
+
+    let visitor_id = VisitorId::new();
+    let referral_code = referrer
+        .referral_code
+        .as_ref()
+        .ok_or("referrer code")?;
+    assert!(
+        record_referral_interaction(
+            &pool,
+            workspace_id,
+            referral_code,
+            visitor_id,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await?
+    );
+    let interaction: (Option<Uuid>, String, String, Option<Uuid>, String) = sqlx::query_as(
+        r#"SELECT fan_id, channel, source_target, anonymous_visitor_id, attribution_method
+           FROM fan_provenance_events
+           WHERE workspace_id=$1 AND anonymous_visitor_id=$2 AND event_kind='interaction'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(Into::<Uuid>::into(visitor_id))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(interaction.0, None, "click stays anonymous until signup");
+    assert_eq!(interaction.1, "referral");
+    assert_eq!(
+        interaction.2,
+        format!("fan:{}", referrer.fan_id.into_uuid())
+    );
+    assert_eq!(interaction.3, Some(Into::<Uuid>::into(visitor_id)));
+    assert_eq!(interaction.4, "referral_click");
 
     for index in 1..=3 {
         acquisition

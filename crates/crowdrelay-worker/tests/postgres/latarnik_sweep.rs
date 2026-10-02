@@ -505,7 +505,7 @@ async fn make_active_latarnik(
 async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_referral() -> Result<()>
 {
     use crowdrelay_infra::latarnik_missions::{
-        MissionAnswer, answer_my_mission, my_open_mission, settle,
+        MissionAnswer, answer_my_mission, load_carriers, my_open_mission, settle,
     };
     let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
     let ws = workspace(&pool).await?;
@@ -587,8 +587,10 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
         mine.prompt
     );
     ensure!(
-        mine.share_text.contains("https://band.example/r/") && !mine.share_text.contains("//r/"),
-        "their own link on the stored site root: {}",
+        mine.share_text.contains("https://band.example/r/")
+            && mine.share_text.contains("?event=gorzow&lang=pl")
+            && !mine.share_text.contains("//r/"),
+        "their own contextual link on the stored site root: {}",
         mine.share_text
     );
     let hers = my_open_mission(&pool, w, &ania_token, now)
@@ -608,6 +610,38 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     ensure!(answer_my_mission(&pool, w, &kuba_token, mine.id, MissionAnswer::Tap, now).await?);
     let (done, _) = settle(&pool, w, now + Span::hours(1)).await?;
     ensure!(done == 0, "a tap earns nothing");
+
+    // A real human follows the referral. That click is not success, but it is
+    // durable evidence the cadence policy can see; the show is also remembered
+    // so this person can never be asked about the same fact twice.
+    let visitor = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (workspace_id, event_kind, channel, source_target, anonymous_visitor_id,
+              attribution_method, attribution_confidence, occurred_at)
+         VALUES ($1,'interaction','referral',$2,$3,'referral_click',1.0,$4)",
+    )
+    .bind(w)
+    .bind(format!("fan:{kuba}"))
+    .bind(visitor)
+    .bind(now + Span::minutes(30))
+    .execute(&pool)
+    .await?;
+    let carrier = load_carriers(&pool, w, now + Span::hours(1), 100)
+        .await?
+        .into_iter()
+        .find(|carrier| carrier.role_id == kuba_role)
+        .ok_or_else(|| anyhow::anyhow!("Kuba carrier"))?;
+    ensure!(
+        carrier.context.advocacy_yield.tapped_90d == 1
+            && carrier.context.advocacy_yield.human_clickers_90d == 1,
+        "{:?}",
+        carrier.context.advocacy_yield
+    );
+    ensure!(
+        carrier.context.seen_event_ids.contains(&show),
+        "the already-asked show is frozen in mission history"
+    );
 
     // Someone Kuba brought arrives through his code after the tap: completed.
     let friend = fan(&pool, ws, "friend@fan.test", 1, true).await?;
@@ -642,14 +676,29 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     ensure!(status == "completed");
     ensure!(my_open_mission(&pool, w, &kuba_token, now).await?.is_none());
 
-    // Ania's untouched mission runs out its time and frees her slot; the
-    // cooldown from its offer then still holds her back from a new one.
+    // Ania's untouched mission runs out its time and frees her slot. One quiet
+    // attempt does not label her, so the normal 14-day cooldown still holds.
+    // Kuba, however, completed his show mission: after the proven 10-day
+    // cooldown he may receive the *different* release he has never seen.
     let (_, expired) = settle(&pool, w, now + Span::days(11)).await?;
     ensure!(expired == 1, "{expired}");
+    let adapted = sweep.run_once(now + Span::days(11)).await?;
     ensure!(
-        sweep.run_once(now + Span::days(11)).await?.missions_offered == 0,
-        "inside the cooldown from the last offer, and Kuba's too"
+        adapted.missions_offered == 1,
+        "only the proven carrier gets a different fact: {adapted:?}"
     );
-    let _ = kuba_role;
+    let next = my_open_mission(&pool, w, &kuba_token, now + Span::days(11))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("next Kuba mission"))?;
+    ensure!(
+        next.kind == "release_one_person" && next.id != mine.id,
+        "the same show is never asked twice: {next:?}"
+    );
+    ensure!(
+        my_open_mission(&pool, w, &ania_token, now + Span::days(11))
+            .await?
+            .is_none(),
+        "one ignored ask stays on the ordinary 14-day cadence"
+    );
     Ok(())
 }

@@ -10,8 +10,9 @@
 //!
 //! What this module refuses to do is as important as what it does:
 //!
-//! - **One at a time.** A Latarnik with an open mission is offered none, and a
-//!   recently-offered one is left alone for [`COOLDOWN`].
+//! - **One at a time.** A Latarnik with an open mission is offered none. Cadence
+//!   follows measured human yield: proven carriers may see a new *different*
+//!   fact a little sooner; repeated ignored or clickless asks back off hard.
 //! - **Only what is real.** A show mission needs a published show in the future,
 //!   in the Latarnik's own city, inside [`SHOW_HORIZON`]; a release mission needs
 //!   something published recently. No fact, no mission.
@@ -24,8 +25,15 @@ use time::{Date, Duration, OffsetDateTime};
 
 /// Offered missions expire after this long: a stale ask is not an ask.
 pub const MISSION_LIFETIME: Duration = Duration::days(10);
-/// Minimum gap between two missions offered to the same person.
+/// Baseline gap between two missions offered to the same person.
 pub const COOLDOWN: Duration = Duration::days(14);
+/// A proven carrier may see a new, different fact this soon. Success does not
+/// waive the one-person/one-fact rules; it only avoids needless dead time.
+pub const PROVEN_COOLDOWN: Duration = Duration::days(10);
+/// Repeated taps with no real person following the link are a low-yield signal.
+pub const CLICKLESS_COOLDOWN: Duration = Duration::days(30);
+/// Two offers with no tap mean "leave this person alone", not "ask harder".
+pub const QUIET_COOLDOWN: Duration = Duration::days(45);
 /// A show is mission-worthy this far ahead and no further.
 pub const SHOW_HORIZON: Duration = Duration::days(21);
 /// A release is mission-worthy this long after it came out.
@@ -69,6 +77,7 @@ impl Language {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShowFact {
     pub event_id: uuid::Uuid,
+    pub slug: String,
     pub title: String,
     pub city: Option<String>,
     pub starts_on: Date,
@@ -85,8 +94,18 @@ pub struct ReleaseFact {
     pub published_at: OffsetDateTime,
 }
 
-/// What the evaluator may read. No evidence about the person beyond their
-/// role's state and their last mission.
+/// Recent observed advocacy outcomes. These are behaviour of the mission loop,
+/// not personality scores. They only tune how often CrowdRelay asks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AdvocacyYield {
+    pub offered_90d: u32,
+    pub tapped_90d: u32,
+    pub human_clickers_90d: u32,
+    pub completed_90d: u32,
+}
+
+/// What the evaluator may read: role state, real published facts, which facts
+/// were already asked about, and bounded recent mission yield.
 #[derive(Clone, Debug)]
 pub struct MissionContext {
     /// Role is `active` and carries the referral capability.
@@ -94,6 +113,10 @@ pub struct MissionContext {
     /// An offered or tapped mission is already open.
     pub has_open_mission: bool,
     pub last_offered_at: Option<OffsetDateTime>,
+    pub advocacy_yield: AdvocacyYield,
+    /// A person is never asked about the same show/release twice.
+    pub seen_event_ids: Vec<uuid::Uuid>,
+    pub seen_content_source_ids: Vec<uuid::Uuid>,
     pub language: Language,
     /// The person's own referral link, absolute. Without it there is nothing to
     /// send on, so there is no mission.
@@ -122,6 +145,14 @@ fn date_label(language: Language, date: Date) -> String {
 fn show_plan(language: Language, show: &ShowFact, link: &str) -> MissionPlan {
     let when = date_label(language, show.starts_on);
     let place = show.city.as_deref().unwrap_or_default();
+    let lang = match language {
+        Language::Pl => "pl",
+        Language::En => "en",
+    };
+    // Preserve why the recipient clicked all the way through the referral
+    // resolver. The resolver still validates the event against this tenant's
+    // published event cache before it will use the contextual destination.
+    let link = format!("{link}?event={}&lang={lang}", show.slug);
     let (prompt, share) = match language {
         Language::Pl => (
             format!(
@@ -172,17 +203,34 @@ fn release_plan(language: Language, release: &ReleaseFact, link: &str) -> Missio
     }
 }
 
+fn cooldown_for(yield_: AdvocacyYield) -> Duration {
+    if yield_.completed_90d > 0 || yield_.human_clickers_90d >= 2 {
+        return PROVEN_COOLDOWN;
+    }
+    if yield_.offered_90d >= 2 && yield_.tapped_90d == 0 {
+        return QUIET_COOLDOWN;
+    }
+    if yield_.tapped_90d >= 2 && yield_.human_clickers_90d == 0 {
+        return CLICKLESS_COOLDOWN;
+    }
+    COOLDOWN
+}
+
 /// Chooses at most one mission. A show in the person's own city outranks a
 /// release (it is closer, more specific and has a date); among shows the
-/// soonest wins; among releases the newest.
+/// soonest unseen one wins; among releases the newest unseen one.
+///
+/// Cadence reacts only after repeated evidence. One quiet mission does not label
+/// a person as low-yield, and even proven carriers never see the same fact twice.
 #[must_use]
 pub fn choose_mission(context: &MissionContext, now: OffsetDateTime) -> Option<MissionPlan> {
     if !context.may_carry || context.has_open_mission {
         return None;
     }
+    let cooldown = cooldown_for(context.advocacy_yield);
     if context
         .last_offered_at
-        .is_some_and(|at| now - at < COOLDOWN)
+        .is_some_and(|at| now - at < cooldown)
     {
         return None;
     }
@@ -190,7 +238,12 @@ pub fn choose_mission(context: &MissionContext, now: OffsetDateTime) -> Option<M
     if let Some(show) = context
         .shows
         .iter()
-        .filter(|s| s.in_their_city && s.starts_at > now && s.starts_at - now <= SHOW_HORIZON)
+        .filter(|s| {
+            s.in_their_city
+                && s.starts_at > now
+                && s.starts_at - now <= SHOW_HORIZON
+                && !context.seen_event_ids.contains(&s.event_id)
+        })
         .min_by_key(|s| s.starts_at)
     {
         return Some(show_plan(context.language, show, link));
@@ -198,7 +251,13 @@ pub fn choose_mission(context: &MissionContext, now: OffsetDateTime) -> Option<M
     context
         .releases
         .iter()
-        .filter(|r| r.published_at <= now && now - r.published_at <= RELEASE_WINDOW)
+        .filter(|r| {
+            r.published_at <= now
+                && now - r.published_at <= RELEASE_WINDOW
+                && !context
+                    .seen_content_source_ids
+                    .contains(&r.content_source_id)
+        })
         .max_by_key(|r| r.published_at)
         .map(|r| release_plan(context.language, r, link))
 }
@@ -215,6 +274,7 @@ mod tests {
         let at = NOW + Duration::days(days_ahead);
         ShowFact {
             event_id: Uuid::now_v7(),
+            slug: "virya-furydate-impala".into(),
             title: "Virya × Furydate × Impala".into(),
             city: Some("Gorzów Wielkopolski".into()),
             starts_on: at.date(),
@@ -236,6 +296,9 @@ mod tests {
             may_carry: true,
             has_open_mission: false,
             last_offered_at: None,
+            advocacy_yield: AdvocacyYield::default(),
+            seen_event_ids: vec![],
+            seen_content_source_ids: vec![],
             language: Language::Pl,
             referral_url: Some("https://virya.music/r/abc123".into()),
             shows: vec![show(15, true)],
@@ -250,7 +313,9 @@ mod tests {
         assert!(plan.prompt.contains("jedną osobę"), "{}", plan.prompt);
         assert!(plan.prompt.ends_with("(17.10)?"), "{}", plan.prompt);
         assert!(plan.share_text.contains("Gorzów Wielkopolski"));
-        assert!(plan.share_text.ends_with("https://virya.music/r/abc123"));
+        assert!(plan.share_text.ends_with(
+            "https://virya.music/r/abc123?event=virya-furydate-impala&lang=pl"
+        ));
         assert!(plan.event_id.is_some() && plan.content_source_id.is_none());
     }
 
@@ -319,6 +384,84 @@ mod tests {
             ..context()
         };
         assert!(choose_mission(&rested, NOW).is_some());
+    }
+
+    #[test]
+    fn the_same_fact_is_never_asked_twice() {
+        let show_ctx = context();
+        let seen_show = MissionContext {
+            seen_event_ids: vec![show_ctx.shows[0].event_id],
+            seen_content_source_ids: vec![show_ctx.releases[0].content_source_id],
+            ..show_ctx
+        };
+        assert_eq!(choose_mission(&seen_show, NOW), None);
+
+        let release_ctx = MissionContext {
+            shows: vec![],
+            ..context()
+        };
+        let seen_release = MissionContext {
+            seen_content_source_ids: vec![release_ctx.releases[0].content_source_id],
+            ..release_ctx
+        };
+        assert_eq!(choose_mission(&seen_release, NOW), None);
+    }
+
+    #[test]
+    fn measured_yield_changes_cadence_without_overreacting_to_one_attempt() {
+        let one_quiet = MissionContext {
+            last_offered_at: Some(NOW - Duration::days(15)),
+            advocacy_yield: AdvocacyYield {
+                offered_90d: 1,
+                ..AdvocacyYield::default()
+            },
+            ..context()
+        };
+        assert!(choose_mission(&one_quiet, NOW).is_some(), "one miss keeps baseline cadence");
+
+        let ignored_twice = MissionContext {
+            last_offered_at: Some(NOW - Duration::days(30)),
+            advocacy_yield: AdvocacyYield {
+                offered_90d: 2,
+                ..AdvocacyYield::default()
+            },
+            ..context()
+        };
+        assert_eq!(
+            choose_mission(&ignored_twice, NOW),
+            None,
+            "two ignored asks back off to 45 days"
+        );
+
+        let clickless_twice = MissionContext {
+            last_offered_at: Some(NOW - Duration::days(20)),
+            advocacy_yield: AdvocacyYield {
+                offered_90d: 2,
+                tapped_90d: 2,
+                ..AdvocacyYield::default()
+            },
+            ..context()
+        };
+        assert_eq!(
+            choose_mission(&clickless_twice, NOW),
+            None,
+            "two taps with no human click back off to 30 days"
+        );
+
+        let proven = MissionContext {
+            last_offered_at: Some(NOW - Duration::days(11)),
+            advocacy_yield: AdvocacyYield {
+                offered_90d: 2,
+                tapped_90d: 2,
+                human_clickers_90d: 1,
+                completed_90d: 1,
+            },
+            ..context()
+        };
+        assert!(
+            choose_mission(&proven, NOW).is_some(),
+            "a proven carrier may get a different fact after 10 days"
+        );
     }
 
     #[test]

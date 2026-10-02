@@ -81,6 +81,28 @@ class ReferralConversionContract(unittest.TestCase):
         self.assertIn("qualified", self.audience)
         self.assertIn("activated", self.audience)
         self.assertIn("reversed", self.audience)
+        for field in [
+            "latarnik_offered_30d",
+            "latarnik_tapped_30d",
+            "latarnik_human_clickers_30d",
+            "latarnik_joined_30d",
+            "latarnik_qualified_30d",
+            "latarnik_activated_30d",
+        ]:
+            self.assertIn(field, self.audience)
+            self.assertIn(field, self.models)
+
+    def test_latarnik_clicks_are_real_and_mission_bounded(self) -> None:
+        section = self.audience[
+            self.audience.find("pub async fn referral_conversion"):
+            self.audience.find("pub async fn city_funnel")
+        ]
+        self.assertIn("attribution_method = 'referral_click'", section)
+        self.assertIn("anonymous_visitor_id IS NOT NULL", section)
+        self.assertIn("mission.tapped_at IS NOT NULL", section)
+        self.assertIn("provenance.occurred_at >= mission.tapped_at", section)
+        self.assertIn("mission.expires_at + INTERVAL '7 days'", section)
+        self.assertIn("referral.accepted_at >= mission.tapped_at", section)
 
     def test_endpoint_uses_real_activation(self) -> None:
         self.assertIn("fan_last_meaningful_action", self.audience)
