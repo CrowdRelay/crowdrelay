@@ -28,10 +28,10 @@
 
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
-use crowdrelay_domain::{BeaconId, WorkspaceId};
 use crowdrelay_domain::contact_research::relationship_is_worth_researching;
 use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, decide};
 use crowdrelay_domain::trace::TraceContext;
+use crowdrelay_domain::{BeaconId, WorkspaceId};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -331,7 +331,6 @@ pub async fn dual_role_contact(
     Ok(row.map(|row| row_to_contact(&row, reason_available).0))
 }
 
-
 /// The small queue of warm relationships worth learning about now.
 ///
 /// This is not an invitation queue. It asks a narrower question: which warm,
@@ -388,15 +387,17 @@ pub async fn relationship_research_queue(
             continue;
         }
 
-        queue.push(crowdrelay_application::autopilot::RelationshipResearchSnapshot {
-            beacon_id: BeaconId::from_uuid(contact.beacon_id),
-            display_name: contact.display_name,
-            role: contact.role,
-            city: contact.city,
-            relationship_score: contact.relationship_score,
-            has_replied: contact.has_replied,
-            days_since_last_contact: contact.days_since_last_contact,
-        });
+        queue.push(
+            crowdrelay_application::autopilot::RelationshipResearchSnapshot {
+                beacon_id: BeaconId::from_uuid(contact.beacon_id),
+                display_name: contact.display_name,
+                role: contact.role,
+                city: contact.city,
+                relationship_score: contact.relationship_score,
+                has_replied: contact.has_replied,
+                days_since_last_contact: contact.days_since_last_contact,
+            },
+        );
     }
     Ok(queue)
 }

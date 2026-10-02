@@ -1,4 +1,6 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
+use super::ports::{AutopilotDecisionRepository, LoadedCausalModel};
+use super::{evidence_ledger::EvidenceLedger, model::*, policy_config::*};
 use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
 };
@@ -77,8 +79,6 @@ use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use super::ports::{AutopilotDecisionRepository, LoadedCausalModel};
-use super::{evidence_ledger::EvidenceLedger, model::*, policy_config::*};
 mod beacons;
 mod booking_supply;
 mod commercial;

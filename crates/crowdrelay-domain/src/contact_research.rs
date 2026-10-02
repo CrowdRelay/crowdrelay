@@ -71,8 +71,8 @@ pub fn relationship_is_worth_researching(
         return false;
     }
     let known = has_replied || relationship_score >= RELATIONSHIP_RESEARCH_MIN_SCORE;
-    let rested = days_since_last_contact
-        .is_some_and(|days| days >= RELATIONSHIP_RESEARCH_QUIET_DAYS);
+    let rested =
+        days_since_last_contact.is_some_and(|days| days >= RELATIONSHIP_RESEARCH_QUIET_DAYS);
     known && rested
 }
 
@@ -248,25 +248,60 @@ mod tests {
     #[test]
     fn deep_research_is_for_warm_rested_relationships_only() {
         assert!(relationship_is_worth_researching(
-            true, 20, true, false, Some(40), false
+            true,
+            20,
+            true,
+            false,
+            Some(40),
+            false
         ));
         assert!(relationship_is_worth_researching(
-            false, RELATIONSHIP_RESEARCH_MIN_SCORE, true, false, Some(40), false
+            false,
+            RELATIONSHIP_RESEARCH_MIN_SCORE,
+            true,
+            false,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            false, 50, true, false, Some(40), false
+            false,
+            50,
+            true,
+            false,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, true, false, Some(3), false
+            true,
+            90,
+            true,
+            false,
+            Some(3),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, false, false, Some(40), false
+            true,
+            90,
+            false,
+            false,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, true, true, Some(40), false
+            true,
+            90,
+            true,
+            true,
+            Some(40),
+            false
         ));
         assert!(!relationship_is_worth_researching(
-            true, 90, true, false, Some(40), true
+            true,
+            90,
+            true,
+            false,
+            Some(40),
+            true
         ));
     }
 

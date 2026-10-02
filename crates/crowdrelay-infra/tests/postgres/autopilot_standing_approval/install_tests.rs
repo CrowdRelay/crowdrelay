@@ -324,7 +324,7 @@ async fn show_recalls_own_their_links_without_inheriting_install_template_approv
         .bind(f.workspace_id.into_uuid()).fetch_all(&f.pool).await?;
     assert_eq!(ctas.len(), 2);
     for (fan, url) in ctas {
-        assert_eq!(url.is_some(), fan != installed_fan);
+        assert_eq!(url.is_some(), fan != installed_fan.into_uuid());
     }
     Ok(())
 }

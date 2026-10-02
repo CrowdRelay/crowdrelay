@@ -58,13 +58,9 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<RelationshipResearchSnapshot>, RepositoryError> {
         self.bounded(async {
-            crate::latarnik::relationship_research_queue(
-                &self.pool,
-                workspace_id.into_uuid(),
-                now,
-            )
-            .await
-            .map_err(map_sqlx)
+            crate::latarnik::relationship_research_queue(&self.pool, workspace_id.into_uuid(), now)
+                .await
+                .map_err(map_sqlx)
         })
         .await
     }
