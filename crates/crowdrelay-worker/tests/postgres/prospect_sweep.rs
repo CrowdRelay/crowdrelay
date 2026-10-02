@@ -309,9 +309,9 @@ async fn a_reply_that_carried_the_join_link_becomes_a_touch_and_then_a_fan() -> 
             .to_lowercase();
         let expected = match handle.as_str() {
             "kuba_metal" | "ania_rock" => "hold",
-            // Not yet answered: a commenter under the band's own post is warm
-            // engagement, so the queue still recommends answering them.
-            _ => "engage_in_context",
+            // One generic comment is deliberately weak evidence. FAN SCOUT
+            // observes it; repeated warmth or a concrete question can earn a reply.
+            _ => "observe",
         };
         ensure!(
             serde_json::to_value(item.action)? == expected,

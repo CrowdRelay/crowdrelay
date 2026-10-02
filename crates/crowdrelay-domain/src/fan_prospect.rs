@@ -247,6 +247,33 @@ const SHOW_QUESTION_PHRASES: &[&str] = &[
     "where can i get tickets",
 ];
 
+const JOIN_QUESTION_PHRASES: &[&str] = &[
+    "jak was śledzić",
+    "jak was sledzic",
+    "gdzie mogę was śledzić",
+    "gdzie moge was sledzic",
+    "jak was obserwować",
+    "jak was obserwowac",
+    "gdzie was obserwować",
+    "gdzie was obserwowac",
+    "jak dołączyć",
+    "jak dolaczyc",
+    "gdzie dołączyć",
+    "gdzie dolaczyc",
+    "macie newsletter",
+    "macie mailing",
+    "jak zostać na bieżąco",
+    "jak zostac na biezaco",
+    "how do i follow",
+    "where can i follow",
+    "how can i follow",
+    "how do i join",
+    "where can i join",
+    "how can i join",
+    "how do i stay updated",
+    "where can i sign up",
+];
+
 const MUSIC_QUESTION_PHRASES: &[&str] = &[
     "gdzie posłuchać",
     "gdzie posluchac",
@@ -273,8 +300,12 @@ const MUSIC_QUESTION_PHRASES: &[&str] = &[
 #[must_use]
 pub fn classify_comment(text: &str) -> ObservationKind {
     let lowered = text.to_lowercase();
-    // A question mark is required: "bilety już wyprzedane" and "come to my
-    // show" carry the same words as a question and are not one.
+    // A direct "how/where do I join/follow" is explicit intent even if the
+    // commenter omitted punctuation. Show/music phrases stay stricter: they
+    // need a question mark so "bilety już wyprzedane" is not treated as an ask.
+    if JOIN_QUESTION_PHRASES.iter().any(|p| lowered.contains(p)) {
+        return ObservationKind::AskedToJoinOrFollow;
+    }
     let asks = lowered.contains('?');
     if !asks {
         return ObservationKind::ActiveUnderOurPost;
@@ -333,6 +364,10 @@ pub fn normalize_handle(raw: &str) -> Option<String> {
         .unwrap_or(trimmed);
     let normalized = trimmed.trim_start_matches('@').to_lowercase();
     if normalized.is_empty()
+        || matches!(
+            normalized.as_str(),
+            "someone" | "unknown" | "[deleted]" | "[removed]" | "anonymous"
+        )
         || normalized.chars().count() > MAX_HANDLE_LEN
         || normalized.chars().any(char::is_whitespace)
     {
@@ -423,7 +458,18 @@ mod tests {
         );
         assert_eq!(normalize_handle("u/SomeUser"), Some("someuser".into()));
         assert_eq!(normalize_handle("@@double"), Some("double".into()));
-        for not_a_handle in ["", "   ", "@", "two words", &"a".repeat(MAX_HANDLE_LEN + 1)] {
+        for not_a_handle in [
+            "",
+            "   ",
+            "@",
+            "two words",
+            "someone",
+            "unknown",
+            "[deleted]",
+            "[removed]",
+            "anonymous",
+            &"a".repeat(MAX_HANDLE_LEN + 1),
+        ] {
             assert_eq!(normalize_handle(not_a_handle), None, "{not_a_handle:?}");
         }
     }
@@ -456,6 +502,19 @@ mod tests {
         assert_eq!(
             classify_comment("Gdzie posłuchać pełnej wersji?"),
             ObservationKind::AskedForMusic
+        );
+        assert_eq!(
+            classify_comment("Gdzie mogę was śledzić?"),
+            ObservationKind::AskedToJoinOrFollow
+        );
+        assert_eq!(
+            classify_comment("How do I stay updated?"),
+            ObservationKind::AskedToJoinOrFollow
+        );
+        assert_eq!(
+            classify_comment("jak was śledzić"),
+            ObservationKind::AskedToJoinOrFollow,
+            "explicit relationship intent does not depend on punctuation"
         );
         for not_an_ask in [
             "Kurła chciałbym tam być 😍🔥",

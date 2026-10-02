@@ -116,27 +116,8 @@ struct AgentComments {
 struct ReplyDraft {
     reply: Option<String>,
     skip_reason: Option<String>,
-    /// Optional signal from newer agents builds. Missing means no capture:
-    /// deploy order can never turn an old drafter into a CTA bot.
-    #[serde(default)]
-    capture_intent: Option<String>,
-    #[serde(default)]
-    capture_evidence: Option<String>,
     provider: Option<String>,
     model: Option<String>,
-}
-
-fn owned_join_capture_requested<'a>(platform: &str, draft: &'a ReplyDraft) -> Option<&'a str> {
-    if !matches!(platform, "instagram" | "facebook")
-        || draft.capture_intent.as_deref() != Some("join")
-    {
-        return None;
-    }
-    draft
-        .capture_evidence
-        .as_deref()
-        .map(str::trim)
-        .filter(|evidence| !evidence.is_empty())
 }
 
 fn owned_reply_capture_slug(comment_id: Uuid) -> String {
@@ -373,6 +354,17 @@ impl CommunityExecutorWorker {
             tracing::warn!(error = %error, "owned-channel comment harvest failed");
             0
         });
+        // FAN SCOUT is part of the reply control path, not a dashboard lagging
+        // an hour behind it. Observe fresh comments and ingest prior send
+        // receipts before deciding whether another person should hear from us.
+        let scout = crate::prospect_sweep::ProspectSweep::new(
+            self.pool.clone(),
+            self.workspace_id,
+            self.operation_timeout,
+        );
+        if let Err(error) = scout.run_once(OffsetDateTime::now_utc()).await {
+            tracing::warn!(error = %error, "fan scout pre-reply sweep failed");
+        }
         let drafted = self.draft_pending_replies().await?;
         let sent = self.send_due_reply().await? + self.send_due_owned_reply().await?;
         Ok(harvested + drafted + sent)
@@ -456,6 +448,93 @@ impl CommunityExecutorWorker {
         recent: &[String],
     ) -> Result<(), CommunityExecutorError> {
         let ws = self.workspace_id.into_uuid();
+        let fan_scout_action = if matches!(row.platform.as_str(), "instagram" | "facebook") {
+            crowdrelay_infra::fan_prospects::next_action_for_comment(&self.pool, ws, row.id)
+                .await
+                .map_err(|error| match error {
+                    crowdrelay_infra::fan_prospects::ProspectError::Database(error) => {
+                        CommunityExecutorError::Database(error)
+                    }
+                })?
+        } else {
+            None
+        };
+
+        if matches!(row.platform.as_str(), "instagram" | "facebook") {
+            use crowdrelay_domain::fan_next_action::FanProspectActionKind as FanAction;
+            match fan_scout_action.as_ref().map(|action| action.decision.action) {
+                Some(FanAction::EngageInContext | FanAction::InviteToFanbase) => {}
+                Some(FanAction::DoNotContact) => {
+                    sqlx::query(
+                        "UPDATE community_comments
+                         SET status='skipped',
+                             hold_reason='FAN SCOUT: person is refused/suppressed; do not contact',
+                             updated_at=now()
+                         WHERE id=$1 AND workspace_id=$2 AND status='unanswered'",
+                    )
+                    .bind(row.id)
+                    .bind(ws)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+                Some(FanAction::Observe) => {
+                    sqlx::query(
+                        "UPDATE community_comments
+                         SET status='skipped',
+                             hold_reason='FAN SCOUT: observe only; no active relationship move is justified',
+                             updated_at=now()
+                         WHERE id=$1 AND workspace_id=$2 AND status='unanswered'",
+                    )
+                    .bind(row.id)
+                    .bind(ws)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+                Some(FanAction::Hold) => {
+                    // Holds are re-evaluated without model spend. Six hours is
+                    // only the polling cadence; the typed evaluator still owns
+                    // the actual 72h/168h relationship cooldown.
+                    sqlx::query(
+                        "UPDATE community_comments
+                         SET not_before=now()+INTERVAL '6 hours',
+                             hold_reason=$3,
+                             updated_at=now()
+                         WHERE id=$1 AND workspace_id=$2 AND status='unanswered'",
+                    )
+                    .bind(row.id)
+                    .bind(ws)
+                    .bind(
+                        fan_scout_action.as_ref().map_or_else(
+                            || "FAN SCOUT: held".to_owned(),
+                            |action| format!("FAN SCOUT: {}", action.decision.reason),
+                        ),
+                    )
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+                None => {
+                    // The discovery sweep may have failed or the public author
+                    // may not be a safe identity. Never fall back from "Brain
+                    // has no person decision" to "ask an LLM what to do".
+                    sqlx::query(
+                        "UPDATE community_comments
+                         SET not_before=now()+INTERVAL '15 minutes',
+                             hold_reason='FAN SCOUT: prospect evidence not ready; no model action taken',
+                             updated_at=now()
+                         WHERE id=$1 AND workspace_id=$2 AND status='unanswered'",
+                    )
+                    .bind(row.id)
+                    .bind(ws)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
+            }
+        }
+
         // What this comment answers, stored at harvest: the band's own words
         // when a fan is answering the band. Rows harvested before the parent
         // was kept fall back to naming the band without quoting it.
@@ -496,15 +575,57 @@ impl CommunityExecutorWorker {
             let reason = draft
                 .skip_reason
                 .unwrap_or_else(|| "the drafter chose not to reply".to_owned());
-            sqlx::query(
-                "UPDATE community_comments SET status = 'skipped', hold_reason = $3, drafted_by = $4, updated_at = now() WHERE id = $1 AND workspace_id = $2",
-            )
-            .bind(row.id)
-            .bind(ws)
-            .bind(reason.chars().take(500).collect::<String>())
-            .bind(draft.model.as_deref())
-            .execute(&self.pool)
-            .await?;
+            if fan_scout_action.is_some() {
+                // Brain selected a relationship move. A wording model may fail
+                // to serve it, but it cannot silently turn that decision into
+                // permanent silence. Retry a bounded number of times, then
+                // surface the failed wording task for an operator.
+                let attempts = row.attempts.saturating_add(1).max(1);
+                let failed = attempts >= MAX_ATTEMPTS;
+                let hold = if failed {
+                    format!(
+                        "FAN SCOUT: gave up after {attempts} wording attempts for the selected action — last drafter reason: {reason}"
+                    )
+                } else {
+                    format!(
+                        "FAN SCOUT: selected action still needs wording — drafter returned no reply: {reason}"
+                    )
+                };
+                sqlx::query(
+                    r#"
+                    UPDATE community_comments
+                    SET status = CASE WHEN $3 THEN 'failed' ELSE 'unanswered' END,
+                        hold_reason = $4,
+                        drafted_by = $5,
+                        attempts = GREATEST(attempts, $6),
+                        not_before = now() + make_interval(mins => $7),
+                        updated_at = now()
+                    WHERE id=$1 AND workspace_id=$2 AND status='unanswered'
+                    "#,
+                )
+                .bind(row.id)
+                .bind(ws)
+                .bind(failed)
+                .bind(hold.chars().take(500).collect::<String>())
+                .bind(draft.model.as_deref())
+                .bind(attempts)
+                .bind(RETRY_BACKOFF_MINUTES)
+                .execute(&self.pool)
+                .await?;
+            } else {
+                // Legacy/non-prospect reply lanes retain their current
+                // semantics: the model may decide a conversation needs no
+                // answer at all.
+                sqlx::query(
+                    "UPDATE community_comments SET status = 'skipped', hold_reason = $3, drafted_by = $4, updated_at = now() WHERE id = $1 AND workspace_id = $2",
+                )
+                .bind(row.id)
+                .bind(ws)
+                .bind(reason.chars().take(500).collect::<String>())
+                .bind(draft.model.as_deref())
+                .execute(&self.pool)
+                .await?;
+            }
             return Ok(());
         };
 
@@ -560,19 +681,23 @@ impl CommunityExecutorWorker {
             ReviewOutcome::Unavailable => None,
         };
 
-        // A capture CTA is never inferred from engagement. It needs the
-        // drafter's explicit, evidenced join intent, a clean mechanical draft,
-        // a passing independent review, and a tenant-owned member site.
-        // Even then it always goes to a person: unattended conversational
-        // replies remain link-free.
-        let capture_evidence = owned_join_capture_requested(&row.platform, &draft);
+        // CTA authority comes from the typed FAN SCOUT decision, never from
+        // the copy model. The model writes natural wording; a deterministic
+        // InviteToFanbase decision is the only thing that may attach this
+        // tracked first-party path.
+        let fan_scout_invite = fan_scout_action.as_ref().is_some_and(|action| {
+            action.decision.action
+                == crowdrelay_domain::fan_next_action::FanProspectActionKind::InviteToFanbase
+                && action.decision.cta_intent
+                    == Some(crowdrelay_domain::fan_next_action::FanProspectCtaIntent::JoinFanbase)
+        });
         let capture_url_chars = self.public_origin.trim_end_matches('/').chars().count()
             + "/l/".chars().count()
             + owned_reply_capture_slug(row.id).chars().count();
         let capture_fits = reply.chars().count() + 2 + capture_url_chars <= 400;
         let capture_link = if guard_hold.is_none()
             && matches!(review, ReviewOutcome::Passed { .. })
-            && capture_evidence.is_some()
+            && fan_scout_invite
             && capture_fits
         {
             self.owned_reply_capture_link(row).await?
@@ -594,13 +719,25 @@ impl CommunityExecutorWorker {
             owned_replies::unattended_owned_replies_enabled()
         };
         let (status, hold_reason, approved_by, not_before) = if capture_added {
-            let evidence = capture_evidence.unwrap_or_default();
             (
                 "awaiting_approval",
-                Some(format!(
-                    "held: commenter explicitly asked how to follow/join — tracked fan-capture link added; review before sending ({})",
-                    evidence.chars().take(160).collect::<String>()
-                )),
+                Some(
+                    "held: FAN SCOUT selected InviteToFanbase from explicit join/follow evidence — tracked capture link added; review before sending"
+                        .to_owned(),
+                ),
+                None,
+                None,
+            )
+        } else if fan_scout_invite {
+            // An invite decision without its reviewed tracked path must never
+            // silently degrade into a plain auto-reply. A person can repair or
+            // decline it; the machine cannot substitute a different action.
+            (
+                "awaiting_approval",
+                Some(
+                    "held: FAN SCOUT selected InviteToFanbase, but the tracked CTA could not be safely attached"
+                        .to_owned(),
+                ),
                 None,
                 None,
             )
@@ -637,8 +774,8 @@ impl CommunityExecutorWorker {
         Ok(())
     }
 
-    /// Mints the tenant-owned tracked link offered only when the commenter
-    /// explicitly asked how to join/follow. The smart-link dimensions make
+    /// Mints the tenant-owned tracked link only after FAN SCOUT selected
+    /// InviteToFanbase. The smart-link dimensions make
     /// click → visitor → fan attribution readable without adding a second
     /// reply ledger.
     async fn owned_reply_capture_link(
@@ -914,43 +1051,6 @@ mod replies_tests {
     fn review_payload_sends_provider_string_when_known() {
         let payload = review_payload("reddit_reply", "r/test", "body", "ctx", Some("claude"));
         assert_eq!(payload["drafted_by_provider"], "claude");
-    }
-
-    fn draft_with_capture(intent: Option<&str>, evidence: Option<&str>) -> ReplyDraft {
-        ReplyDraft {
-            reply: Some("Dzięki, że pytasz.".to_owned()),
-            skip_reason: None,
-            capture_intent: intent.map(str::to_owned),
-            capture_evidence: evidence.map(str::to_owned),
-            provider: Some("test".to_owned()),
-            model: Some("test".to_owned()),
-        }
-    }
-
-    #[test]
-    fn only_explicit_evidenced_meta_join_intent_requests_capture() {
-        let good = draft_with_capture(Some("join"), Some("gdzie mogę was śledzić?"));
-        assert_eq!(
-            owned_join_capture_requested("instagram", &good),
-            Some("gdzie mogę was śledzić?")
-        );
-        assert_eq!(
-            owned_join_capture_requested("facebook", &good),
-            Some("gdzie mogę was śledzić?")
-        );
-
-        assert!(owned_join_capture_requested("reddit", &good).is_none());
-        assert!(owned_join_capture_requested("youtube", &good).is_none());
-
-        let missing_evidence = draft_with_capture(Some("join"), None);
-        assert!(owned_join_capture_requested("instagram", &missing_evidence).is_none());
-
-        let ordinary = draft_with_capture(Some("none"), Some("kocham ten numer"));
-        assert!(owned_join_capture_requested("instagram", &ordinary).is_none());
-
-        // Older agents builds deserialize with both optional fields absent.
-        let legacy = draft_with_capture(None, None);
-        assert!(owned_join_capture_requested("facebook", &legacy).is_none());
     }
 
     #[test]

@@ -552,6 +552,103 @@ pub struct ProspectActionView {
     pub measurement: &'static str,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ProspectCommentAction {
+    pub prospect_id: Uuid,
+    pub decision: crowdrelay_domain::fan_next_action::FanProspectDecision,
+}
+
+/// The deterministic FAN SCOUT decision for one harvested comment.
+///
+/// The comment must already exist as prospect evidence. This function does not
+/// discover or create a person just because the reply worker wants work; the
+/// prospect sweep owns discovery. Cooldown is read from actual touch receipts,
+/// so two comments by one person cannot become two independent outreach slots.
+///
+/// # Errors
+/// Database failure.
+pub async fn next_action_for_comment(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    comment_id: Uuid,
+) -> Result<Option<ProspectCommentAction>, ProspectError> {
+    let member_site_ready = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM tenant_settings
+             WHERE workspace_id=$1
+               AND key='member_site_base_url'
+               AND btrim(value) <> ''
+         )",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+
+    let row = sqlx::query_as::<_, ProspectActionRow>(
+        r#"
+        SELECT p.id, p.status, p.platform, p.external_identity, p.last_seen_at,
+               count(o.id)::bigint AS observation_count,
+               COALESCE(bool_or(o.source = 'own_comments'), false) AS same_thread_context,
+               COALESCE(bool_or(o.observation_kind = 'asked_to_join_or_follow'), false)
+                   AS explicit_join_or_follow_intent,
+               COALESCE(bool_or(o.observation_kind IN ('asked_about_show','asked_for_music')), false)
+                   AS question_intent,
+               (
+                   COUNT(o.id) FILTER (
+                       WHERE o.observation_kind IN (
+                           'active_under_our_post','replied','shared_material'
+                       )
+                   ) >= 2
+               ) AS warm_engagement,
+               EXISTS (
+                   SELECT 1 FROM fan_prospect_touches t
+                   WHERE t.workspace_id=p.workspace_id AND t.prospect_id=p.id
+                     AND t.touched_at > now() - make_interval(hours => $3)
+               ) AS recently_engaged
+        FROM fan_prospect_observations anchor
+        JOIN fan_prospects p
+          ON p.workspace_id=anchor.workspace_id AND p.id=anchor.prospect_id
+        LEFT JOIN fan_prospect_observations o
+          ON o.workspace_id=p.workspace_id AND o.prospect_id=p.id
+        WHERE anchor.workspace_id=$1
+          AND anchor.source='own_comments'
+          AND anchor.source_ref=$2
+        GROUP BY p.id, p.status, p.platform, p.external_identity, p.last_seen_at
+        ORDER BY p.last_seen_at DESC, p.id
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(comment_id.to_string())
+    .bind(ENGAGEMENT_COOLDOWN_HOURS)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let Some(status) = ProspectStatus::parse(&row.status) else {
+        return Ok(None);
+    };
+    let decision = evaluate_fan_prospect(FanProspectActionInput {
+        status,
+        has_same_thread_context: row.same_thread_context,
+        explicit_join_or_follow_intent: row.explicit_join_or_follow_intent,
+        question_intent: row.question_intent,
+        warm_engagement: row.warm_engagement,
+        member_site_ready,
+        same_thread_join_capture_supported: matches!(
+            row.platform.as_str(),
+            "instagram" | "facebook"
+        ),
+        recently_engaged: row.recently_engaged,
+    });
+    Ok(Some(ProspectCommentAction {
+        prospect_id: row.id,
+        decision,
+    }))
+}
+
 /// Read-only relationship decisions for the current prospect pool.
 ///
 /// The identity appears only on the private control-plane surface that consumes
@@ -584,9 +681,13 @@ pub async fn next_actions(
                    AS explicit_join_or_follow_intent,
                COALESCE(bool_or(o.observation_kind IN ('asked_about_show','asked_for_music')), false)
                    AS question_intent,
-               COALESCE(bool_or(o.observation_kind IN (
-                   'active_under_our_post','replied','shared_material'
-               )), false) AS warm_engagement,
+               (
+                   COUNT(o.id) FILTER (
+                       WHERE o.observation_kind IN (
+                           'active_under_our_post','replied','shared_material'
+                       )
+                   ) >= 2
+               ) AS warm_engagement,
                EXISTS (
                    SELECT 1 FROM fan_prospect_touches t
                    WHERE t.workspace_id=p.workspace_id AND t.prospect_id=p.id
@@ -619,6 +720,10 @@ pub async fn next_actions(
             question_intent: row.question_intent,
             warm_engagement: row.warm_engagement,
             member_site_ready,
+            same_thread_join_capture_supported: matches!(
+                row.platform.as_str(),
+                "instagram" | "facebook"
+            ),
             recently_engaged: row.recently_engaged,
         });
         views.push(ProspectActionView {

@@ -78,7 +78,7 @@ async fn serve_capture_agents(listener: TcpListener) {
             .to_owned();
         let body = match path.as_str() {
             "/community/reply-draft" => {
-                r#"{"reply":"Jasne — dzięki, że pytasz.","capture_intent":"join","capture_evidence":"gdzie mogę was śledzić?","provider":"mock","model":"mock"}"#
+                r#"{"reply":"Jasne — dzięki, że pytasz.","capture_intent":"none","capture_evidence":null,"provider":"mock","model":"mock"}"#
             }
             "/community/review" => r#"{"score":9.0,"pass":true}"#,
             _ => r#"{"error":"unknown"}"#,
@@ -381,7 +381,7 @@ async fn the_register_guard_does_not_govern_owned_replies() -> Result<()> {
             INSERT INTO community_comments
                 (workspace_id, platform, content_source_id, platform_comment_id,
                  parent_id, author, body, status)
-            VALUES ($1,'instagram',$2,'901','555','fan1','super koncert!',
+            VALUES ($1,'instagram',$2,'901','555','fan1','Kiedy gracie Wrocław?',
                     'unanswered')
             "#,
         )
@@ -417,12 +417,12 @@ async fn the_register_guard_does_not_govern_owned_replies() -> Result<()> {
     result
 }
 
-/// Explicit follow/join intent on the band's own Meta post becomes a measured
-/// capture opportunity, never an unattended CTA. The smart link carries the
-/// platform/comment/creative dimensions the normal acquisition ledger reads.
+/// Explicit follow/join evidence becomes a measured capture opportunity even
+/// when the copy model says capture_intent=none: typed FAN SCOUT policy owns
+/// the CTA. The tracked invitation is still held for a person before send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn explicit_meta_follow_intent_gets_a_human_reviewed_tracked_capture_link() -> Result<()> {
+async fn fan_scout_not_the_copy_model_owns_the_tracked_capture_decision() -> Result<()> {
     let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
         .await
         .context("connect to the migrated suite database")?;
@@ -483,13 +483,13 @@ async fn explicit_meta_follow_intent_gets_a_human_reviewed_tracked_capture_link(
         let expected_slug = format!("reply-capture-{}", comment_id.simple());
         ensure!(
             draft.contains(&format!("/l/{expected_slug}")),
-            "the human should review the exact tracked CTA, got {draft:?}"
+            "Brain-selected InviteToFanbase should attach the exact tracked CTA even though the model requested none: {draft:?}"
         );
         ensure!(
             hold_reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("explicitly asked how to follow/join")),
-            "the queue should explain why the CTA was proposed, got {hold_reason:?}"
+                .is_some_and(|reason| reason.contains("FAN SCOUT selected InviteToFanbase")),
+            "the queue should explain the FAN SCOUT invite decision, got {hold_reason:?}"
         );
 
         let (slug, destination, source, community, creative): (
