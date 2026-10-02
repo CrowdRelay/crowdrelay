@@ -129,6 +129,21 @@ class N8nWorkflowAttestationContract(unittest.TestCase):
         self.assertFalse(template["VOSTEAMEMAIL001"]["candidateEnabled"])
         self.assertEqual(template["VOSTEAMEMAIL001"]["workflowSha256"], attest.canonical_sha(self.workflow))
 
+    def test_new_welcome_cannot_reuse_v1_smoke_evidence(self):
+        self.manifest.write_text("event_type\tworkflow_id\tcapability\tenabled\ttemplate_capabilities\n"
+            "crowdrelay.fan_lifecycle.message_requested\tVOSTEAMEMAIL001\tfan.lifecycle.message\t1\tfan.lifecycle.welcome.v2\n")
+        rows=attest.read_manifest(self.manifest)
+        workflows={"VOSTEAMEMAIL001":self.workflow}
+        template=attest.smoke_template(rows,workflows)
+        self.assertIs(template["VOSTEAMEMAIL001"]["welcomeActivation"],False)
+        smoke=self.smoke()
+        with self.assertRaisesRegex(ValueError,"welcomeActivation"):
+            attest.build_attestation(self.manifest,rows,workflows,smoke,datetime.now(timezone.utc),14)
+        smoke["VOSTEAMEMAIL001"]["welcomeActivation"]=True
+        result=attest.build_attestation(self.manifest,rows,workflows,smoke,datetime.now(timezone.utc),14)
+        self.assertIs(result["workflows"][0]["smoke"]["welcomeActivation"],True)
+        self.assertIn("fan.lifecycle.welcome.v2",result["workflows"][0]["capabilities"])
+
 
 if __name__ == "__main__":
     unittest.main()

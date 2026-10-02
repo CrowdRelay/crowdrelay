@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from n8n_manifest_capabilities import WELCOME_V2_CAPABILITY, row_capabilities
+
 CLAIM_CONTRACT = "execution-claim-v1"
 RECEIPT_CONTRACT = "execution-report-v1"
 CLAIM_OPTIONAL_CAPABILITIES = {"calendar.upsert"}
@@ -39,7 +41,7 @@ def read_manifest(path: Path) -> list[dict[str, str]]:
     with path.open(newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     required = {"event_type", "workflow_id", "capability", "enabled"}
-    if not rows or set(rows[0]) != required:
+    if not rows or not required <= set(rows[0]) or set(rows[0]) - required - {"template_capabilities"}:
         raise ValueError(f"unexpected production manifest columns in {path}")
     return rows
 
@@ -114,7 +116,7 @@ def smoke_template(rows: list[dict[str, str]], workflows: dict[str, dict[str, An
         if row["workflow_id"] == "UNAVAILABLE":
             continue
         entry = mappings[row["workflow_id"]]
-        entry["capabilities"].add(row["capability"])
+        entry["capabilities"].update(row_capabilities(row))
         entry["enabled"] = entry["enabled"] or row["enabled"] == "1"
     result: dict[str, Any] = {}
     for workflow_id, mapping in sorted(mappings.items()):
@@ -137,6 +139,8 @@ def smoke_template(rows: list[dict[str, str]], workflows: dict[str, dict[str, An
             "claimContractVersion": CLAIM_CONTRACT,
             "receiptContractVersion": RECEIPT_CONTRACT,
         }
+        if WELCOME_V2_CAPABILITY in caps:
+            result[workflow_id]["welcomeActivation"] = False
     return result
 
 
@@ -166,7 +170,7 @@ def build_attestation(
         workflow_sha = canonical_sha(workflow)
         persistence = persistence_summary(workflow)
         active = bool(workflow.get("active"))
-        caps = sorted({row["capability"] for row in mappings})
+        caps = sorted({cap for row in mappings for cap in row_capabilities(row)})
         events = sorted({row["event_type"] for row in mappings})
         requires_claim = enabled and not all(cap in CLAIM_OPTIONAL_CAPABILITIES for cap in caps)
         smoke_result = smoke.get(workflow_id) if isinstance(smoke, dict) else None
@@ -188,6 +192,8 @@ def build_attestation(
                 for key in ("eventValidation", "providerReceipt", "receiptBeforeRetry", "credentialCheck"):
                     if smoke_result.get(key) is not True:
                         failures.append(f"smoke check {key} failed: {workflow_id}")
+                if WELCOME_V2_CAPABILITY in caps and smoke_result.get("welcomeActivation") is not True:
+                    failures.append(f"welcomeActivation smoke check failed: {workflow_id}")
                 if requires_claim and smoke_result.get("executionClaim") is not True:
                     failures.append(f"execution claim check failed: {workflow_id}")
                 if smoke_result.get("claimContractVersion") != CLAIM_CONTRACT:
@@ -204,6 +210,9 @@ def build_attestation(
                     "claimContractVersion": smoke_result.get("claimContractVersion"),
                     "receiptContractVersion": smoke_result.get("receiptContractVersion"),
                 }
+
+                if WELCOME_V2_CAPABILITY in caps:
+                    smoke_public["welcomeActivation"] = smoke_result.get("welcomeActivation") is True
 
         attestations.append(
             {

@@ -30,7 +30,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -108,7 +108,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -142,7 +142,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

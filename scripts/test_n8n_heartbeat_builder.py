@@ -54,6 +54,27 @@ class N8nHeartbeatBuilderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "route-manifest SHA"):
             MODULE.build_heartbeat(self.manifest, self.attestation, "n8n-blue", "v1", 90, self.now)
 
+    def test_welcome_capability_needs_its_own_bound_smoke_before_bootstrap(self):
+        self.manifest.write_text("event_type\tworkflow_id\tcapability\tenabled\ttemplate_capabilities\n"
+            "crowdrelay.fan_lifecycle.message_requested\tlive-workflow\tfan.lifecycle.message\t1\tfan.lifecycle.welcome.v2\n")
+        data=json.loads(self.attestation.read_text())
+        data["routeManifestSha256"]=hashlib.sha256(self.manifest.read_bytes()).hexdigest()
+        self.attestation.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError,"welcomeActivation"):
+            MODULE.build_heartbeat(self.manifest,self.attestation,"n8n-blue","v2",90,self.now)
+        data["workflows"][0]["smoke"]["welcomeActivation"]=True
+        self.attestation.write_text(json.dumps(data))
+        payload=MODULE.build_heartbeat(self.manifest,self.attestation,"n8n-blue","v2",90,self.now)
+        self.assertEqual({cap["capability"] for cap in payload["capabilities"]},{"fan.lifecycle.message","fan.lifecycle.welcome.v2"})
+
+    def test_a_template_capability_cannot_be_attached_to_an_unrelated_route(self):
+        self.manifest.write_text(self.manifest.read_text().replace("enabled\n","enabled\ttemplate_capabilities\n").replace("\t1\n","\t1\tfan.lifecycle.welcome.v2\n"))
+        data=json.loads(self.attestation.read_text())
+        data["routeManifestSha256"]=hashlib.sha256(self.manifest.read_bytes()).hexdigest()
+        self.attestation.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError,"requires the lifecycle route"):
+            MODULE.build_heartbeat(self.manifest,self.attestation,"n8n-blue","v2",90,self.now)
+
 
 if __name__ == "__main__":
     unittest.main()
