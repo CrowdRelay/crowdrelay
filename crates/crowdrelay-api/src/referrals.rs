@@ -35,7 +35,7 @@ const REFERRAL_COOKIE_MAX_AGE_SECONDS: u32 = 30 * 24 * 60 * 60;
 const PRIVATE_NO_STORE: &str = "private, no-store";
 
 #[derive(Debug, Default, Deserialize)]
-struct ReferralDestinationQuery {
+pub struct ReferralDestinationQuery {
     event: Option<String>,
     release: Option<String>,
     lang: Option<String>,
