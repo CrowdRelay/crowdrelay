@@ -34,6 +34,7 @@ pub mod community_intelligence;
 pub mod community_join_executor;
 pub mod community_rules;
 pub mod community_vetting;
+pub mod contact_research_sweep;
 pub mod curator_handles;
 pub mod discord_executor;
 pub mod discovery;

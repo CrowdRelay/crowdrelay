@@ -202,6 +202,36 @@ async fn enrich_outreach_draft(
         // A kind the vocabulary does not know is not a letter we can write.
         return Ok(());
     };
+    // Nobody is pitched unread. The evaluator already holds a target with no
+    // recent fact on file, so this is the second lock on the same door: a fact
+    // can age out, or a draft can be persisted by a path the evaluator did not
+    // vet, between the decision and the words. Leaving the draft empty is the
+    // refusal — the executor will not send an empty letter.
+    let language = crowdrelay_domain::outreach_letter::language_for_contact(&contact_email);
+    let Some(hook) = crate::contact_research::latest_hook_on(
+        transaction,
+        ws,
+        &contact_email,
+        OffsetDateTime::now_utc().date(),
+    )
+    .await
+    .map_err(map_sqlx)?
+    else {
+        tracing::info!(
+            opportunity_id = %opportunity_id.into_uuid(),
+            "outreach composed no letter: nobody is pitched unread"
+        );
+        return Ok(());
+    };
+    let open_with_what_was_read = |mut letter: crowdrelay_domain::outreach_letter::OutreachLetter| {
+        letter.body = crowdrelay_domain::contact_research::open_with_known(
+            &letter.body,
+            &hook,
+            language,
+            crowdrelay_domain::contact_research::Register::Outlet,
+        );
+        letter
+    };
     // The same pitch the supply refresh keys opportunities by: a release
     // plan with a listen link, else the newest dated catalogue release. The
     // letter carries its tracked link — a bare listen URL in a hundred
@@ -288,7 +318,7 @@ async fn enrich_outreach_draft(
             listen_url: pitch_url.clone(),
         }) {
             Ok(letter) => {
-                *draft = letter;
+                *draft = open_with_what_was_read(letter);
                 *template_key = show.template_key;
             }
             // Leaving the draft empty is the refusal: the executor will not
@@ -312,7 +342,7 @@ async fn enrich_outreach_draft(
         language: crowdrelay_domain::outreach_letter::language_for_contact(&contact_email),
         next_show,
     }) {
-        *draft = letter;
+        *draft = open_with_what_was_read(letter);
     }
     Ok(())
 }

@@ -33,6 +33,7 @@
 //! event scout uses) or a person. Both go through [`PersonalHook::new`], so the
 //! checks below apply to either.
 
+use crate::gig_letter::LetterLanguage;
 use time::{Date, Duration};
 
 /// How old the researched thing may be. A review from last spring is not
@@ -196,6 +197,64 @@ impl PersonalHook {
     }
 }
 
+/// How the letter addresses its reader, which decides how the opening speaks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Register {
+    /// One working person writing to another they already know: "you".
+    Colleague,
+    /// A pitch to an outlet, a programme or a desk: no assumption about who is
+    /// reading, so no "you".
+    Outlet,
+}
+
+/// The paragraph a letter opens with: what the band read, before anything it
+/// wants. The source is deliberately not in it — every URL in a letter is a
+/// tracked link, and a research link is not one.
+#[must_use]
+pub fn known_paragraph(
+    hook: &PersonalHook,
+    language: LetterLanguage,
+    register: Register,
+) -> String {
+    let lead = match (language, register) {
+        (LetterLanguage::Polish, Register::Colleague) => {
+            "Zanim napisaliśmy, zajrzeliśmy do tego, co ostatnio robisz"
+        }
+        (LetterLanguage::Polish, Register::Outlet) => {
+            "Zanim napisaliśmy, zajrzeliśmy do tego, co ostatnio u Was"
+        }
+        (LetterLanguage::English, Register::Colleague) => {
+            "Before writing we looked at what you have been doing lately"
+        }
+        (LetterLanguage::English, Register::Outlet) => {
+            "Before writing we looked at what you have been publishing lately"
+        }
+    };
+    match hook.praise_sentence() {
+        Some(praise) => format!("{lead} — {}. {praise}", hook.fact),
+        None => format!("{lead} — {}.", hook.fact),
+    }
+}
+
+/// Inserts the opening after a letter's greeting line.
+///
+/// Letters here are a greeting, a blank line, then the body; the opening goes
+/// between them, so it is the first thing the reader meets after their name.
+/// A body with no blank line gets the opening in front.
+#[must_use]
+pub fn open_with_known(
+    body: &str,
+    hook: &PersonalHook,
+    language: LetterLanguage,
+    register: Register,
+) -> String {
+    let paragraph = known_paragraph(hook, language, register);
+    match body.split_once("\n\n") {
+        Some((greeting, rest)) => format!("{greeting}\n\n{paragraph}\n\n{rest}"),
+        None => format!("{paragraph}\n\n{body}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +394,41 @@ mod tests {
         ] {
             assert!(refusal.message().len() > 20, "{refusal:?}");
         }
+    }
+
+    #[test]
+    fn the_opening_goes_between_the_greeting_and_the_body() {
+        let hook = ok();
+        let letter = open_with_known(
+            "Dzień dobry, Radio Lokalne,\n\nPiszemy w sprawie płyty.\n\nPozdrawiamy",
+            &hook,
+            LetterLanguage::Polish,
+            Register::Outlet,
+        );
+        let greeting = letter.find("Dzień dobry").unwrap();
+        let read = letter.find("recenzja płyty „Szum”").unwrap();
+        let ask = letter.find("Piszemy w sprawie").unwrap();
+        assert!(greeting < read && read < ask, "{letter}");
+        assert!(
+            letter.contains("u Was — recenzja"),
+            "outlet register: {letter}"
+        );
+        assert!(
+            !letter.contains("example.test"),
+            "the source stays out of the letter"
+        );
+        let colleague = known_paragraph(&hook, LetterLanguage::Polish, Register::Colleague);
+        assert!(colleague.contains("co ostatnio robisz"), "{colleague}");
+        let english = known_paragraph(&hook, LetterLanguage::English, Register::Outlet);
+        assert!(english.contains("publishing lately"), "{english}");
+        assert!(
+            open_with_known(
+                "no greeting break",
+                &hook,
+                LetterLanguage::English,
+                Register::Outlet
+            )
+            .starts_with("Before writing")
+        );
     }
 }

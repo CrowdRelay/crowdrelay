@@ -44,6 +44,22 @@ pub async fn latest_hook(
     email: &str,
     today: Date,
 ) -> Result<Option<PersonalHook>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    latest_hook_on(&mut conn, workspace_id, email, today).await
+}
+
+/// [`latest_hook`] on a connection, so a letter can be composed in the same
+/// transaction that records it.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn latest_hook_on(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    email: &str,
+    today: Date,
+) -> Result<Option<PersonalHook>, sqlx::Error> {
     let row = sqlx::query_as::<_, (String, Option<String>, String, Date)>(
         r#"
         SELECT fact, praise, source_url, observed_on
@@ -60,7 +76,7 @@ pub async fn latest_hook(
     .bind(email.trim().to_ascii_lowercase())
     .bind(today)
     .bind(i32::try_from(HOOK_MAX_AGE_DAYS).unwrap_or(120))
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     Ok(
         row.map(|(fact, praise, source_url, observed_on)| PersonalHook {
