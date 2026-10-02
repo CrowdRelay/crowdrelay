@@ -132,14 +132,16 @@ pub async fn revenue(State(state): State<crate::AppState>, headers: HeaderMap) -
     private_json(result, &headers)
 }
 
-/// Referral conversion readout: sent → qualified → activated.
+/// Referral conversion readout: fan referrals plus the rolling Latarnik funnel.
 ///
-/// The campaign plan asks for "referral conversion" and "activated referral
-/// rate". This endpoint gives the funnel: how many people used a referral
-/// code, how many of those qualified, and how many of the qualified
-/// referrals are themselves 30d-active. The last number is the one that
-/// matters — a referral who signed up but never did anything is not an
-/// activated referral.
+/// The all-time fields remain backward compatible. The `latarnik_*_30d` fields
+/// are the North Star read: what CrowdRelay offered, what the Latarnik tapped,
+/// how many *people* actually followed the referral, and which of those people
+/// became/behaved like fans. A tap is not a click, and a click is not a fan.
+///
+/// Mission attribution is intentionally bounded to a tapped mission's own
+/// window. A generic referral by the same fan outside that window is still a
+/// valid referral, but it is not allowed to make FAN SCOUT look effective.
 pub async fn referral_conversion(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
@@ -147,28 +149,133 @@ pub async fn referral_conversion(
     let now = OffsetDateTime::now_utc();
     let result = sqlx::query_as::<_, ReferralConversionRow>(
         r#"
+        WITH all_referrals AS (
+            SELECT
+                count(*)::bigint AS referrals_sent,
+                count(*) FILTER (WHERE ra.status = 'qualified')::bigint AS qualified,
+                count(*) FILTER (
+                    WHERE ra.status = 'qualified'
+                      AND fan_last_meaningful_action(
+                          referred.workspace_id, referred.id, referred.normalized_email
+                      ) BETWEEN $2 - INTERVAL '30 days' AND $2
+                      AND EXISTS (
+                          SELECT 1 FROM fan_consents AS consent
+                          WHERE consent.workspace_id = referred.workspace_id
+                            AND consent.fan_id = referred.id
+                            AND consent.purpose = 'marketing'
+                            AND consent.granted
+                      )
+                )::bigint AS activated,
+                count(*) FILTER (WHERE ra.status = 'reversed')::bigint AS reversed
+            FROM referral_attributions ra
+            JOIN fans AS referred
+              ON referred.workspace_id = ra.workspace_id
+             AND referred.id = ra.referred_fan_id
+            WHERE ra.workspace_id = $1
+        ),
+        mission_windows AS (
+            SELECT DISTINCT
+                mission.id AS mission_id,
+                mission.tapped_at,
+                mission.expires_at,
+                fan.id AS referrer_fan_id
+            FROM latarnik_missions AS mission
+            JOIN latarnik_roles AS role
+              ON role.workspace_id = mission.workspace_id
+             AND role.id = mission.role_id
+            JOIN person_identities AS identity
+              ON identity.workspace_id = role.workspace_id
+             AND identity.person_id = role.person_id
+             AND identity.kind = 'email'
+             AND identity.platform IS NULL
+            JOIN fans AS fan
+              ON fan.workspace_id = identity.workspace_id
+             AND fan.normalized_email = identity.value
+            WHERE mission.workspace_id = $1
+              AND mission.offered_at >= $2 - INTERVAL '30 days'
+              AND mission.offered_at <= $2
+        ),
+        mission_counts AS (
+            SELECT
+                count(DISTINCT mission_id)::bigint AS offered,
+                count(DISTINCT mission_id) FILTER (WHERE tapped_at IS NOT NULL)::bigint AS tapped
+            FROM mission_windows
+        ),
+        mission_clickers AS (
+            SELECT count(DISTINCT provenance.anonymous_visitor_id)::bigint AS human_clickers
+            FROM fan_provenance_events AS provenance
+            WHERE provenance.workspace_id = $1
+              AND provenance.event_kind = 'interaction'
+              AND provenance.channel = 'referral'
+              AND provenance.attribution_method = 'referral_click'
+              AND provenance.anonymous_visitor_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM mission_windows AS mission
+                  WHERE mission.tapped_at IS NOT NULL
+                    AND provenance.source_target = 'fan:' || mission.referrer_fan_id::text
+                    AND provenance.occurred_at >= mission.tapped_at
+                    AND provenance.occurred_at <= mission.expires_at + INTERVAL '7 days'
+              )
+        ),
+        mission_referrals AS (
+            SELECT DISTINCT
+                referral.referred_fan_id,
+                referral.status
+            FROM referral_attributions AS referral
+            WHERE referral.workspace_id = $1
+              AND EXISTS (
+                  SELECT 1
+                  FROM mission_windows AS mission
+                  WHERE mission.tapped_at IS NOT NULL
+                    AND mission.referrer_fan_id = referral.referrer_fan_id
+                    AND referral.accepted_at >= mission.tapped_at
+                    AND referral.accepted_at <= mission.expires_at + INTERVAL '7 days'
+              )
+        ),
+        mission_referral_counts AS (
+            SELECT
+                count(DISTINCT referral.referred_fan_id)::bigint AS joined,
+                count(DISTINCT referral.referred_fan_id)
+                    FILTER (WHERE referral.status = 'qualified')::bigint AS qualified,
+                count(DISTINCT referral.referred_fan_id) FILTER (
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM fans AS referred
+                        WHERE referred.workspace_id = $1
+                          AND referred.id = referral.referred_fan_id
+                          AND fan_last_meaningful_action(
+                              referred.workspace_id,
+                              referred.id,
+                              referred.normalized_email
+                          ) BETWEEN $2 - INTERVAL '30 days' AND $2
+                          AND EXISTS (
+                              SELECT 1
+                              FROM fan_consents AS consent
+                              WHERE consent.workspace_id = referred.workspace_id
+                                AND consent.fan_id = referred.id
+                                AND consent.purpose = 'marketing'
+                                AND consent.granted
+                          )
+                    )
+                )::bigint AS activated
+            FROM mission_referrals AS referral
+        )
         SELECT
-            count(*)::bigint AS referrals_sent,
-            count(*) FILTER (WHERE ra.status = 'qualified')::bigint AS qualified,
-            count(*) FILTER (
-                WHERE ra.status = 'qualified'
-                  AND fan_last_meaningful_action(
-                      referred.workspace_id, referred.id, referred.normalized_email
-                  ) BETWEEN $2 - INTERVAL '30 days' AND $2
-                  AND EXISTS (
-                      SELECT 1 FROM fan_consents AS consent
-                      WHERE consent.workspace_id = referred.workspace_id
-                        AND consent.fan_id = referred.id
-                        AND consent.purpose = 'marketing'
-                        AND consent.granted
-                  )
-            )::bigint AS activated,
-            count(*) FILTER (WHERE ra.status = 'reversed')::bigint AS reversed
-        FROM referral_attributions ra
-        JOIN fans AS referred
-          ON referred.workspace_id = ra.workspace_id
-         AND referred.id = ra.referred_fan_id
-        WHERE ra.workspace_id = $1
+            all_referrals.referrals_sent,
+            all_referrals.qualified,
+            all_referrals.activated,
+            all_referrals.reversed,
+            mission_counts.offered AS latarnik_offered_30d,
+            mission_counts.tapped AS latarnik_tapped_30d,
+            mission_clickers.human_clickers AS latarnik_human_clickers_30d,
+            mission_referral_counts.joined AS latarnik_joined_30d,
+            mission_referral_counts.qualified AS latarnik_qualified_30d,
+            mission_referral_counts.activated AS latarnik_activated_30d
+        FROM all_referrals
+        CROSS JOIN mission_counts
+        CROSS JOIN mission_clickers
+        CROSS JOIN mission_referral_counts
         "#,
     )
     .bind(state.ticketing.workspace_id().into_uuid())
