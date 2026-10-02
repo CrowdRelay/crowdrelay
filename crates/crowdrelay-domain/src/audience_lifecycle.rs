@@ -52,6 +52,11 @@ pub struct FanLifecycleSnapshot {
     /// behind it is a dead end. So the code is issued first, for the same
     /// reason a show gets its tracked link before anything is shared.
     pub has_referral_code: bool,
+    /// When FAN SCOUT/Latarnik evidence said this person became ready for one
+    /// personal referral ask. A generic "engaged fan" is no longer enough,
+    /// and the timestamp gives the ask a fresh bounded window of its own.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub referral_ask_ready_at: Option<OffsetDateTime>,
     /// Whether a `signal_installations` row already names this fan — the app
     /// on Android, or a web session that identified itself. This is the
     /// "contactable through Signal" bit the whole funnel is counted on; a fan
@@ -95,15 +100,17 @@ pub struct FanLifecyclePolicy {
     pub minimum_hours_after_synesthesia: u32,
     pub marketing_cooldown_hours: u32,
     pub dormant_after_days: u32,
-    /// Minimum signup age before an engaged fan who has referred nobody is asked to.
+    /// Minimum delay after FAN SCOUT marks a fan ready for a personal referral ask.
     ///
-    /// Not zero: the welcome lands first and an invite in the same breath reads
-    /// as a transaction rather than a welcome.
+    /// Not zero: readiness is a planning fact, not permission to collide with
+    /// the fan's current conversation. The ordinary marketing cooldown still
+    /// applies independently.
     pub referral_invite_after_days: u32,
-    /// Days after signup past which the ask stops.
+    /// Days after FAN SCOUT readiness past which the ask stops.
     ///
-    /// A stale-ask bound, not a schedule. The stable lifecycle episode permits
-    /// one onboarding invite; this window keeps it from arriving weeks late.
+    /// A stale-opportunity bound, not a schedule. If the system could not make
+    /// a clean ask while the evidence was fresh, it waits for new evidence
+    /// rather than reviving an old advocacy judgement months later.
     pub referral_invite_until_days: u32,
     /// Minimum signup age before a fan without Signal is asked to open it.
     ///
@@ -294,6 +301,7 @@ pub fn evaluate_fan_lifecycle(
         || snapshot.last_marketing_touch_at.is_some_and(|at| at > now)
         || snapshot.last_paid_ticket_at.is_some_and(|at| at > now)
         || snapshot.last_event_interest_at.is_some_and(|at| at > now)
+        || snapshot.referral_ask_ready_at.is_some_and(|at| at > now)
         || snapshot
             .recent_checkin
             .as_ref()
@@ -376,21 +384,18 @@ pub fn evaluate_fan_lifecycle(
         };
     }
 
-    // The ask. Placed after the welcome so it is never a fan's first contact,
-    // and before dormancy so it reaches somebody still paying attention.
-    //
-    // A welcome receipt and elapsed time are not evidence of a useful
-    // experience. Require a real fan action before asking them to share.
+    // The first advocacy ask is no longer inferred from signup age. FAN SCOUT's
+    // typed evidence must explicitly mark the person ready; this lifecycle only
+    // decides whether that fresh opportunity can be delivered cleanly now.
     let engaged = snapshot
         .latest_engagement_at()
         .is_some_and(|at| at >= snapshot.created_at && at <= now);
-    // The episode bounds the request; outside this age window the fan is
-    // left alone, including fans with no observed activity.
-    if engaged
+    if let Some(ready_at) = snapshot.referral_ask_ready_at
+        && engaged
         && snapshot.qualified_referrals == 0
         && snapshot.last_marketing_touch_at.is_some()
-        && now - snapshot.created_at >= Duration::days(i64::from(policy.referral_invite_after_days))
-        && now - snapshot.created_at < Duration::days(i64::from(policy.referral_invite_until_days))
+        && now - ready_at >= Duration::days(i64::from(policy.referral_invite_after_days))
+        && now - ready_at < Duration::days(i64::from(policy.referral_invite_until_days))
     {
         return FanLifecycleDecision::RequestMessage {
             template: LifecycleTemplate::ReferralInvite,
@@ -444,6 +449,7 @@ mod tests {
             last_marketing_touch_at: None,
             has_paid_ticket: false,
             has_referral_code: true,
+            referral_ask_ready_at: Some(now() - Duration::days(4)),
             has_signal_install: true,
             paid_ticket_count: 0,
             qualified_referrals: 0,
@@ -846,11 +852,29 @@ mod tests {
     #[test]
     fn a_welcomed_fan_who_has_referred_nobody_is_asked_to() {
         let mut snapshot = eligible();
-        // Welcomed six days ago: inside the ask window, past the cooldown.
+        // The fan was welcomed earlier; FAN SCOUT marked them ready four days
+        // ago, inside the advocacy window and past the cooldown.
+        snapshot.created_at = now() - Duration::days(30);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        snapshot.referral_ask_ready_at = Some(now() - Duration::days(4));
+        snapshot.last_event_interest_at = Some(now() - Duration::days(1));
+        assert!(matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn engagement_alone_does_not_create_an_advocacy_ask() {
+        let mut snapshot = eligible();
         snapshot.created_at = now() - Duration::days(6);
         snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
         snapshot.last_event_interest_at = Some(now() - Duration::days(1));
-        assert!(matches!(
+        snapshot.referral_ask_ready_at = None;
+        assert!(!matches!(
             evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::RequestMessage {
                 template: LifecycleTemplate::ReferralInvite,
@@ -912,11 +936,28 @@ mod tests {
 
     #[test]
     fn the_ask_stops_at_the_end_of_its_window() {
-        // The episode bounds repeated requests; the age window also prevents
-        // stale onboarding invitations.
+        // The episode bounds repeated requests; the readiness window also
+        // prevents stale advocacy invitations.
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(90);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(30));
+        snapshot.referral_ask_ready_at = Some(now() - Duration::days(30));
+        assert!(!matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_fresh_advocacy_opportunity_waits_its_own_small_delay() {
         let mut snapshot = eligible();
         snapshot.created_at = now() - Duration::days(30);
-        snapshot.last_marketing_touch_at = Some(now() - Duration::days(30));
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        snapshot.last_event_interest_at = Some(now() - Duration::days(1));
+        snapshot.referral_ask_ready_at = Some(now() - Duration::days(1));
         assert!(!matches!(
             evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::RequestMessage {

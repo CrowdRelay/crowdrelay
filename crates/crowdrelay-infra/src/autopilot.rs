@@ -492,6 +492,7 @@ struct LifecycleSnapshotRow {
     qualified_referrals: i64,
     last_qualified_referral_at: Option<OffsetDateTime>,
     has_referral_code: bool,
+    referral_ask_ready_at: Option<OffsetDateTime>,
     has_signal_install: bool,
     checkin_at: Option<OffsetDateTime>,
     checkin_event_slug: Option<String>,

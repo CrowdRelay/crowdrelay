@@ -3,11 +3,10 @@
 //!
 //! It reads first-party behaviour only (`latarnik_roles::load_fan_evidence`),
 //! asks the pure evaluator what each fan's advocacy readiness warrants, and
-//! writes exactly one thing: a `candidate` role row with the evidence frozen on
-//! it. It never contacts anyone — moving a candidate to `invited` is a separate,
-//! gated step — and it never changes a fan's status. A fan the evaluator would
-//! only *ask for one referral* is counted but gets no role: a light ask is not
-//! the role, and the role is one row per person.
+//! writes one of two durable planning facts with the evidence frozen on it: a
+//! `candidate` role for the deep path, or a person-keyed `personal_referral`
+//! opportunity for the light path. It never contacts anyone — delivery remains
+//! in the consented fan lifecycle — and it never changes a fan's status.
 
 use std::time::Duration;
 
@@ -15,7 +14,9 @@ use crowdrelay_domain::{
     WorkspaceId,
     latarnik::{LatarnikMove, evaluate},
 };
-use crowdrelay_infra::latarnik_roles::{LatarnikError, load_fan_evidence, record_candidate};
+use crowdrelay_infra::latarnik_roles::{
+    LatarnikError, load_fan_evidence, record_candidate, record_referral_opportunity,
+};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use tokio::{
@@ -39,9 +40,10 @@ pub struct SweepReport {
     pub fans_read: u64,
     /// Roles created this pass.
     pub candidates_recorded: u64,
-    /// Fans whose readiness is real but light: the one-referral ask, not the
-    /// role. Counted so the readout can say how many there are.
+    /// Fans whose readiness is real but light: the one-referral ask, not the role.
     pub light_ask_ready: u64,
+    /// New person-keyed referral opportunities created this pass.
+    pub referral_opportunities_recorded: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -105,7 +107,21 @@ impl LatarnikSweep {
                         report.candidates_recorded += 1;
                     }
                 }
-                LatarnikMove::AskForReferral => report.light_ask_ready += 1,
+                LatarnikMove::AskForReferral => {
+                    report.light_ask_ready += 1;
+                    if record_referral_opportunity(
+                        &self.pool,
+                        ws,
+                        &fan.email,
+                        &fan.evidence,
+                        now,
+                    )
+                    .await?
+                    .is_some()
+                    {
+                        report.referral_opportunities_recorded += 1;
+                    }
+                }
                 LatarnikMove::None(_) => {}
             }
         }
