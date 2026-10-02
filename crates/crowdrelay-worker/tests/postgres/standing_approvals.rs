@@ -270,14 +270,8 @@ async fn a_live_grant_cannot_bypass_a_missing_or_negative_strategic_review() -> 
         let ws = workspace(&database).await?;
         let (target_id, source_id) = admitted_community(&database, ws).await?;
         grant_standing(&database, ws, target_id).await?;
-        insert_community_post_with_review(
-            &database,
-            ws,
-            target_id,
-            source_id,
-            strategic_status,
-        )
-        .await?;
+        insert_community_post_with_review(&database, ws, target_id, source_id, strategic_status)
+            .await?;
 
         ensure!(worker(&database, ws).run_once().await? == 1, "one outcome");
         let (status, _, _) = only_action(&database, ws).await?;
