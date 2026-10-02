@@ -118,12 +118,20 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
             source.expires_at,
             source.title,
             source.source_key,
-            -- The drop surge reads the source's own destination and words:
-            -- a video's YouTube URL and description. Only meaningful on
-            -- `video`/`release` sources — a synced post's URL is its relay
-            -- permalink, read through `post_url` instead.
-            CASE WHEN source.source_kind IN ('video', 'release')
-                 THEN source.metadata->>'url' END AS source_url,
+            -- The drop surge reads the source's own public destination.
+            -- Video syncs store it as `url`; release plans historically
+            -- project their public listen target as `listen_url`. Reading
+            -- only `url` made hand-planned releases look unclickable and
+            -- silently disabled the whole event-driven fan-out.
+            CASE
+                WHEN source.source_kind = 'video'
+                    THEN source.metadata->>'url'
+                WHEN source.source_kind = 'release'
+                    THEN COALESCE(
+                        NULLIF(btrim(source.metadata->>'url'), ''),
+                        NULLIF(btrim(source.metadata->>'listen_url'), '')
+                    )
+            END AS source_url,
             CASE WHEN source.source_kind IN ('video', 'release')
                  THEN source.metadata->>'body' END AS source_body,
             -- The video's thumbnail for post drafts: stored when the sync
