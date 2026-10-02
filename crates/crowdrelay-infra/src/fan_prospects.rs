@@ -514,6 +514,10 @@ pub async fn expire(
 }
 
 const MAX_ACTION_READ_ROWS: i64 = 500;
+/// The window in which a prospect the band just spoke to is held, in hours.
+/// The same number the evaluator reports as its cooldown for an engagement
+/// (`fan_next_action`), kept in one place so the read and the answer agree.
+const ENGAGEMENT_COOLDOWN_HOURS: i32 = 72;
 const MAX_ACTION_VIEW_ROWS: usize = 100;
 
 #[derive(Debug, FromRow)]
@@ -528,6 +532,7 @@ struct ProspectActionRow {
     explicit_join_or_follow_intent: bool,
     question_intent: bool,
     warm_engagement: bool,
+    recently_engaged: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -581,7 +586,12 @@ pub async fn next_actions(
                    AS question_intent,
                COALESCE(bool_or(o.observation_kind IN (
                    'active_under_our_post','replied','shared_material'
-               )), false) AS warm_engagement
+               )), false) AS warm_engagement,
+               EXISTS (
+                   SELECT 1 FROM fan_prospect_touches t
+                   WHERE t.workspace_id=p.workspace_id AND t.prospect_id=p.id
+                     AND t.touched_at > now() - make_interval(hours => $3)
+               ) AS recently_engaged
         FROM fan_prospects p
         LEFT JOIN fan_prospect_observations o
           ON o.workspace_id=p.workspace_id AND o.prospect_id=p.id
@@ -593,6 +603,7 @@ pub async fn next_actions(
     )
     .bind(workspace_id)
     .bind(MAX_ACTION_READ_ROWS)
+    .bind(ENGAGEMENT_COOLDOWN_HOURS)
     .fetch_all(pool)
     .await?;
 
@@ -608,6 +619,7 @@ pub async fn next_actions(
             question_intent: row.question_intent,
             warm_engagement: row.warm_engagement,
             member_site_ready,
+            recently_engaged: row.recently_engaged,
         });
         views.push(ProspectActionView {
             prospect_id: row.id,
@@ -634,4 +646,158 @@ pub async fn next_actions(
     });
     views.truncate(MAX_ACTION_VIEW_ROWS);
     Ok(views)
+}
+
+/// What kind of thing the band said.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TouchKind {
+    Engage,
+    Invite,
+}
+
+impl TouchKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Engage => "engage",
+            Self::Invite => "invite",
+        }
+    }
+}
+
+/// A receipt from a surface that spoke to a prospect.
+#[derive(Clone, Debug)]
+pub struct TouchReceipt<'a> {
+    pub prospect_id: Uuid,
+    pub kind: TouchKind,
+    /// The sending surface (`owned_reply`) and its own row id.
+    pub source: &'a str,
+    pub source_ref: &'a str,
+    /// The tracked link the message carried; required for an invite.
+    pub smart_link_id: Option<Uuid>,
+    pub touched_at: OffsetDateTime,
+}
+
+/// Records that the band spoke to a prospect, and moves the prospect up the
+/// ladder (`engage` -> warming, `invite` -> invited) only where the status
+/// machine allows it. Returns whether this receipt was new; reading the same
+/// send twice records one touch.
+///
+/// A prospect who has since refused or been suppressed still has the touch
+/// recorded (it is a fact about what the band did), but is never moved.
+///
+/// # Errors
+///
+/// Propagates the database error; the transaction rolls back whole.
+pub async fn record_touch(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    receipt: &TouchReceipt<'_>,
+) -> Result<bool, ProspectError> {
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fan_prospect_touches
+             (workspace_id, prospect_id, kind, source, source_ref, smart_link_id, touched_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (workspace_id, source, source_ref) DO NOTHING
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(receipt.prospect_id)
+    .bind(receipt.kind.as_str())
+    .bind(receipt.source)
+    .bind(receipt.source_ref)
+    .bind(receipt.smart_link_id)
+    .bind(receipt.touched_at)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if inserted {
+        let target = match receipt.kind {
+            TouchKind::Engage => ProspectStatus::Warming,
+            TouchKind::Invite => ProspectStatus::Invited,
+        };
+        let current = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM fan_prospects WHERE workspace_id=$1 AND id=$2 FOR UPDATE",
+        )
+        .bind(workspace_id)
+        .bind(receipt.prospect_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(current) = current.as_deref().and_then(ProspectStatus::parse)
+            && current != target
+            && current.may_become(target)
+        {
+            sqlx::query(
+                "UPDATE fan_prospects SET status=$3, updated_at=now()
+                 WHERE workspace_id=$1 AND id=$2",
+            )
+            .bind(workspace_id)
+            .bind(receipt.prospect_id)
+            .bind(target.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// How far back a click may precede an arrival and still be credited to it.
+/// Matches the visitor-continuity window the content scorecard uses.
+const ATTRIBUTION_WINDOW_DAYS: i32 = 30;
+
+/// Links prospects to the fans their touches brought in.
+///
+/// A fan is credited to a touch only through the chain the tracked link makes
+/// readable: the touch carried a link, a visitor clicked that link, and that
+/// same visitor later arrived as the fan (`fan_acquisition_events`
+/// `anonymous_visitor_id`) — within [`ATTRIBUTION_WINDOW_DAYS`] and never
+/// before the touch. The conversion itself goes through [`link_verified_fan`],
+/// so a prospect still only converts onto an active, same-workspace fan.
+///
+/// Returns how many prospects converted this pass.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn attribute_conversions(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+    limit: i64,
+) -> Result<u64, ProspectError> {
+    let pairs = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT DISTINCT ON (t.prospect_id) t.prospect_id, arrival.fan_id
+         FROM fan_prospect_touches t
+         JOIN fan_prospects p
+           ON p.workspace_id=t.workspace_id AND p.id=t.prospect_id
+         JOIN click_events click
+           ON click.workspace_id=t.workspace_id AND click.smart_link_id=t.smart_link_id
+          AND click.anonymous_visitor_id IS NOT NULL
+          AND click.occurred_at >= t.touched_at
+         JOIN fan_acquisition_events arrival
+           ON arrival.workspace_id=t.workspace_id
+          AND arrival.anonymous_visitor_id=click.anonymous_visitor_id
+          AND arrival.fan_id IS NOT NULL
+          AND arrival.occurred_at >= click.occurred_at
+          AND arrival.occurred_at <= click.occurred_at + make_interval(days => $3)
+         WHERE t.workspace_id=$1
+           AND t.smart_link_id IS NOT NULL
+           AND p.linked_fan_id IS NULL
+           AND p.status NOT IN ('converted','refused','suppressed')
+         ORDER BY t.prospect_id, arrival.occurred_at
+         LIMIT $2",
+    )
+    .bind(workspace_id)
+    .bind(limit)
+    .bind(ATTRIBUTION_WINDOW_DAYS)
+    .fetch_all(pool)
+    .await?;
+    let mut converted = 0_u64;
+    for (prospect_id, fan_id) in pairs {
+        if link_verified_fan(pool, workspace_id, prospect_id, fan_id, now).await? {
+            converted += 1;
+        }
+    }
+    Ok(converted)
 }

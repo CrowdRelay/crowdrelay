@@ -27,7 +27,8 @@ use crowdrelay_domain::{
     fan_prospect::{ObservationKind, ProspectSource, classify_comment},
 };
 use crowdrelay_infra::fan_prospects::{
-    ObserveOutcome, ObservedPerson, ProspectError, expire, observe,
+    ObserveOutcome, ObservedPerson, ProspectError, TouchKind, TouchReceipt, attribute_conversions,
+    expire, observe, record_touch,
 };
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
@@ -68,6 +69,10 @@ pub struct SweepReport {
     pub already_known: u64,
     pub not_collected: u64,
     pub not_an_identity: u64,
+    /// Replies the band sent that were recorded as touches this pass.
+    pub touched: u64,
+    /// Prospects linked to the fan their touch brought in this pass.
+    pub converted: u64,
     pub expired: u64,
 }
 
@@ -196,7 +201,76 @@ impl ProspectSweep {
                 }
             }
         }
+        self.record_replies_as_touches(ws, &mut report).await?;
+        report.converted = attribute_conversions(&self.pool, ws, now, EXPIRE_PER_PASS).await?;
         report.expired = expire(&self.pool, ws, now, EXPIRE_PER_PASS).await?;
         Ok(report)
     }
+
+    /// The reply lane's sends, recorded as what they are: the band speaking to
+    /// a prospect. A reply that carried the tenant's join link is an
+    /// invitation (and is the only link a conversion can be attributed to);
+    /// any other reply is engagement. The lane is the executor; this only
+    /// reads its receipts, so the evaluator never has to trust its own memory.
+    async fn record_replies_as_touches(
+        &self,
+        ws: Uuid,
+        report: &mut SweepReport,
+    ) -> Result<(), SweepError> {
+        let replies = sqlx::query_as::<_, ReplyRow>(
+            "SELECT c.id AS comment_id,
+                    c.replied_at,
+                    o.prospect_id,
+                    link.id AS smart_link_id
+             FROM community_comments c
+             JOIN fan_prospect_observations o
+               ON o.workspace_id = c.workspace_id
+              AND o.source = 'own_comments'
+              AND o.source_ref = c.id::text
+             LEFT JOIN smart_links link
+               ON link.workspace_id = c.workspace_id
+              AND link.slug = 'reply-capture-' || replace(c.id::text, '-', '')
+             WHERE c.workspace_id = $1
+               AND c.status = 'replied'
+               AND c.replied_at IS NOT NULL
+             ORDER BY c.replied_at DESC
+             LIMIT $2",
+        )
+        .bind(ws)
+        .bind(OBSERVE_PER_PASS)
+        .fetch_all(&self.pool)
+        .await?;
+        for reply in &replies {
+            let source_ref = reply.comment_id.to_string();
+            let recorded = record_touch(
+                &self.pool,
+                ws,
+                &TouchReceipt {
+                    prospect_id: reply.prospect_id,
+                    kind: if reply.smart_link_id.is_some() {
+                        TouchKind::Invite
+                    } else {
+                        TouchKind::Engage
+                    },
+                    source: "owned_reply",
+                    source_ref: &source_ref,
+                    smart_link_id: reply.smart_link_id,
+                    touched_at: reply.replied_at,
+                },
+            )
+            .await?;
+            if recorded {
+                report.touched += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct ReplyRow {
+    comment_id: Uuid,
+    replied_at: OffsetDateTime,
+    prospect_id: Uuid,
+    smart_link_id: Option<Uuid>,
 }

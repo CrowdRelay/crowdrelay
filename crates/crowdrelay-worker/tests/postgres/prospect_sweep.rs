@@ -122,6 +122,8 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 already_known: 0,
                 not_collected: 0,
                 not_an_identity: 1,
+                touched: 0,
+                converted: 0,
                 expired: 0,
             },
         "first pass: {report:?}"
@@ -135,6 +137,8 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 already_known: 3,
                 not_collected: 0,
                 not_an_identity: 1,
+                touched: 0,
+                converted: 0,
                 expired: 0,
             },
         "second pass changes nothing: {again:?}"
@@ -208,5 +212,182 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
     .fetch_all(&pool)
     .await?;
     ensure!(left == [("zine_pl".to_owned(),)], "{left:?}");
+    Ok(())
+}
+
+/// The reply lane answers a commenter with the tenant's join link; the commenter
+/// clicks it and later arrives as a fan. The sweep must record the reply as a
+/// touch (so the queue stops recommending an answer already given), and credit
+/// the fan to the prospect only through the click -> visitor -> arrival chain.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_reply_that_carried_the_join_link_becomes_a_touch_and_then_a_fan() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let source = video(&pool, ws).await?;
+    let asked = comment(
+        &pool,
+        ws,
+        source,
+        "instagram",
+        "kuba_metal",
+        "Kiedy gracie Wrocław?",
+        3,
+    )
+    .await?;
+    let engaged = comment(
+        &pool,
+        ws,
+        source,
+        "instagram",
+        "ania_rock",
+        "Świetny numer",
+        3,
+    )
+    .await?;
+    let silent = comment(&pool, ws, source, "instagram", "cichy", "Super", 3).await?;
+    let _ = silent;
+    let sweep = ProspectSweep::new(pool.clone(), ws, Duration::from_secs(10));
+    let now = OffsetDateTime::now_utc();
+    sweep.run_once(now).await?;
+
+    // The lane replied to two of them; only kuba_metal's reply carried the link.
+    let replied_at = now - Span::days(2);
+    for id in [asked, engaged] {
+        sqlx::query(
+            "UPDATE community_comments
+             SET status='replied', replied_at=$3, draft='Gramy 17.10 w Gorzowie',
+                 reply_comment_id='9876543210'
+             WHERE workspace_id=$1 AND id=$2",
+        )
+        .bind(ws.into_uuid())
+        .bind(id)
+        .bind(replied_at)
+        .execute(&pool)
+        .await?;
+    }
+    let link: Uuid = sqlx::query_scalar(
+        "INSERT INTO smart_links (workspace_id, slug, destination_url, active,
+                                  channel_source, channel_community, channel_creative)
+         VALUES ($1, $2, 'https://band.example/signal', true, 'instagram', $3,
+                 'owned_reply_capture')
+         RETURNING id",
+    )
+    .bind(ws.into_uuid())
+    .bind(format!("reply-capture-{}", asked.simple()))
+    .bind(format!("comment:{asked}"))
+    .fetch_one(&pool)
+    .await?;
+
+    let first = sweep.run_once(now).await?;
+    ensure!(first.touched == 2 && first.converted == 0, "{first:?}");
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ltrim(lower(p.external_identity),'@'), p.status
+         FROM fan_prospects p WHERE p.workspace_id=$1 ORDER BY 1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    ensure!(
+        statuses
+            == [
+                ("ania_rock".into(), "warming".into()),
+                ("cichy".into(), "observed".into()),
+                ("kuba_metal".into(), "invited".into()),
+            ],
+        "{statuses:?}"
+    );
+    let again = sweep.run_once(now).await?;
+    ensure!(again.touched == 0, "the same send is one touch: {again:?}");
+
+    // The queue no longer recommends answering the two who were just answered.
+    let queue = crowdrelay_infra::fan_prospects::next_actions(&pool, ws.into_uuid()).await?;
+    for item in &queue {
+        let handle = item
+            .external_identity
+            .trim_start_matches('@')
+            .to_lowercase();
+        let expected = match handle.as_str() {
+            "kuba_metal" | "ania_rock" => "hold",
+            // Not yet answered: a commenter under the band's own post is warm
+            // engagement, so the queue still recommends answering them.
+            _ => "engage_in_context",
+        };
+        ensure!(
+            serde_json::to_value(item.action)? == expected,
+            "{handle}: {:?}",
+            item.action
+        );
+    }
+
+    // Before any click, no conversion. A click by a visitor who never arrives
+    // credits nobody; a click then an arrival as an active fan converts.
+    let stranger = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+         VALUES ($1,$2,$3,$4)",
+    )
+    .bind(ws.into_uuid())
+    .bind(link)
+    .bind(stranger)
+    .bind(now - Span::days(1))
+    .execute(&pool)
+    .await?;
+    let none = sweep.run_once(now).await?;
+    ensure!(none.converted == 0, "a click alone is not a fan: {none:?}");
+
+    let visitor = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+         VALUES ($1,$2,$3,$4)",
+    )
+    .bind(ws.into_uuid())
+    .bind(link)
+    .bind(visitor)
+    .bind(now - Span::hours(20))
+    .execute(&pool)
+    .await?;
+    let fan = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,'kuba@fan.test','active')",
+    )
+    .bind(fan)
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events (workspace_id, fan_id, anonymous_visitor_id, source, request_id, occurred_at)
+         VALUES ($1,$2,$3,'public_signup','req-prospect-test',$4)",
+    )
+    .bind(ws.into_uuid())
+    .bind(fan)
+    .bind(visitor)
+    .bind(now - Span::hours(19))
+    .execute(&pool)
+    .await?;
+    let converted = sweep.run_once(now).await?;
+    ensure!(converted.converted == 1, "{converted:?}");
+    let (status, linked): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, linked_fan_id FROM fan_prospects
+         WHERE workspace_id=$1 AND ltrim(lower(external_identity),'@')='kuba_metal'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        (status.as_str(), linked) == ("converted", Some(fan)),
+        "{status} {linked:?}"
+    );
+    let trace: Uuid = sqlx::query_scalar(
+        "SELECT trace_id FROM fan_prospect_touches WHERE workspace_id=$1 AND smart_link_id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(link)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        !trace.is_nil(),
+        "the touch carries the trace the conversion joins"
+    );
     Ok(())
 }
