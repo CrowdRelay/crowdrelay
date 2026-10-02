@@ -1,5 +1,10 @@
 include!("growth_metacognition.rs");
 
+// This file is `include!`d into `evaluate.rs` — its scope is the `evaluate`
+// module, so the supply-recovery re-export in the `growth_intelligence`
+// submodule has to be named explicitly.
+use crate::autopilot::evaluate::growth_intelligence::maybe_replenish_acquisition_supply;
+
 // GrowthIntelligence context arm — extracted from evaluate.rs to keep
 // the orchestrator under the modularity contract line limit.
 impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
