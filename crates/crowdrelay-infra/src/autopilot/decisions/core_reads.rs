@@ -170,8 +170,11 @@ macro_rules! decision_core_reads {
                           AND interest.created_at <= $2
                     ) AS last_event_interest_at,
                     (
-                        SELECT count(DISTINCT ticket_order.event_id)
+                        SELECT count(DISTINCT ticket_sale.event_id)
                         FROM ticket_orders AS ticket_order
+                        JOIN ticket_sales AS ticket_sale
+                          ON ticket_sale.workspace_id = ticket_order.workspace_id
+                         AND ticket_sale.id = ticket_order.ticket_sale_id
                         WHERE ticket_order.workspace_id = fan.workspace_id
                           AND ticket_order.buyer_email = fan.normalized_email
                           AND ticket_order.status IN ('paid', 'partially_refunded')
