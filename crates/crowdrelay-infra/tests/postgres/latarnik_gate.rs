@@ -537,7 +537,7 @@ async fn nobody_is_written_to_unread() -> Result<(), Box<dyn std::error::Error>>
         act,
         anna,
         fact,
-        Some("Rzadko ktoś omawia tę płytę tak konkretnie."),
+        Some("W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie."),
         "https://example.test/audycje/metalowy-wieczor",
         (now - time::Duration::days(12)).date(),
         "pl",

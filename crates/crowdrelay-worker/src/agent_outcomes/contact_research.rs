@@ -201,7 +201,7 @@ mod contact_research_tests {
         json!({
             "type": "contact_research",
             "fact": "recenzja płyty „Szum” w audycji „Metalowy Wieczór”",
-            "praise": "Rzadko ktoś omawia tę płytę tak konkretnie.",
+            "praise": "W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.",
             "source_url": URL,
             "observed_on": "2026-09-20",
             "language": "pl"

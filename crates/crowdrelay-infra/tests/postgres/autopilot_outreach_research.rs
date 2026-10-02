@@ -125,9 +125,10 @@ async fn an_unread_target_is_not_pitched_until_the_band_has_read_them()
     let ask = body.find("Echoes").expect("the pitch");
     assert!(greeting < known && known < ask, "{body}");
     assert!(
-        body.contains("co ostatnio u Was"),
-        "an outlet is not addressed as 'you': {body}"
+        body.contains("W recenzji „Szum” zwróciło nam uwagę"),
+        "the pitch must open on the sourced human observation: {body}"
     );
+    assert!(!body.contains("Zanim napisaliśmy"), "{body}");
     assert!(
         !body.contains("example.test/"),
         "the research source leaked into the letter: {body}"

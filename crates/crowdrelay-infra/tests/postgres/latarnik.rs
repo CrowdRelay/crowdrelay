@@ -498,7 +498,7 @@ pub(crate) async fn researched(
             (workspace_id, normalized_email, fact, praise, source_url, observed_on,
              researched_by)
         VALUES ($1, $2, 'recenzja płyty „Szum” w audycji „Metalowy Wieczór”',
-                'Rzadko ktoś omawia tę płytę tak konkretnie.', $3, $4, 'test')
+                'W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.', $3, $4, 'test')
         "#,
     )
     .bind(workspace_id)
