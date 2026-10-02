@@ -286,7 +286,8 @@ enum RenderCitiesError {
 }
 
 mod automated_fetch;
-use automated_fetch::is_automated_fetch;
+pub(crate) use automated_fetch::dropped_prometheus;
+use automated_fetch::{automated_fetch, record_dropped};
 
 include!("acquisition/redirect.rs");
 
