@@ -8,6 +8,7 @@ include!("decisions/booking_reads.rs");
 include!("decisions/cycle_reads.rs");
 include!("decisions/join_ask.rs");
 include!("decisions/persist.rs");
+include!("decisions/lifecycle_episodes.rs");
 include!("decisions/persist_letters.rs");
 
 // Keep the heavy SQL implementations outside the `async_trait` procedural
@@ -58,13 +59,9 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         now: OffsetDateTime,
     ) -> Result<Vec<RelationshipResearchSnapshot>, RepositoryError> {
         self.bounded(async {
-            crate::latarnik::relationship_research_queue(
-                &self.pool,
-                workspace_id.into_uuid(),
-                now,
-            )
-            .await
-            .map_err(map_sqlx)
+            crate::latarnik::relationship_research_queue(&self.pool, workspace_id.into_uuid(), now)
+                .await
+                .map_err(map_sqlx)
         })
         .await
     }

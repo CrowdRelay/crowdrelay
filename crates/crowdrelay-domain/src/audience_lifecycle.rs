@@ -64,6 +64,24 @@ pub struct FanLifecycleSnapshot {
     pub recent_checkin: Option<LifecycleCheckin>,
 }
 
+impl FanLifecycleSnapshot {
+    /// The latest deliberate action, including attendance. Sessions, installs
+    /// and messages are reachability/contact receipts, not fan engagement.
+    #[must_use]
+    pub fn latest_engagement_at(&self) -> Option<OffsetDateTime> {
+        self.last_paid_ticket_at
+            .into_iter()
+            .chain(self.last_event_interest_at)
+            .chain(self.synesthesia_completed_at)
+            .chain(
+                self.recent_checkin
+                    .as_ref()
+                    .map(|checkin| checkin.checked_in_at),
+            )
+            .max()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct FanLifecyclePolicy {
@@ -370,11 +388,8 @@ pub fn evaluate_fan_lifecycle(
     // A welcome receipt and elapsed time are not evidence of a useful
     // experience. Require a real fan action before asking them to share.
     let engaged = snapshot
-        .last_paid_ticket_at
-        .into_iter()
-        .chain(snapshot.last_event_interest_at)
-        .chain(snapshot.synesthesia_completed_at)
-        .any(|at| at >= snapshot.created_at && at <= now);
+        .latest_engagement_at()
+        .is_some_and(|at| at >= snapshot.created_at && at <= now);
     // Bounded by a window rather than by an "asked" flag: outside the
     // window the fan is left alone, including fans with no observed activity.
     if engaged
@@ -400,11 +415,7 @@ pub fn evaluate_fan_lifecycle(
     }
 
     let latest_activity = snapshot
-        .last_paid_ticket_at
-        .into_iter()
-        .chain(snapshot.last_event_interest_at)
-        .chain(snapshot.synesthesia_completed_at)
-        .max()
+        .latest_engagement_at()
         .unwrap_or(snapshot.created_at);
     if now - latest_activity >= Duration::days(i64::from(policy.dormant_after_days)) {
         return FanLifecycleDecision::RequestMessage {

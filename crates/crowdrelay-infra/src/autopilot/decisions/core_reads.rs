@@ -152,6 +152,7 @@ macro_rules! decision_core_reads {
                         WHERE ticket_order.workspace_id = fan.workspace_id
                           AND ticket_order.buyer_email = fan.normalized_email
                           AND ticket_order.status IN ('paid', 'partially_refunded')
+                          AND ticket_order.paid_at <= $2
                     ) AS has_paid_ticket,
                     (
                         SELECT max(ticket_order.paid_at)
@@ -159,31 +160,38 @@ macro_rules! decision_core_reads {
                         WHERE ticket_order.workspace_id = fan.workspace_id
                           AND ticket_order.buyer_email = fan.normalized_email
                           AND ticket_order.status IN ('paid', 'partially_refunded')
+                          AND ticket_order.paid_at <= $2
                     ) AS last_paid_ticket_at,
                     (
                         SELECT max(interest.created_at)
                         FROM event_interests AS interest
                         WHERE interest.workspace_id = fan.workspace_id
                           AND interest.fan_id = fan.id
+                          AND interest.created_at <= $2
                     ) AS last_event_interest_at,
                     (
-                        SELECT count(*)
+                        SELECT count(DISTINCT ticket_order.event_id)
                         FROM ticket_orders AS ticket_order
                         WHERE ticket_order.workspace_id = fan.workspace_id
                           AND ticket_order.buyer_email = fan.normalized_email
                           AND ticket_order.status IN ('paid', 'partially_refunded')
+                          AND ticket_order.paid_at <= $2
                     ) AS paid_ticket_count,
                     (
-                        SELECT count(*)
+                        SELECT count(DISTINCT referral.referred_fan_id)
                         FROM referral_attributions AS referral
                         WHERE referral.workspace_id = fan.workspace_id
                           AND referral.referrer_fan_id = fan.id
+                          AND referral.status = 'qualified'
+                          AND referral.qualified_at <= $2
                     ) AS qualified_referrals,
                     (
-                        SELECT max(referral.accepted_at)
+                        SELECT max(referral.qualified_at)
                         FROM referral_attributions AS referral
                         WHERE referral.workspace_id = fan.workspace_id
                           AND referral.referrer_fan_id = fan.id
+                          AND referral.status = 'qualified'
+                          AND referral.qualified_at <= $2
                     ) AS last_qualified_referral_at,
                     EXISTS (
                         SELECT 1 FROM referral_codes AS code
@@ -207,6 +215,7 @@ macro_rules! decision_core_reads {
                     WHERE consent.workspace_id = fan.workspace_id
                       AND consent.fan_id = fan.id
                       AND consent.purpose = 'marketing'
+                      AND consent.recorded_at <= $2
                     ORDER BY consent.recorded_at DESC, consent.id DESC
                     LIMIT 1
                 ) AS latest_consent ON true
@@ -220,6 +229,7 @@ macro_rules! decision_core_reads {
                       AND entry.fan_id = fan.id
                       AND NOT run.synthetic
                       AND run.completed_at IS NOT NULL
+                      AND run.completed_at <= $2
                     ORDER BY run.completed_at DESC, run.id DESC
                     LIMIT 1
                 ) AS synesthesia ON true
@@ -263,11 +273,13 @@ macro_rules! decision_core_reads {
                      AND event.id = checkin.event_id
                     WHERE checkin.workspace_id = fan.workspace_id
                       AND checkin.fan_id = fan.id
+                      AND checkin.checked_in_at <= $2
                     ORDER BY checkin.checked_in_at DESC, checkin.id DESC
                     LIMIT 1
                 ) AS last_checkin ON true
                 WHERE fan.workspace_id = $1
                   AND fan.status = 'active'
+                  AND fan.deleted_at IS NULL
                   AND (synesthesia.completed_at IS NULL OR synesthesia.completed_at <= $2)
                 ORDER BY fan.created_at, fan.id
                 LIMIT $3

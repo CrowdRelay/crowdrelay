@@ -108,6 +108,7 @@ pub mod join_ask;
 pub mod join_kit;
 pub mod latarnik_invite;
 pub mod learning;
+pub mod lifecycle_episode;
 pub mod listing;
 pub mod live_opportunities;
 pub mod market_intelligence;
