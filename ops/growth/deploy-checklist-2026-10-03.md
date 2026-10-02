@@ -17,8 +17,17 @@ cannot start until this ships. Commands are copy-paste; nothing here deploys.
 | 0411 | new `fan_advocacy_opportunities` | none |
 | 0412 | adds `UNIQUE (workspace_id, id)` on `latarnik_roles`; new `latarnik_missions` | none |
 
-Rollback of schema is not provided (forward-only migrator); every change above is
-safe to leave in place under the previous binary because nothing is dropped.
+**Rehearsed 2026-10-03.** A database was built at `c78365b3` (schema 405), seeded with
+prod's shape (10 persons / 10 prospects / 10 observations), then migrated with main's
+`setup`: it reached 412, all 10 prospects survived, `scout_*` became
+`legacy_0404_*`, `latarnik_missions` exists and is empty.
+
+**There is no binary rollback after migrating.** Running the old `c78365b3` binary
+against the 412 schema fails closed: `migration 406 was previously applied but is
+missing in the resolved migrations`. So a deploy that has run `setup` can only go
+forward (fix and redeploy) or restore the database. Take a `pg_dump` (see `ops/backup`)
+immediately before step 1; nothing is dropped by the migrations themselves, so the
+dump is the rollback.
 
 ## 2. Deploy order (backward-compatible)
 
