@@ -204,9 +204,7 @@ pub fn compose_outreach_letter(
         (LetterLanguage::English, OutreachPhase::FollowUp, _) => {
             follow_up(input, target, act, title, url, ask)
         }
-        (LetterLanguage::Polish, OutreachPhase::Initial, _) => {
-            initial_pl(input, act, title, url)
-        }
+        (LetterLanguage::Polish, OutreachPhase::Initial, _) => initial_pl(input, act, title, url),
         (LetterLanguage::Polish, OutreachPhase::FollowUp, _) => {
             follow_up_pl(input, act, title, url)
         }
@@ -242,7 +240,9 @@ fn playlist_initial_pl(
     let mut lines = vec![
         greeting_pl(input.target_name),
         String::new(),
-        format!("Mamy nowy numer — {title}. Jeśli pasuje do profilu playlisty, zostawiamy go tutaj:"),
+        format!(
+            "Mamy nowy numer — {title}. Jeśli pasuje do profilu playlisty, zostawiamy go tutaj:"
+        ),
         url.to_owned(),
     ];
     lines.extend(sign_off_pl(input.sender, act));
@@ -821,7 +821,10 @@ mod tests {
         ))
         .expect("a complete input composes");
         assert!(en.body.starts_with("Hi Metal Playlists Weekly,"));
-        assert!(en.body.contains("We have a new track — our new single \"Rytuał\"."));
+        assert!(
+            en.body
+                .contains("We have a new track — our new single \"Rytuał\".")
+        );
         assert!(en.body.contains("If it fits the playlist, here it is:"));
         assert!(en.body.contains("https://virya.music/l/rytual"));
         for bot in [
@@ -833,16 +836,29 @@ mod tests {
         ] {
             assert!(!en.body.contains(bot), "{bot}: {}", en.body);
         }
-        assert!(en.body.ends_with("Best,\nVIRYA\nhttps://virya.music/l/site"));
+        assert!(
+            en.body
+                .ends_with("Best,\nVIRYA\nhttps://virya.music/l/site")
+        );
 
         let pl = compose_outreach_letter(&OutreachLetterInput {
             language: LetterLanguage::Polish,
-            ..input(&sender, OutreachTargetKind::Playlist, OutreachPhase::Initial)
+            ..input(
+                &sender,
+                OutreachTargetKind::Playlist,
+                OutreachPhase::Initial,
+            )
         })
         .expect("a complete Polish playlist ask composes");
         assert!(pl.body.starts_with("Dzień dobry, Metal Playlists Weekly,"));
-        assert!(pl.body.contains("Mamy nowy numer — our new single \"Rytuał\"."));
-        assert!(pl.body.contains("Jeśli pasuje do profilu playlisty, zostawiamy go tutaj:"));
+        assert!(
+            pl.body
+                .contains("Mamy nowy numer — our new single \"Rytuał\".")
+        );
+        assert!(
+            pl.body
+                .contains("Jeśli pasuje do profilu playlisty, zostawiamy go tutaj:")
+        );
         for bot in [
             "Piszemy w imieniu",
             "chcielibyśmy zaproponować",
@@ -851,7 +867,10 @@ mod tests {
         ] {
             assert!(!pl.body.contains(bot), "{bot}: {}", pl.body);
         }
-        assert!(pl.body.ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music/l/site"));
+        assert!(
+            pl.body
+                .ends_with("Pozdrawiamy,\nVIRYA\nhttps://virya.music/l/site")
+        );
     }
 
     #[test]

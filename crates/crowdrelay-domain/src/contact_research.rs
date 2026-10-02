@@ -218,15 +218,24 @@ impl PersonalHook {
             }
             let lower = opening.to_lowercase();
             const META: [&str; 8] = [
-                "before writing", "we looked at", "we researched", "we checked",
-                "zanim napisaliśmy", "zajrzeliśmy", "sprawdziliśmy", "przejrzeliśmy",
+                "before writing",
+                "we looked at",
+                "we researched",
+                "we checked",
+                "zanim napisaliśmy",
+                "zajrzeliśmy",
+                "sprawdziliśmy",
+                "przejrzeliśmy",
             ];
             if META.iter().any(|needle| lower.contains(needle)) {
                 return Err(HookRefusal::MetaResearchVoice);
             }
             const GENERIC: [&str; 6] = [
-                "świetna robota", "great work", "love what you do",
-                "thanks for supporting the scene", "dzięki za wspieranie sceny",
+                "świetna robota",
+                "great work",
+                "love what you do",
+                "thanks for supporting the scene",
+                "dzięki za wspieranie sceny",
                 "dziękujemy za wspieranie sceny",
             ];
             if GENERIC.iter().any(|needle| lower.contains(needle)) {
@@ -427,7 +436,9 @@ mod tests {
         assert!(hook.praise.is_none());
         assert_eq!(
             ok().praise_sentence().as_deref(),
-            Some("W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.")
+            Some(
+                "W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie."
+            )
         );
     }
 
@@ -498,7 +509,9 @@ mod tests {
         assert_eq!(
             PersonalHook::new(
                 fact,
-                Some("To bardzo konkretny materiał i naprawdę dobrze się go czyta od początku do końca"),
+                Some(
+                    "To bardzo konkretny materiał i naprawdę dobrze się go czyta od początku do końca"
+                ),
                 "https://e.test/x",
                 day,
                 TODAY
@@ -534,10 +547,22 @@ mod tests {
         let fact = "recenzja płyty „Szum” w audycji „Metalowy Wieczór”";
         let day = date!(2026 - 09 - 20);
         for (praise, expected) in [
-            ("W recenzji „Szum” podoba nam się konkret, ale świetna robota!", HookRefusal::NotOurRegister),
-            ("W recenzji „Szum” jest konkretny detal, ale Super #metal", HookRefusal::NotOurRegister),
-            ("W recenzji „Szum” jest konkretny detal — zobacz https://e.test/x", HookRefusal::LinkInText),
-            ("W recenzji „Szum” jest konkretny detal — zajrzyj na www.e.test", HookRefusal::LinkInText),
+            (
+                "W recenzji „Szum” podoba nam się konkret, ale świetna robota!",
+                HookRefusal::NotOurRegister,
+            ),
+            (
+                "W recenzji „Szum” jest konkretny detal, ale Super #metal",
+                HookRefusal::NotOurRegister,
+            ),
+            (
+                "W recenzji „Szum” jest konkretny detal — zobacz https://e.test/x",
+                HookRefusal::LinkInText,
+            ),
+            (
+                "W recenzji „Szum” jest konkretny detal — zajrzyj na www.e.test",
+                HookRefusal::LinkInText,
+            ),
         ] {
             assert_eq!(
                 PersonalHook::new(fact, Some(praise), "https://e.test/x", day, TODAY),
@@ -612,7 +637,7 @@ mod tests {
             "no greeting break",
             &hook,
             LetterLanguage::English,
-            Register::Outlet
+            Register::Outlet,
         );
         assert!(no_break.starts_with("W recenzji „Szum”"), "{no_break}");
         assert!(!no_break.contains("Before writing"), "{no_break}");

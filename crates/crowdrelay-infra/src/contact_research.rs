@@ -88,14 +88,7 @@ pub async fn latest_hook_on(
         // Research quality evolves. Re-validate persisted rows against today's
         // contract so an old generic/meta-AI opener cannot keep unlocking
         // outward mail forever just because it was accepted by an older build.
-        PersonalHook::new(
-            &fact,
-            praise.as_deref(),
-            &source_url,
-            observed_on,
-            today,
-        )
-        .ok()
+        PersonalHook::new(&fact, praise.as_deref(), &source_url, observed_on, today).ok()
     }))
 }
 
