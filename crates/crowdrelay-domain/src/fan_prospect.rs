@@ -220,6 +220,74 @@ impl ProspectSource {
     }
 }
 
+// Phrases that make a comment a question about shows or tickets. Lowercase,
+// matched against the lowercased comment; English and Polish. A statement of
+// enthusiasm ("Kurła chciałbym tam być") is deliberately not here: wanting to
+// have been at a show is not asking about the next one.
+const SHOW_QUESTION_PHRASES: &[&str] = &[
+    "kiedy gracie",
+    "kiedy będziecie",
+    "kiedy bedziecie",
+    "gracie w ",
+    "będziecie w ",
+    "bedziecie w ",
+    "przyjedziecie",
+    "zagracie",
+    "gdzie bilet",
+    "gdzie kupić bilet",
+    "gdzie kupic bilet",
+    "bilety",
+    "when are you playing",
+    "when do you play",
+    "are you playing",
+    "will you play",
+    "come to ",
+    "any tour dates",
+    "tickets",
+    "where can i get tickets",
+];
+
+const MUSIC_QUESTION_PHRASES: &[&str] = &[
+    "gdzie posłuchać",
+    "gdzie posluchac",
+    "jest na spotify",
+    "jest na youtube",
+    "gdzie można kupić płyt",
+    "where can i listen",
+    "is this on spotify",
+    "is it on spotify",
+    "where to listen",
+    "full song",
+    "full album",
+];
+
+/// What a comment on the band's own post is, from its words alone.
+///
+/// A question about a show is `AskedAboutShow`; a question about where to hear
+/// the music is `AskedForMusic`; anything else is `ActiveUnderOurPost`. Plain
+/// string rules — a comment that is a question must also read as one: it has a
+/// `?` or an interrogative phrase from the lists above, so "bilety już są
+/// wyprzedane" (a statement) is not an ask. The rule is deliberately narrow:
+/// a false negative leaves a person observed, a false positive makes the band
+/// speak to someone who did not ask.
+#[must_use]
+pub fn classify_comment(text: &str) -> ObservationKind {
+    let lowered = text.to_lowercase();
+    // A question mark is required: "bilety już wyprzedane" and "come to my
+    // show" carry the same words as a question and are not one.
+    let asks = lowered.contains('?');
+    if !asks {
+        return ObservationKind::ActiveUnderOurPost;
+    }
+    if SHOW_QUESTION_PHRASES.iter().any(|p| lowered.contains(p)) {
+        ObservationKind::AskedAboutShow
+    } else if MUSIC_QUESTION_PHRASES.iter().any(|p| lowered.contains(p)) {
+        ObservationKind::AskedForMusic
+    } else {
+        ObservationKind::ActiveUnderOurPost
+    }
+}
+
 /// Provider/user/channel ids are case-sensitive on some platforms. They are
 /// trimmed and bounded, but never lowercased. A stable provider id outranks a
 /// handle when both are available: usernames can change, provider ids should not.
@@ -365,6 +433,45 @@ mod tests {
         assert_eq!(display_handle(" @Kuba_Metal "), Some("Kuba_Metal".into()));
         assert_eq!(display_handle("u/SomeUser"), Some("SomeUser".into()));
         assert_eq!(display_handle("two words"), None);
+    }
+
+    #[test]
+    fn only_a_question_about_a_show_or_the_music_is_an_ask() {
+        assert_eq!(
+            classify_comment("Kiedy gracie Wrocław?"),
+            ObservationKind::AskedAboutShow
+        );
+        assert_eq!(
+            classify_comment("When are you playing in Berlin?"),
+            ObservationKind::AskedAboutShow
+        );
+        assert_eq!(
+            classify_comment("Gdzie bilety?"),
+            ObservationKind::AskedAboutShow
+        );
+        assert_eq!(
+            classify_comment("Is this on Spotify?"),
+            ObservationKind::AskedForMusic
+        );
+        assert_eq!(
+            classify_comment("Gdzie posłuchać pełnej wersji?"),
+            ObservationKind::AskedForMusic
+        );
+        for not_an_ask in [
+            "Kurła chciałbym tam być 😍🔥",
+            "Bilety już wyprzedane",
+            "Super ❤️",
+            "Mam fryza jakbym grał w Ramones xd",
+            "Dostałeś rozgrzeszenie??",
+            "Ktoś się czai we mrokuu 🔥🔥",
+            "I'll play this at my show tonight",
+        ] {
+            assert_eq!(
+                classify_comment(not_an_ask),
+                ObservationKind::ActiveUnderOurPost,
+                "{not_an_ask}"
+            );
+        }
     }
 
     #[test]
