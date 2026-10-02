@@ -86,7 +86,10 @@ async fn concurrent_variants_of_the_same_episode_create_only_one_action()
         persist(&f, f.workspace_id, &first),
         persist(&f, f.workspace_id, &second)
     );
-    assert_eq!(usize::from(first?) + usize::from(second?), 1);
+    assert_ne!(
+        first?, second?,
+        "exactly one concurrent request is persisted"
+    );
     Ok(())
 }
 

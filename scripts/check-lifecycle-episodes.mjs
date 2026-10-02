@@ -6,6 +6,8 @@ import {createRequire} from 'node:module'
 // Install the optional validator in a temporary directory; no repository dependency change.
 const require=createRequire(path.resolve(process.env.CROWDRELAY_VALIDATION_NODE_ROOT ?? '.', 'package.json'))
 const {PGlite}=require('@electric-sql/pglite')
+let checks=0
+function check(...args) { checks++; assert.equal(...args) }
 const db = new PGlite()
 const root='../'
 const core=fs.readFileSync(new URL(root+'crates/crowdrelay-infra/src/autopilot/decisions/core_reads.rs',import.meta.url),'utf8')
@@ -54,33 +56,34 @@ await db.query("INSERT INTO referral_attributions VALUES($1,$2,$3,'pending',$4,N
 await db.query("INSERT INTO concert_checkins VALUES($1,$2,$3,$1,$4),($5,$2,$3,$5,$6)",[fan,ws,fan,old,other,future])
 await db.query("INSERT INTO event_interests VALUES($1,$2,$3)",[ws,fan,future])
 await assert.rejects(db.query(snapshot.replace('DISTINCT ticket_sale.event_id','DISTINCT ticket_order.event_id'),[ws,now,100]),/event_id/)
+checks++
 let rows=(await db.query(snapshot,[ws,now,100])).rows
-assert.equal(rows.length,1);assert.equal(rows[0].paid_ticket_count,1);assert.equal(rows[0].qualified_referrals,0);assert.equal(rows[0].last_qualified_referral_at,null);assert.equal(rows[0].marketing_consent,true);assert.equal(rows[0].checkin_event_slug,'real-show');assert.equal(rows[0].last_event_interest_at,null)
+check(rows.length,1);check(rows[0].paid_ticket_count,1);check(rows[0].qualified_referrals,0);check(rows[0].last_qualified_referral_at,null);check(rows[0].marketing_consent,true);check(rows[0].checkin_event_slug,'real-show');check(rows[0].last_event_interest_at,null)
 await order(old,other)
 await db.query("UPDATE referral_attributions SET status='qualified',qualified_at=$1 WHERE workspace_id=$2",[old,ws])
 await db.query("INSERT INTO referral_attributions VALUES($1,$2,$3,'qualified',$4,$5)",[ws,fan,fan,old,future])
 rows=(await db.query(snapshot,[ws,now,100])).rows
-assert.equal(rows[0].paid_ticket_count,2);assert.equal(rows[0].qualified_referrals,1);assert.equal(new Date(rows[0].last_qualified_referral_at).toISOString(),'2026-10-01T08:00:00.000Z')
-assert.equal((await db.query(snapshot,[foreign,now,100])).rows[0].paid_ticket_count,0)
-let count=12
+check(rows[0].paid_ticket_count,2);check(rows[0].qualified_referrals,1);check(new Date(rows[0].last_qualified_referral_at).toISOString(),'2026-10-01T08:00:00.000Z')
+check((await db.query(snapshot,[foreign,now,100])).rows[0].paid_ticket_count,0)
+
 const template='crowdrelay.fan.welcome.v1',current='action:lifecycle-episode:fan:welcome:once'
 const answered=async({workspace=ws,subject=fan,tpl=template,key=current,episode='once',since=null,tickets=null,slug=null}={})=>(await db.query(guard,[workspace,subject,tpl,key,episode,since,tickets,slug])).rows[0].exists
-assert.equal(await answered(),false);count++
+check(await answered(),false);
 async function seed({state='succeeded',template:tpl=template,key='legacy',metadata={},workspace=ws,created=old,show=null}={}) {
  await db.exec('DELETE FROM autopilot_actions; DELETE FROM autopilot_decisions;')
  await db.query('INSERT INTO autopilot_decisions VALUES($1,$2,$3)',[fan,workspace,JSON.stringify(metadata)])
  await db.query("INSERT INTO autopilot_actions VALUES($1,$2,$1,$3,'fan.lifecycle.message.request',$4,$5,$6,$7,$7)",[fan,workspace,fan,state,JSON.stringify({template_key:tpl,show}),key,created])
 }
-for(const state of ['awaiting_approval','queued','processing','succeeded','failed','cancelled','unknown']) {await seed({state});assert.equal(await answered(),true);count++}
-assert.equal(await answered({workspace:foreign}),false);assert.equal(await answered({subject:other}),false);assert.equal(await answered({tpl:'crowdrelay.fan.signal_install_ask.v1'}),false);count+=3
+for(const state of ['awaiting_approval','queued','processing','succeeded','failed','cancelled','unknown']) {await seed({state});check(await answered(),true);}
+check(await answered({workspace:foreign}),false);check(await answered({subject:other}),false);check(await answered({tpl:'crowdrelay.fan.signal_install_ask.v1'}),false);
 await seed({metadata:{paid_ticket_count:5},template:'returning'})
-assert.equal(await answered({tpl:'returning',tickets:5,episode:'shows-5'}),true);assert.equal(await answered({tpl:'returning',tickets:10,episode:'shows-10'}),false);count+=2
+check(await answered({tpl:'returning',tickets:5,episode:'shows-5'}),true);check(await answered({tpl:'returning',tickets:10,episode:'shows-10'}),false);
 await seed({template:'referral-thanks'})
-assert.equal(await answered({tpl:'referral-thanks',since:'2026-09-30T08:00:00Z',episode:'first'}),true);assert.equal(await answered({tpl:'referral-thanks',since:now,episode:'second'}),false);count+=2
+check(await answered({tpl:'referral-thanks',since:'2026-09-30T08:00:00Z',episode:'first'}),true);check(await answered({tpl:'referral-thanks',since:now,episode:'second'}),false);
 await seed({template:'show',show:{event_slug:'real-show'}})
-assert.equal(await answered({tpl:'show',since:old,slug:'real-show',episode:'first'}),true);assert.equal(await answered({tpl:'show',since:old,slug:'other-show',episode:'other'}),false);count+=2
-await seed({key:current+':lapsed:test',state:'cancelled',metadata:{lifecycle_episode:{key:'once'}}});assert.equal(await answered(),false);count++
-await seed({key:'other-version',metadata:{lifecycle_episode:{key:'once'}}});assert.equal(await answered(),true);count++
-await seed({key:'other-version',created:future,metadata:{lifecycle_episode:{key:'old'}}});assert.equal(await answered({episode:'new',since:old}),false);count++
-console.log(`PostgreSQL/PGlite PASS: ${count} assertions against actual lifecycle snapshot and compatibility SQL`)
+check(await answered({tpl:'show',since:old,slug:'real-show',episode:'first'}),true);check(await answered({tpl:'show',since:old,slug:'other-show',episode:'other'}),false);
+await seed({key:current+':lapsed:test',state:'cancelled',metadata:{lifecycle_episode:{key:'once'}}});check(await answered(),false);
+await seed({key:'other-version',metadata:{lifecycle_episode:{key:'once'}}});check(await answered(),true);
+await seed({key:'other-version',created:future,metadata:{lifecycle_episode:{key:'old'}}});check(await answered({episode:'new',since:old}),false);
+console.log(`PostgreSQL/PGlite PASS: ${checks} assertions against actual lifecycle snapshot and compatibility SQL`)
 await db.close()
