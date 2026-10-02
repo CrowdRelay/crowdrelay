@@ -95,6 +95,10 @@ pub enum OutcomeRejection {
     /// shown: wrong person, a source it never saw, a date that is not the one
     /// recorded for that page, or text outside the band's register.
     UngroundedContactResearch { reason: String },
+    /// A FAN SCOUT person finding was not one of the deterministic candidates
+    /// recorded on the task, had unusable identity/evidence, or named a
+    /// prospect whose refusal/suppression forbids further collection.
+    UngroundedFanProspect { reason: String },
     /// The social-content worker returned a different channel from the one
     /// Brain selected from measured first-party yield. Letting the model
     /// substitute a platform would break the feedback loop: the system would
@@ -176,6 +180,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::UngroundedContactResearch { reason } => write!(
                 f,
                 "UNGROUNDED_CONTACT_RESEARCH: {reason}"
+            ),
+            Self::UngroundedFanProspect { reason } => write!(
+                f,
+                "UNGROUNDED_FAN_PROSPECT: {reason}"
             ),
         }
     }

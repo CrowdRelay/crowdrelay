@@ -19,7 +19,10 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
     // Only require_approval kinds create actions. Insights and segments
     // are observations — confidence 0 is weak but not dangerous.
     if outcome.kind.disposition() != "require_approval"
-        && outcome.kind != OutcomeKind::ContactResearch
+        && !matches!(
+            outcome.kind,
+            OutcomeKind::ContactResearch | OutcomeKind::FanProspects
+        )
     {
         return Ok(());
     }
@@ -44,13 +47,15 @@ fn evaluate_outcome_quality(outcome: &ValidatedOutcome) -> Result<(), OutcomeRej
 
     // The model's own report about its own output. A cheap filter that a
     // failing connector happens to trip, not a statement about evidence.
-    let honest_empty_contact_research =
-        outcome.kind == OutcomeKind::ContactResearch && outcome.payload.item.is_none();
+    let honest_empty_internal_research = matches!(
+        outcome.kind,
+        OutcomeKind::ContactResearch | OutcomeKind::FanProspects
+    ) && outcome.payload.item.is_none();
     if outcome
         .self_reported_confidence
         .self_reported_basis_points()
         == 0
-        && !honest_empty_contact_research
+        && !honest_empty_internal_research
     {
         return Err(OutcomeRejection::InsufficientEvidence {
             reason: "the model reported zero confidence in its own output".to_owned(),
