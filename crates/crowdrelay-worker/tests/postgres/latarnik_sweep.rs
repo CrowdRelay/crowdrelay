@@ -587,8 +587,10 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
         mine.prompt
     );
     ensure!(
-        mine.share_text.contains("https://band.example/r/") && !mine.share_text.contains("//r/"),
-        "their own link on the stored site root: {}",
+        mine.share_text.contains("https://band.example/r/")
+            && mine.share_text.contains("?event=gorzow&lang=pl")
+            && !mine.share_text.contains("//r/"),
+        "their own contextual link on the stored site root: {}",
         mine.share_text
     );
     let hers = my_open_mission(&pool, w, &ania_token, now)
