@@ -125,7 +125,8 @@ mod tests {
         // deadline says so instead of rendering an epoch.
         let later = utc(1, time::Month::October, 12, 0);
         assert!(
-            format_deadline_note(Some(due), Some(later), BriefingLocale::En, "UTC").contains("October")
+            format_deadline_note(Some(due), Some(later), BriefingLocale::En, "UTC")
+                .contains("October")
         );
         assert_eq!(
             format_deadline_note(None, None, BriefingLocale::Pl, "UTC"),
@@ -162,9 +163,7 @@ mod tests {
     /// together, so this asserts both sides of it.
     #[test]
     fn booking_discovery_is_gated_and_mapped() {
-        let payload = AutopilotActionPayload::RequestBookingTargetDiscovery {
-            requested_count: 8,
-        };
+        let payload = AutopilotActionPayload::RequestBookingTargetDiscovery { requested_count: 8 };
         assert!(
             payload_requires_executor(&payload),
             "a discovery ask no executor serves must park, not burn attempts"
@@ -261,16 +260,15 @@ fn pending_action(
     // and `apply_revision` share the allowlist, so the modal and the gate
     // can never disagree about which keys may be rewritten.
     let revisable = crowdrelay_domain::draft_revision::revisable_fields(&row.payload);
-    let payload: AutopilotActionPayload =
-        serde_json::from_value(row.payload).map_err(|error| {
-            tracing::warn!(
-                %error,
-                action_kind = %row.action_kind,
-                "autopilot action payload does not match its schema; \
-                 the action cannot be executed and will fail every attempt"
-            );
-            RepositoryError::Unexpected
-        })?;
+    let payload: AutopilotActionPayload = serde_json::from_value(row.payload).map_err(|error| {
+        tracing::warn!(
+            %error,
+            action_kind = %row.action_kind,
+            "autopilot action payload does not match its schema; \
+             the action cannot be executed and will fail every attempt"
+        );
+        RepositoryError::Unexpected
+    })?;
     let required_capability = executor_capability_for_payload(&payload);
     let executor_ready = required_capability.is_none_or(|capability| {
         live_capabilities
@@ -351,23 +349,34 @@ fn enrich_show_growth_briefing(
     if let Some(paid) = number("paid_tickets") {
         let value = number("capacity")
             .filter(|capacity| *capacity > 0)
-            .map_or_else(|| paid.to_string(), |capacity| format!("{paid} / {capacity}"));
-        briefing.content.push(field("Paid tickets", "Sprzedane bilety", value));
+            .map_or_else(
+                || paid.to_string(),
+                |capacity| format!("{paid} / {capacity}"),
+            );
+        briefing
+            .content
+            .push(field("Paid tickets", "Sprzedane bilety", value));
     }
     if let Some(last_7d) = number("paid_tickets_last_7d") {
-        briefing
-            .content
-            .push(field("Tickets, last 7d", "Bilety, ostatnie 7 dni", last_7d.to_string()));
+        briefing.content.push(field(
+            "Tickets, last 7d",
+            "Bilety, ostatnie 7 dni",
+            last_7d.to_string(),
+        ));
     }
     if let Some(interested) = number("interested_fans") {
-        briefing
-            .content
-            .push(field("Interested fans", "Zainteresowani fani", interested.to_string()));
+        briefing.content.push(field(
+            "Interested fans",
+            "Zainteresowani fani",
+            interested.to_string(),
+        ));
     }
     if let Some(local) = number("city_signal_fans") {
-        briefing
-            .content
-            .push(field("Fans in this city", "Fani w tym mieście", local.to_string()));
+        briefing.content.push(field(
+            "Fans in this city",
+            "Fani w tym mieście",
+            local.to_string(),
+        ));
     }
     if let Some(referrers) = number("qualified_referrers_in_city") {
         briefing.content.push(field(
@@ -377,9 +386,11 @@ fn enrich_show_growth_briefing(
         ));
     }
     if let Some(partners) = number("beacon_partners") {
-        briefing
-            .content
-            .push(field("Active local partners", "Aktywni lokalni partnerzy", partners.to_string()));
+        briefing.content.push(field(
+            "Active local partners",
+            "Aktywni lokalni partnerzy",
+            partners.to_string(),
+        ));
     }
 
     if lever.is_relationship_sensitive() {
@@ -460,11 +471,27 @@ pub(super) async fn crew_clock(pool: &sqlx::PgPool, workspace_id: Uuid) -> CrewC
 /// guessed; with none recorded (or an unknown one) the note stays in UTC and
 /// says so.
 const PL_WEEKDAYS: [&str; 7] = [
-    "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela",
+    "poniedziałek",
+    "wtorek",
+    "środa",
+    "czwartek",
+    "piątek",
+    "sobota",
+    "niedziela",
 ];
 const PL_MONTHS: [&str; 12] = [
-    "stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca",
-    "sierpnia", "września", "października", "listopada", "grudnia",
+    "stycznia",
+    "lutego",
+    "marca",
+    "kwietnia",
+    "maja",
+    "czerwca",
+    "lipca",
+    "sierpnia",
+    "września",
+    "października",
+    "listopada",
+    "grudnia",
 ];
 
 pub(super) fn format_deadline_note(
@@ -617,9 +644,7 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "outreach_reply_7d" => Ok(AutopilotMeasurementKind::OutreachReply7d),
         "audience_ticket_revenue_72h" => Ok(AutopilotMeasurementKind::AudienceTicketRevenue72h),
         "show_ticket_revenue_7d" => Ok(AutopilotMeasurementKind::ShowTicketRevenue7d),
-        "show_growth_surface_clicks_7d" => {
-            Ok(AutopilotMeasurementKind::ShowGrowthSurfaceClicks7d)
-        }
+        "show_growth_surface_clicks_7d" => Ok(AutopilotMeasurementKind::ShowGrowthSurfaceClicks7d),
         "show_growth_attributed_ticket_orders_7d" => {
             Ok(AutopilotMeasurementKind::ShowGrowthAttributedTicketOrders7d)
         }
@@ -640,13 +665,12 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
             Ok(AutopilotMeasurementKind::AgentRunCommunityEngagement7d)
         }
         "durable_fan_growth_30d" => Ok(AutopilotMeasurementKind::DurableFanGrowth30d),
-        "scanner_discovery_quality_14d" => {
-            Ok(AutopilotMeasurementKind::ScannerDiscoveryQuality14d)
-        }
+        "scanner_discovery_quality_14d" => Ok(AutopilotMeasurementKind::ScannerDiscoveryQuality14d),
         "strategist_insight_quality_14d" => {
             Ok(AutopilotMeasurementKind::StrategistInsightQuality14d)
         }
         "fan_lifecycle_engagement_7d" => Ok(AutopilotMeasurementKind::FanLifecycleEngagement7d),
+        "fan_lifecycle_activation_7d" => Ok(AutopilotMeasurementKind::FanLifecycleActivation7d),
         "agent_run_fan_growth_3d" => Ok(AutopilotMeasurementKind::AgentRunFanGrowth3d),
         "agent_run_outcome_quality_1h" => Ok(AutopilotMeasurementKind::AgentRunOutcomeQuality1h),
         "scanner_discovery_quality_1h" => Ok(AutopilotMeasurementKind::ScannerDiscoveryQuality1h),
@@ -654,22 +678,16 @@ fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, Repos
         "signal_installs_1d" => Ok(AutopilotMeasurementKind::SignalInstalls1d),
         "booking_agent_reply_30d" => Ok(AutopilotMeasurementKind::BookingAgentReply30d),
         "show_attendance_rate_14d" => Ok(AutopilotMeasurementKind::ShowAttendanceRate14d),
-        "release_bound_acquisition_14d" => {
-            Ok(AutopilotMeasurementKind::ReleaseBoundAcquisition14d)
-        }
+        "release_bound_acquisition_14d" => Ok(AutopilotMeasurementKind::ReleaseBoundAcquisition14d),
         "release_link_clicks_14d" => Ok(AutopilotMeasurementKind::ReleaseLinkClicks14d),
-        "release_fan_conversion_14d" => {
-            Ok(AutopilotMeasurementKind::ReleaseFanConversion14d)
-        }
+        "release_fan_conversion_14d" => Ok(AutopilotMeasurementKind::ReleaseFanConversion14d),
         "release_channel_lift_14d" => Ok(AutopilotMeasurementKind::ReleaseChannelLift14d),
         "campaign_ticket_conversion_14d" => {
             Ok(AutopilotMeasurementKind::CampaignTicketConversion14d)
         }
         "campaign_unsubscribe_7d" => Ok(AutopilotMeasurementKind::CampaignUnsubscribe7d),
         "content_link_clicks_7d" => Ok(AutopilotMeasurementKind::ContentLinkClicks7d),
-        "content_fan_acquisition_7d" => {
-            Ok(AutopilotMeasurementKind::ContentFanAcquisition7d)
-        }
+        "content_fan_acquisition_7d" => Ok(AutopilotMeasurementKind::ContentFanAcquisition7d),
         "artifact_outcome_7d" => Ok(AutopilotMeasurementKind::ArtifactOutcome7d),
         _ => Err(RepositoryError::Unexpected),
     }

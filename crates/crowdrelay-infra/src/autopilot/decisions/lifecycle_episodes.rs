@@ -7,7 +7,12 @@ async fn lifecycle_episode_already_answered(
     workspace_id: WorkspaceId,
     candidate: &DecisionCandidate,
 ) -> Result<bool, RepositoryError> {
-    let AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, template_key, .. } = &candidate.action else {
+    let AutopilotActionPayload::RequestFanLifecycleMessage {
+        fan_id,
+        template_key,
+        ..
+    } = &candidate.action
+    else {
         return Ok(false);
     };
     let Some(value) = candidate.input_snapshot.get("lifecycle_episode") else {
@@ -36,7 +41,9 @@ SELECT EXISTS (
       ON decision.workspace_id=action.workspace_id AND decision.id=action.decision_id
     WHERE action.workspace_id=$1 AND action.subject_id=$2
       AND action.action_kind='fan.lifecycle.message.request'
-      AND action.payload->>'template_key'=$3
+      AND (action.payload->>'template_key'=$3
+        OR ($3 IN ('crowdrelay.fan.welcome.v1','crowdrelay.fan.welcome.v2')
+            AND action.payload->>'template_key' IN ('crowdrelay.fan.welcome.v1','crowdrelay.fan.welcome.v2')))
       -- The current family's own uniqueness/lapse bound already handles it.
       AND action.idempotency_key<>$4
       AND NOT starts_with(action.idempotency_key,$4 || ':lapsed:')

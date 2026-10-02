@@ -63,7 +63,8 @@ async fn persist_decision_and_action_tx(
             if matches!(
                 candidate.disposition,
                 PolicyDisposition::RequireApproval | PolicyDisposition::AutoExecute
-            ) && executor_registry_is_active(transaction, workspace_id).await?
+            ) && (capability == WELCOME_V2_CAPABILITY
+                || executor_registry_is_active(transaction, workspace_id).await?)
                 && !executor_capability_available(transaction, workspace_id, capability)
                     .await? =>
         {

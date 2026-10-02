@@ -50,7 +50,7 @@ fn lifecycle_candidate(
         FanLifecycleDecision::Hold(_) => return Ok(None),
     };
     let template_key = match template {
-        LifecycleTemplate::Welcome => "crowdrelay.fan.welcome.v1",
+        LifecycleTemplate::Welcome => "crowdrelay.fan.welcome.v2",
         LifecycleTemplate::SynesthesiaFollowUp => "crowdrelay.synesthesia.follow_up.v1",
         LifecycleTemplate::DormantReactivation => "crowdrelay.fan.reactivation.v1",
         LifecycleTemplate::FirstTicketThankYou => "crowdrelay.fan.first_ticket_thanks.v1",
@@ -81,7 +81,10 @@ fn lifecycle_candidate(
     // A snapshot is a struct, so it serialises to an object; the guard keeps
     // the indexing lint satisfied without a panic path.
     if let Some(object) = input_snapshot.as_object_mut() {
-        object.insert("lifecycle_episode".to_owned(), serde_json::to_value(&episode)?);
+        object.insert(
+            "lifecycle_episode".to_owned(),
+            serde_json::to_value(&episode)?,
+        );
     }
     let subject = ActionSubject::Fan(snapshot.fan_id);
     // The recall names a specific night, so the night rides the action: the

@@ -102,6 +102,9 @@ pub enum AutopilotMeasurementKind {
     /// messaging: the brain learns which message templates actually move
     /// individual fans to action.
     FanLifecycleEngagement7d,
+    /// Binary deliberate activation after welcome v2. Sessions, clicks and push
+    /// registration are not activation. Separate vocabulary preserves v1 history.
+    FanLifecycleActivation7d,
     /// Early fan-growth checkpoint 3 days after an agent dispatch. This is
     /// the fastest feedback signal for the learning loop — the brain can
     /// learn from a 3-day partial observation while waiting for the full
@@ -224,6 +227,7 @@ impl AutopilotMeasurementKind {
             Self::ScannerDiscoveryQuality14d => "scanner_discovery_quality_14d",
             Self::StrategistInsightQuality14d => "strategist_insight_quality_14d",
             Self::FanLifecycleEngagement7d => "fan_lifecycle_engagement_7d",
+            Self::FanLifecycleActivation7d => "fan_lifecycle_activation_7d",
             Self::AgentRunFanGrowth3d => "agent_run_fan_growth_3d",
             Self::AgentRunOutcomeQuality1h => "agent_run_outcome_quality_1h",
             Self::ScannerDiscoveryQuality1h => "scanner_discovery_quality_1h",
@@ -303,6 +307,7 @@ impl AutopilotMeasurementKind {
             Self::BeaconOutreachUniqueVisitors14d => Some("beacon_outreach_unique_visitors"),
             Self::AgentRunCommunityEngagement7d => Some("engagement_score"),
             Self::FanLifecycleEngagement7d => Some("lifecycle_engagement_events"),
+            Self::FanLifecycleActivation7d => Some("lifecycle_deliberate_activation_v2"),
             Self::ScannerDiscoveryQuality14d => Some("scanner_discoveries"),
             Self::StrategistInsightQuality14d => Some("strategist_insights"),
             Self::ScannerDiscoveryQuality1h => Some("scanner_discoveries_1h"),

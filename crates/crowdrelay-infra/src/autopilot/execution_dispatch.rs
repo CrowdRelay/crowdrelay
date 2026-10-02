@@ -37,9 +37,7 @@ pub(super) async fn ensure_dispatch_envelope(
             subreddit,
             ..
         } => {
-            let handle = subreddit
-                .clone()
-                .unwrap_or_else(|| target_id.to_string());
+            let handle = subreddit.clone().unwrap_or_else(|| target_id.to_string());
             let context = DispatchContext {
                 post_format: Some("link".to_owned()),
                 ..DispatchContext::default()
@@ -56,7 +54,9 @@ pub(super) async fn ensure_dispatch_envelope(
             task_id,
             ..
         } => (
-            template_id.clone().unwrap_or_else(|| "agent-content".to_owned()),
+            template_id
+                .clone()
+                .unwrap_or_else(|| "agent-content".to_owned()),
             task_id.to_string(),
             None,
             DispatchContext::default(),
@@ -206,7 +206,9 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("source:{source_id}")),
             DispatchContext::default(),
         ),
-        AutopilotActionPayload::RequestShowGrowth { event_id, lever, .. } => (
+        AutopilotActionPayload::RequestShowGrowth {
+            event_id, lever, ..
+        } => (
             format!("show-growth:{}", lever.as_str()),
             format!("event:{event_id}"),
             Some(format!("event:{event_id}")),
@@ -231,8 +233,17 @@ pub(super) async fn ensure_dispatch_envelope(
             Some(format!("release:{release_id}")),
             DispatchContext::default(),
         ),
-        AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, .. } => (
-            "fan-lifecycle".to_owned(),
+        AutopilotActionPayload::RequestFanLifecycleMessage {
+            fan_id,
+            template_key,
+            ..
+        } => (
+            if template_key == WELCOME_V2_TEMPLATE {
+                WELCOME_V2_TEMPLATE
+            } else {
+                "fan-lifecycle"
+            }
+            .to_owned(),
             format!("fan:{fan_id}"),
             Some(format!("fan:{fan_id}")),
             DispatchContext::default(),
@@ -264,14 +275,12 @@ pub(super) async fn ensure_dispatch_envelope(
     // content, not of a price change or a send.
     let creative_family = match payload {
         AutopilotActionPayload::RequestCommunityEngagement {
-            creative_family,
-            ..
+            creative_family, ..
         } => *creative_family,
         _ => None,
     };
 
-    let context_json =
-        serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
+    let context_json = serde_json::to_value(&context).unwrap_or_else(|_| serde_json::json!({}));
     sqlx::query(
         r#"
         INSERT INTO dispatch_predictions
@@ -296,12 +305,8 @@ pub(super) async fn ensure_dispatch_envelope(
     let target = target_key
         .clone()
         .unwrap_or_else(|| format!("action:{action_id}"));
-    let opportunity_id = OpportunityId::new(
-        &template_id,
-        &target,
-        OpportunityAction::Post,
-        &context,
-    );
+    let opportunity_id =
+        OpportunityId::new(&template_id, &target, OpportunityAction::Post, &context);
     let evidence = GrowthEvidence::at_dispatch(
         workspace_id.into_uuid(),
         Some(action_id.into_uuid()),
@@ -466,14 +471,12 @@ async fn gate_outward_emission(
         .map_err(map_sqlx)?
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty());
-        let slugs = crowdrelay_domain::tracked_link::tracked_site_link_slugs_in(
-            body,
-            site_root.as_deref(),
-        )
-        .ok_or(RepositoryError::ConflictBecause(
-            "letter body carries a URL the ledger cannot see — only \
+        let slugs =
+            crowdrelay_domain::tracked_link::tracked_site_link_slugs_in(body, site_root.as_deref())
+                .ok_or(RepositoryError::ConflictBecause(
+                    "letter body carries a URL the ledger cannot see — only \
              {site}/l/{slug} links may reach a reader",
-        ))?;
+                ))?;
         if !slugs.is_empty() {
             // A shape is not a receipt: a typo, deleted redirect or another
             // workspace's slug must not send a reader to a dead CTA. Lock
@@ -529,9 +532,18 @@ async fn gate_outward_emission(
     // pitch's costume. Owned-audience sends are exempt on purpose: one text to
     // many consented fans is what a broadcast *is*.
     if class == crowdrelay_domain::action_class::ActionClass::ThirdParty {
-        let draft = payload.get("draft").filter(|value| value.is_object()).cloned();
-        let body = payload.get("body").and_then(Value::as_str).map(str::to_owned);
-        let title = payload.get("title").and_then(Value::as_str).map(str::to_owned);
+        let draft = payload
+            .get("draft")
+            .filter(|value| value.is_object())
+            .cloned();
+        let body = payload
+            .get("body")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let title = payload
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if draft.is_some() || body.is_some() {
             // Community engagement is scoped per target: a verbatim repeat at
             // the *same* community is the broadcast this gate exists to stop,
@@ -541,7 +553,10 @@ async fn gate_outward_emission(
             // text to many venues remains refused. A NULL bind therefore means
             // "unscoped", not "match only targetless rows".
             let target = if event_type == "crowdrelay.community.engagement_requested" {
-                payload.get("target_id").and_then(Value::as_str).map(str::to_owned)
+                payload
+                    .get("target_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
             } else {
                 None
             };
@@ -621,7 +636,14 @@ pub(super) async fn emit_external_action_keyed(
     mut payload: Value,
     emission_suffix: Option<&str>,
 ) -> Result<(), RepositoryError> {
-    gate_outward_emission(transaction, workspace_id, action_id, event_type, &mut payload).await?;
+    gate_outward_emission(
+        transaction,
+        workspace_id,
+        action_id,
+        event_type,
+        &mut payload,
+    )
+    .await?;
     ensure_executor_capability(
         transaction,
         workspace_id,
