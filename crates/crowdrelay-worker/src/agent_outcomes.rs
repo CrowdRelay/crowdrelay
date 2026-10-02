@@ -111,6 +111,7 @@ include!("agent_outcomes/rejections.rs");
 include!("agent_outcomes/community_ingestion.rs");
 include!("agent_outcomes/beacon_candidates.rs");
 include!("agent_outcomes/contact_research.rs");
+include!("agent_outcomes/fan_prospects.rs");
 include!("agent_outcomes/quality_guard.rs");
 include!("agent_outcomes/opportunity_findings.rs");
 include!("agent_outcomes/strategy_proposals.rs");
@@ -456,6 +457,19 @@ impl AgentOutcomeWorker {
         let producing_template = producing_task
             .as_ref()
             .map(|(template, _, _)| template.as_str());
+        // FAN SCOUT person evidence uses the canonical prospect repository,
+        // whose write is idempotent and owns its own transaction. Resolve it
+        // before this decision transaction opens: a transient failure after
+        // the observation merely retries the audit decision; it cannot
+        // duplicate the person or the observation.
+        let fan_prospect_subject = if outcome.kind == OutcomeKind::FanProspects {
+            Some(
+                self.fan_prospect_subject(outcome, producing_task.as_ref())
+                    .await?,
+            )
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
         let decision_id = Uuid::now_v7();
 
@@ -479,6 +493,9 @@ impl AgentOutcomeWorker {
             }
             OutcomeKind::ContactResearch => {
                 contact_research_subject(&mut tx, outcome, producing_task.as_ref()).await?
+            }
+            OutcomeKind::FanProspects => {
+                fan_prospect_subject.unwrap_or(("agent_outcome", outcome.id))
             }
             _ => ("agent_outcome", outcome.id),
         };

@@ -42,6 +42,10 @@ pub enum OutcomeKind {
     /// something true. Lands as a `contact_research` row if CrowdRelay can
     /// check the citation; never as an action, because it contacts nobody.
     ContactResearch,
+    /// A person-level FAN SCOUT finding. The model may select only a
+    /// `candidate_ref`; identity and evidence are resolved from deterministic
+    /// task metadata before the canonical prospect spine is written.
+    FanProspects,
 }
 
 impl OutcomeKind {
@@ -60,6 +64,7 @@ impl OutcomeKind {
             Self::OpportunityFindings => "opportunity_findings",
             Self::StrategyProposals => "strategy_proposals",
             Self::ContactResearch => "contact_research",
+            Self::FanProspects => "fan_prospects",
         }
     }
 
@@ -68,7 +73,7 @@ impl OutcomeKind {
     pub const fn autopilot_context(self) -> &'static str {
         match self {
             Self::PressPitch | Self::SocialPost => "promotion_budget",
-            Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
+            Self::SignalPush | Self::AudienceSegments | Self::FanProspects => "fan_lifecycle",
             Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
             Self::BeaconCandidates | Self::ContactResearch => "beacon",
             Self::CampaignInsight
@@ -100,7 +105,8 @@ impl OutcomeKind {
             | Self::CampaignInsight
             | Self::ReleasePlanNote
             | Self::GenericInsight
-            | Self::ContactResearch => "recommend_only",
+            | Self::ContactResearch
+            | Self::FanProspects => "recommend_only",
         }
     }
 
@@ -116,6 +122,7 @@ impl OutcomeKind {
             Self::OpportunityFindings => "agent_opportunity_finding",
             Self::StrategyProposals => "agent_strategy_consult",
             Self::ContactResearch => "agent_contact_research",
+            Self::FanProspects => "agent_fan_prospect_observation",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
         }
     }
@@ -460,6 +467,7 @@ pub fn validate(
         "opportunity_findings" => OutcomeKind::OpportunityFindings,
         "strategy_proposals" => OutcomeKind::StrategyProposals,
         "contact_research" => OutcomeKind::ContactResearch,
+        "fan_prospects" => OutcomeKind::FanProspects,
         other => return Err(OutcomeValidationError::UnknownKind(other.to_owned())),
     };
     let self_reported_confidence = ModelSelfReportedConfidence::parse(confidence_basis_points)?;
@@ -540,10 +548,12 @@ pub fn provenance_admission(
     kind: OutcomeKind,
     provenance: Option<&OutcomeProvenance>,
 ) -> Result<(), ProvenanceRejection> {
-    // ContactResearch is internal evidence, not an approval card, but it can
-    // later shape text sent to a real person. Hold it to the same provenance
-    // bar as outward proposals without pretending research itself is a send.
-    if kind.disposition() != "require_approval" && kind != OutcomeKind::ContactResearch {
+    // Internal person research can later shape a real relationship. Hold it
+    // to the same provenance bar as outward proposals without pretending the
+    // research itself is a send.
+    if kind.disposition() != "require_approval"
+        && !matches!(kind, OutcomeKind::ContactResearch | OutcomeKind::FanProspects)
+    {
         return Ok(());
     }
     let Some(provenance) = provenance else {

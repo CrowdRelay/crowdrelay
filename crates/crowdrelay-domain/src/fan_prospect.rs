@@ -186,6 +186,10 @@ pub enum ProspectSource {
     /// (its own Instagram, YouTube, Reddit posts). They addressed the band in
     /// public; the band answering in the same thread is the expected reply.
     OwnComments,
+    /// A public Bandcamp account appearing in a release's collector/supporter
+    /// list. This is affinity evidence only: the person paid for similar music,
+    /// but has no relationship with this tenant and no contact permission.
+    BandcampCollectors,
 }
 
 impl ProspectSource {
@@ -193,13 +197,14 @@ impl ProspectSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OwnComments => "own_comments",
+            Self::BandcampCollectors => "bandcamp_collectors",
         }
     }
 
     #[must_use]
     pub const fn lawful_basis(self) -> LawfulBasis {
         match self {
-            Self::OwnComments => LawfulBasis::LegitimateInterest,
+            Self::OwnComments | Self::BandcampCollectors => LawfulBasis::LegitimateInterest,
         }
     }
 
@@ -211,6 +216,9 @@ impl ProspectSource {
             // A commenter who is never engaged has no further claim on us after
             // a season; sixty days covers a release cycle and no more.
             Self::OwnComments => Duration::days(60),
+            // This is cold public affinity evidence, not an interaction with
+            // the tenant. If nothing else happens, forget it quickly.
+            Self::BandcampCollectors => Duration::days(30),
         }
     }
 
@@ -558,6 +566,14 @@ mod tests {
         );
         assert_eq!(
             ProspectSource::OwnComments.lawful_basis().as_str(),
+            "legitimate_interest"
+        );
+        assert_eq!(
+            ProspectSource::BandcampCollectors.expires_at(first),
+            datetime!(2026-10-31 12:00 UTC)
+        );
+        assert_eq!(
+            ProspectSource::BandcampCollectors.lawful_basis().as_str(),
             "legitimate_interest"
         );
     }
