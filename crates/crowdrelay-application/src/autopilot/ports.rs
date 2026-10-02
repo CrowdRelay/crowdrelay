@@ -48,7 +48,8 @@ use super::model::{
     ClaimedPlayOutcome, DecisionCandidate, LiveTermsSnapshot, OutreachKindStanding,
     OutreachWaveAnchor, OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition,
     PlacementSettlement, PlayAnchor, PlayKindStanding, PlayOutcomeObservation, PlayRunSnapshot,
-    PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot, TermsSettlement,
+    PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot, RelationshipResearchSnapshot,
+    TermsSettlement,
 };
 use crate::RepositoryError;
 
@@ -121,6 +122,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
     ) -> Result<Vec<FanLifecycleSnapshot>, RepositoryError>;
+
+    /// Warm Beacon relationships that have cleared every pre-contact gate
+    /// except "we have actually read what they did lately". Internal research
+    /// only: loading this queue grants no outreach authority.
+    async fn load_relationship_research_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<RelationshipResearchSnapshot>, RepositoryError>;
 
     async fn load_event_campaign_snapshots(
         &self,

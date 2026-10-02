@@ -29,6 +29,12 @@ where
         let stats = report.context_stats(candidate.context);
         stats.candidates = stats.candidates.saturating_add(1);
         let class = candidate.action.action_class();
+        // Subject cooldown is about communication fatigue, not internal work.
+        // A Beacon/Fan can be the subject of a reversible database/research
+        // action without hearing from the band at all. Treating that as a
+        // touch made internal work consume the person's cooldown and could
+        // block the actual message the work existed to improve.
+        let outward_contact = class.is_outward() && candidate.subject.is_contactable_person();
         let ceiling = limits
             .ceilings
             .iter()
@@ -54,10 +60,7 @@ where
             // Only contacts have a cooldown. An event is a topic, not a person:
             // keying it there would let one show run a single growth lever a
             // week and quietly starve the other nine.
-            hours_since_subject_touched: candidate
-                .subject
-                .is_contactable_person()
-                .then(|| {
+            hours_since_subject_touched: outward_contact.then(|| {
                     // Somebody this cycle already reached is touched now, not
                     // whenever the cycle's snapshot says. Without this, two
                     // contexts — or two plays around two different shows — can
@@ -160,7 +163,7 @@ where
                 .context_stats(candidate.context)
                 .actions
                 .saturating_add(1);
-            if candidate.subject.is_contactable_person() {
+            if outward_contact {
                 limits.touched_this_cycle.insert(candidate.subject.uuid());
             }
             // Spend the budget as it is used, not once at the start of the

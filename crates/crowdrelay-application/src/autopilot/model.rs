@@ -173,6 +173,26 @@ pub struct AutopilotPolicy {
     pub guardrail_reason: Option<String>,
 }
 
+/**
+ * One warm relationship worth researching before any new outward ask.
+ *
+ * This is intentionally broader than "Latarnik". A Beacon is a person or
+ * organisation the act already works with; the same research can later ground
+ * a pitch, a thank-you, a Signal/fan invitation, or the decision to stay quiet.
+ * The Brain only decides that learning is worth doing here. It does not grant
+ * permission to contact the person.
+ */
+#[derive(Clone, Debug, Serialize)]
+pub struct RelationshipResearchSnapshot {
+    pub beacon_id: BeaconId,
+    pub display_name: String,
+    pub role: String,
+    pub city: Option<String>,
+    pub relationship_score: i32,
+    pub has_replied: bool,
+    pub days_since_last_contact: Option<i64>,
+}
+
 /// Generic subject reference used only at the application/action boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActionSubject {

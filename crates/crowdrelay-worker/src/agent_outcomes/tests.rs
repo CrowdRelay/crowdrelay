@@ -25,7 +25,8 @@ pub(super) fn make_outcome(
     confidence: i32,
     item: Option<Value>,
 ) -> ValidatedOutcome {
-    let needs_provenance = kind.disposition() == "require_approval";
+    let needs_provenance =
+        kind.disposition() == "require_approval" || kind == OutcomeKind::ContactResearch;
     ValidatedOutcome {
         id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
