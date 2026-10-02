@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crowdrelay_infra::contact_research::{
-    ResearchError, queue_contact_research, record_hook_for_beacon,
+    ResearchError, queue_contact_research, queue_target_research, record_hook_for_beacon,
 };
 use crowdrelay_infra::latarnik::{
     InviteError, approve_latarnik_invite, dual_role_review, preview_latarnik_invite,
@@ -220,6 +220,52 @@ pub async fn request_research(
             .into_response(),
         Err(ResearchError::Database(error)) => {
             tracing::warn!(%error, "contact research request failed");
+            Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// `POST /v1/control-plane/contacts/targets/{target_id}/research/request`
+///
+/// The same research for an outreach target that is not a beacon (press, radio,
+/// playlists): the engine pitches those too, and nobody is pitched unread.
+pub async fn request_target_research(
+    State(state): State<crate::AppState>,
+    Path(target_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(target_id) = Uuid::parse_str(&target_id) else {
+        return Problem::not_found(request_id(&headers))
+            .private()
+            .into_response();
+    };
+    match queue_target_research(
+        &state.database,
+        state.ops.workspace_id().into_uuid(),
+        target_id,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(task_id) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "queued": task_id })),
+        )
+            .into_response(),
+        Err(ResearchError::NotFound) => Problem::not_found(request_id(&headers))
+            .private()
+            .into_response(),
+        Err(ResearchError::Refused(sentence)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(serde_json::json!({ "refused": sentence })),
+        )
+            .into_response(),
+        Err(ResearchError::Database(error)) => {
+            tracing::warn!(%error, "target research request failed");
             Problem::service_unavailable(request_id(&headers))
                 .private()
                 .into_response()

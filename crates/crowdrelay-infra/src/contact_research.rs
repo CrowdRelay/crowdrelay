@@ -72,21 +72,24 @@ pub async fn latest_hook(
     )
 }
 
-/// Records an already-validated hook against the beacon's address on `conn`.
+/// Records an already-validated hook against an address on `conn`.
 ///
 /// Takes a connection rather than a pool so the worker can write it inside the
 /// transaction that records the agent outcome: the fact and the outcome that
 /// produced it commit together or not at all. `hook` can only have come from
 /// [`PersonalHook::new`], so the register and recency rules have already held.
 ///
+/// Keyed by the address, not by a beacon or an outreach target: one person can
+/// be both, and the research must not be done, paid for or lost twice.
+///
 /// # Errors
 ///
-/// [`ResearchError::NotFound`] when the beacon is unknown or has no address, or
-/// the database error.
+/// [`ResearchError::Refused`] for an unusable language or address, or the
+/// database error.
 pub async fn record_hook_on(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
-    beacon_id: Uuid,
+    email: &str,
     hook: &PersonalHook,
     language: &str,
     researched_by: &str,
@@ -96,16 +99,10 @@ pub async fn record_hook_on(
             "the language is a two-letter code such as pl or en".to_owned(),
         ));
     }
-    let email = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT lower(btrim(contact_email)) FROM beacons WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace_id)
-    .bind(beacon_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .flatten()
-    .filter(|email| !email.is_empty())
-    .ok_or(ResearchError::NotFound)?;
+    let email = email.trim().to_ascii_lowercase();
+    if !email.contains('@') {
+        return Err(ResearchError::NotFound);
+    }
     sqlx::query(
         r#"
         INSERT INTO contact_research
@@ -134,6 +131,23 @@ pub async fn record_hook_on(
     Ok(())
 }
 
+/// The address a beacon is reached at, lowercased, or `None`.
+async fn beacon_email(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    beacon_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT lower(btrim(contact_email)) FROM beacons WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id)
+    .bind(beacon_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .filter(|email| !email.is_empty()))
+}
+
 /// Validates a candidate and records it against the beacon's address.
 ///
 /// The same checks serve a person's note and, through the worker, the research
@@ -159,11 +173,14 @@ pub async fn record_hook_for_beacon(
     today: Date,
 ) -> Result<PersonalHook, ResearchError> {
     let hook = PersonalHook::new(fact, praise, source_url, observed_on, today)?;
+    let email = beacon_email(pool, workspace_id, beacon_id)
+        .await?
+        .ok_or(ResearchError::NotFound)?;
     let mut conn = pool.acquire().await?;
     record_hook_on(
         &mut conn,
         workspace_id,
-        beacon_id,
+        &email,
         &hook,
         language,
         researched_by,
@@ -181,7 +198,7 @@ pub const RESEARCH_TEMPLATE: &str = "contact-researcher";
 /// find nothing recent about does not become findable by asking again tomorrow.
 pub const RESEARCH_RETRY_DAYS: i32 = 7;
 
-/// Asks the research agent to read one person's recent work.
+/// Asks the research agent to read one beacon's recent work.
 ///
 /// Researching contacts nobody, so this needs no approval; it is still bounded:
 /// only people who would otherwise be askable are researched (the relationship
@@ -189,9 +206,10 @@ pub const RESEARCH_RETRY_DAYS: i32 = 7;
 /// person is researched at most once per [`RESEARCH_RETRY_DAYS`] unless the
 /// earlier attempt failed.
 ///
-/// The person is pinned in the task's metadata (`subject_beacon_id`). The
-/// worker accepts a result only for that person, so a UUID mentioned in the
-/// prompt text is a request and the metadata is the record of what was asked.
+/// The person is pinned in the task's metadata by address
+/// (`subject_contact_email`). The worker accepts a result only for that
+/// address, and the model is never given a way to name anybody else: the
+/// address is not in the prompt and not in the tool's output.
 ///
 /// # Errors
 ///
@@ -223,6 +241,81 @@ pub async fn queue_contact_research(
                 .unwrap_or_else(|| "they are already askable".to_owned())
         )));
     }
+    let email = beacon_email(pool, workspace_id, beacon_id)
+        .await?
+        .ok_or(ResearchError::NotFound)?;
+    enqueue_research(
+        pool,
+        workspace_id,
+        &email,
+        &contact.display_name,
+        &contact.role,
+        contact.city.as_deref(),
+    )
+    .await
+}
+
+/// Asks the research agent to read an outreach target's recent work.
+///
+/// The outreach engine pitches targets that are not beacons (press, radio,
+/// playlists), and the rule is the same for them: nobody is pitched unread.
+/// A target is researched only if it is still open to contact — active,
+/// accepting outreach, not marked do-not-contact, and not a person who said no
+/// — and has no recent fact on file.
+///
+/// # Errors
+///
+/// [`ResearchError::Refused`] with the sentence the operator reads,
+/// [`ResearchError::NotFound`], or the database error.
+pub async fn queue_target_research(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    target_id: Uuid,
+    now: time::OffsetDateTime,
+) -> Result<Uuid, ResearchError> {
+    let target = sqlx::query_as::<_, (String, String, String, bool, bool, bool, String)>(
+        r#"
+        SELECT lower(btrim(contact_email)), display_name, target_kind, active,
+               accepts_outreach, do_not_contact, last_reply_disposition
+        FROM outreach_targets
+        WHERE workspace_id = $1 AND id = $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(target_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ResearchError::NotFound)?;
+    let (email, name, kind, active, accepts, do_not_contact, reply) = target;
+    if !active
+        || !accepts
+        || do_not_contact
+        || matches!(reply.as_str(), "declined" | "do_not_contact")
+    {
+        return Err(ResearchError::Refused(
+            "not worth researching: they are not open to contact".to_owned(),
+        ));
+    }
+    if latest_hook(pool, workspace_id, &email, now.date())
+        .await?
+        .is_some()
+    {
+        return Err(ResearchError::Refused(
+            "this person was read recently — their fact is on file".to_owned(),
+        ));
+    }
+    enqueue_research(pool, workspace_id, &email, &name, &kind, None).await
+}
+
+/// Puts one `contact-researcher` task on the agents queue, once a week at most.
+async fn enqueue_research(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+    display_name: &str,
+    role: &str,
+    city: Option<&str>,
+) -> Result<Uuid, ResearchError> {
     let table_exists =
         sqlx::query_scalar::<_, bool>("SELECT to_regclass('agent_service_tasks') IS NOT NULL")
             .fetch_one(pool)
@@ -238,7 +331,7 @@ pub async fn queue_contact_research(
             SELECT 1 FROM agent_service_tasks
             WHERE workspace_id = $1
               AND template_id = $2
-              AND metadata->>'subject_beacon_id' = $3
+              AND metadata->>'subject_contact_email' = $3
               AND status <> 'failed'
               AND created_at > now() - make_interval(days => $4::int)
         )
@@ -246,7 +339,7 @@ pub async fn queue_contact_research(
     )
     .bind(workspace_id)
     .bind(RESEARCH_TEMPLATE)
-    .bind(beacon_id.to_string())
+    .bind(email)
     .bind(RESEARCH_RETRY_DAYS)
     .fetch_one(pool)
     .await?;
@@ -258,12 +351,10 @@ pub async fn queue_contact_research(
     }
     let prompt = format!(
         "Research this person for the band, so a letter to them can open with something true \
-         about their recent work.\n\nbeacon_id: {beacon_id}\nname: {}\nrole: {}\ncity: {}\n\n\
+         about their recent work.\n\nname: {display_name}\nrole: {role}\ncity: {}\n\n\
          Return the one most recent, specific thing they did, cited exactly as instructed, or \
          nothing if the research data does not support one.",
-        contact.display_name,
-        contact.role,
-        contact.city.as_deref().unwrap_or("unknown"),
+        city.unwrap_or("unknown"),
     );
     let task_id = Uuid::now_v7();
     sqlx::query(
@@ -279,7 +370,7 @@ pub async fn queue_contact_research(
     .bind(prompt)
     .bind(serde_json::json!({
         "source": "operator",
-        "subject_beacon_id": beacon_id,
+        "subject_contact_email": email,
     }))
     .execute(pool)
     .await?;

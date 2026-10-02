@@ -9,8 +9,9 @@
 // A fact is accepted only when CrowdRelay can check every claim against what
 // the model was actually shown:
 //
-//   * the person is the one the task was pinned to, in metadata written at
-//     dispatch, never one named in prose;
+//   * the person is the one the task was pinned to, by address, in metadata
+//     written at dispatch. The item does not name a person at all: the model
+//     has no way to attach a fact to somebody else;
 //   * the cited URL is a page the research tool returned (the evidence the
 //     context builder recorded), so a URL the model invented has no entry;
 //   * the cited date is the publication date the tool recorded for that very
@@ -22,7 +23,7 @@
 // It lands as a row, never as an action: researching a person contacts nobody.
 
 struct ValidatedResearch {
-    beacon_id: Uuid,
+    email: String,
     hook: crowdrelay_domain::contact_research::PersonalHook,
     language: String,
 }
@@ -69,18 +70,13 @@ fn validate_contact_research(
             .filter(|value| !value.is_empty())
     };
 
-    let beacon_id = text("beacon_id")
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .ok_or_else(|| ungrounded_research("beacon_id is missing or invalid"))?;
-    let pinned = task_metadata
-        .get("subject_beacon_id")
+    // The person comes from the record of what was asked, never from the answer.
+    let email = task_metadata
+        .get("subject_contact_email")
         .and_then(Value::as_str)
-        .and_then(|raw| Uuid::parse_str(raw).ok());
-    if pinned != Some(beacon_id) {
-        return Err(ungrounded_research(
-            "beacon_id is not the person this task was pinned to",
-        ));
-    }
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .filter(|raw| raw.contains('@'))
+        .ok_or_else(|| ungrounded_research("the task was not pinned to a person"))?;
 
     let source_url = text("source_url").ok_or_else(|| ungrounded_research("source_url is missing"))?;
     let evidence = evidence_urls(task_metadata);
@@ -124,15 +120,16 @@ fn validate_contact_research(
         .unwrap_or("pl")
         .to_owned();
     Ok(ValidatedResearch {
-        beacon_id,
+        email,
         hook,
         language,
     })
 }
 
-/// The decision's subject pair for a contact-research outcome: the person the
-/// fact is about once it is on file, the outcome itself for an honest-empty
-/// envelope (the agent found nothing it could stand behind, which is allowed).
+/// The decision's subject pair for a contact-research outcome. The outcome is
+/// its own subject: the fact is keyed by an address, and a decision row must not
+/// carry a person's address as its subject. An honest-empty envelope (the agent
+/// found nothing it could stand behind) is allowed and lands the same way.
 async fn contact_research_subject(
     tx: &mut Transaction<'_, Postgres>,
     outcome: &ValidatedOutcome,
@@ -155,16 +152,16 @@ async fn contact_research_subject(
     match crowdrelay_infra::contact_research::record_hook_on(
         tx,
         outcome.workspace_id,
-        validated.beacon_id,
+        &validated.email,
         &validated.hook,
         &validated.language,
         "agent:contact-researcher",
     )
     .await
     {
-        Ok(()) => Ok(("beacon", validated.beacon_id)),
+        Ok(()) => Ok(("agent_outcome", outcome.id)),
         Err(crowdrelay_infra::contact_research::ResearchError::NotFound) => {
-            Err(ungrounded_research("the person is not in this workspace").into())
+            Err(ungrounded_research("the task was not pinned to a usable address").into())
         }
         Err(crowdrelay_infra::contact_research::ResearchError::Refused(reason)) => {
             Err(ungrounded_research(reason).into())
@@ -181,13 +178,13 @@ mod contact_research_tests {
     use serde_json::json;
     use time::macros::date;
 
-    const BEACON: &str = "0198f5a0-0000-7000-8000-000000000001";
+    const EMAIL: &str = "redakcja@radio.example.test";
     const URL: &str = "https://radio.example.test/audycje/metalowy-wieczor";
     const TODAY: time::Date = date!(2026 - 10 - 02);
 
     fn metadata(published_on: &str) -> Value {
         json!({
-            "subject_beacon_id": BEACON,
+            "subject_contact_email": EMAIL,
             "evidence": { "urls": [{
                 "url": URL,
                 "tool": "research_contact",
@@ -203,7 +200,6 @@ mod contact_research_tests {
     fn item() -> Value {
         json!({
             "type": "contact_research",
-            "beacon_id": BEACON,
             "fact": "recenzja płyty „Szum” w audycji „Metalowy Wieczór”",
             "praise": "Rzadko ktoś omawia tę płytę tak konkretnie.",
             "source_url": URL,
@@ -215,7 +211,7 @@ mod contact_research_tests {
     fn rejected(item: &Value, metadata: &Value) -> String {
         match validate_contact_research(item, metadata, TODAY) {
             Err(OutcomeRejection::UngroundedContactResearch { reason }) => reason,
-            other => panic!("expected a rejection, got {:?}", other.map(|v| v.beacon_id)),
+            other => panic!("expected a rejection, got {:?}", other.map(|v| v.email)),
         }
     }
 
@@ -223,7 +219,7 @@ mod contact_research_tests {
     fn a_fact_the_tool_showed_and_dated_is_accepted() {
         let valid = validate_contact_research(&item(), &metadata("2026-09-20"), TODAY)
             .expect("grounded and in register");
-        assert_eq!(valid.beacon_id, Uuid::parse_str(BEACON).unwrap());
+        assert_eq!(valid.email, EMAIL);
         assert_eq!(valid.hook.observed_on, date!(2026 - 09 - 20));
         assert_eq!(valid.language, "pl");
         // The citation compares normalised: a trailing slash or a fragment is
@@ -233,14 +229,24 @@ mod contact_research_tests {
         assert!(validate_contact_research(&with_slash, &metadata("2026-09-20"), TODAY).is_ok());
     }
 
+    /// The person is the one the task was pinned to, by address, and the
+    /// answer cannot change it: whatever the item says about who it is for, the
+    /// fact is filed against the pinned address and nobody else's.
     #[test]
-    fn it_must_be_the_person_the_task_was_pinned_to() {
-        let mut other = item();
-        other["beacon_id"] = json!("0198f5a0-0000-7000-8000-000000000002");
-        assert!(rejected(&other, &metadata("2026-09-20")).contains("pinned"));
-        let mut missing = metadata("2026-09-20");
-        missing.as_object_mut().unwrap().remove("subject_beacon_id");
-        assert!(rejected(&item(), &missing).contains("pinned"));
+    fn the_person_comes_from_the_record_of_what_was_asked() {
+        let mut claims_somebody_else = item();
+        claims_somebody_else["beacon_id"] = json!("0198f5a0-0000-7000-8000-000000000002");
+        claims_somebody_else["contact_email"] = json!("ktos.inny@example.test");
+        let valid = validate_contact_research(&claims_somebody_else, &metadata("2026-09-20"), TODAY)
+            .expect("extra fields are ignored, not trusted");
+        assert_eq!(valid.email, EMAIL);
+
+        let mut unpinned = metadata("2026-09-20");
+        unpinned.as_object_mut().unwrap().remove("subject_contact_email");
+        assert!(rejected(&item(), &unpinned).contains("not pinned"));
+        let mut not_an_address = metadata("2026-09-20");
+        not_an_address["subject_contact_email"] = json!("nobody");
+        assert!(rejected(&item(), &not_an_address).contains("not pinned"));
     }
 
     /// The model cannot cite a page it was not shown.
@@ -249,7 +255,7 @@ mod contact_research_tests {
         let mut invented = item();
         invented["source_url"] = json!("https://radio.example.test/audycje/wymyslone");
         assert!(rejected(&invented, &metadata("2026-09-20")).contains("showed the model"));
-        let no_evidence = json!({ "subject_beacon_id": BEACON });
+        let no_evidence = json!({ "subject_contact_email": EMAIL });
         assert!(rejected(&item(), &no_evidence).contains("showed the model"));
     }
 
