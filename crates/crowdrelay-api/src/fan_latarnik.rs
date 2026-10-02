@@ -17,6 +17,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
 };
+use crowdrelay_infra::latarnik_missions::{MissionAnswer, answer_my_mission, my_open_mission};
 use crowdrelay_infra::latarnik_roles::{LatarnikError, MyAnswer, answer_my_role, my_role};
 use serde::Deserialize;
 use serde_json::json;
@@ -120,6 +121,97 @@ pub async fn answer_my_latarnik(
         .into_response(),
         Err(error) => {
             tracing::warn!(%error, "latarnik answer failed");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/me/latarnik/mission` — the one open mission, if there is one.
+pub async fn get_my_mission(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let request_id_value = request_id(&headers);
+    let Some(session) = fan_session_from_headers(&headers) else {
+        return Problem::unauthorized(request_id_value)
+            .private()
+            .into_response();
+    };
+    match my_open_mission(
+        &state.database,
+        state.ticketing.workspace_id().into_uuid(),
+        session.as_str(),
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(mission) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(json!({ "mission": mission })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "latarnik mission read failed");
+            Problem::service_unavailable(request_id_value)
+                .private()
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MissionAnswerRequest {
+    answer: MissionAnswerWire,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MissionAnswerWire {
+    Tap,
+    Dismiss,
+}
+
+/// `POST /v1/me/latarnik/mission/{mission_id}/answer` — `tap` (the share sheet
+/// opened) or `dismiss`. A tap is recorded, never rewarded.
+pub async fn answer_my_mission_route(
+    State(state): State<crate::AppState>,
+    axum::extract::Path(mission_id): axum::extract::Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(body): Json<MissionAnswerRequest>,
+) -> Response {
+    let request_id_value = request_id(&headers);
+    let Some(session) = fan_session_from_headers(&headers) else {
+        return Problem::unauthorized(request_id_value)
+            .private()
+            .into_response();
+    };
+    let answer = match body.answer {
+        MissionAnswerWire::Tap => MissionAnswer::Tap,
+        MissionAnswerWire::Dismiss => MissionAnswer::Dismiss,
+    };
+    match answer_my_mission(
+        &state.database,
+        state.ticketing.workspace_id().into_uuid(),
+        session.as_str(),
+        mission_id,
+        answer,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(json!({ "recorded": true })),
+        )
+            .into_response(),
+        // No session match, not theirs, closed or expired: one answer for all.
+        Ok(false) => Problem::not_found(request_id_value)
+            .private()
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "latarnik mission answer failed");
             Problem::service_unavailable(request_id_value)
                 .private()
                 .into_response()

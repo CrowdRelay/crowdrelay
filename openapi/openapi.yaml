@@ -1319,6 +1319,87 @@ paths:
         '409': { $ref: '#/components/responses/PrivateProblem' }
         '503': { $ref: '#/components/responses/PrivateProblem' }
         '500': { $ref: '#/components/responses/PrivateProblem' }
+  /me/latarnik/mission:
+    get:
+      operationId: getMyLatarnikMission
+      summary: Read the one open mission offered to the signed-in Latarnik
+      description: >-
+        A mission is one question about one real thing (a published show in the
+        Latarnik's own city, or a recent release) and one text they may send to
+        one friend, carrying their own referral link. It is offered here, in
+        their own session, and nowhere else. `mission` is null when nothing is
+        open. A tap or a share is never rewarded: a mission completes only when
+        someone it brought arrives through the Latarnik's own referral code.
+      security: [{ fanSession: [] }]
+      responses:
+        '200':
+          description: The open mission, or null.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/PrivateNoStore' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [mission]
+                properties:
+                  mission:
+                    nullable: true
+                    type: object
+                    additionalProperties: false
+                    required: [id, kind, prompt, share_text, status, expires_at]
+                    properties:
+                      id: { type: string, format: uuid }
+                      kind: { type: string, enum: [show_one_person, release_one_person] }
+                      prompt: { type: string, maxLength: 300 }
+                      share_text: { type: string, maxLength: 600 }
+                      status: { type: string, enum: [offered, tapped] }
+                      expires_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+        '500': { $ref: '#/components/responses/PrivateProblem' }
+  /me/latarnik/mission/{mission_id}/answer:
+    post:
+      operationId: answerMyLatarnikMission
+      summary: Record that the Latarnik tapped send, or dismissed the mission
+      description: >-
+        `tap` records that the share sheet opened; it is evidence of nothing and
+        earns nothing. `dismiss` closes the mission. Not theirs, closed,
+        expired and unauthenticated-for-this-mission are one 404, so the route
+        cannot be used to probe for other people's missions.
+      security: [{ fanSession: [] }]
+      parameters:
+      - name: mission_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [answer]
+              properties:
+                answer: { type: string, enum: [tap, dismiss] }
+      responses:
+        '200':
+          description: Recorded.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/PrivateNoStore' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [recorded]
+                properties:
+                  recorded: { type: boolean }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+        '500': { $ref: '#/components/responses/PrivateProblem' }
   /commerce/coupons/redeem:
     post:
       operationId: redeemMerchCoupon

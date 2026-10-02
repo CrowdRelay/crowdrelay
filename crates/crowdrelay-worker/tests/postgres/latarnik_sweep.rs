@@ -170,6 +170,9 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
                 candidates_recorded: 0,
                 light_ask_ready: 1,
                 referral_opportunities_recorded: 1,
+                missions_offered: 0,
+                missions_completed: 0,
+                missions_expired: 0,
             },
         "{report:?}"
     );
@@ -186,19 +189,17 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
     .bind(ws.into_uuid())
     .fetch_one(&pool)
     .await?;
-    ensure!(opportunities == 1, "the light ask becomes one durable opportunity");
+    ensure!(
+        opportunities == 1,
+        "the light ask becomes one durable opportunity"
+    );
 
     // A second pass cannot create another ask or upgrade the same person into
     // a role behind the first plan's back.
     let second = sweep.run_once(now + Span::hours(1)).await?;
     ensure!(second.referral_opportunities_recorded == 0, "{second:?}");
-    let observed_again = load_fan_evidence(
-        &pool,
-        ws.into_uuid(),
-        now + Span::hours(1),
-        100,
-    )
-    .await?;
+    let observed_again =
+        load_fan_evidence(&pool, ws.into_uuid(), now + Span::hours(1), 100).await?;
     ensure!(
         observed_again
             .iter()
@@ -351,10 +352,14 @@ async fn the_fan_sees_the_invitation_in_their_own_session_and_answers_through_th
     let ws = workspace(&pool).await?;
     let w = ws.into_uuid();
     let now = OffsetDateTime::now_utc();
+    // Session token hashes are unique across the whole database, so a rerun on
+    // the same database must not reuse them.
+    let kuba_token = format!("kuba-{}", Uuid::now_v7());
+    let ania_token = format!("ania-{}", Uuid::now_v7());
     let kuba = fan(&pool, ws, "kuba@fan.test", 90, true).await?;
     let ania = fan(&pool, ws, "ania@fan.test", 90, true).await?;
-    signed_in(&pool, ws, kuba, "kuba-token").await?;
-    signed_in(&pool, ws, ania, "ania-token").await?;
+    signed_in(&pool, ws, kuba, &kuba_token).await?;
+    signed_in(&pool, ws, ania, &ania_token).await?;
     let evidence = FanEvidence {
         account_open: true,
         consented: true,
@@ -372,21 +377,21 @@ async fn the_fan_sees_the_invitation_in_their_own_session_and_answers_through_th
     // No session, no answer.
     ensure!(my_role(&pool, w, "nobody").await?.is_none());
     // A fan with no role sees nothing.
-    ensure!(my_role(&pool, w, "ania-token").await?.map(|r| r.0) == Some(MyRoleState::None));
+    ensure!(my_role(&pool, w, &ania_token).await?.map(|r| r.0) == Some(MyRoleState::None));
 
     // The band's internal candidate is not shown: nothing has been asked.
     let role = record_candidate(&pool, w, "kuba@fan.test", &evidence, now)
         .await?
         .ok_or_else(|| anyhow::anyhow!("candidate"))?;
-    ensure!(my_role(&pool, w, "kuba-token").await?.map(|r| r.0) == Some(MyRoleState::None));
-    let early = answer_my_role(&pool, w, "kuba-token", MyAnswer::Accept, now).await;
+    ensure!(my_role(&pool, w, &kuba_token).await?.map(|r| r.0) == Some(MyRoleState::None));
+    let early = answer_my_role(&pool, w, &kuba_token, MyAnswer::Accept, now).await;
     ensure!(matches!(early, Err(LatarnikError::NotFound)), "{early:?}");
 
     // The operator asks; the fan sees it — and only that fan.
     transition_role(&pool, w, role, RoleStatus::Invited, None, now).await?;
-    ensure!(my_role(&pool, w, "kuba-token").await?.map(|r| r.0) == Some(MyRoleState::Invited));
-    ensure!(my_role(&pool, w, "ania-token").await?.map(|r| r.0) == Some(MyRoleState::None));
-    let wrong = answer_my_role(&pool, w, "kuba-token", MyAnswer::Pause, now).await;
+    ensure!(my_role(&pool, w, &kuba_token).await?.map(|r| r.0) == Some(MyRoleState::Invited));
+    ensure!(my_role(&pool, w, &ania_token).await?.map(|r| r.0) == Some(MyRoleState::None));
+    let wrong = answer_my_role(&pool, w, &kuba_token, MyAnswer::Pause, now).await;
     ensure!(
         matches!(wrong, Err(LatarnikError::IllegalMove { .. })),
         "an answer must fit: {wrong:?}"
@@ -395,7 +400,7 @@ async fn the_fan_sees_the_invitation_in_their_own_session_and_answers_through_th
     // Accepting makes them active with the one capability slice 2 grants; the
     // same person now visibly holds fan and Latarnik roles at once.
     ensure!(
-        answer_my_role(&pool, w, "kuba-token", MyAnswer::Accept, now).await? == RoleStatus::Active
+        answer_my_role(&pool, w, &kuba_token, MyAnswer::Accept, now).await? == RoleStatus::Active
     );
     let listed = list_roles(&pool, w, 10).await?;
     ensure!(listed[0].status == "active" && listed[0].is_also_a_fan);
@@ -408,18 +413,18 @@ async fn the_fan_sees_the_invitation_in_their_own_session_and_answers_through_th
     .await?;
     ensure!(caps == serde_json::json!(["referral_link"]), "{caps}");
     ensure!(
-        answer_my_role(&pool, w, "kuba-token", MyAnswer::Pause, now).await? == RoleStatus::Paused
+        answer_my_role(&pool, w, &kuba_token, MyAnswer::Pause, now).await? == RoleStatus::Paused
     );
     ensure!(
-        answer_my_role(&pool, w, "kuba-token", MyAnswer::Resume, now).await? == RoleStatus::Active
+        answer_my_role(&pool, w, &kuba_token, MyAnswer::Resume, now).await? == RoleStatus::Active
     );
 
     // Leaving is terminal and recorded; the band never asks again.
     ensure!(
-        answer_my_role(&pool, w, "kuba-token", MyAnswer::Leave, now).await? == RoleStatus::Revoked
+        answer_my_role(&pool, w, &kuba_token, MyAnswer::Leave, now).await? == RoleStatus::Revoked
     );
-    ensure!(my_role(&pool, w, "kuba-token").await?.map(|r| r.0) == Some(MyRoleState::Ended));
-    let reopened = answer_my_role(&pool, w, "kuba-token", MyAnswer::Accept, now).await;
+    ensure!(my_role(&pool, w, &kuba_token).await?.map(|r| r.0) == Some(MyRoleState::Ended));
+    let reopened = answer_my_role(&pool, w, &kuba_token, MyAnswer::Accept, now).await;
     ensure!(
         matches!(reopened, Err(LatarnikError::IllegalMove { .. })),
         "{reopened:?}"
@@ -438,8 +443,7 @@ async fn the_fan_sees_the_invitation_in_their_own_session_and_answers_through_th
         .ok_or_else(|| anyhow::anyhow!("candidate"))?;
     transition_role(&pool, w, ania_role, RoleStatus::Invited, None, now).await?;
     ensure!(
-        answer_my_role(&pool, w, "ania-token", MyAnswer::Decline, now).await?
-            == RoleStatus::Revoked
+        answer_my_role(&pool, w, &ania_token, MyAnswer::Decline, now).await? == RoleStatus::Revoked
     );
     let reason: Option<String> = sqlx::query_scalar(
         "SELECT status_reason FROM latarnik_roles WHERE workspace_id=$1 AND id=$2",
@@ -452,5 +456,200 @@ async fn the_fan_sees_the_invitation_in_their_own_session_and_answers_through_th
         reason.as_deref() == Some("declined_by_person"),
         "{reason:?}"
     );
+    Ok(())
+}
+
+async fn make_active_latarnik(
+    pool: &PgPool,
+    ws: WorkspaceId,
+    email: &str,
+    token: &str,
+    locale: &str,
+    now: OffsetDateTime,
+) -> Result<(Uuid, Uuid)> {
+    use crowdrelay_infra::latarnik_roles::{MyAnswer, answer_my_role};
+    let w = ws.into_uuid();
+    let fan_id = fan(pool, ws, email, 90, true).await?;
+    sqlx::query("UPDATE fans SET locale = $3 WHERE workspace_id=$1 AND id=$2")
+        .bind(w)
+        .bind(fan_id)
+        .bind(locale)
+        .execute(pool)
+        .await?;
+    signed_in(pool, ws, fan_id, token).await?;
+    let evidence = FanEvidence {
+        account_open: true,
+        consented: true,
+        tenure_days: 90,
+        active_now: true,
+        active_before: true,
+        distinct_actions_90d: 3,
+        attended_show_90d: true,
+        has_purchased: false,
+        qualified_referrals: 0,
+        suppressed_in_any_role: false,
+        already_asked: false,
+    };
+    let role = record_candidate(pool, w, email, &evidence, now)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("candidate"))?;
+    transition_role(pool, w, role, RoleStatus::Invited, None, now).await?;
+    answer_my_role(pool, w, token, MyAnswer::Accept, now).await?;
+    Ok((fan_id, role))
+}
+
+/// A mission is one real thing, offered inside the Latarnik's own session, one at
+/// a time, and completed only by someone it brought — never by a tap.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_referral() -> Result<()>
+{
+    use crowdrelay_infra::latarnik_missions::{
+        MissionAnswer, answer_my_mission, my_open_mission, settle,
+    };
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let w = ws.into_uuid();
+    let now = OffsetDateTime::now_utc();
+    let kuba_token = format!("mission-kuba-{}", Uuid::now_v7());
+    let ania_token = format!("mission-ania-{}", Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'member_site_base_url', 'https://band.example/')",
+    )
+    .bind(w)
+    .execute(&pool)
+    .await?;
+
+    let (kuba, kuba_role) =
+        make_active_latarnik(&pool, ws, "kuba@fan.test", &kuba_token, "pl-PL", now).await?;
+    let (_ania, _ania_role) =
+        make_active_latarnik(&pool, ws, "ania@fan.test", &ania_token, "en-GB", now).await?;
+
+    // Accepting gave each their own referral code and the one capability.
+    let codes: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM referral_codes WHERE workspace_id=$1 AND active")
+            .bind(w)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(codes == 2, "{codes}");
+
+    // Nothing real to ask yet: no show, no release. No mission, nothing invented.
+    let sweep = LatarnikSweep::new(pool.clone(), ws, Duration::from_secs(10));
+    ensure!(sweep.run_once(now).await?.missions_offered == 0);
+    ensure!(my_open_mission(&pool, w, &kuba_token, now).await?.is_none());
+
+    // A published show in Kuba's city and a fresh release.
+    let city: Uuid = sqlx::query_scalar("SELECT id FROM cities LIMIT 1")
+        .fetch_one(&pool)
+        .await?;
+    sqlx::query("INSERT INTO fan_city_interests (workspace_id, fan_id, city_id) VALUES ($1,$2,$3)")
+        .bind(w)
+        .bind(kuba)
+        .bind(city)
+        .execute(&pool)
+        .await?;
+    let show = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO events (id, workspace_id, city_id, slug, title, starts_at, status, published_at)
+         VALUES ($1,$2,$3,'gorzow','Gorzów show', now() + interval '12 days','published', now())",
+    )
+    .bind(show)
+    .bind(w)
+    .bind(city)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO content_sources (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+         VALUES ($1,'video','youtube:abc','Technophobia', now() - interval '3 days', now() + interval '60 days', '{}'::jsonb)",
+    )
+    .bind(w)
+    .execute(&pool)
+    .await?;
+
+    let offered = sweep.run_once(now).await?;
+    ensure!(offered.missions_offered == 2, "{offered:?}");
+    ensure!(
+        sweep.run_once(now).await?.missions_offered == 0,
+        "one open mission each"
+    );
+
+    let mine = my_open_mission(&pool, w, &kuba_token, now)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("mission"))?;
+    ensure!(
+        mine.kind == "show_one_person" && mine.status == "offered",
+        "{mine:?}"
+    );
+    ensure!(
+        mine.prompt.contains("jedną osobę"),
+        "Polish for a pl-PL fan: {}",
+        mine.prompt
+    );
+    ensure!(
+        mine.share_text.contains("https://band.example/r/") && !mine.share_text.contains("//r/"),
+        "their own link on the stored site root: {}",
+        mine.share_text
+    );
+    let hers = my_open_mission(&pool, w, &ania_token, now)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("mission"))?;
+    ensure!(
+        hers.kind == "release_one_person" && hers.prompt.contains("one person"),
+        "{hers:?}"
+    );
+    ensure!(hers.id != mine.id);
+
+    // Nobody can answer someone else's mission, and a stranger learns nothing.
+    ensure!(!answer_my_mission(&pool, w, &ania_token, mine.id, MissionAnswer::Tap, now).await?);
+    ensure!(!answer_my_mission(&pool, w, "nobody", mine.id, MissionAnswer::Tap, now).await?);
+
+    // A tap is recorded and completes nothing.
+    ensure!(answer_my_mission(&pool, w, &kuba_token, mine.id, MissionAnswer::Tap, now).await?);
+    let (done, _) = settle(&pool, w, now + Span::hours(1)).await?;
+    ensure!(done == 0, "a tap earns nothing");
+
+    // Someone Kuba brought arrives through his code after the tap: completed.
+    let friend = fan(&pool, ws, "friend@fan.test", 1, true).await?;
+    let code_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
+    )
+    .bind(w)
+    .bind(kuba)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO referral_attributions
+             (workspace_id, referrer_fan_id, referred_fan_id, referral_code_id, accepted_at,
+              status, qualified_at)
+         VALUES ($1,$2,$3,$4,$5,'qualified',$5)",
+    )
+    .bind(w)
+    .bind(kuba)
+    .bind(friend)
+    .bind(code_id)
+    .bind(now + Span::hours(2))
+    .execute(&pool)
+    .await?;
+    let (done, _) = settle(&pool, w, now + Span::hours(3)).await?;
+    ensure!(done == 1, "{done}");
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM latarnik_missions WHERE workspace_id=$1 AND id=$2")
+            .bind(w)
+            .bind(mine.id)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(status == "completed");
+    ensure!(my_open_mission(&pool, w, &kuba_token, now).await?.is_none());
+
+    // Ania's untouched mission runs out its time and frees her slot; the
+    // cooldown from its offer then still holds her back from a new one.
+    let (_, expired) = settle(&pool, w, now + Span::days(11)).await?;
+    ensure!(expired == 1, "{expired}");
+    ensure!(
+        sweep.run_once(now + Span::days(11)).await?.missions_offered == 0,
+        "inside the cooldown from the last offer, and Kuba's too"
+    );
+    let _ = kuba_role;
     Ok(())
 }
