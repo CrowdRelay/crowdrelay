@@ -96,7 +96,7 @@ pub async fn observe(
     let mut tx = pool.begin().await?;
     let prospect_id: uuid::Uuid = sqlx::query_scalar(
         r#"
-        INSERT INTO fan_prospects (
+        INSERT INTO scout_prospects (
             workspace_id, platform, identity_kind, external_identity,
             identity_key, display_name, profile_url, first_seen_at, last_seen_at
         )
@@ -104,10 +104,10 @@ pub async fn observe(
         ON CONFLICT (workspace_id, platform, identity_kind, identity_key)
         DO UPDATE SET
             external_identity = EXCLUDED.external_identity,
-            display_name = COALESCE(EXCLUDED.display_name, fan_prospects.display_name),
-            profile_url = COALESCE(EXCLUDED.profile_url, fan_prospects.profile_url),
-            first_seen_at = LEAST(fan_prospects.first_seen_at, EXCLUDED.first_seen_at),
-            last_seen_at = GREATEST(fan_prospects.last_seen_at, EXCLUDED.last_seen_at),
+            display_name = COALESCE(EXCLUDED.display_name, scout_prospects.display_name),
+            profile_url = COALESCE(EXCLUDED.profile_url, scout_prospects.profile_url),
+            first_seen_at = LEAST(scout_prospects.first_seen_at, EXCLUDED.first_seen_at),
+            last_seen_at = GREATEST(scout_prospects.last_seen_at, EXCLUDED.last_seen_at),
             updated_at = now()
         RETURNING id
         "#,
@@ -125,7 +125,7 @@ pub async fn observe(
 
     sqlx::query(
         r#"
-        INSERT INTO fan_prospect_observations (
+        INSERT INTO scout_prospect_observations (
             workspace_id, prospect_id, observation_kind, source_kind,
             source_id, source_url, evidence, observed_at
         )
@@ -168,7 +168,7 @@ pub async fn link_verified_fan(
 ) -> Result<bool, FanScoutStoreError> {
     let linked = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
-        UPDATE fan_prospects AS prospect
+        UPDATE scout_prospects AS prospect
         SET linked_fan_id = $3,
             status = 'converted',
             converted_at = COALESCE(prospect.converted_at, $4),

@@ -4,11 +4,11 @@
 -- keep prospect discovery/evidence separate from the owned fanbase until a
 -- verified first-party fan already exists and is explicitly linked.
 --
--- fan_prospects is current relationship state. fan_prospect_observations
+-- scout_prospects is current relationship state. scout_prospect_observations
 -- is append-only evidence. Re-discovery may refresh names/last_seen but never
 -- silently clears refusal/suppression and never inserts into fans.
 
-CREATE TABLE fan_prospects (
+CREATE TABLE scout_prospects (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id        uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     platform            text NOT NULL
@@ -63,13 +63,13 @@ CREATE TABLE fan_prospects (
     UNIQUE (workspace_id, id)
 );
 
-CREATE INDEX fan_prospects_status_idx
-    ON fan_prospects (workspace_id, status, last_seen_at DESC);
-CREATE INDEX fan_prospects_linked_fan_idx
-    ON fan_prospects (workspace_id, linked_fan_id)
+CREATE INDEX scout_prospects_status_idx
+    ON scout_prospects (workspace_id, status, last_seen_at DESC);
+CREATE INDEX scout_prospects_linked_fan_idx
+    ON scout_prospects (workspace_id, linked_fan_id)
     WHERE linked_fan_id IS NOT NULL;
 
-CREATE TABLE fan_prospect_observations (
+CREATE TABLE scout_prospect_observations (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id        uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     prospect_id         uuid NOT NULL,
@@ -99,7 +99,7 @@ CREATE TABLE fan_prospect_observations (
     observed_at         timestamptz NOT NULL,
     created_at          timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (workspace_id, prospect_id)
-        REFERENCES fan_prospects(workspace_id, id) ON DELETE CASCADE,
+        REFERENCES scout_prospects(workspace_id, id) ON DELETE CASCADE,
     UNIQUE (
         workspace_id,
         prospect_id,
@@ -109,5 +109,5 @@ CREATE TABLE fan_prospect_observations (
     )
 );
 
-CREATE INDEX fan_prospect_observations_recent_idx
-    ON fan_prospect_observations (workspace_id, prospect_id, observed_at DESC);
+CREATE INDEX scout_prospect_observations_recent_idx
+    ON scout_prospect_observations (workspace_id, prospect_id, observed_at DESC);

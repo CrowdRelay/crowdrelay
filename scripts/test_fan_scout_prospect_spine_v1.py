@@ -8,8 +8,8 @@ migration = (R / "migrations/0404_fan_scout_prospect_spine.sql").read_text()
 infra = (R / "crates/crowdrelay-infra/src/fan_scout.rs").read_text()
 domain = (R / "crates/crowdrelay-domain/src/fan_scout.rs").read_text()
 
-assert "CREATE TABLE fan_prospects" in migration
-assert "CREATE TABLE fan_prospect_observations" in migration
+assert "CREATE TABLE scout_prospects" in migration
+assert "CREATE TABLE scout_prospect_observations" in migration
 assert "linked_fan_id" in migration
 assert "UNIQUE (workspace_id, platform, identity_kind, identity_key)" in migration
 assert "INSERT INTO fans" not in migration

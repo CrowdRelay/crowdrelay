@@ -87,7 +87,7 @@ async fn rediscovery_dedupes_and_never_clears_refusal() -> Result<(), Box<dyn st
     assert_eq!(first, same, "handle case and @ are one prospect");
 
     let observations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM fan_prospect_observations
+        "SELECT count(*) FROM scout_prospect_observations
          WHERE workspace_id=$1 AND prospect_id=$2",
     )
     .bind(ws.into_uuid())
@@ -97,7 +97,7 @@ async fn rediscovery_dedupes_and_never_clears_refusal() -> Result<(), Box<dyn st
     assert_eq!(observations, 1, "the same source observation is idempotent");
 
     sqlx::query(
-        "UPDATE fan_prospects SET status='refused'
+        "UPDATE scout_prospects SET status='refused'
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(ws.into_uuid())
@@ -116,7 +116,7 @@ async fn rediscovery_dedupes_and_never_clears_refusal() -> Result<(), Box<dyn st
     )
     .await?;
     let status: String =
-        sqlx::query_scalar("SELECT status FROM fan_prospects WHERE workspace_id=$1 AND id=$2")
+        sqlx::query_scalar("SELECT status FROM scout_prospects WHERE workspace_id=$1 AND id=$2")
             .bind(ws.into_uuid())
             .bind(first.into_uuid())
             .fetch_one(&pool)
@@ -164,7 +164,7 @@ async fn conversion_only_links_an_existing_verified_same_workspace_fan()
     assert!(link_verified_fan(&pool, ws, prospect, local_fan, now).await?);
 
     let linked: (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT status, linked_fan_id FROM fan_prospects
+        "SELECT status, linked_fan_id FROM scout_prospects
          WHERE workspace_id=$1 AND id=$2",
     )
     .bind(ws.into_uuid())
