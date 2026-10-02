@@ -67,6 +67,7 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                COALESCE(relay_failed.source_ids, ARRAY[]::uuid[]) AS relay_failure_sources,
                COALESCE(relay_failed.counts, ARRAY[]::bigint[]) AS relay_failure_counts,
                COALESCE(relay_failed.last_failed, ARRAY[]::timestamptz[]) AS relay_failure_last,
+               last.last_draft_at,
                provenance.converted_fans,
                provenance.interactions,
                durable.durable_fans,
@@ -277,6 +278,7 @@ struct RelayTargetRow {
     relay_failure_sources: Vec<Uuid>,
     relay_failure_counts: Vec<i64>,
     relay_failure_last: Vec<OffsetDateTime>,
+    last_draft_at: Option<OffsetDateTime>,
     converted_fans: i64,
     interactions: i64,
     durable_fans: i64,
@@ -294,8 +296,9 @@ fn relay_quality(row: &RelayTargetRow) -> (i64, i64, i64) {
 /// Select at most three rested communities for one source-bound relay.
 ///
 /// Two slots exploit first-party outcome evidence; one slot is reserved for
-/// a community with no measured outcome yet. The fallback fills any empty
-/// slots in rotation order, so a new tenant with no history behaves exactly
+/// a community the relay has never attempted. A previously used room with zero
+/// yield is measured-zero, not exploration. The fallback fills any empty slots
+/// in rotation order, so a new tenant with no history behaves exactly
 /// like the old fair round-robin instead of being starved by "quality" it
 /// cannot possibly have measured yet.
 fn select_relay_targets(rows: Vec<RelayTargetRow>) -> Vec<RelayTargetRow> {
@@ -324,7 +327,10 @@ fn select_relay_targets(rows: Vec<RelayTargetRow>) -> Vec<RelayTargetRow> {
         .iter()
         .enumerate()
         .find_map(|(index, row)| {
-            (relay_quality(row) == (0, 0, 0) && !selected.contains(&index)).then_some(index)
+            (row.last_draft_at.is_none()
+                && relay_quality(row) == (0, 0, 0)
+                && !selected.contains(&index))
+            .then_some(index)
         })
     {
         selected.insert(index);
