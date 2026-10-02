@@ -71,7 +71,7 @@ impl Fixture {
         self.workspace_id.into_uuid()
     }
 
-    async fn target(
+    pub(crate) async fn target(
         &self,
         name: &str,
         kind: &str,

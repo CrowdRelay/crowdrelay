@@ -343,12 +343,22 @@ const OUTREACH_SNAPSHOT_SQL: &str = r#"
                AND interaction.phase = 'reply'
                AND interaction.disposition = 'declined'
             ) AS last_declined_at,
+            -- In flight per TARGET, not per opportunity. One inbox can carry
+            -- several opportunities at once (two release sources for the same
+            -- video, a release plus a show), and an opportunity-scoped check
+            -- let each of them park its own approval card: measured in
+            -- production 2026-10-02, NNRadio held three pending pitches
+            -- (two byte-identical) and Power Radio Berlin-Brandenburg two.
+            -- Approving them would mail one station several times in a day.
             EXISTS (
                 SELECT 1
                 FROM autopilot_actions AS action
+                JOIN outreach_opportunities AS sibling
+                  ON sibling.workspace_id = action.workspace_id
+                 AND sibling.id = action.subject_id
                 WHERE action.workspace_id = $1
                   AND action.context = 'outreach'
-                  AND action.subject_id = opportunity.id
+                  AND sibling.target_id = opportunity.target_id
                   AND action.status IN ('awaiting_approval','queued','processing')
             ) AS in_flight,
             -- Nobody is pitched unread: a dated, sourced fact about what this
