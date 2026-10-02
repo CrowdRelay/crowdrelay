@@ -892,6 +892,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let community_join_executor_shutdown = shutdown_receiver.clone();
     let contact_research_shutdown = shutdown_receiver.clone();
     let prospect_sweep_shutdown = shutdown_receiver.clone();
+    let latarnik_sweep_shutdown = shutdown_receiver.clone();
     let community_rules_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let video_source_sync_shutdown = shutdown_receiver.clone();
@@ -1147,6 +1148,18 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         );
         spawn_named(&mut runtime_tasks, "prospect sweep", async move {
             worker.run(prospect_sweep_shutdown).await;
+        });
+    }
+    // Detects fans ready to carry the band to a friend before their first
+    // referral and records them as candidates. Asks nobody. See `latarnik_sweep`.
+    {
+        let worker = crowdrelay_worker::latarnik_sweep::LatarnikSweep::new(
+            database.clone(),
+            workspace_id,
+            config.database.operation_timeout,
+        );
+        spawn_named(&mut runtime_tasks, "latarnik sweep", async move {
+            worker.run(latarnik_sweep_shutdown).await;
         });
     }
     if let Some(worker) = community_rules::CommunityRulesWorker::new(

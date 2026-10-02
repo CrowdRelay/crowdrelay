@@ -1,0 +1,114 @@
+//! Finds the fans most likely to carry the band to a friend, before they have
+//! referred anybody, and records them as Latarnik candidates.
+//!
+//! It reads first-party behaviour only (`latarnik_roles::load_fan_evidence`),
+//! asks the pure evaluator what each fan's advocacy readiness warrants, and
+//! writes exactly one thing: a `candidate` role row with the evidence frozen on
+//! it. It never contacts anyone — moving a candidate to `invited` is a separate,
+//! gated step — and it never changes a fan's status. A fan the evaluator would
+//! only *ask for one referral* is counted but gets no role: a light ask is not
+//! the role, and the role is one row per person.
+
+use std::time::Duration;
+
+use crowdrelay_domain::{
+    WorkspaceId,
+    latarnik::{LatarnikMove, evaluate},
+};
+use crowdrelay_infra::latarnik_roles::{LatarnikError, load_fan_evidence, record_candidate};
+use sqlx::PgPool;
+use time::OffsetDateTime;
+use tokio::{
+    sync::watch,
+    time::{MissedTickBehavior, interval, timeout},
+};
+
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Fans read per pass; a larger fanbase is worked through over passes, oldest
+/// fans first.
+pub const FANS_PER_PASS: i64 = 1_000;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SweepError {
+    #[error(transparent)]
+    Latarnik(#[from] LatarnikError),
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct SweepReport {
+    pub fans_read: u64,
+    /// Roles created this pass.
+    pub candidates_recorded: u64,
+    /// Fans whose readiness is real but light: the one-referral ask, not the
+    /// role. Counted so the readout can say how many there are.
+    pub light_ask_ready: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LatarnikSweep {
+    pool: PgPool,
+    workspace_id: WorkspaceId,
+    operation_timeout: Duration,
+}
+
+impl LatarnikSweep {
+    #[must_use]
+    pub fn new(pool: PgPool, workspace_id: WorkspaceId, operation_timeout: Duration) -> Self {
+        Self {
+            pool,
+            workspace_id,
+            operation_timeout,
+        }
+    }
+
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+        let mut ticker = interval(SWEEP_INTERVAL);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    match timeout(self.operation_timeout * 6, self.run_once(OffsetDateTime::now_utc())).await {
+                        Ok(Ok(report)) if report != SweepReport::default() => {
+                            tracing::info!(?report, "latarnik sweep");
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => tracing::warn!(%error, "latarnik sweep failed"),
+                        Err(_) => tracing::warn!("latarnik sweep timed out"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// One pass; public so tests drive the real queries with their own clock.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the database error.
+    pub async fn run_once(&self, now: OffsetDateTime) -> Result<SweepReport, SweepError> {
+        let ws = self.workspace_id.into_uuid();
+        let mut report = SweepReport::default();
+        for fan in load_fan_evidence(&self.pool, ws, now, FANS_PER_PASS).await? {
+            report.fans_read += 1;
+            match evaluate(&fan.evidence) {
+                LatarnikMove::InviteToLatarnik => {
+                    if record_candidate(&self.pool, ws, &fan.email, &fan.evidence, now)
+                        .await?
+                        .is_some()
+                    {
+                        report.candidates_recorded += 1;
+                    }
+                }
+                LatarnikMove::AskForReferral => report.light_ask_ready += 1,
+                LatarnikMove::None(_) => {}
+            }
+        }
+        Ok(report)
+    }
+}

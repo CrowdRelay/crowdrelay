@@ -25,6 +25,7 @@ mod growth_metric_sync_schedule;
 mod import_opportunities;
 mod import_outreach;
 mod join_ask;
+mod latarnik_sweep;
 mod no_agent_service;
 mod ops_watchdog;
 mod osm_venue_sweep;
