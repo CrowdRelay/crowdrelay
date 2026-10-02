@@ -84,14 +84,19 @@ pub async fn latest_hook_on(
     .bind(i32::try_from(crowdrelay_domain::contact_research::PRAISE_MIN_CHARS).unwrap_or(40))
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(
-        row.map(|(fact, praise, source_url, observed_on)| PersonalHook {
-            fact,
-            praise,
-            source_url,
+    Ok(row.and_then(|(fact, praise, source_url, observed_on)| {
+        // Research quality evolves. Re-validate persisted rows against today's
+        // contract so an old generic/meta-AI opener cannot keep unlocking
+        // outward mail forever just because it was accepted by an older build.
+        PersonalHook::new(
+            &fact,
+            praise.as_deref(),
+            &source_url,
             observed_on,
-        }),
-    )
+            today,
+        )
+        .ok()
+    }))
 }
 
 /// Records an already-validated hook against an address on `conn`.
