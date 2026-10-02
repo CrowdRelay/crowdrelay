@@ -13,6 +13,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(in crate::autopilot::evaluate) fn growth_intelligence_candidate(
     blocked_on_membership: &mut Vec<(String, u32)>,
+    rooms_unread: &mut Vec<String>,
     snapshot: &GrowthIntelligenceSnapshot,
     policy: &AutopilotPolicy,
     evidence: ContextEvidence,
@@ -42,6 +43,7 @@ pub(in crate::autopilot::evaluate) fn growth_intelligence_candidate(
             strategy,
             exploration_novelty,
             blocked_on_membership,
+            rooms_unread,
         );
     }
     // All other templates: 0 or 1 workspace-wide candidate.

@@ -586,6 +586,7 @@ mod tests {
                 community_url: None,
                 language: Some("en".to_owned()),
                 relay_failures: Vec::new(),
+ recent_threads: Vec::new(),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
@@ -594,6 +595,7 @@ mod tests {
                 community_url: None,
                 language: None,
                 relay_failures: Vec::new(),
+ recent_threads: Vec::new(),
             },
         ];
 
@@ -836,6 +838,7 @@ mod tests {
             community_url: None,
             language: Some("en".to_owned()),
             relay_failures: Vec::new(),
+ recent_threads: Vec::new(),
         }];
         // Five hours old: doing well, but too early to tell.
         let fresh = content_candidates(
@@ -959,6 +962,7 @@ mod tests {
                 community_url: None,
                 language: Some("en".to_owned()),
                 relay_failures: Vec::new(),
+ recent_threads: Vec::new(),
             },
             CommunityRelayTarget {
                 target_id: OutreachTargetId::new(),
@@ -967,6 +971,7 @@ mod tests {
                 community_url: None,
                 language: None,
                 relay_failures: Vec::new(),
+ recent_threads: Vec::new(),
             },
         ];
 

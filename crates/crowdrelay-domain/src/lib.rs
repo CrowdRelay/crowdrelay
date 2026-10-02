@@ -145,6 +145,7 @@ pub mod reply_rescue;
 pub mod reply_triage;
 pub mod reply_verdict_map;
 pub mod representation;
+pub mod room_reading;
 pub mod roster_catalogue_rotation;
 pub mod roster_overview;
 pub mod roster_plan;

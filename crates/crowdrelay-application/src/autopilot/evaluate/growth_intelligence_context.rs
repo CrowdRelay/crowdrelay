@@ -168,6 +168,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             // target community. Other templates return 0 or 1.
             let candidates = growth_intelligence_candidate(
                 &mut report.blocked_on_membership,
+                &mut report.rooms_unread,
                 snapshot,
                 policy,
                 evidence.for_context(policy.context),

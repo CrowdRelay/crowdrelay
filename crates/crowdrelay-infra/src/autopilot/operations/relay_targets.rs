@@ -66,7 +66,8 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                COALESCE(NULLIF(t.community_url, ''), place.url) AS community_url,
                COALESCE(relay_failed.source_ids, ARRAY[]::uuid[]) AS relay_failure_sources,
                COALESCE(relay_failed.counts, ARRAY[]::bigint[]) AS relay_failure_counts,
-               COALESCE(relay_failed.last_failed, ARRAY[]::timestamptz[]) AS relay_failure_last
+               COALESCE(relay_failed.last_failed, ARRAY[]::timestamptz[]) AS relay_failure_last,
+               room.threads
         FROM agent_outreach_targets t
         LEFT JOIN discovery_places place
           ON place.id = t.place_id AND place.workspace_id = t.workspace_id
@@ -116,6 +117,27 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                 GROUP BY source_part
             ) per_source
         ) relay_failed ON true
+        -- What the room is discussing now: the threads the community sweep read
+        -- there (`fan_observations`, kind 'post'), each with its own date and
+        -- permalink. The window is `room_reading::READ_MAX_AGE_DAYS`.
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                       'title', recent.fact,
+                       'url', recent.url,
+                       'posted_on', recent.observed_on) ORDER BY recent.observed_on DESC, recent.url), '[]'::jsonb)
+                       AS threads
+            FROM (
+                SELECT DISTINCT ON (fo.url) fo.fact, fo.url, fo.observed_at::date AS observed_on
+                FROM fan_observations AS fo
+                WHERE fo.workspace_id = t.workspace_id
+                  AND fo.place_id = t.place_id
+                  AND fo.kind = 'post'
+                  AND fo.url IS NOT NULL
+                  AND fo.observed_at >= current_date - 14
+                  AND fo.observed_at <= current_date
+                ORDER BY fo.url, fo.observed_at DESC
+            ) AS recent
+        ) AS room ON true
         WHERE t.workspace_id = $1
           AND t.target_kind = 'community'
           AND t.screening_verdict = 'admitted'
@@ -186,6 +208,7 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                 platform: row.platform,
                 community_url: row.community_url,
                 relay_failures,
+                recent_threads: super::growth_intelligence::read_room_threads(&row.threads),
             })
         })
         .collect()
@@ -201,4 +224,5 @@ struct RelayTargetRow {
     relay_failure_sources: Vec<Uuid>,
     relay_failure_counts: Vec<i64>,
     relay_failure_last: Vec<OffsetDateTime>,
+    threads: serde_json::Value,
 }

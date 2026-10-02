@@ -34,6 +34,7 @@ mod publication_artifact;
 mod receipt_reconciliation;
 mod retention_approvals;
 mod retention_outbox;
+mod room_reading_gate;
 mod sheet_intake;
 mod sheet_intake_scout;
 mod standing_approvals;

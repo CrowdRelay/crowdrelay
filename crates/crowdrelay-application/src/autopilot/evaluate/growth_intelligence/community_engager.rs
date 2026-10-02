@@ -40,6 +40,7 @@ pub(super) fn community_engager_candidates(
     strategy: GrowthStrategy,
     exploration_novelty: f64,
     blocked_on_membership: &mut Vec<(String, u32)>,
+    rooms_unread: &mut Vec<String>,
 ) -> Result<Vec<ScoredCandidate>, serde_json::Error> {
     // Check cooldown — if the template is not due, no candidates.
     // Apply tenant preference cadence multiplier (see
@@ -182,6 +183,19 @@ pub(super) fn community_engager_candidates(
         if graph.is_blocked(&community_post_key(target.target_id)) {
             continue;
         }
+        // Nobody enters a room they have not read. The community sweep records
+        // the threads a room is discussing; a community with too few recent
+        // ones — because the sweep cannot read its platform, has not reached it
+        // yet, or the room is dead — gets no post, whatever it would be worth.
+        // A gate rather than a penalty, like the two above: a post written
+        // from a description and a rules page is the stranger's post this
+        // rule exists to end. Reported, not silent (`rooms_unread`).
+        let room_threads =
+            crowdrelay_domain::room_reading::counted(&target.recent_threads, now.date());
+        if !crowdrelay_domain::room_reading::is_read(&room_threads) {
+            rooms_unread.push(target.subreddit.clone());
+            continue;
+        }
         // Build a per-community dispatch context. The subreddit_type is
         // the specific community's classification, not the first target's.
         let subreddit_type = classify_community(target);
@@ -317,6 +331,9 @@ pub(super) fn community_engager_candidates(
         if let Some(members) = target.member_count {
             prompt.push_str(&format!("\n- members: {members}"));
         }
+        prompt.push_str(&crowdrelay_domain::room_reading::room_paragraph(
+            &room_threads,
+        ));
         // The community's own conversion record — stated to the drafter
         // because "match what worked" means nothing when the evidence that
         // something worked never reaches the prompt. Zero is still worth
@@ -501,7 +518,132 @@ mod tests {
             converted_fans_90d: 0,
             interactions_90d: 0,
             durable_fans_90d: 0,
+            recent_threads: Vec::new(),
         }
+    }
+
+    // ---- rooms are read before they are entered -------------------------
+
+    fn read_threads(days_ago: &[i64]) -> Vec<crowdrelay_domain::room_reading::RoomThread> {
+        let today = OffsetDateTime::now_utc().date();
+        days_ago
+            .iter()
+            .enumerate()
+            .map(|(n, days)| crowdrelay_domain::room_reading::RoomThread {
+                title: format!("Weekly {n}: what are you listening to?"),
+                url: format!("https://www.reddit.com/comments/thread{n}"),
+                posted_on: today - time::Duration::days(*days),
+            })
+            .collect()
+    }
+
+    fn engager_snapshot(targets: Vec<UnengagedTarget>) -> GrowthIntelligenceSnapshot {
+        use crowdrelay_brain::{
+            AgentExecutionHealth, TenantPreferencePosterior, WorldModel,
+            hypothesis::HypothesisState, self_assessment::MetacognitionMonitor,
+        };
+        GrowthIntelligenceSnapshot {
+            fatigue: None,
+            template_id: "community-engager".to_owned(),
+            hours_since_last_run: Some(500),
+            hours_since_last_effective_run: Some(500),
+            has_upcoming_event: false,
+            days_to_next_event: None,
+            fan_growth_stagnant: false,
+            unengaged_outreach_targets: u32::try_from(targets.len()).unwrap_or(0),
+            unengaged_targets: targets,
+            recent_insights: Vec::new(),
+            community_engagement_history: Vec::new(),
+            social_content_history: Vec::new(),
+            standing: crowdrelay_domain::learning::Standing::Untested { measured: 0 },
+            world_model: WorldModel::default(),
+            tenant_preference: TenantPreferencePosterior::default(),
+            hypothesis_state: HypothesisState::Active,
+            metacognition: MetacognitionMonitor::default(),
+            agent_execution_health: AgentExecutionHealth::default(),
+            rescan_requested: false,
+        }
+    }
+
+    /// Runs the engager's candidate pass; returns the prompts it dispatched and
+    /// the rooms it reported as unread.
+    fn dispatched(targets: Vec<UnengagedTarget>) -> (Vec<String>, Vec<String>) {
+        let policy = AutopilotPolicy {
+            context: AutopilotContext::GrowthIntelligence,
+            enabled: true,
+            autonomy_level: crowdrelay_domain::autonomy::AutonomyLevel::BoundedAuto,
+            minimum_confidence: crowdrelay_domain::autonomy::Confidence::from_basis_points(5_000)
+                .expect("valid basis points"),
+            max_actions_24h: 50,
+            config: AutopilotPolicyConfig::GrowthIntelligence(GrowthIntelligencePolicy::default()),
+            version: 1,
+            guarded_until: None,
+            guardrail_reason: None,
+        };
+        let AutopilotPolicyConfig::GrowthIntelligence(domain_policy) = &policy.config else {
+            unreachable!("built just above")
+        };
+        let mut blocked = Vec::new();
+        let mut unread = Vec::new();
+        let candidates = community_engager_candidates(
+            &engager_snapshot(targets),
+            &policy,
+            domain_policy,
+            ContextEvidence::UNPROVEN,
+            WorkspaceId::new(),
+            OffsetDateTime::now_utc(),
+            &CausalModel::default(),
+            GrowthStrategy::AggressiveDiscovery,
+            0.0,
+            &mut blocked,
+            &mut unread,
+        )
+        .expect("candidates build");
+        let prompts = candidates
+            .iter()
+            .filter_map(|scored| match &scored.candidate.action {
+                AutopilotActionPayload::RequestAgentRun { prompt, .. } => Some(prompt.clone()),
+                _ => None,
+            })
+            .collect();
+        (prompts, unread)
+    }
+
+    #[test]
+    fn a_room_the_band_has_not_read_gets_no_post_and_is_reported() {
+        let mut quiet = target("djent");
+        quiet.target_id = uuid::Uuid::now_v7();
+        quiet.recent_threads = read_threads(&[1, 2]);
+        let mut unreadable = target("a_forum");
+        unreadable.target_id = uuid::Uuid::now_v7();
+        let (prompts, unread) = dispatched(vec![quiet, unreadable]);
+        assert!(
+            prompts.is_empty(),
+            "posted into an unread room: {prompts:?}"
+        );
+        assert_eq!(unread, ["djent", "a_forum"]);
+    }
+
+    #[test]
+    fn a_post_is_drafted_with_the_threads_the_room_is_discussing() {
+        let mut room = target("metal");
+        room.recent_threads = read_threads(&[1, 3, 6]);
+        let (prompts, unread) = dispatched(vec![room.clone()]);
+        assert!(unread.is_empty());
+        assert_eq!(prompts.len(), 1);
+        for thread in &room.recent_threads {
+            assert!(prompts[0].contains(&thread.url), "{}", prompts[0]);
+        }
+        assert!(prompts[0].contains("fits_thread_url"));
+    }
+
+    #[test]
+    fn threads_older_than_the_window_do_not_make_a_room_read() {
+        let mut stale = target("oldroom");
+        stale.recent_threads = read_threads(&[1, 20, 40]);
+        let (prompts, unread) = dispatched(vec![stale]);
+        assert!(prompts.is_empty());
+        assert_eq!(unread, ["oldroom"]);
     }
 
     /// The regression that made this worth a graph rather than a condition.

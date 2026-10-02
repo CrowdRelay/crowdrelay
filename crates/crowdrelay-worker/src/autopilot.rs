@@ -637,6 +637,19 @@ impl AutopilotWorker {
                         "growth blocked: posts are waiting on communities nobody has joined"
                     );
                 }
+                // Nobody posts into a room the band has not read. A community
+                // with too few recent threads on record gets no post, and
+                // without this line that reads exactly like a brain with
+                // nothing to say. Only Reddit has a reader today, so every
+                // other platform's communities are listed here until one is
+                // built.
+                if !report.rooms_unread.is_empty() {
+                    tracing::warn!(
+                        communities = report.rooms_unread.len(),
+                        unread = ?report.rooms_unread.iter().take(10).collect::<Vec<_>>(),
+                        "growth held: communities the band has not read this fortnight"
+                    );
+                }
                 // Same reason as the membership gate above: a configured
                 // join-ask platform that stays quiet is work waiting on a
                 // person (no connection, no photo, no site URL), and a

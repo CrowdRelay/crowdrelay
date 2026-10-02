@@ -131,6 +131,15 @@ fn drop_surge_candidates(
                 let Some(retry) = surge_retry(snapshot, &format!("community:{target_id}"), now) else {
                     continue;
                 };
+                // Nobody enters a room they have not read, a fresh drop
+                // included: the first hours are worth less than a post
+                // written about a room nobody looked into. Only Reddit has a
+                // reader, so a forum or a Discord lands here until one exists.
+                let room_threads =
+                    crowdrelay_domain::room_reading::counted(&target.recent_threads, now.date());
+                if !crowdrelay_domain::room_reading::is_read(&room_threads) {
+                    continue;
+                }
                 let address = if target.platform == "reddit" {
                     format!("r/{}", target.subreddit)
                 } else {
@@ -155,10 +164,11 @@ fn drop_surge_candidates(
                              source_id: {source}\ntarget_id: {target_id}\nplatform: {}\naddress: {address}\n\
                              language: {}\n\nSource title: {}\nSource URL: {}\nDescription: {}\n\
                              Use only source facts. Follow the community's verified rules.\n\
-                             Missing credentials or a manual-only platform means a draft for a person, not permission to publish.",
+                             Missing credentials or a manual-only platform means a draft for a person, not permission to publish.{}",
                             target.platform, target.language.as_deref().unwrap_or("not recorded"),
                             snapshot.title, snapshot.source_url.as_deref().unwrap_or(""),
                             surge_caption(snapshot, 400),
+                            crowdrelay_domain::room_reading::room_paragraph(&room_threads),
                         ),
                         priority: 1,
                         tier: crowdrelay_brain::AgentTier::Basic,

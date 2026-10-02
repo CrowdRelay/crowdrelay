@@ -247,6 +247,10 @@ pub struct CommunityRelayTarget {
     /// `:attempt{n}` key — without it a dead dispatch dedupes forever while
     /// the community keeps winning the rotation slot.
     pub relay_failures: Vec<RelayLaneFailure>,
+    /// What the room has been discussing lately, as the community sweep read it
+    /// (see `room_reading`). Empty means nobody has looked, and the drop surge
+    /// does not post into a room it has not read.
+    pub recent_threads: Vec<crate::room_reading::RoomThread>,
 }
 
 /// How many fans a Signal push would reach right now, measured with the
