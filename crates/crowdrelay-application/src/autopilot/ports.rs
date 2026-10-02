@@ -53,6 +53,48 @@ use super::model::{
 };
 use crate::RepositoryError;
 
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganicFunnelDirective {
+    ExpandReach,
+    RepairConversion,
+    RepairConfirmation,
+    ActivateFans,
+    RetainFans,
+}
+
+impl OrganicFunnelDirective {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExpandReach => "expand_reach",
+            Self::RepairConversion => "repair_conversion",
+            Self::RepairConfirmation => "repair_confirmation",
+            Self::ActivateFans => "activate_fans",
+            Self::RetainFans => "retain_fans",
+        }
+    }
+
+    #[must_use]
+    pub const fn permits_join_ask(self) -> bool {
+        matches!(self, Self::ExpandReach | Self::RepairConversion)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct OrganicFunnelControl {
+    pub directive: OrganicFunnelDirective,
+    pub mature_links: u32,
+    pub unique_visitors: u32,
+    pub signups: u32,
+    pub confirmed: u32,
+    pub activation_mature: u32,
+    pub activated_mature: u32,
+    pub retention_mature: u32,
+    pub retained: u32,
+}
+
 /// A causal model and the identity of the belief state that produced it.
 ///
 /// A decision persists the number the model gave it. Without this it could not
@@ -494,6 +536,18 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     /// Each snapshot carries the hours since the last run and the workspace's
     /// current situation (upcoming events, fan growth, unengaged targets).
     /// The deterministic evaluator uses these to decide whether to dispatch.
+    /// The mature verified-organic funnel's current limiting stage.
+    ///
+    /// Defaulting to None keeps non-SQL test repositories honest: no funnel
+    /// read means no override, never an invented zero.
+    async fn load_organic_funnel_control(
+        &self,
+        _workspace_id: WorkspaceId,
+        _now: OffsetDateTime,
+    ) -> Result<Option<OrganicFunnelControl>, RepositoryError> {
+        Ok(None)
+    }
+
     async fn load_growth_intelligence_snapshots(
         &self,
         workspace_id: WorkspaceId,
