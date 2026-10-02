@@ -419,13 +419,9 @@ async fn monthly_verified_organic_goal_drives_the_existing_brain_control_loop()
         .await?;
     }
 
-    let observed = crowdrelay_infra::organic_goal::read(
-        &pool,
-        workspace_id.into_uuid(),
-        now,
-    )
-    .await?
-    .ok_or("the renewed organic goal is readable")?;
+    let observed = crowdrelay_infra::organic_goal::read(&pool, workspace_id.into_uuid(), now)
+        .await?
+        .ok_or("the renewed organic goal is readable")?;
     assert_eq!(observed.goal.id, organic_id);
     assert_eq!(
         observed.counts.confirmed, 0,
@@ -521,4 +517,3 @@ async fn monthly_verified_organic_goal_drives_the_existing_brain_control_loop()
     assert!(chosen.deadline < november);
     Ok(())
 }
-
