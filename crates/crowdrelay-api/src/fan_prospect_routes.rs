@@ -1,9 +1,10 @@
 //! The person funnel: how many publicly observed people the band holds, where
 //! they are in the relationship, and which source classes they came from.
 //!
-//! Read-only and control-plane-authed. It reports counts, never identities: the
-//! handle of a person who has not joined is personal data, and nothing on this
-//! surface needs it. Every count is a count of rows that exist; an empty
+//! Read-only and control-plane-authed. The funnel reports counts only. The
+//! separate action queue is deliberately private/no-store and includes the
+//! public identity because an operator cannot review "reply to this person"
+//! without knowing which public conversation it refers to. An empty
 //! workspace reports an empty funnel with every status present, so "no
 //! prospects" and "the read failed" cannot be confused (a failed read is a 503).
 
@@ -22,7 +23,25 @@ use crate::{Problem, request_id};
 const PRIVATE_NO_STORE: &str = "private, no-store";
 
 pub(super) fn control_plane_routes() -> axum::Router<crate::AppState> {
-    axum::Router::new().route("/v1/control-plane/growth/prospect-funnel", get(funnel))
+    axum::Router::new()
+        .route("/v1/control-plane/growth/prospect-funnel", get(funnel))
+        .route("/v1/control-plane/growth/prospect-actions", get(actions))
+}
+
+async fn actions(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::fan_prospects::next_actions(&state.database, workspace_id).await {
+        Ok(items) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(json!({ "items": items })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "prospect next-action read failed");
+            Problem::service_unavailable(request_id(&headers)).into_response()
+        }
+    }
 }
 
 async fn funnel(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {

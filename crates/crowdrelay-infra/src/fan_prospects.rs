@@ -16,9 +16,15 @@
 //!   evidence (or progress), from the reading's own time; the retention sweep
 //!   deletes what passes it without progressing.
 
-use crowdrelay_domain::fan_prospect::{
-    ObservationKind, ProspectSource, ProspectStatus, display_handle, normalize_handle,
-    normalize_platform, normalize_platform_user_id,
+use crowdrelay_domain::{
+    fan_next_action::{
+        FanProspectActionInput, FanProspectActionKind, FanProspectCtaIntent, FanProspectMedium,
+        evaluate_fan_prospect,
+    },
+    fan_prospect::{
+        ObservationKind, ProspectSource, ProspectStatus, display_handle, normalize_handle,
+        normalize_platform, normalize_platform_user_id,
+    },
 };
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
@@ -499,4 +505,127 @@ pub async fn expire(
     }
     tx.commit().await?;
     Ok(u64::try_from(expired.len()).unwrap_or(u64::MAX))
+}
+
+const MAX_ACTION_READ_ROWS: i64 = 500;
+const MAX_ACTION_VIEW_ROWS: usize = 100;
+
+#[derive(Debug, FromRow)]
+struct ProspectActionRow {
+    id: Uuid,
+    status: String,
+    platform: String,
+    external_identity: String,
+    last_seen_at: OffsetDateTime,
+    observation_count: i64,
+    same_thread_context: bool,
+    explicit_join_or_follow_intent: bool,
+    question_intent: bool,
+    warm_engagement: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProspectActionView {
+    pub prospect_id: Uuid,
+    pub platform: String,
+    pub external_identity: String,
+    pub status: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_seen_at: OffsetDateTime,
+    pub observation_count: i64,
+    pub action: FanProspectActionKind,
+    pub medium: Option<FanProspectMedium>,
+    pub cta_intent: Option<FanProspectCtaIntent>,
+    pub reason: &'static str,
+    pub cooldown_hours: Option<u32>,
+    pub measurement: &'static str,
+}
+
+/// Read-only relationship decisions for the current prospect pool.
+///
+/// The identity appears only on the private control-plane surface that consumes
+/// this view. No action is persisted and no authority is granted here.
+///
+/// # Errors
+/// Database failure.
+pub async fn next_actions(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<ProspectActionView>, ProspectError> {
+    let member_site_ready = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM tenant_settings
+             WHERE workspace_id=$1
+               AND key='member_site_base_url'
+               AND btrim(value) <> ''
+         )",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+
+    let rows = sqlx::query_as::<_, ProspectActionRow>(
+        r#"
+        SELECT p.id, p.status, p.platform, p.external_identity, p.last_seen_at,
+               count(o.id)::bigint AS observation_count,
+               COALESCE(bool_or(o.source = 'own_comments'), false) AS same_thread_context,
+               COALESCE(bool_or(o.observation_kind = 'asked_to_join_or_follow'), false)
+                   AS explicit_join_or_follow_intent,
+               COALESCE(bool_or(o.observation_kind IN ('asked_about_show','asked_for_music')), false)
+                   AS question_intent,
+               COALESCE(bool_or(o.observation_kind IN (
+                   'active_under_our_post','replied','shared_material'
+               )), false) AS warm_engagement
+        FROM fan_prospects p
+        LEFT JOIN fan_prospect_observations o
+          ON o.workspace_id=p.workspace_id AND o.prospect_id=p.id
+        WHERE p.workspace_id=$1
+        GROUP BY p.id, p.status, p.platform, p.external_identity, p.last_seen_at
+        ORDER BY p.last_seen_at DESC, p.id
+        LIMIT $2
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(MAX_ACTION_READ_ROWS)
+    .fetch_all(pool)
+    .await?;
+
+    let mut views = Vec::with_capacity(rows.len().min(MAX_ACTION_VIEW_ROWS));
+    for row in rows {
+        let Some(status) = ProspectStatus::parse(&row.status) else {
+            continue;
+        };
+        let decision = evaluate_fan_prospect(FanProspectActionInput {
+            status,
+            has_same_thread_context: row.same_thread_context,
+            explicit_join_or_follow_intent: row.explicit_join_or_follow_intent,
+            question_intent: row.question_intent,
+            warm_engagement: row.warm_engagement,
+            member_site_ready,
+        });
+        views.push(ProspectActionView {
+            prospect_id: row.id,
+            platform: row.platform,
+            external_identity: row.external_identity,
+            status: row.status,
+            last_seen_at: row.last_seen_at,
+            observation_count: row.observation_count,
+            action: decision.action,
+            medium: decision.medium,
+            cta_intent: decision.cta_intent,
+            reason: decision.reason,
+            cooldown_hours: decision.cooldown_hours,
+            measurement: decision.measurement,
+        });
+    }
+    views.sort_by(|left, right| {
+        right
+            .action
+            .priority()
+            .cmp(&left.action.priority())
+            .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
+            .then_with(|| left.prospect_id.cmp(&right.prospect_id))
+    });
+    views.truncate(MAX_ACTION_VIEW_ROWS);
+    Ok(views)
 }
