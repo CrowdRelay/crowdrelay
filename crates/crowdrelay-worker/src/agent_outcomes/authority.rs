@@ -135,15 +135,42 @@ impl AgentOutcomeWorker {
 /// an invented rehearsal story posted to a subreddit, all approved as
 /// `policy:bounded_auto`. So `Policy` is withdrawn here.
 ///
-/// A standing grant survives, because it is not a setting: it is an operator
-/// who looked at one named community and said "stop asking me about this
-/// one", and it is revocable per target. That, an approved relay card, or a
-/// person approving the action itself are the only ways model text leaves.
-fn model_text_authority(authority: UnattendedAuthority) -> UnattendedAuthority {
+/// A standing grant survives only after the separate strategic AI reviewer
+/// passed this concrete draft, because the grant says "this target is trusted",
+/// not "any future model wording is good". The reviewer grants no authority of
+/// its own: it can only preserve that already-existing target grant. A negative
+/// or missing review degrades to the same human approval card instead of
+/// publishing or disappearing.
+fn model_text_authority(
+    authority: UnattendedAuthority,
+    strategic_review_passed: bool,
+) -> UnattendedAuthority {
+    if !strategic_review_passed {
+        return UnattendedAuthority::Denied;
+    }
     match authority {
         UnattendedAuthority::Policy => UnattendedAuthority::Denied,
         other => other,
     }
+}
+
+/// Human-readable reason a reviewed outward draft must stay on the approval
+/// card. Strategic review is advisory to a person; it never deletes a grounded
+/// draft and never grants authority.
+fn strategic_review_hold_reason(outcome: &ValidatedOutcome) -> Option<String> {
+    if !matches!(
+        outcome.kind,
+        OutcomeKind::PressPitch | OutcomeKind::SocialPost | OutcomeKind::SignalPush
+    ) {
+        return None;
+    }
+    let review = &outcome.payload.provenance.as_ref()?.strategic_review;
+    (!review.passed()).then(|| {
+        let detail = review
+            .human_hold_reason()
+            .unwrap_or("strategic review did not produce a passing verdict");
+        format!("Human review required after AI cross-review: {detail}")
+    })
 }
 
 /// The community this post is for, or `None` when it is not a community post.
@@ -230,6 +257,24 @@ mod authority_tests {
                     "body": "test",
                 })),
             )
+        }
+
+        #[test]
+        fn model_text_needs_both_a_strategic_pass_and_existing_target_authority() {
+            assert_eq!(
+                model_text_authority(UnattendedAuthority::Grant, true),
+                UnattendedAuthority::Grant
+            );
+            assert_eq!(
+                model_text_authority(UnattendedAuthority::Grant, false),
+                UnattendedAuthority::Denied,
+                "a reviewer outage or negative review sends the draft to a person instead of using the standing grant"
+            );
+            assert_eq!(
+                model_text_authority(UnattendedAuthority::Policy, true),
+                UnattendedAuthority::Denied,
+                "the reviewer is never a new source of workspace-wide authority"
+            );
         }
 
         /// The whole of fix one: a forum post no longer answers to the money

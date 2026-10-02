@@ -1,3 +1,21 @@
+## AI cross-review before model-written content leaves
+
+Grounding and strategic usefulness are separate gates.
+
+- Grounding asks whether the draft is supported by the supplied context.
+- Strategic review asks whether shipping that grounded draft **now** is likely
+  to help this tenant in its current situation: objective, timing, audience,
+  conversion path, repetition/fatigue and relationship cost.
+- A strategic rejection is revision feedback. The agents service gives the
+  next generator attempt the reviewer's concrete issues.
+- The revision chain is bounded by the existing model fallback chain. If no
+  generator satisfies the reviewer, or the reviewer is unavailable, the last
+  grounded draft is still persisted as **human-review-only**.
+- `strategic_review_passed` grants no authority. It only permits authority the
+  operator already granted (currently a target-specific community standing
+  approval) to remain usable. Missing/rejected review can therefore never
+  publish unattended, but it also never deadlocks the content pipeline.
+
 # The canonical learning loop
 
 One document for the whole cycle, edge by edge. For each edge: what owns the

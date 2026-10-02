@@ -104,6 +104,23 @@ async fn insert_community_post(
     target_id: Uuid,
     source_id: Uuid,
 ) -> Result<()> {
+    insert_community_post_with_review(
+        pool,
+        workspace_id,
+        target_id,
+        source_id,
+        "strategic_review_passed",
+    )
+    .await
+}
+
+async fn insert_community_post_with_review(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    target_id: Uuid,
+    source_id: Uuid,
+    strategic_status: &str,
+) -> Result<()> {
     let id = Uuid::now_v7();
     let thread = super::community_relay_batch::cited_thread(pool, workspace_id, target_id).await?;
     let payload = json!({
@@ -119,6 +136,20 @@ async fn insert_community_post(
         "rationale": "community engager draft",
         "provenance": {
             "verification": { "status": "grounding_check_passed" },
+            "strategic_review": {
+                "status": strategic_status,
+                "issues": if strategic_status == "strategic_review_rejected" {
+                    json!(["not useful enough for this tenant right now"])
+                } else {
+                    json!([])
+                },
+                "revision_brief": "",
+                "reviewer_error": if strategic_status == "not_reviewed" {
+                    json!("reviewer unavailable")
+                } else {
+                    serde_json::Value::Null
+                }
+            },
             "context": { "any_source_failed": false, "any_source_truncated": false },
             "confidence": {
                 "basis_points": 8000,
@@ -226,6 +257,35 @@ async fn a_live_standing_grant_sends_the_post_without_asking_again() -> Result<(
         status == "queued",
         "a target the operator already judged must not be asked about again, got {status}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_live_grant_cannot_bypass_a_missing_or_negative_strategic_review() -> Result<()> {
+    for strategic_status in ["not_reviewed", "strategic_review_rejected"] {
+        let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+            .await
+            .expect("connect to the migrated suite database");
+        let ws = workspace(&database).await?;
+        let (target_id, source_id) = admitted_community(&database, ws).await?;
+        grant_standing(&database, ws, target_id).await?;
+        insert_community_post_with_review(
+            &database,
+            ws,
+            target_id,
+            source_id,
+            strategic_status,
+        )
+        .await?;
+
+        ensure!(worker(&database, ws).run_once().await? == 1, "one outcome");
+        let (status, _, _) = only_action(&database, ws).await?;
+        ensure!(
+            status == "awaiting_approval",
+            "{strategic_status} must degrade to a human card, not auto-publish or disappear: {status}"
+        );
+    }
     Ok(())
 }
 
