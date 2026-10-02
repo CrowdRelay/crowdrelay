@@ -169,6 +169,7 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
                 fans_read: 4,
                 candidates_recorded: 0,
                 light_ask_ready: 1,
+                referral_opportunities_recorded: 1,
             },
         "{report:?}"
     );
@@ -178,6 +179,31 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
             .fetch_one(&pool)
             .await?;
     ensure!(roles == 0, "a light ask is not a role");
+    let opportunities: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_advocacy_opportunities
+         WHERE workspace_id=$1 AND kind='personal_referral' AND status='ready'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(opportunities == 1, "the light ask becomes one durable opportunity");
+
+    // A second pass cannot create another ask or upgrade the same person into
+    // a role behind the first plan's back.
+    let second = sweep.run_once(now + Span::hours(1)).await?;
+    ensure!(second.referral_opportunities_recorded == 0, "{second:?}");
+    let observed_again = load_fan_evidence(
+        &pool,
+        ws.into_uuid(),
+        now + Span::hours(1),
+        100,
+    )
+    .await?;
+    ensure!(
+        observed_again
+            .iter()
+            .any(|f| f.email == "engaged@fan.test" && f.evidence.already_asked)
+    );
     Ok(())
 }
 

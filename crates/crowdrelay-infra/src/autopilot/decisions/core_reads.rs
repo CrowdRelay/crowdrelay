@@ -204,6 +204,19 @@ macro_rules! decision_core_reads {
                     ) AS has_referral_code,
                     EXISTS (
                         SELECT 1
+                        FROM person_identities AS identity
+                        JOIN fan_advocacy_opportunities AS opportunity
+                          ON opportunity.workspace_id = identity.workspace_id
+                         AND opportunity.person_id = identity.person_id
+                        WHERE identity.workspace_id = fan.workspace_id
+                          AND identity.kind = 'email'
+                          AND identity.platform IS NULL
+                          AND identity.value = fan.normalized_email
+                          AND opportunity.kind = 'personal_referral'
+                          AND opportunity.status = 'ready'
+                    ) AS referral_ask_ready,
+                    EXISTS (
+                        SELECT 1
                         FROM signal_installations AS install
                         WHERE install.workspace_id = fan.workspace_id
                           AND install.fan_id = fan.id

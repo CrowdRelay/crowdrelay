@@ -28,6 +28,7 @@ mod lifecycle_tests {
             qualified_referrals: 0,
             last_qualified_referral_at: None,
             has_referral_code: true,
+            referral_ask_ready: true,
             has_signal_install: false,
             last_event_interest_at: None,
             recent_checkin: None,

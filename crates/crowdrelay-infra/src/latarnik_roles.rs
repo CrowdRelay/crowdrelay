@@ -12,7 +12,7 @@
 //! step that moves the role to `invited`.
 
 use crowdrelay_domain::latarnik::{FanEvidence, RoleStatus};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -136,12 +136,25 @@ pub async fn load_fan_evidence(
                         WHERE t.workspace_id = f.workspace_id
                           AND lower(btrim(t.contact_email)) = f.normalized_email
                           AND t.do_not_contact) AS suppressed_elsewhere,
-               EXISTS (SELECT 1
-                         FROM person_identities pi
-                         JOIN latarnik_roles lr
-                           ON lr.workspace_id = pi.workspace_id AND lr.person_id = pi.person_id
-                        WHERE pi.workspace_id = f.workspace_id
-                          AND pi.kind = 'email' AND pi.value = f.normalized_email) AS already_asked
+               (
+                 EXISTS (SELECT 1
+                           FROM person_identities pi
+                           JOIN latarnik_roles lr
+                             ON lr.workspace_id = pi.workspace_id AND lr.person_id = pi.person_id
+                          WHERE pi.workspace_id = f.workspace_id
+                            AND pi.kind = 'email' AND pi.value = f.normalized_email)
+                 OR EXISTS (
+                     SELECT 1
+                     FROM person_identities pi
+                     JOIN fan_advocacy_opportunities opportunity
+                       ON opportunity.workspace_id = pi.workspace_id
+                      AND opportunity.person_id = pi.person_id
+                     WHERE pi.workspace_id = f.workspace_id
+                       AND pi.kind = 'email'
+                       AND pi.platform IS NULL
+                       AND pi.value = f.normalized_email
+                 )
+               ) AS already_asked
         FROM fans f
         WHERE f.workspace_id = $1
           AND f.status = 'active'
@@ -179,6 +192,100 @@ pub async fn load_fan_evidence(
         .collect())
 }
 
+async fn resolve_person_for_email(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    email: &str,
+) -> Result<Uuid, LatarnikError> {
+    if let Some(person_id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT person_id FROM person_identities
+         WHERE workspace_id = $1 AND kind = 'email' AND value = $2 AND platform IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        return Ok(person_id);
+    }
+
+    let person_id =
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id")
+            .bind(workspace_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    let claimed = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO person_identities (workspace_id, person_id, kind, platform, value, source)
+         VALUES ($1, $2, 'email', NULL, $3, 'fan_evidence_sweep')
+         ON CONFLICT (workspace_id, kind, COALESCE(platform, ''), value) DO NOTHING
+         RETURNING person_id",
+    )
+    .bind(workspace_id)
+    .bind(person_id)
+    .bind(email)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if claimed.is_some() {
+        return Ok(person_id);
+    }
+
+    // Lost a race for the address: discard the empty person and use the
+    // identity winner. Nothing else can point at this just-created row yet.
+    sqlx::query("DELETE FROM persons WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(person_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT person_id FROM person_identities
+         WHERE workspace_id = $1 AND kind = 'email' AND value = $2 AND platform IS NULL",
+    )
+    .bind(workspace_id)
+    .bind(email)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// Records the lightest possible advocacy mission: ask one ready fan to carry
+/// one tracked referral to one relevant person.
+///
+/// This is deliberately not a Latarnik role and it sends nothing. The existing
+/// fan lifecycle owns the later message, cooldown, approval and delivery.
+/// Person-keying means fan merges cannot duplicate or erase the one-ask budget.
+///
+/// Returns the opportunity id only when this call created it.
+///
+/// # Errors
+///
+/// Propagates the database error; the transaction rolls back whole.
+pub async fn record_referral_opportunity(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+    evidence: &FanEvidence,
+    now: OffsetDateTime,
+) -> Result<Option<Uuid>, LatarnikError> {
+    let evidence_json = serde_json::to_value(evidence)
+        .map_err(|_| LatarnikError::Database(sqlx::Error::Protocol("evidence".into())))?;
+    let mut tx = pool.begin().await?;
+    let person_id = resolve_person_for_email(&mut tx, workspace_id, email).await?;
+    let created = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO fan_advocacy_opportunities
+             (workspace_id, person_id, kind, source, evidence, ready_at)
+         VALUES ($1, $2, 'personal_referral', 'fan_evidence_sweep', $3, $4)
+         ON CONFLICT (workspace_id, person_id, kind) DO NOTHING
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(person_id)
+    .bind(evidence_json)
+    .bind(now)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(created)
+}
+
 /// Records a fan as a Latarnik candidate. Finds or creates the person through
 /// the fan's email identity; one row per person, so a fan detected twice, or one
 /// whose role was already ended, changes nothing. Returns the role id only when
@@ -197,54 +304,7 @@ pub async fn record_candidate(
     let evidence_json = serde_json::to_value(evidence)
         .map_err(|_| LatarnikError::Database(sqlx::Error::Protocol("evidence".into())))?;
     let mut tx = pool.begin().await?;
-    let existing = sqlx::query_scalar::<_, Uuid>(
-        "SELECT person_id FROM person_identities
-         WHERE workspace_id = $1 AND kind = 'email' AND value = $2 AND platform IS NULL",
-    )
-    .bind(workspace_id)
-    .bind(email)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let person_id = match existing {
-        Some(person_id) => person_id,
-        None => {
-            let person_id = sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id",
-            )
-            .bind(workspace_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let claimed = sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO person_identities (workspace_id, person_id, kind, platform, value, source)
-                 VALUES ($1, $2, 'email', NULL, $3, 'fan_evidence_sweep')
-                 ON CONFLICT (workspace_id, kind, COALESCE(platform, ''), value) DO NOTHING
-                 RETURNING person_id",
-            )
-            .bind(workspace_id)
-            .bind(person_id)
-            .bind(email)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if claimed.is_some() {
-                person_id
-            } else {
-                // Lost a race for the address: use the winner's person.
-                sqlx::query("DELETE FROM persons WHERE workspace_id = $1 AND id = $2")
-                    .bind(workspace_id)
-                    .bind(person_id)
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query_scalar::<_, Uuid>(
-                    "SELECT person_id FROM person_identities
-                     WHERE workspace_id = $1 AND kind = 'email' AND value = $2 AND platform IS NULL",
-                )
-                .bind(workspace_id)
-                .bind(email)
-                .fetch_one(&mut *tx)
-                .await?
-            }
-        }
-    };
+    let person_id = resolve_person_for_email(&mut tx, workspace_id, email).await?;
     let created = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO latarnik_roles (workspace_id, person_id, source, evidence, candidate_at)
          VALUES ($1, $2, 'fan_evidence_sweep', $3, $4)

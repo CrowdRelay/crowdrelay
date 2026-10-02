@@ -52,6 +52,9 @@ pub struct FanLifecycleSnapshot {
     /// behind it is a dead end. So the code is issued first, for the same
     /// reason a show gets its tracked link before anything is shared.
     pub has_referral_code: bool,
+    /// FAN SCOUT/Latarnik evidence says this person is ready for one personal
+    /// referral ask. A generic "engaged fan" is no longer enough.
+    pub referral_ask_ready: bool,
     /// Whether a `signal_installations` row already names this fan — the app
     /// on Android, or a web session that identified itself. This is the
     /// "contactable through Signal" bit the whole funnel is counted on; a fan
@@ -387,6 +390,7 @@ pub fn evaluate_fan_lifecycle(
     // The episode bounds the request; outside this age window the fan is
     // left alone, including fans with no observed activity.
     if engaged
+        && snapshot.referral_ask_ready
         && snapshot.qualified_referrals == 0
         && snapshot.last_marketing_touch_at.is_some()
         && now - snapshot.created_at >= Duration::days(i64::from(policy.referral_invite_after_days))
@@ -444,6 +448,7 @@ mod tests {
             last_marketing_touch_at: None,
             has_paid_ticket: false,
             has_referral_code: true,
+            referral_ask_ready: true,
             has_signal_install: true,
             paid_ticket_count: 0,
             qualified_referrals: 0,
@@ -851,6 +856,22 @@ mod tests {
         snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
         snapshot.last_event_interest_at = Some(now() - Duration::days(1));
         assert!(matches!(
+            evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
+            FanLifecycleDecision::RequestMessage {
+                template: LifecycleTemplate::ReferralInvite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn engagement_alone_does_not_create_an_advocacy_ask() {
+        let mut snapshot = eligible();
+        snapshot.created_at = now() - Duration::days(6);
+        snapshot.last_marketing_touch_at = Some(now() - Duration::days(6));
+        snapshot.last_event_interest_at = Some(now() - Duration::days(1));
+        snapshot.referral_ask_ready = false;
+        assert!(!matches!(
             evaluate_fan_lifecycle(snapshot, FanLifecyclePolicy::default(), now()),
             FanLifecycleDecision::RequestMessage {
                 template: LifecycleTemplate::ReferralInvite,
