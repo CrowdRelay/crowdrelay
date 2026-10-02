@@ -189,7 +189,7 @@ impl StrategicReviewProvenance {
         self.issues
             .first()
             .map(String::as_str)
-            .or_else(|| self.reviewer_error.as_deref())
+            .or(self.reviewer_error.as_deref())
             .or_else(|| {
                 (!self.revision_brief.trim().is_empty()).then_some(self.revision_brief.as_str())
             })
