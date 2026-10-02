@@ -69,6 +69,7 @@ impl Language {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShowFact {
     pub event_id: uuid::Uuid,
+    pub slug: String,
     pub title: String,
     pub city: Option<String>,
     pub starts_on: Date,
@@ -122,6 +123,14 @@ fn date_label(language: Language, date: Date) -> String {
 fn show_plan(language: Language, show: &ShowFact, link: &str) -> MissionPlan {
     let when = date_label(language, show.starts_on);
     let place = show.city.as_deref().unwrap_or_default();
+    let lang = match language {
+        Language::Pl => "pl",
+        Language::En => "en",
+    };
+    // Preserve why the recipient clicked all the way through the referral
+    // resolver. The resolver still validates the event against this tenant's
+    // published event cache before it will use the contextual destination.
+    let link = format!("{link}?event={}&lang={lang}", show.slug);
     let (prompt, share) = match language {
         Language::Pl => (
             format!(
@@ -215,6 +224,7 @@ mod tests {
         let at = NOW + Duration::days(days_ahead);
         ShowFact {
             event_id: Uuid::now_v7(),
+            slug: "virya-furydate-impala".into(),
             title: "Virya × Furydate × Impala".into(),
             city: Some("Gorzów Wielkopolski".into()),
             starts_on: at.date(),
@@ -250,7 +260,9 @@ mod tests {
         assert!(plan.prompt.contains("jedną osobę"), "{}", plan.prompt);
         assert!(plan.prompt.ends_with("(17.10)?"), "{}", plan.prompt);
         assert!(plan.share_text.contains("Gorzów Wielkopolski"));
-        assert!(plan.share_text.ends_with("https://virya.music/r/abc123"));
+        assert!(plan.share_text.ends_with(
+            "https://virya.music/r/abc123?event=virya-furydate-impala&lang=pl"
+        ));
         assert!(plan.event_id.is_some() && plan.content_source_id.is_none());
     }
 
