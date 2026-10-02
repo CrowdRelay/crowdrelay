@@ -325,3 +325,200 @@ async fn a_community_size_cannot_be_declared_as_an_objective()
     );
     Ok(())
 }
+
+/// The explicit 100/month acquisition scoreboard is a control input, not a
+/// dashboard-only number. Renewal creates the current month's durable identity;
+/// only the verified organic cohort advances it; and the same ActiveObjective
+/// then reaches the world model and the existing goal constraint.
+///
+/// Twenty raw fan rows are a negative control: without an action-owned
+/// publication/click conversion they are unverified arrivals, not progress.
+/// A nearer ordinary workspace objective is added last to prove both sources
+/// enter one nearest-deadline chooser rather than competing planners.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn monthly_verified_organic_goal_drives_the_existing_brain_control_loop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let suffix = workspace_id.into_uuid().simple().to_string();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
+        .bind(workspace_id.into_uuid())
+        .bind(format!("organic-goal-brain-{suffix}"))
+        .bind("Organic goal brain control")
+        .execute(&pool)
+        .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+
+    let at = |day: u8, month: time::Month| {
+        time::Date::from_calendar_date(2026, month, day)
+            .expect("valid date")
+            .with_hms(12, 0, 0)
+            .expect("valid time")
+            .assume_utc()
+    };
+    let now = at(15, time::Month::October);
+    let september = at(1, time::Month::September);
+    let october = at(1, time::Month::October);
+    let november = at(1, time::Month::November);
+
+    let previous_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO organic_fan_goals
+           (workspace_id,period_start,deadline,baseline_at,baseline_fans,target,declared_by)
+         VALUES ($1,$2,$3,$2,0,100,'test:previous-month')
+         RETURNING id",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(september)
+    .bind(october)
+    .fetch_one(&pool)
+    .await?;
+
+    repository.renew_organic_goal(workspace_id, now).await?;
+
+    let (organic_id, target, period_start): (Uuid, i64, OffsetDateTime) = sqlx::query_as(
+        "SELECT id,target,period_start FROM organic_fan_goals
+         WHERE workspace_id=$1
+         ORDER BY period_start DESC
+         LIMIT 1",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_ne!(
+        organic_id, previous_id,
+        "each monthly control episode needs a stable identity of its own"
+    );
+    assert!(
+        period_start > september,
+        "renewal must create the current Warsaw-month episode"
+    );
+    assert_eq!(target, 100);
+
+    for index in 0..20 {
+        sqlx::query(
+            "INSERT INTO fans
+               (id,workspace_id,normalized_email,status,created_at)
+             VALUES ($1,$2,$3,'active',$4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.into_uuid())
+        .bind(format!("raw-{index}-{suffix}@organic-goal.test"))
+        .bind(at(5, time::Month::October))
+        .execute(&pool)
+        .await?;
+    }
+
+    let observed = crowdrelay_infra::organic_goal::read(
+        &pool,
+        workspace_id.into_uuid(),
+        now,
+    )
+    .await?
+    .ok_or("the renewed organic goal is readable")?;
+    assert_eq!(observed.goal.id, organic_id);
+    assert_eq!(
+        observed.counts.confirmed, 0,
+        "fan rows without the verified publication/click acquisition chain are not goal progress"
+    );
+    assert_eq!(observed.counts.unverified_arrivals, 20);
+
+    let objective = repository
+        .load_active_objective(workspace_id, now)
+        .await?
+        .ok_or("the monthly organic goal is an active brain objective")?;
+    assert_eq!(objective.objective_id, organic_id);
+    assert_eq!(objective.metric_key, "verified_organic_acquisitions");
+    assert_eq!(objective.observed_value, Some(0));
+    assert_eq!(objective.target_value, 100);
+    assert!(objective.is_behind());
+
+    let constraint = crowdrelay_brain::GoalConstraint::apply(&objective, now, 5, 10)
+        .ok_or("a behind observed objective has a goal constraint")?;
+    assert_eq!(constraint.base_max_dispatches, 5);
+    assert_eq!(
+        constraint.applied_max_dispatches, 10,
+        "zero observed pace behind a 100/month target opens the existing bounded ceiling"
+    );
+    assert!(constraint.exploration_suppressed);
+
+    let snapshots = repository
+        .load_growth_intelligence_snapshots(workspace_id, now)
+        .await?;
+    let world_goal = snapshots
+        .first()
+        .and_then(|snapshot| snapshot.world_model.objective.as_ref())
+        .ok_or("the world model carries the organic objective")?;
+    assert_eq!(world_goal.objective_id, organic_id);
+    assert_eq!(world_goal.observed_value, Some(0));
+
+    // A regular workspace objective with the nearer live deadline shares the
+    // same chooser and therefore wins without creating a second planner.
+    let series_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO growth_metric_series
+           (id,workspace_id,platform,metric_key,display_name)
+         VALUES ($1,$2,'bandsintown','trackers','Bandsintown trackers')",
+    )
+    .bind(series_id)
+    .bind(workspace_id.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO growth_metric_points
+           (workspace_id,series_id,captured_at,value,source)
+         VALUES ($1,$2,$3,10,'test')",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(series_id)
+    .bind(at(14, time::Month::October))
+    .execute(&pool)
+    .await?;
+    let explicit = repository
+        .declare_growth_objective(
+            workspace_id,
+            DeclareGrowthObjective {
+                platform: MetricPlatform::Bandsintown,
+                metric_key: "trackers".to_owned(),
+                scope: ObjectiveScope::Workspace,
+                direction: MetricDirection::HigherIsBetter,
+                target_value: 100,
+                deadline: at(20, time::Month::October),
+                declared_by: "band".to_owned(),
+            },
+            &key(),
+            None,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE growth_objectives
+         SET declared_at=$2, baseline_value=0
+         WHERE id=$1",
+    )
+    .bind(explicit.objective_id)
+    .bind(at(5, time::Month::October))
+    .execute(&pool)
+    .await?;
+
+    let chosen = repository
+        .load_active_objective(workspace_id, now)
+        .await?
+        .ok_or("one active objective is chosen")?;
+    assert_eq!(
+        chosen.objective_id, explicit.objective_id,
+        "nearest live workspace deadline wins across both objective sources"
+    );
+    assert!(chosen.deadline < november);
+    Ok(())
+}
+

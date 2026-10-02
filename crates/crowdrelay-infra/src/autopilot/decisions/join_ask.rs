@@ -12,13 +12,6 @@ macro_rules! decision_join_ask_reads {
             workspace_id: WorkspaceId,
         ) -> Result<crowdrelay_domain::join_ask::JoinAskSnapshot, RepositoryError> {
             self.bounded(async {
-                crate::organic_goal::renew(
-                    &self.pool,
-                    workspace_id.into_uuid(),
-                    OffsetDateTime::now_utc(),
-                )
-                .await
-                .map_err(map_sqlx)?;
                 crate::join_ask::load_join_ask_snapshot(&self.pool, workspace_id.into_uuid())
                     .await
                     .map_err(map_sqlx)

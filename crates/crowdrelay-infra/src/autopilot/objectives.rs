@@ -312,8 +312,14 @@ async fn assessed_objectives(
     Ok(assessed)
 }
 
-/// The objective the brain works toward this cycle: the live workspace-scoped
-/// one with the nearest deadline, judged exactly as the operator sees it.
+/// The objective the brain works toward this cycle: one chooser over every
+/// workspace-wide control objective with a canonical progress read.
+///
+/// Series-backed objectives keep using `assessed_objectives`. The monthly
+/// verified-organic objective is assessed by `organic_goal::read`, which is
+/// also what its operator scoreboard serves. Folding the already-assessed
+/// values here gives the brain one nearest-deadline choice without inventing a
+/// second progress calculation.
 ///
 /// City, event and release-plan objectives stay operator readouts. The
 /// portfolio selects for the whole workspace, and a city being behind is not a
@@ -324,22 +330,40 @@ pub(in crate::autopilot) async fn load_brain_objective(
     now: OffsetDateTime,
 ) -> Result<Option<crowdrelay_brain::ActiveObjective>, RepositoryError> {
     let assessed = assessed_objectives(pool, workspace_id, now).await?;
+    let series_objectives = assessed
+        .into_iter()
+        .filter(|(_, objective)| objective.scope == ObjectiveScope::Workspace)
+        .map(|(view, objective)| crowdrelay_brain::ActiveObjective {
+            objective_id: view.objective_id,
+            platform: view.platform,
+            metric_key: view.metric_key,
+            direction: objective.direction,
+            baseline_value: view.baseline_value,
+            target_value: view.target_value,
+            observed_value: view.observed_value,
+            declared_at: view.declared_at,
+            deadline: view.deadline,
+            state: view.state,
+        });
+
+    let organic = crate::organic_goal::read(pool, workspace_id.into_uuid(), now)
+        .await
+        .map_err(map_sqlx)?
+        .map(|view| crowdrelay_brain::ActiveObjective {
+            objective_id: view.goal.id,
+            platform: "signal".to_owned(),
+            metric_key: "verified_organic_acquisitions".to_owned(),
+            direction: MetricDirection::HigherIsBetter,
+            baseline_value: 0,
+            target_value: view.goal.target,
+            observed_value: Some(view.counts.confirmed),
+            declared_at: view.goal.baseline_at,
+            deadline: view.goal.deadline,
+            state: view.assessment,
+        });
+
     Ok(crowdrelay_brain::ActiveObjective::choose(
-        assessed
-            .into_iter()
-            .filter(|(_, objective)| objective.scope == ObjectiveScope::Workspace)
-            .map(|(view, objective)| crowdrelay_brain::ActiveObjective {
-                objective_id: view.objective_id,
-                platform: view.platform,
-                metric_key: view.metric_key,
-                direction: objective.direction,
-                baseline_value: view.baseline_value,
-                target_value: view.target_value,
-                observed_value: view.observed_value,
-                declared_at: view.declared_at,
-                deadline: view.deadline,
-                state: view.state,
-            }),
+        series_objectives.chain(organic),
     ))
 }
 

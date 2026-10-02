@@ -387,6 +387,22 @@ impl PostgresAutopilotRepository {
         &self.pool
     }
 
+    /// Rolls an already-enrolled monthly organic goal into the current Warsaw
+    /// month. The worker cycle owns this mutation; readers never enrol or roll
+    /// goals as a side effect of asking for a snapshot.
+    pub async fn renew_organic_goal(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<(), RepositoryError> {
+        self.bounded(async {
+            crate::organic_goal::renew(&self.pool, workspace_id.into_uuid(), now)
+                .await
+                .map_err(map_sqlx)
+        })
+        .await
+    }
+
     async fn bounded<T>(
         &self,
         operation: impl Future<Output = Result<T, RepositoryError>>,

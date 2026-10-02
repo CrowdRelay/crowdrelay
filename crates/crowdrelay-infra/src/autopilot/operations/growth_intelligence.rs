@@ -949,8 +949,10 @@ pub(in crate::autopilot) async fn load_growth_intelligence_snapshots(
         north_star_this_month,
     );
 
-    // The operator's declared objective, assessed by the same read the
-    // objectives endpoint serves — one definition of progress, two readers.
+    // One active workspace objective. Series-backed goals keep the objectives
+    // endpoint's assessment; the monthly verified-organic goal keeps its own
+    // organic scoreboard assessment. The chooser only compares already-judged
+    // live deadlines — it never redefines either source's progress.
     let objective = super::super::objectives::load_brain_objective(pool, workspace_id, now).await?;
 
     let world_model = WorldModel {

@@ -10,6 +10,8 @@ pub use mutations::{GoalError, GoalMutation, declare, exclude};
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct OrganicGoal {
+    /// Stable identity for this month's control objective and its decision provenance.
+    pub id: Uuid,
     #[serde(with = "time::serde::rfc3339")]
     pub period_start: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -57,7 +59,7 @@ pub async fn read(
     now: OffsetDateTime,
 ) -> Result<Option<OrganicGoalView>, sqlx::Error> {
     let goal = sqlx::query_as::<_, OrganicGoal>(
-        "SELECT period_start,deadline,baseline_at,baseline_fans,target FROM organic_fan_goals WHERE workspace_id=$1 AND period_start<=$2 ORDER BY period_start DESC LIMIT 1",
+        "SELECT id,period_start,deadline,baseline_at,baseline_fans,target FROM organic_fan_goals WHERE workspace_id=$1 AND period_start<=$2 ORDER BY period_start DESC LIMIT 1",
     ).bind(workspace).bind(now).fetch_optional(pool).await?;
     let Some(goal) = goal else {
         return Ok(None);
