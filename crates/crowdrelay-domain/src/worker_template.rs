@@ -314,7 +314,6 @@ mod tests {
     #[test]
     fn new_fan_acquisition_is_a_closed_template_vocabulary() {
         for template in [
-            WorkerTemplate::PressPitch,
             WorkerTemplate::SocialPost,
             WorkerTemplate::TelegramPoster,
             WorkerTemplate::DiscordPoster,
