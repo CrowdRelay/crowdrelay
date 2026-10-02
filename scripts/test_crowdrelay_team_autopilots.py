@@ -37,10 +37,15 @@ class TeamAutopilotsContract(unittest.TestCase):
 
     def test_fan_growth_has_welcome_followup_and_reactivation(self):
         domain = text("crates/crowdrelay-domain/src/audience_lifecycle.rs")
+        # The lifecycle arm moved to evaluate/candidates_lifecycle.rs when the
+        # evaluator split — same contract, new home. Welcome is v2 since the
+        # activation went versioned/tracked; v1 stays accepted only for
+        # in-flight episode rows.
         evaluator = text("crates/crowdrelay-application/src/autopilot/evaluate.rs")
+        evaluator += text("crates/crowdrelay-application/src/autopilot/evaluate/candidates_lifecycle.rs")
         for value in ("Welcome", "SynesthesiaFollowUp", "DormantReactivation"):
             self.assertIn(value, domain)
-        for template in ("crowdrelay.fan.welcome.v1", "crowdrelay.synesthesia.follow_up.v1", "crowdrelay.fan.reactivation.v1"):
+        for template in ("crowdrelay.fan.welcome.v2", "crowdrelay.synesthesia.follow_up.v1", "crowdrelay.fan.reactivation.v1"):
             self.assertIn(template, evaluator)
 
     def test_live_auto_application_is_fee_contract_and_exclusivity_bounded(self):
