@@ -7,7 +7,7 @@ use axum::{
         rejection::{JsonRejection, QueryRejection},
     },
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode,
         header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE},
     },
     response::{IntoResponse, Response},
@@ -18,10 +18,16 @@ use crowdrelay_application::{
 };
 use crowdrelay_domain::{CouponCode, EventSlug, ReferralCode, WorkspaceId};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use url::Url;
 
 use crate::{
-    IDEMPOTENCY_KEY, Problem, X_REQUEST_ID, acquisition::fan_session_from_headers, request_id,
+    IDEMPOTENCY_KEY, Problem, X_REQUEST_ID,
+    acquisition::{
+        attribution_cookie, attribution_visitor, automated_fetch, fan_session_from_headers,
+        record_dropped,
+    },
+    request_id,
 };
 
 const REFERRAL_COOKIE: &str = "crowdrelay_referral";
@@ -73,6 +79,7 @@ pub async fn redirect_referral(
     State(state): State<crate::AppState>,
     Path(raw_code): Path<String>,
     query: Result<Query<ReferralDestinationQuery>, QueryRejection>,
+    method: Method,
     headers: HeaderMap,
 ) -> Response {
     let request_id_value = request_id(&headers);
@@ -128,24 +135,74 @@ pub async fn redirect_referral(
             .private()
             .into_response();
     };
-    let Ok(cookie) = HeaderValue::from_str(&referral_cookie(&code, state.referrals.secure_cookies))
-    else {
-        tracing::error!("referral cookie could not be encoded as a response header");
-        return Problem::internal(request_id_value)
-            .private()
-            .into_response();
-    };
+    // A preview bot following a pasted referral is not a person. Serve the
+    // destination so unfurls still work, but do not mint attribution state or
+    // teach the growth loop from that fetch.
+    let automated = automated_fetch(&method, &headers);
+    let visitor_id = attribution_visitor(&headers).unwrap_or_default();
+    if let Some(reason) = automated {
+        record_dropped(reason);
+        tracing::debug!("referral fetch by an automated agent not recorded as an interaction");
+    } else {
+        let pool = state.database.clone();
+        let workspace_id = state.referrals.workspace_id;
+        let code_for_receipt = code.clone();
+        let timeout = state.ticketing.operation_timeout();
+        tokio::spawn(async move {
+            let write = crowdrelay_infra::referrals::record_referral_interaction(
+                &pool,
+                workspace_id,
+                &code_for_receipt,
+                visitor_id,
+                OffsetDateTime::now_utc(),
+            );
+            match tokio::time::timeout(timeout, write).await {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    tracing::debug!("active referral disappeared before interaction receipt");
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "failed to persist referral interaction receipt");
+                }
+                Err(_) => {
+                    tracing::warn!("timed out persisting referral interaction receipt");
+                }
+            }
+        });
+    }
 
-    (
+    let mut response = (
         StatusCode::FOUND,
         [
             (LOCATION, location),
-            (SET_COOKIE, cookie),
             (CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE)),
             (REFERRER_POLICY, HeaderValue::from_static("no-referrer")),
         ],
     )
-        .into_response()
+        .into_response();
+
+    if automated.is_none() {
+        let Ok(referral_cookie) =
+            HeaderValue::from_str(&referral_cookie(&code, state.referrals.secure_cookies))
+        else {
+            tracing::error!("referral cookie could not be encoded as a response header");
+            return Problem::internal(request_id_value)
+                .private()
+                .into_response();
+        };
+        let Ok(visitor_cookie) = HeaderValue::from_str(&attribution_cookie(
+            visitor_id,
+            state.referrals.secure_cookies,
+        )) else {
+            tracing::error!("attribution cookie could not be encoded as a response header");
+            return Problem::internal(request_id_value)
+                .private()
+                .into_response();
+        };
+        response.headers_mut().append(SET_COOKIE, referral_cookie);
+        response.headers_mut().append(SET_COOKIE, visitor_cookie);
+    }
+    response
 }
 
 /// Returns private referral and reward progress for the current fan session.
