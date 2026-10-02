@@ -30,8 +30,12 @@ use crowdrelay_infra::{
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+#[path = "autopilot_standing_approval/episode_tests.rs"]
+mod episode_tests;
 #[path = "autopilot_standing_approval/install_tests.rs"]
 mod install_tests;
+#[path = "autopilot_standing_approval/snapshot_tests.rs"]
+mod snapshot_tests;
 
 struct Fixture {
     pool: sqlx::PgPool,
