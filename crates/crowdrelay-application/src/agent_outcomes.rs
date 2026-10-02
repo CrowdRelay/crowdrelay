@@ -851,7 +851,11 @@ mod tests {
             Ok(()),
             "strategic review controls unattended authority/revision, not whether a grounded draft can reach a human"
         );
-        let review = &outcome.payload.provenance.expect("provenance").strategic_review;
+        let review = &outcome
+            .payload
+            .provenance
+            .expect("provenance")
+            .strategic_review;
         assert!(!review.passed());
         assert_eq!(
             review.human_hold_reason(),

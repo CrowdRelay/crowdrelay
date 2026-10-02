@@ -536,7 +536,9 @@ impl AgentOutcomeWorker {
                 .char_indices()
                 .nth(240)
                 .map_or(decision_reason_source.len(), |(byte, _)| byte);
-            decision_reason_source.get(..byte_end).unwrap_or(decision_reason_source)
+            decision_reason_source
+                .get(..byte_end)
+                .unwrap_or(decision_reason_source)
         };
 
         // A social_post from the community-engager worker targets a specific
