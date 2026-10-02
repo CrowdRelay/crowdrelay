@@ -982,6 +982,9 @@ mod tests {
     #[test]
     fn an_old_quiz_does_not_swallow_a_dormancy_episode() {
         let mut fan = eligible();
+        // This test is about its own arm, not the advocacy ask: the shared
+        // fixture is referral-ready since #498, so opt this fan out of it.
+        fan.referral_ask_ready_at = None;
         fan.created_at = now() - Duration::days(120);
         fan.last_marketing_touch_at = Some(now() - Duration::days(90));
         fan.synesthesia_completed_at = Some(now() - Duration::days(60));
@@ -997,6 +1000,9 @@ mod tests {
     #[test]
     fn an_old_quiz_does_not_trigger_onboarding_after_recent_attendance() {
         let mut fan = eligible();
+        // This test is about its own arm, not the advocacy ask: the shared
+        // fixture is referral-ready since #498, so opt this fan out of it.
+        fan.referral_ask_ready_at = None;
         fan.created_at = now() - Duration::days(120);
         fan.last_marketing_touch_at = Some(now() - Duration::days(90));
         fan.synesthesia_completed_at = Some(now() - Duration::days(90));
@@ -1032,6 +1038,9 @@ mod tests {
     #[test]
     fn recent_attendance_is_not_dormancy() {
         let mut fan = eligible();
+        // This test is about its own arm, not the advocacy ask: the shared
+        // fixture is referral-ready since #498, so opt this fan out of it.
+        fan.referral_ask_ready_at = None;
         fan.created_at = now() - Duration::days(90);
         fan.last_marketing_touch_at = Some(now() - Duration::days(10));
         fan.recent_checkin = Some(LifecycleCheckin {
