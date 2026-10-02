@@ -54,7 +54,6 @@ pub mod fan_import;
 pub mod fan_lifecycle;
 pub mod fan_privacy;
 pub mod fan_prospects;
-pub mod fan_scout;
 pub mod fanbase;
 pub mod festival_seed;
 pub mod gdrive;

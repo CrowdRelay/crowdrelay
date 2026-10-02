@@ -215,6 +215,20 @@ impl ProspectSource {
     }
 }
 
+/// Provider/user/channel ids are case-sensitive on some platforms. They are
+/// trimmed and bounded, but never lowercased. A stable provider id outranks a
+/// handle when both are available: usernames can change, provider ids should not.
+pub const MAX_PLATFORM_USER_ID_LEN: usize = 256;
+
+#[must_use]
+pub fn normalize_platform_user_id(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()
+        && value.chars().count() <= MAX_PLATFORM_USER_ID_LEN
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_owned())
+}
+
 /// The longest handle the system will treat as an identity. Longer is not a
 /// platform handle; it is text.
 pub const MAX_HANDLE_LEN: usize = 100;
@@ -313,6 +327,19 @@ mod tests {
             assert_eq!(ProspectStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(ProspectStatus::parse("fan"), None);
+    }
+
+    #[test]
+    fn stable_platform_ids_preserve_case() {
+        assert_eq!(
+            normalize_platform_user_id(" UCaBcD123 "),
+            Some("UCaBcD123".to_owned())
+        );
+        assert_eq!(normalize_platform_user_id(""), None);
+        assert_eq!(
+            normalize_platform_user_id(&"x".repeat(MAX_PLATFORM_USER_ID_LEN + 1)),
+            None
+        );
     }
 
     #[test]

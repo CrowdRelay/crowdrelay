@@ -14,7 +14,8 @@ use crate::common;
 
 use crowdrelay_domain::fan_prospect::{ObservationKind, ProspectSource};
 use crowdrelay_infra::fan_prospects::{
-    ObserveOutcome, ObservedPerson, expire, observe, source_counts, status_counts,
+    ObserveOutcome, ObservedPerson, expire, link_verified_fan, observe, source_counts,
+    status_counts,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -34,7 +35,9 @@ fn seen<'a>(handle: &'a str, source_ref: &'a str, at: OffsetDateTime) -> Observe
     ObservedPerson {
         source: ProspectSource::OwnComments,
         platform: "Instagram",
-        handle,
+        platform_user_id: None,
+        handle: Some(handle),
+        display_identity: handle,
         display_name: None,
         profile_url: None,
         kind: ObservationKind::ActiveUnderOurPost,
@@ -44,6 +47,24 @@ fn seen<'a>(handle: &'a str, source_ref: &'a str, at: OffsetDateTime) -> Observe
         evidence: "Kiedy gracie Wrocław?",
         confidence_basis_points: 3_000,
     }
+}
+
+async fn active_fan(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    email: &str,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let fan = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans (id, workspace_id, normalized_email, status)
+         VALUES ($1,$2,$3,'active')",
+    )
+    .bind(fan)
+    .bind(workspace_id)
+    .bind(email)
+    .execute(pool)
+    .await?;
+    Ok(fan)
 }
 
 async fn count(
@@ -149,6 +170,119 @@ async fn one_handle_is_one_person_and_rereading_appends_nothing()
         observe(&pool, other, &seen("kuba_metal", "c1", now)).await?,
         ObserveOutcome::Created { .. }
     ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn stable_provider_id_survives_a_display_name_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool, "prospects-stable-id").await?;
+    let now = OffsetDateTime::now_utc();
+
+    let first = ObservedPerson {
+        source: ProspectSource::OwnComments,
+        platform: "youtube",
+        platform_user_id: Some("UCaBcD123"),
+        handle: None,
+        display_identity: "Metal Fan",
+        display_name: Some("Metal Fan"),
+        profile_url: None,
+        kind: ObservationKind::ActiveUnderOurPost,
+        source_ref: "yt-1",
+        source_url: None,
+        observed_at: now,
+        evidence: "ale siadło",
+        confidence_basis_points: 3_000,
+    };
+    let ObserveOutcome::Created { prospect_id } = observe(&pool, ws, &first).await? else {
+        panic!("created");
+    };
+    let renamed = ObservedPerson {
+        display_identity: "Nowa Nazwa",
+        display_name: Some("Nowa Nazwa"),
+        source_ref: "yt-2",
+        ..first
+    };
+    assert_eq!(
+        observe(&pool, ws, &renamed).await?,
+        ObserveOutcome::Known {
+            prospect_id,
+            appended: true
+        }
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM persons WHERE workspace_id=$1",
+            ws
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM fan_prospects WHERE workspace_id=$1",
+            ws
+        )
+        .await?,
+        1
+    );
+    let shown: String = sqlx::query_scalar(
+        "SELECT external_identity FROM fan_prospects WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws)
+    .bind(prospect_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(shown, "Nowa Nazwa");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn conversion_only_links_an_existing_verified_same_workspace_fan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool, "prospects-link").await?;
+    let other = workspace(&pool, "prospects-link-other").await?;
+    let now = OffsetDateTime::now_utc();
+    let ObserveOutcome::Created { prospect_id } =
+        observe(&pool, ws, &seen("warm_person", "c1", now)).await?
+    else {
+        panic!("created");
+    };
+
+    let foreign = active_fan(&pool, other, "foreign@fan.test").await?;
+    assert!(!link_verified_fan(&pool, ws, prospect_id, foreign, now).await?);
+
+    let local = active_fan(&pool, ws, "local@fan.test").await?;
+    assert!(
+        !link_verified_fan(&pool, ws, prospect_id, local, now).await?,
+        "an unverified first-party identity is not enough"
+    );
+    sqlx::query(
+        "INSERT INTO fan_identifiers
+             (workspace_id, fan_id, kind, value, source, verified_at)
+         VALUES ($1,$2,'email','local@fan.test','test',now())",
+    )
+    .bind(ws)
+    .bind(local)
+    .execute(&pool)
+    .await?;
+    assert!(link_verified_fan(&pool, ws, prospect_id, local, now).await?);
+
+    let linked: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, linked_fan_id FROM fan_prospects
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws)
+    .bind(prospect_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(linked, ("converted".to_owned(), Some(local)));
     Ok(())
 }
 

@@ -18,7 +18,7 @@
 
 use crowdrelay_domain::fan_prospect::{
     ObservationKind, ProspectSource, ProspectStatus, display_handle, normalize_handle,
-    normalize_platform,
+    normalize_platform, normalize_platform_user_id,
 };
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
@@ -29,8 +29,13 @@ use uuid::Uuid;
 pub struct ObservedPerson<'a> {
     pub source: ProspectSource,
     pub platform: &'a str,
-    /// The handle as the platform shows it.
-    pub handle: &'a str,
+    /// Stable provider/user/channel id when the surface exposes one.
+    pub platform_user_id: Option<&'a str>,
+    /// Public handle when the surface exposes one.
+    pub handle: Option<&'a str>,
+    /// Human-readable source identity. Matching never relies on this when a
+    /// stable provider id exists.
+    pub display_identity: &'a str,
     pub display_name: Option<&'a str>,
     pub profile_url: Option<&'a str>,
     pub kind: ObservationKind,
@@ -54,8 +59,11 @@ pub enum ObserveOutcome {
     Known { prospect_id: Uuid, appended: bool },
     /// The prospect has said no (or is suppressed). Nothing was written.
     NotCollected { prospect_id: Uuid },
-    /// The handle or platform is not an identity. Nothing was written.
+    /// Neither a stable platform id nor a valid handle was present.
     NotAnIdentity,
+    /// Supplied identities already belong to different people. Ingestion
+    /// never silently merges them.
+    IdentityConflict,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,15 +88,28 @@ pub async fn observe(
     workspace_id: Uuid,
     seen: &ObservedPerson<'_>,
 ) -> Result<ObserveOutcome, ProspectError> {
-    let (Some(platform), Some(handle)) = (
-        normalize_platform(seen.platform),
-        normalize_handle(seen.handle),
-    ) else {
+    let Some(platform) = normalize_platform(seen.platform) else {
         return Ok(ObserveOutcome::NotAnIdentity);
     };
-    let Some(shown) = display_handle(seen.handle) else {
+    let stable_id = seen.platform_user_id.and_then(normalize_platform_user_id);
+    let handle = seen.handle.and_then(normalize_handle);
+    if stable_id.is_none() && handle.is_none() {
         return Ok(ObserveOutcome::NotAnIdentity);
+    }
+    let shown = {
+        let display = seen.display_identity.trim();
+        if !display.is_empty() && display.chars().count() <= 256 {
+            display.to_owned()
+        } else if let Some(handle) = seen.handle.and_then(display_handle) {
+            handle
+        } else {
+            stable_id.clone().unwrap_or_default()
+        }
     };
+    if shown.is_empty() {
+        return Ok(ObserveOutcome::NotAnIdentity);
+    }
+
     let evidence = truncate_evidence(seen.evidence);
     if evidence.is_empty() {
         return Ok(ObserveOutcome::NotAnIdentity);
@@ -96,73 +117,138 @@ pub async fn observe(
     let expires_at = seen.source.expires_at(seen.observed_at);
     let mut tx = pool.begin().await?;
 
-    // The person: found by handle, or created. The unique index on
-    // (workspace, kind, platform, value) is the arbiter under a race.
-    let existing_person = sqlx::query_scalar::<_, Uuid>(
-        "SELECT person_id FROM person_identities
-         WHERE workspace_id = $1 AND kind = 'platform_handle'
-           AND platform = $2 AND value = $3",
-    )
-    .bind(workspace_id)
-    .bind(&platform)
-    .bind(&handle)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let person_id = match existing_person {
-        Some(person_id) => person_id,
-        None => {
-            let person_id = sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id",
-            )
-            .bind(workspace_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let claimed = sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO person_identities (workspace_id, person_id, kind, platform, value, source)
-                 VALUES ($1, $2, 'platform_handle', $3, $4, $5)
-                 ON CONFLICT (workspace_id, kind, COALESCE(platform, ''), value) DO NOTHING
-                 RETURNING person_id",
-            )
-            .bind(workspace_id)
-            .bind(person_id)
-            .bind(&platform)
-            .bind(&handle)
-            .bind(seen.source.as_str())
-            .fetch_optional(&mut *tx)
-            .await?;
-            if claimed.is_some() {
-                person_id
-            } else {
-                // Lost a race: another writer claimed the handle first. Drop the
-                // person we just made and use theirs.
-                sqlx::query("DELETE FROM persons WHERE workspace_id = $1 AND id = $2")
-                    .bind(workspace_id)
-                    .bind(person_id)
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query_scalar::<_, Uuid>(
-                    "SELECT person_id FROM person_identities
-                     WHERE workspace_id = $1 AND kind = 'platform_handle'
-                       AND platform = $2 AND value = $3",
-                )
+    let stable_person = if let Some(stable_id) = stable_id.as_deref() {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT person_id FROM person_identities
+             WHERE workspace_id=$1 AND kind='platform_user_id'
+               AND platform=$2 AND value=$3",
+        )
+        .bind(workspace_id)
+        .bind(&platform)
+        .bind(stable_id)
+        .fetch_optional(&mut *tx)
+        .await?
+    } else {
+        None
+    };
+    let handle_person = if let Some(handle) = handle.as_deref() {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT person_id FROM person_identities
+             WHERE workspace_id=$1 AND kind='platform_handle'
+               AND platform=$2 AND value=$3",
+        )
+        .bind(workspace_id)
+        .bind(&platform)
+        .bind(handle)
+        .fetch_optional(&mut *tx)
+        .await?
+    } else {
+        None
+    };
+    if stable_person.is_some() && handle_person.is_some() && stable_person != handle_person {
+        tx.rollback().await?;
+        return Ok(ObserveOutcome::IdentityConflict);
+    }
+
+    let person_id = if let Some(person_id) = stable_person.or(handle_person) {
+        person_id
+    } else {
+        let person_id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO persons (workspace_id) VALUES ($1) RETURNING id",
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let (kind, value) = if let Some(stable_id) = stable_id.as_deref() {
+            ("platform_user_id", stable_id)
+        } else {
+            ("platform_handle", handle.as_deref().expect("handle exists"))
+        };
+        let claimed = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO person_identities
+                 (workspace_id, person_id, kind, platform, value, source)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (workspace_id, kind, COALESCE(platform, ''), value)
+             DO NOTHING
+             RETURNING person_id",
+        )
+        .bind(workspace_id)
+        .bind(person_id)
+        .bind(kind)
+        .bind(&platform)
+        .bind(value)
+        .bind(seen.source.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if claimed.is_some() {
+            person_id
+        } else {
+            sqlx::query("DELETE FROM persons WHERE workspace_id=$1 AND id=$2")
                 .bind(workspace_id)
-                .bind(&platform)
-                .bind(&handle)
-                .fetch_one(&mut *tx)
-                .await?
-            }
+                .bind(person_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT person_id FROM person_identities
+                 WHERE workspace_id=$1 AND kind=$2 AND platform=$3 AND value=$4",
+            )
+            .bind(workspace_id)
+            .bind(kind)
+            .bind(&platform)
+            .bind(value)
+            .fetch_one(&mut *tx)
+            .await?
         }
     };
 
+    for (kind, value) in [
+        stable_id
+            .as_deref()
+            .map(|value| ("platform_user_id", value)),
+        handle.as_deref().map(|value| ("platform_handle", value)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        sqlx::query(
+            "INSERT INTO person_identities
+                 (workspace_id, person_id, kind, platform, value, source)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (workspace_id, kind, COALESCE(platform, ''), value)
+             DO NOTHING",
+        )
+        .bind(workspace_id)
+        .bind(person_id)
+        .bind(kind)
+        .bind(&platform)
+        .bind(value)
+        .bind(seen.source.as_str())
+        .execute(&mut *tx)
+        .await?;
+        let owner = sqlx::query_scalar::<_, Uuid>(
+            "SELECT person_id FROM person_identities
+             WHERE workspace_id=$1 AND kind=$2 AND platform=$3 AND value=$4",
+        )
+        .bind(workspace_id)
+        .bind(kind)
+        .bind(&platform)
+        .bind(value)
+        .fetch_one(&mut *tx)
+        .await?;
+        if owner != person_id {
+            tx.rollback().await?;
+            return Ok(ObserveOutcome::IdentityConflict);
+        }
+    }
+
     let prior = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, status FROM fan_prospects
-         WHERE workspace_id = $1 AND platform = $2
-           AND lower(btrim(external_identity)) = $3
+         WHERE workspace_id=$1 AND person_id=$2 AND platform=$3
          FOR UPDATE",
     )
     .bind(workspace_id)
+    .bind(person_id)
     .bind(&platform)
-    .bind(&handle)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -174,17 +260,28 @@ pub async fn observe(
             }
             sqlx::query(
                 "UPDATE fan_prospects
-                 SET last_seen_at = GREATEST(last_seen_at, $3),
-                     expires_at = GREATEST(expires_at, $4),
-                     display_name = COALESCE($5, display_name),
-                     profile_url = COALESCE($6, profile_url),
-                     updated_at = now()
-                 WHERE workspace_id = $1 AND id = $2",
+                 SET last_seen_at=GREATEST(last_seen_at,$3),
+                     expires_at=GREATEST(expires_at,$4),
+                     external_identity=CASE
+                         WHEN $3 >= last_seen_at THEN $5
+                         ELSE external_identity
+                     END,
+                     display_name=CASE
+                         WHEN $3 >= last_seen_at THEN COALESCE($6,display_name)
+                         ELSE display_name
+                     END,
+                     profile_url=CASE
+                         WHEN $3 >= last_seen_at THEN COALESCE($7,profile_url)
+                         ELSE profile_url
+                     END,
+                     updated_at=now()
+                 WHERE workspace_id=$1 AND id=$2",
             )
             .bind(workspace_id)
             .bind(prospect_id)
             .bind(seen.observed_at)
             .bind(expires_at)
+            .bind(&shown)
             .bind(seen.display_name)
             .bind(seen.profile_url)
             .execute(&mut *tx)
@@ -194,9 +291,9 @@ pub async fn observe(
         None => {
             let prospect_id = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO fan_prospects
-                     (workspace_id, person_id, platform, external_identity, display_name,
-                      profile_url, lawful_basis, expires_at, first_seen_at, last_seen_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+                     (workspace_id,person_id,platform,external_identity,display_name,
+                      profile_url,lawful_basis,expires_at,first_seen_at,last_seen_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
                  RETURNING id",
             )
             .bind(workspace_id)
@@ -216,10 +313,10 @@ pub async fn observe(
 
     let appended = sqlx::query_scalar::<_, i64>(
         "INSERT INTO fan_prospect_observations
-             (workspace_id, prospect_id, observation_kind, source, source_ref, source_url,
-              observed_at, evidence, confidence_basis_points)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (prospect_id, observation_kind, source, source_ref) DO NOTHING
+             (workspace_id,prospect_id,observation_kind,source,source_ref,source_url,
+              observed_at,evidence,confidence_basis_points)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (prospect_id,observation_kind,source,source_ref) DO NOTHING
          RETURNING id",
     )
     .bind(workspace_id)
@@ -235,6 +332,7 @@ pub async fn observe(
     .await?
     .is_some();
     tx.commit().await?;
+
     Ok(if created {
         ObserveOutcome::Created { prospect_id }
     } else {
@@ -243,6 +341,54 @@ pub async fn observe(
             appended,
         }
     })
+}
+
+/// Links a prospect to an existing verified first-party fan.
+///
+/// This never creates a fan row. Refused/suppressed prospects are not revived,
+/// and a prospect already linked to another fan cannot be silently relinked.
+///
+/// # Errors
+/// Propagates database errors.
+pub async fn link_verified_fan(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    prospect_id: Uuid,
+    fan_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<bool, ProspectError> {
+    let linked = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE fan_prospects AS prospect
+         SET linked_fan_id=$3,
+             status='converted',
+             last_seen_at=GREATEST(prospect.last_seen_at,$4),
+             updated_at=$4
+         WHERE prospect.workspace_id=$1
+           AND prospect.id=$2
+           AND prospect.status NOT IN ('refused','suppressed')
+           AND (prospect.linked_fan_id IS NULL OR prospect.linked_fan_id=$3)
+           AND EXISTS (
+               SELECT 1 FROM fans AS fan
+               WHERE fan.workspace_id=$1
+                 AND fan.id=$3
+                 AND fan.status='active'
+                 AND fan.deleted_at IS NULL
+                 AND EXISTS (
+                     SELECT 1 FROM fan_identifiers AS identifier
+                     WHERE identifier.workspace_id=fan.workspace_id
+                       AND identifier.fan_id=fan.id
+                       AND identifier.verified_at IS NOT NULL
+                 )
+           )
+         RETURNING prospect.id",
+    )
+    .bind(workspace_id)
+    .bind(prospect_id)
+    .bind(fan_id)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?;
+    Ok(linked.is_some())
 }
 
 /// Prospects per status, for the person-funnel readout. Every status is
