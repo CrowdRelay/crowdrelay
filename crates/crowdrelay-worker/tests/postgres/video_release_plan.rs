@@ -133,3 +133,82 @@ async fn a_ten_day_old_video_opens_no_plan() -> Result<()> {
     assert_eq!(plan_count(&pool, workspace_id).await?, 0);
     Ok(())
 }
+
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_confirmed_short_retires_source_release_plan_and_campaign() -> Result<()> {
+    let (pool, worker, workspace_id) = fixture().await?;
+    let video_id = "legacyshort1";
+
+    worker
+        .upsert_video("UCchan", &entry(video_id, OffsetDateTime::now_utc()))
+        .await
+        .map_err(|error| anyhow!("seed legacy source: {error}"))?;
+
+    let source_format: String = sqlx::query_scalar(
+        "SELECT metadata->>'youtube_format'
+         FROM content_sources
+         WHERE workspace_id=$1 AND source_key=$2",
+    )
+    .bind(workspace_id)
+    .bind(format!("youtube:{video_id}"))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(source_format, "long_form");
+
+    let plan_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM release_plans WHERE workspace_id=$1 AND source_key=$2",
+    )
+    .bind(workspace_id)
+    .bind(format!("youtube:{video_id}"))
+    .fetch_one(&pool)
+    .await?;
+
+    let campaign_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO campaigns (workspace_id,name,release_plan_id)
+         VALUES ($1,'Legacy Short Campaign',$2)
+         RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(plan_id)
+    .fetch_one(&pool)
+    .await?;
+
+    worker
+        .retire_youtube_short(video_id)
+        .await
+        .map_err(|error| anyhow!("retire short: {error}"))?;
+
+    let (source_active, format): (bool, Option<String>) = sqlx::query_as(
+        "SELECT active, metadata->>'youtube_format'
+         FROM content_sources
+         WHERE workspace_id=$1 AND source_key=$2",
+    )
+    .bind(workspace_id)
+    .bind(format!("youtube:{video_id}"))
+    .fetch_one(&pool)
+    .await?;
+    assert!(!source_active);
+    assert_eq!(format.as_deref(), Some("short"));
+
+    let plan: (bool, bool, bool) = sqlx::query_as(
+        "SELECT active,communication_enabled,press_enabled
+         FROM release_plans WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id)
+    .bind(plan_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(plan, (false, false, false));
+
+    let campaign_active: bool =
+        sqlx::query_scalar("SELECT active FROM campaigns WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id)
+            .bind(campaign_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(!campaign_active, "a Short's release campaign must not survive");
+
+    Ok(())
+}

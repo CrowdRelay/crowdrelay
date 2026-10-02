@@ -413,6 +413,36 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
         ) AS surge_failed ON true
         WHERE source.workspace_id = $1
           AND source.active
+          -- The YouTube watcher owns primary video promotion. A watcher row
+          -- is usable only after a positive long-form classification; legacy
+          -- rows without that durable fact are held until the next sweep.
+          AND NOT (
+              source.source_kind = 'video'
+              AND source.metadata->>'origin' = 'youtube_feed'
+              AND COALESCE(source.metadata->>'youtube_format', '') <> 'long_form'
+          )
+          -- Release-plan projections created from the same YouTube source
+          -- inherit the classification when a sibling video row exists.
+          -- This blocks an old Short from newsletter/press/drop-surge paths
+          -- without changing manually-authored non-watcher releases.
+          AND NOT (
+              source.source_kind = 'release'
+              AND COALESCE(source.metadata->>'source_key', '') LIKE 'youtube:%'
+              AND EXISTS (
+                  SELECT 1 FROM content_sources AS known_video
+                  WHERE known_video.workspace_id = source.workspace_id
+                    AND known_video.source_kind = 'video'
+                    AND known_video.source_key = source.metadata->>'source_key'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM content_sources AS long_video
+                  WHERE long_video.workspace_id = source.workspace_id
+                    AND long_video.source_kind = 'video'
+                    AND long_video.source_key = source.metadata->>'source_key'
+                    AND long_video.active
+                    AND long_video.metadata->>'youtube_format' = 'long_form'
+              )
+          )
           -- Every artifact an `event` source owes is pre-show promotion: a
           -- listing, a press hook, a push, feed and story posts, a
           -- newsletter block. Once the night is over none of it is true any
