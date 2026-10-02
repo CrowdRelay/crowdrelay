@@ -213,11 +213,21 @@ async fn stable_provider_id_survives_a_display_name_change()
         }
     );
     assert_eq!(
-        count(&pool, "SELECT count(*) FROM persons WHERE workspace_id=$1", ws).await?,
+        count(
+            &pool,
+            "SELECT count(*) FROM persons WHERE workspace_id=$1",
+            ws
+        )
+        .await?,
         1
     );
     assert_eq!(
-        count(&pool, "SELECT count(*) FROM fan_prospects WHERE workspace_id=$1", ws).await?,
+        count(
+            &pool,
+            "SELECT count(*) FROM fan_prospects WHERE workspace_id=$1",
+            ws
+        )
+        .await?,
         1
     );
     let shown: String = sqlx::query_scalar(

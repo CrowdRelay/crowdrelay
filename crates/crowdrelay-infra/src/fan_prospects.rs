@@ -91,9 +91,7 @@ pub async fn observe(
     let Some(platform) = normalize_platform(seen.platform) else {
         return Ok(ObserveOutcome::NotAnIdentity);
     };
-    let stable_id = seen
-        .platform_user_id
-        .and_then(normalize_platform_user_id);
+    let stable_id = seen.platform_user_id.and_then(normalize_platform_user_id);
     let handle = seen.handle.and_then(normalize_handle);
     if stable_id.is_none() && handle.is_none() {
         return Ok(ObserveOutcome::NotAnIdentity);
@@ -264,9 +262,18 @@ pub async fn observe(
                 "UPDATE fan_prospects
                  SET last_seen_at=GREATEST(last_seen_at,$3),
                      expires_at=GREATEST(expires_at,$4),
-                     external_identity=$5,
-                     display_name=COALESCE($6,display_name),
-                     profile_url=COALESCE($7,profile_url),
+                     external_identity=CASE
+                         WHEN $3 >= last_seen_at THEN $5
+                         ELSE external_identity
+                     END,
+                     display_name=CASE
+                         WHEN $3 >= last_seen_at THEN COALESCE($6,display_name)
+                         ELSE display_name
+                     END,
+                     profile_url=CASE
+                         WHEN $3 >= last_seen_at THEN COALESCE($7,profile_url)
+                         ELSE profile_url
+                     END,
                      updated_at=now()
                  WHERE workspace_id=$1 AND id=$2",
             )
