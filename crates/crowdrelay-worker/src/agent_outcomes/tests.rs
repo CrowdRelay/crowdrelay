@@ -249,7 +249,7 @@ fn valid_signal_push_passes() {
 #[test]
 fn a_workspace_policy_cannot_release_model_written_text() {
     assert_eq!(
-        model_text_authority(UnattendedAuthority::Policy),
+        model_text_authority(UnattendedAuthority::Policy, true),
         UnattendedAuthority::Denied
     );
 }
@@ -257,11 +257,11 @@ fn a_workspace_policy_cannot_release_model_written_text() {
 #[test]
 fn a_persons_standing_grant_still_releases_its_one_community() {
     assert_eq!(
-        model_text_authority(UnattendedAuthority::Grant),
+        model_text_authority(UnattendedAuthority::Grant, true),
         UnattendedAuthority::Grant
     );
     assert_eq!(
-        model_text_authority(UnattendedAuthority::Denied),
+        model_text_authority(UnattendedAuthority::Denied, true),
         UnattendedAuthority::Denied
     );
 }

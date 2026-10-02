@@ -49,20 +49,22 @@ impl AutomatedFetch {
         }
     }
 
-    fn index(self) -> usize {
-        self as usize
+    fn counter(self) -> &'static AtomicU64 {
+        static NOT_GET: AtomicU64 = AtomicU64::new(0);
+        static PREFETCH: AtomicU64 = AtomicU64::new(0);
+        static MISSING_AGENT: AtomicU64 = AtomicU64::new(0);
+        static DECLARED_BOT: AtomicU64 = AtomicU64::new(0);
+        match self {
+            Self::NotGet => &NOT_GET,
+            Self::Prefetch => &PREFETCH,
+            Self::MissingAgent => &MISSING_AGENT,
+            Self::DeclaredBot => &DECLARED_BOT,
+        }
     }
 }
 
-static DROPPED: [AtomicU64; 4] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
-
 pub(crate) fn record_dropped(reason: AutomatedFetch) {
-    DROPPED[reason.index()].fetch_add(1, Ordering::Relaxed);
+    reason.counter().fetch_add(1, Ordering::Relaxed);
 }
 
 /// Prometheus text for the per-reason counters.
@@ -75,7 +77,7 @@ pub(crate) fn dropped_prometheus() -> String {
         out.push_str(&format!(
             "crowdrelay_tracked_link_fetches_not_clicked_total{{reason=\"{}\"}} {}\n",
             reason.label(),
-            DROPPED[reason.index()].load(Ordering::Relaxed)
+            reason.counter().load(Ordering::Relaxed)
         ));
     }
     out
