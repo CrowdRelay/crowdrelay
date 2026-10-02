@@ -102,3 +102,4 @@ pub mod venue_seed;
 pub mod workspace_secrets;
 
 pub mod organic_funnel;
+pub mod organic_goal;

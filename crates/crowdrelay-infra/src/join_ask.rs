@@ -60,7 +60,9 @@ pub async fn load_join_ask_snapshot(
     // `last_tracked_click` conversion rows `record_conversion` writes, keyed
     // to this post's action. Any-click joins would credit a fan to every
     // post they clicked before signing up; the ledger picks exactly one
-    // (the latest click), and this count must agree with it. NULL means the
+    // (the latest click). The shared organic cohort further requires a real
+    // publication/click trace, active marketing consent and no staff/manual/
+    // test/seed exclusion. A pending signup is not a fan reward. NULL means the
     // post has no tracked link — unmeasurable, which the selector keeps
     // separate from a measured zero.
     let posts = sqlx::query_as::<
@@ -83,20 +85,12 @@ pub async fn load_join_ask_snapshot(
                post.posted_at,
                CASE WHEN post.smart_link_id IS NOT NULL
                     THEN (
-                        SELECT COUNT(DISTINCT conversion.fan_id)::bigint
-                        FROM fan_provenance_events AS conversion
-                        JOIN fans AS fan
-                          ON fan.workspace_id = conversion.workspace_id
-                         AND fan.id = conversion.fan_id
-                         AND fan.status <> 'suppressed'
-                         AND fan.deleted_at IS NULL
-                        WHERE conversion.workspace_id = post.workspace_id
-                          AND conversion.event_kind = 'conversion'
-                          AND conversion.attribution_method = 'last_tracked_click'
-                          AND conversion.action_id = post.action_id
-                          AND conversion.occurred_at >= post.posted_at
-                          AND conversion.occurred_at <
-                              post.posted_at + INTERVAL '7 days'
+                        SELECT COUNT(*)::bigint
+                        FROM organic_fan_cohort(post.workspace_id,post.posted_at,
+                            post.posted_at + INTERVAL '7 days',now()) AS cohort
+                        WHERE cohort.action_id=post.action_id
+                          AND cohort.link_id=post.smart_link_id
+                          AND cohort.verified AND cohort.contactable AND NOT cohort.excluded
                     )
                END AS fans_7d, decision.input_snapshot->'capture_context' AS capture_context
         FROM social_posts AS post

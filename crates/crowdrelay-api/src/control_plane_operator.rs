@@ -43,6 +43,8 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             get(crate::ops::list_connection_health),
         )
         // The organic-acquisition funnel is the console's "did that action
+        .route("/v1/control-plane/ops/organic-goal", get(crate::ops::organic_goal).post(crate::ops::declare_organic_goal))
+        .route("/v1/control-plane/ops/organic-goal/fans/{fan_id}/exclusion", post(crate::ops::set_organic_exclusion))
         // grow fans" read — the same handler the admin surface serves.
         .route(
             "/v1/control-plane/ops/organic-funnel",
