@@ -357,6 +357,7 @@ mod tests {
                 Request::builder()
                     .uri("/v1/go/tour-2026")
                     .header(REFERER, "https://social.example/post/123")
+                    .header("user-agent", "Mozilla/5.0 (iPhone) Safari/604.1")
                     .body(Body::empty())?,
             )
             .await?;
@@ -756,6 +757,7 @@ mod tests {
 
     include!("lib_tests_attestation.rs");
     include!("lib_tests_operator_surface.rs");
+    include!("lib_tests_redirect_automated.rs");
 
     #[tokio::test]
     async fn referral_redirect_progress_and_redemption_routes_are_private()

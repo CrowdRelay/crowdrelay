@@ -2,6 +2,7 @@
 pub async fn redirect_smart_link(
     State(state): State<crate::AppState>,
     Path(raw_slug): Path<String>,
+    method: Method,
     headers: HeaderMap,
 ) -> Response {
     let Ok(slug) = SmartLinkSlug::parse(&raw_slug) else {
@@ -18,19 +19,28 @@ pub async fn redirect_smart_link(
             .into_response();
     };
 
+    // Previews, crawlers, HEAD probes and prefetches get the redirect but are
+    // not an audience: no click row, no attribution cookie (see
+    // `automated_fetch`). The visitor id is still minted so the response shape
+    // is identical for every caller.
+    let automated = is_automated_fetch(&method, &headers);
     let visitor_id = attribution_visitor(&headers).unwrap_or_default();
-    let referrer_host = referrer_host(&headers);
-    match ClickEvent::from_link(
-        link,
-        Some(visitor_id),
-        referrer_host,
-        OffsetDateTime::now_utc(),
-    ) {
-        Ok(event) => (state.acquisition.click_submitter)(event),
-        Err(error) => {
-            // Analytics is explicitly best effort. A malformed referrer must
-            // never delay or break the redirect path.
-            tracing::debug!(%error, "discarded invalid click referrer metadata");
+    if automated {
+        tracing::debug!(smart_link_id = %link.id(), "tracked-link fetch by an automated agent not recorded as a click");
+    } else {
+        let referrer_host = referrer_host(&headers);
+        match ClickEvent::from_link(
+            link,
+            Some(visitor_id),
+            referrer_host,
+            OffsetDateTime::now_utc(),
+        ) {
+            Ok(event) => (state.acquisition.click_submitter)(event),
+            Err(error) => {
+                // Analytics is explicitly best effort. A malformed referrer must
+                // never delay or break the redirect path.
+                tracing::debug!(%error, "discarded invalid click referrer metadata");
+            }
         }
     }
 
@@ -66,24 +76,26 @@ pub async fn redirect_smart_link(
             .private()
             .into_response();
     };
-    let Ok(cookie) = HeaderValue::from_str(&attribution_cookie(
-        visitor_id,
-        state.acquisition.secure_cookies,
-    )) else {
-        tracing::error!("attribution cookie could not be encoded as a response header");
-        return Problem::internal(request_id(&headers))
-            .private()
-            .into_response();
-    };
-
-    (
+    let mut response = (
         StatusCode::FOUND,
         [
             (LOCATION, location),
-            (SET_COOKIE, cookie),
             (CACHE_CONTROL, HeaderValue::from_static(PRIVATE_NO_STORE)),
             (REFERRER_POLICY, HeaderValue::from_static("no-referrer")),
         ],
     )
-        .into_response()
+        .into_response();
+    if !automated {
+        let Ok(cookie) = HeaderValue::from_str(&attribution_cookie(
+            visitor_id,
+            state.acquisition.secure_cookies,
+        )) else {
+            tracing::error!("attribution cookie could not be encoded as a response header");
+            return Problem::internal(request_id(&headers))
+                .private()
+                .into_response();
+        };
+        response.headers_mut().insert(SET_COOKIE, cookie);
+    }
+    response
 }
