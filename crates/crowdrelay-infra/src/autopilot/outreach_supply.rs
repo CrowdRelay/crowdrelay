@@ -144,6 +144,30 @@ pub(crate) async fn outreach_pitch(
         "SELECT id, title, listen_url, source_key FROM release_plans
          WHERE workspace_id = $1 AND active
            AND listen_url IS NOT NULL AND btrim(listen_url) <> '' AND btrim(title) <> ''
+           -- A watcher-generated YouTube plan must be backed by a confirmed
+           -- long-form source before it can become press/email outreach.
+           -- Legacy Shorts already have a sibling video row; those rows are
+           -- therefore suppressed immediately even before the next watcher
+           -- sweep quarantines them.
+           AND (
+               source_key NOT LIKE 'youtube:%'
+               OR NOT EXISTS (
+                   SELECT 1
+                   FROM content_sources AS known_video
+                   WHERE known_video.workspace_id = release_plans.workspace_id
+                     AND known_video.source_kind = 'video'
+                     AND known_video.source_key = release_plans.source_key
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM content_sources AS long_video
+                   WHERE long_video.workspace_id = release_plans.workspace_id
+                     AND long_video.source_kind = 'video'
+                     AND long_video.source_key = release_plans.source_key
+                     AND long_video.active
+                     AND long_video.metadata->>'youtube_format' = 'long_form'
+               )
+           )
          ORDER BY release_at DESC, id
          LIMIT 1",
     )

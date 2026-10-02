@@ -104,6 +104,40 @@ pub struct FeedEntry {
     pub description: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YoutubeVideoFormat {
+    LongForm,
+    Short,
+    Unknown,
+}
+
+impl YoutubeVideoFormat {
+    const fn as_metadata(self) -> &'static str {
+        match self {
+            Self::LongForm => "long_form",
+            Self::Short => "short",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A transient probe failure cannot turn an unclassified upload into a
+/// promotable video. Once a long-form classification has been confirmed,
+/// however, a later YouTube outage does not erase that durable fact.
+fn resolve_youtube_format(
+    probed: YoutubeVideoFormat,
+    existing: Option<&str>,
+) -> YoutubeVideoFormat {
+    if probed != YoutubeVideoFormat::Unknown {
+        return probed;
+    }
+    match existing {
+        Some("long_form") => YoutubeVideoFormat::LongForm,
+        Some("short") => YoutubeVideoFormat::Short,
+        _ => YoutubeVideoFormat::Unknown,
+    }
+}
+
 impl VideoSourceSyncWorker {
     pub fn new(
         pool: PgPool,
@@ -216,18 +250,29 @@ impl VideoSourceSyncWorker {
             None => self.uploads_via_feed(channel_id).await?,
         };
         for entry in entries.into_iter().take(MAX_ENTRIES_PER_FEED) {
-            // Only full videos become share sources — a Short is a format the
-            // community strategy never turns into a thread post. The probe
-            // runs once per unseen id; a known row is never re-checked.
+            // Format is re-checked on every sweep. The old implementation
+            // probed only unseen ids and treated a network error as "not a
+            // Short"; one transient failure therefore permanently admitted a
+            // Short as a release-quality video. Promotion is now fail-closed.
             let source_key = format!("youtube:{}", entry.video_id);
-            if !self.source_exists(&source_key).await? && self.is_short(&entry.video_id).await {
-                tracing::info!(
-                    video_id = %entry.video_id,
-                    "video source sync: skipped a short"
-                );
-                continue;
+            let existing = self.source_format(&source_key).await?;
+            let format = resolve_youtube_format(
+                self.probe_video_format(&entry.video_id).await,
+                existing.as_deref(),
+            );
+            match format {
+                YoutubeVideoFormat::LongForm => {
+                    self.upsert_video(channel_id, &entry).await?;
+                }
+                YoutubeVideoFormat::Short | YoutubeVideoFormat::Unknown => {
+                    self.quarantine_video(&source_key, format).await?;
+                    tracing::info!(
+                        video_id = %entry.video_id,
+                        youtube_format = format.as_metadata(),
+                        "video source sync: not eligible for primary promotion"
+                    );
+                }
             }
-            self.upsert_video(channel_id, &entry).await?;
         }
         Ok(())
     }
@@ -279,35 +324,97 @@ impl VideoSourceSyncWorker {
         Ok(parse_playlist_items(&body))
     }
 
-    /// Whether a `youtube:{id}` source row already exists for this workspace.
-    async fn source_exists(&self, source_key: &str) -> Result<bool, String> {
-        sqlx::query_scalar::<_, bool>(
+    /// The last durable format classification for a known YouTube source.
+    async fn source_format(&self, source_key: &str) -> Result<Option<String>, String> {
+        sqlx::query_scalar::<_, Option<String>>(
             r#"
-            SELECT EXISTS(
-                SELECT 1 FROM content_sources
-                WHERE workspace_id = $1
-                  AND source_kind = 'video'
-                  AND source_key = $2
-            )
+            SELECT metadata->>'youtube_format'
+            FROM content_sources
+            WHERE workspace_id = $1
+              AND source_kind = 'video'
+              AND source_key = $2
             "#,
         )
         .bind(self.workspace_id)
         .bind(source_key)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(|e| format!("source exists check: {e}"))
+        .map(|value| value.flatten())
+        .map_err(|e| format!("source format check: {e}"))
     }
 
-    /// YouTube answers `/shorts/{id}` with 200 for a Short and redirects a
-    /// full video to `/watch`. A probe failure must not drop a real upload
-    /// forever — treat it as a full video and let the row live or die on
-    /// the content rules, not on one transient HTTP error.
-    async fn is_short(&self, video_id: &str) -> bool {
+    /// YouTube serves `/shorts/{id}` with 2xx for a Short and redirects a
+    /// normal video back to the watch surface. Any other answer is unknown.
+    /// Unknown is deliberately not promotable: a provider blip may delay a
+    /// video, but it must never turn a Short into a press/email campaign.
+    async fn probe_video_format(&self, video_id: &str) -> YoutubeVideoFormat {
         let url = format!("https://www.youtube.com/shorts/{video_id}");
         match self.http_client.get(&url).send().await {
-            Ok(response) => is_short_status(response.status()),
-            Err(_) => false,
+            Ok(response) => youtube_format_from_status(response.status()),
+            Err(_) => YoutubeVideoFormat::Unknown,
         }
+    }
+
+    /// Deactivate an already-known source when it is a Short or still
+    /// unclassified. This repairs legacy rows that slipped through the old
+    /// fail-open probe. A future confirmed long-form sweep reactivates them.
+    async fn quarantine_video(
+        &self,
+        source_key: &str,
+        format: YoutubeVideoFormat,
+    ) -> Result<(), String> {
+        let mut tx = self.pool.begin().await.map_err(|e| format!("begin quarantine: {e}"))?;
+        let changed: Option<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            UPDATE content_sources
+            SET active = false,
+                metadata = metadata || jsonb_build_object('youtube_format', $3::text),
+                version = version + 1
+            WHERE workspace_id = $1
+              AND source_kind = 'video'
+              AND source_key = $2
+              AND (
+                  active
+                  OR metadata->>'youtube_format' IS DISTINCT FROM $3
+              )
+            RETURNING id, version
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(source_key)
+        .bind(format.as_metadata())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("quarantine source: {e}"))?;
+
+        if let Some((source_id, version)) = changed {
+            sqlx::query(
+                r#"
+                INSERT INTO content_source_history (
+                    workspace_id, source_id, version, snapshot
+                )
+                SELECT workspace_id, id, version, jsonb_build_object(
+                    'source_kind', source_kind,
+                    'source_key', source_key,
+                    'title', title,
+                    'occurred_at', occurred_at,
+                    'expires_at', expires_at,
+                    'metadata', metadata,
+                    'active', active,
+                    'format_key', format_key
+                )
+                FROM content_sources
+                WHERE workspace_id = $1 AND id = $2 AND version = $3
+                "#,
+            )
+            .bind(self.workspace_id)
+            .bind(source_id)
+            .bind(version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("quarantine history: {e}"))?;
+        }
+        tx.commit().await.map_err(|e| format!("commit quarantine: {e}"))
     }
 
     /// Idempotent upsert keyed on the video id. A title change bumps the
@@ -332,6 +439,7 @@ impl VideoSourceSyncWorker {
             "channel_id": channel_id,
             "published_at": entry.published.map(|t| t.unix_timestamp()),
             "origin": "youtube_feed",
+            "youtube_format": "long_form",
             "body": entry.description,
         });
 
@@ -352,11 +460,13 @@ impl VideoSourceSyncWorker {
                 occurred_at = EXCLUDED.occurred_at,
                 expires_at = EXCLUDED.expires_at,
                 metadata = content_sources.metadata || EXCLUDED.metadata,
+                active = true,
                 version = content_sources.version + 1
             WHERE content_sources.title IS DISTINCT FROM EXCLUDED.title
                OR content_sources.occurred_at IS DISTINCT FROM EXCLUDED.occurred_at
                OR content_sources.expires_at IS DISTINCT FROM EXCLUDED.expires_at
                OR content_sources.metadata IS DISTINCT FROM (content_sources.metadata || EXCLUDED.metadata)
+               OR content_sources.active IS DISTINCT FROM true
             RETURNING id, version, (xmax = 0)
             "#,
         )
@@ -573,8 +683,15 @@ fn parse_playlist_items(body: &serde_json::Value) -> Vec<FeedEntry> {
 
 /// The shorts probe's answer, decided on status alone: YouTube serves the
 /// /shorts/{id} URL for a Short and redirects a full video to /watch.
-fn is_short_status(status: reqwest::StatusCode) -> bool {
-    status.is_success()
+/// Provider errors are not evidence either way and stay fail-closed.
+fn youtube_format_from_status(status: reqwest::StatusCode) -> YoutubeVideoFormat {
+    if status.is_success() {
+        YoutubeVideoFormat::Short
+    } else if status.is_redirection() {
+        YoutubeVideoFormat::LongForm
+    } else {
+        YoutubeVideoFormat::Unknown
+    }
 }
 
 /// Reads the text of the first `<tag>…</tag>` in a block. Handles the
@@ -745,11 +862,47 @@ mod tests {
     }
 
     #[test]
-    fn shorts_answer_200_full_videos_redirect() {
+    fn shorts_answer_200_full_videos_redirect_and_errors_stay_unknown() {
         use reqwest::StatusCode;
-        assert!(is_short_status(StatusCode::OK));
-        assert!(!is_short_status(StatusCode::SEE_OTHER));
-        assert!(!is_short_status(StatusCode::FOUND));
-        assert!(!is_short_status(StatusCode::NOT_FOUND));
+        assert_eq!(
+            youtube_format_from_status(StatusCode::OK),
+            YoutubeVideoFormat::Short
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::SEE_OTHER),
+            YoutubeVideoFormat::LongForm
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::FOUND),
+            YoutubeVideoFormat::LongForm
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::NOT_FOUND),
+            YoutubeVideoFormat::Unknown
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::TOO_MANY_REQUESTS),
+            YoutubeVideoFormat::Unknown
+        );
+    }
+
+    #[test]
+    fn unknown_probe_never_promotes_an_unclassified_legacy_upload() {
+        assert_eq!(
+            resolve_youtube_format(YoutubeVideoFormat::Unknown, None),
+            YoutubeVideoFormat::Unknown
+        );
+        assert_eq!(
+            resolve_youtube_format(YoutubeVideoFormat::Unknown, Some("unknown")),
+            YoutubeVideoFormat::Unknown
+        );
+        assert_eq!(
+            resolve_youtube_format(YoutubeVideoFormat::Unknown, Some("long_form")),
+            YoutubeVideoFormat::LongForm
+        );
+        assert_eq!(
+            resolve_youtube_format(YoutubeVideoFormat::Unknown, Some("short")),
+            YoutubeVideoFormat::Short
+        );
     }
 }
