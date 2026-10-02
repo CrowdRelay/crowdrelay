@@ -520,35 +520,15 @@ impl AgentOutcomeWorker {
         // so multi-byte UTF-8 (Polish diacritics, emoji) doesn't
         // exceed the char_length CHECK. The full rationale is
         // preserved in input_snapshot.payload.rationale.
-        let decision_reason_owned = outcome
-            .payload
-            .provenance
-            .as_ref()
-            .filter(|_| {
-                matches!(
-                    outcome.kind,
-                    OutcomeKind::PressPitch | OutcomeKind::SocialPost | OutcomeKind::SignalPush
-                )
-            })
-            .and_then(|provenance| {
-                (!provenance.strategic_review.passed()).then(|| {
-                    let detail = provenance
-                        .strategic_review
-                        .human_hold_reason()
-                        .unwrap_or("strategic review did not produce a passing verdict");
-                    format!("Human review required after AI cross-review: {detail}")
-                })
-            });
-        let decision_reason_source = decision_reason_owned
-            .as_deref()
-            .unwrap_or_else(|| {
-                let rationale = outcome.payload.rationale.trim();
-                if rationale.is_empty() {
-                    "Outcome supplied no rationale."
-                } else {
-                    rationale
-                }
-            });
+        let decision_reason_owned = strategic_review_hold_reason(outcome);
+        let decision_reason_source = decision_reason_owned.as_deref().unwrap_or_else(|| {
+            let rationale = outcome.payload.rationale.trim();
+            if rationale.is_empty() {
+                "Outcome supplied no rationale."
+            } else {
+                rationale
+            }
+        });
         let decision_reason = if decision_reason_source.chars().count() <= 240 {
             decision_reason_source
         } else {
