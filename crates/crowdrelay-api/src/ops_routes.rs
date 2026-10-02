@@ -6,6 +6,14 @@ use axum::{
 pub(crate) fn router() -> Router<crate::AppState> {
     Router::new()
         .route(
+            "/v1/admin/ops/organic-goal",
+            get(crate::ops::organic_goal).post(crate::ops::declare_organic_goal),
+        )
+        .route(
+            "/v1/admin/ops/organic-goal/fans/{fan_id}/exclusion",
+            post(crate::ops::set_organic_exclusion),
+        )
+        .route(
             "/v1/admin/ops/organic-funnel",
             get(crate::ops::organic_funnel),
         )
