@@ -54,6 +54,16 @@ pub fn youtube_video_id(metadata: &Value) -> Option<String> {
 /// Missing policy on a video excludes Meta, not community distribution.
 /// An explicit empty list permits Meta; malformed stored policy fails closed on every promotion surface.
 pub fn excluded_platforms(kind: &str, metadata: &Value) -> Vec<String> {
+    if metadata
+        .get("youtube_format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format == "short")
+    {
+        return PROMOTION_PLATFORMS
+            .iter()
+            .map(|platform| (*platform).to_owned())
+            .collect();
+    }
     if !metadata.is_object() {
         return PROMOTION_PLATFORMS
             .iter()
@@ -134,6 +144,21 @@ mod tests {
         assert!(!platform_allowed("video", &json!({}), "instagram"));
         assert!(platform_allowed("video", &json!({}), "forum"));
         assert!(platform_allowed("release", &json!({}), "facebook"));
+    }
+
+    #[test]
+    fn youtube_shorts_are_never_promotable_on_any_surface() {
+        let metadata = json!({
+            "video_id": "short-id",
+            "youtube_format": "short",
+            "promotion_excluded_platforms": []
+        });
+        for platform in PROMOTION_PLATFORMS {
+            assert!(
+                !platform_allowed("video", &metadata, platform),
+                "Short unexpectedly allowed on {platform}"
+            );
+        }
     }
 
     #[test]

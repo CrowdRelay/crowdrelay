@@ -91,6 +91,13 @@ pub struct VideoSourceSyncWorker {
 /// cost and drops the part that would teach the model to write in hashtags.
 const MAX_DESCRIPTION_CHARS: usize = 1_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YoutubeVideoFormat {
+    LongForm,
+    Short,
+    Unknown,
+}
+
 /// One `<entry>` from a channel's Atom feed.
 #[derive(Debug)]
 pub struct FeedEntry {
@@ -216,18 +223,33 @@ impl VideoSourceSyncWorker {
             None => self.uploads_via_feed(channel_id).await?,
         };
         for entry in entries.into_iter().take(MAX_ENTRIES_PER_FEED) {
-            // Only full videos become share sources — a Short is a format the
-            // community strategy never turns into a thread post. The probe
-            // runs once per unseen id; a known row is never re-checked.
+            // Every upload is re-classified, including rows captured before
+            // the Shorts filter existed. That is what lets a later sweep
+            // retire historical Shorts instead of trusting "already exists".
             let source_key = format!("youtube:{}", entry.video_id);
-            if !self.source_exists(&source_key).await? && self.is_short(&entry.video_id).await {
-                tracing::info!(
-                    video_id = %entry.video_id,
-                    "video source sync: skipped a short"
-                );
-                continue;
+            match self.video_format(&entry.video_id).await {
+                YoutubeVideoFormat::Short => {
+                    self.retire_youtube_short(&entry.video_id).await?;
+                    tracing::info!(
+                        video_id = %entry.video_id,
+                        "video source sync: retired a YouTube Short from promotion"
+                    );
+                }
+                YoutubeVideoFormat::LongForm => {
+                    self.upsert_video(channel_id, &entry).await?;
+                }
+                YoutubeVideoFormat::Unknown => {
+                    let known = self.source_exists(&source_key).await?;
+                    tracing::warn!(
+                        video_id = %entry.video_id,
+                        known_source = known,
+                        "video source sync: YouTube format unresolved; refusing to open or refresh promotion"
+                    );
+                    // New unknown uploads are fail-closed. Existing rows are
+                    // left untouched until a later sweep can classify them;
+                    // crucially, no fresh release plan is opened here.
+                }
             }
-            self.upsert_video(channel_id, &entry).await?;
         }
         Ok(())
     }
@@ -298,16 +320,156 @@ impl VideoSourceSyncWorker {
         .map_err(|e| format!("source exists check: {e}"))
     }
 
-    /// YouTube answers `/shorts/{id}` with 200 for a Short and redirects a
-    /// full video to `/watch`. A probe failure must not drop a real upload
-    /// forever — treat it as a full video and let the row live or die on
-    /// the content rules, not on one transient HTTP error.
-    async fn is_short(&self, video_id: &str) -> bool {
+    /// YouTube answers `/shorts/{id}` with 2xx for a Short and redirects a
+    /// full video to `/watch`. Anything else is unknown and must not open a
+    /// new promotion/release plan: a transient probe problem is safer than
+    /// emailing another band a Short.
+    async fn video_format(&self, video_id: &str) -> YoutubeVideoFormat {
         let url = format!("https://www.youtube.com/shorts/{video_id}");
         match self.http_client.get(&url).send().await {
-            Ok(response) => is_short_status(response.status()),
-            Err(_) => false,
+            Ok(response) => youtube_format_from_status(response.status()),
+            Err(_) => YoutubeVideoFormat::Unknown,
         }
+    }
+
+    /// Remove one confirmed Short from every automatic promotion root.
+    ///
+    /// Old versions of the watcher could persist a Short and even open a
+    /// release plan before format classification existed. A source-level
+    /// `active=false` is not enough because outreach/email supply also reads
+    /// release plans and campaigns. Retire all three in one transaction.
+    ///
+    /// # Errors
+    /// Returns a stringified database error.
+    pub async fn retire_youtube_short(&self, video_id: &str) -> Result<(), String> {
+        let source_key = format!("youtube:{video_id}");
+        let short_marker = json!("short");
+        let mut tx = self.pool.begin().await.map_err(|e| format!("begin short retire: {e}"))?;
+
+        let changed_source: Option<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            UPDATE content_sources
+            SET active = false,
+                expires_at = LEAST(expires_at, now()),
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{youtube_format}',
+                    $3::jsonb,
+                    true
+                ),
+                version = version + 1
+            WHERE workspace_id = $1
+              AND source_kind = 'video'
+              AND source_key = $2
+              AND (
+                  active
+                  OR metadata->>'youtube_format' IS DISTINCT FROM 'short'
+              )
+            RETURNING id, version
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(&source_key)
+        .bind(&short_marker)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("retire short source: {e}"))?;
+
+        if let Some((source_id, version)) = changed_source {
+            sqlx::query(
+                r#"
+                INSERT INTO content_source_history (
+                    workspace_id, source_id, version, snapshot
+                )
+                SELECT workspace_id, id, version, jsonb_build_object(
+                    'source_kind', source_kind,
+                    'source_key', source_key,
+                    'title', title,
+                    'occurred_at', occurred_at,
+                    'expires_at', expires_at,
+                    'metadata', metadata,
+                    'active', active,
+                    'format_key', format_key
+                )
+                FROM content_sources
+                WHERE workspace_id = $1 AND id = $2 AND version = $3
+                "#,
+            )
+            .bind(self.workspace_id)
+            .bind(source_id)
+            .bind(version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("retire short history: {e}"))?;
+        }
+
+        // Disable campaigns first while their release-plan relation is still
+        // visible. This prevents an already-created release campaign from
+        // surviving after the source itself is retired.
+        sqlx::query(
+            r#"
+            UPDATE campaigns AS campaign
+            SET active = false,
+                updated_at = now()
+            WHERE campaign.workspace_id = $1
+              AND campaign.active
+              AND EXISTS (
+                  SELECT 1
+                  FROM release_plans AS plan
+                  WHERE plan.workspace_id = campaign.workspace_id
+                    AND plan.id = campaign.release_plan_id
+                    AND (
+                        plan.source_key = $2
+                        OR plan.listen_url IN (
+                            $3,
+                            $4,
+                            $5
+                        )
+                    )
+              )
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(&source_key)
+        .bind(format!("https://youtu.be/{video_id}"))
+        .bind(format!("https://www.youtube.com/watch?v={video_id}"))
+        .bind(format!("https://www.youtube.com/shorts/{video_id}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("retire short campaigns: {e}"))?;
+
+        sqlx::query(
+            r#"
+            UPDATE release_plans
+            SET active = false,
+                communication_enabled = false,
+                press_enabled = false,
+                version = version + 1
+            WHERE workspace_id = $1
+              AND (
+                  source_key = $2
+                  OR listen_url IN ($3, $4, $5)
+              )
+              AND (
+                  active
+                  OR communication_enabled
+                  OR press_enabled
+              )
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(&source_key)
+        .bind(format!("https://youtu.be/{video_id}"))
+        .bind(format!("https://www.youtube.com/watch?v={video_id}"))
+        .bind(format!("https://www.youtube.com/shorts/{video_id}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("retire short release plans: {e}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("commit short retire: {e}"))?;
+        Ok(())
     }
 
     /// Idempotent upsert keyed on the video id. A title change bumps the
@@ -332,6 +494,7 @@ impl VideoSourceSyncWorker {
             "channel_id": channel_id,
             "published_at": entry.published.map(|t| t.unix_timestamp()),
             "origin": "youtube_feed",
+            "youtube_format": "long_form",
             "body": entry.description,
         });
 
@@ -571,10 +734,16 @@ fn parse_playlist_items(body: &serde_json::Value) -> Vec<FeedEntry> {
         .collect()
 }
 
-/// The shorts probe's answer, decided on status alone: YouTube serves the
-/// /shorts/{id} URL for a Short and redirects a full video to /watch.
-fn is_short_status(status: reqwest::StatusCode) -> bool {
-    status.is_success()
+/// The Shorts probe is deliberately tri-state. A probe problem must never be
+/// interpreted as permission to promote a fresh upload.
+fn youtube_format_from_status(status: reqwest::StatusCode) -> YoutubeVideoFormat {
+    if status.is_success() {
+        YoutubeVideoFormat::Short
+    } else if status.is_redirection() {
+        YoutubeVideoFormat::LongForm
+    } else {
+        YoutubeVideoFormat::Unknown
+    }
 }
 
 /// Reads the text of the first `<tag>…</tag>` in a block. Handles the
@@ -745,11 +914,27 @@ mod tests {
     }
 
     #[test]
-    fn shorts_answer_200_full_videos_redirect() {
+    fn shorts_answer_2xx_full_videos_redirect_and_errors_are_unknown() {
         use reqwest::StatusCode;
-        assert!(is_short_status(StatusCode::OK));
-        assert!(!is_short_status(StatusCode::SEE_OTHER));
-        assert!(!is_short_status(StatusCode::FOUND));
-        assert!(!is_short_status(StatusCode::NOT_FOUND));
+        assert_eq!(
+            youtube_format_from_status(StatusCode::OK),
+            YoutubeVideoFormat::Short
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::SEE_OTHER),
+            YoutubeVideoFormat::LongForm
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::FOUND),
+            YoutubeVideoFormat::LongForm
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::NOT_FOUND),
+            YoutubeVideoFormat::Unknown
+        );
+        assert_eq!(
+            youtube_format_from_status(StatusCode::TOO_MANY_REQUESTS),
+            YoutubeVideoFormat::Unknown
+        );
     }
 }
