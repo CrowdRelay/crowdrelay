@@ -106,6 +106,19 @@ pub enum AgentOutcomeError {
     Rejected(#[from] OutcomeRejection),
 }
 
+/// A prospect write fails only in the database, and that failure is the same
+/// one the retry classification above already understands — so it is the same
+/// variant, not a new one that would be refused instead of retried.
+impl From<crowdrelay_infra::fan_prospects::ProspectError> for AgentOutcomeError {
+    fn from(error: crowdrelay_infra::fan_prospects::ProspectError) -> Self {
+        match error {
+            crowdrelay_infra::fan_prospects::ProspectError::Database(error) => {
+                Self::Database(error)
+            }
+        }
+    }
+}
+
 include!("agent_outcomes/rejections.rs");
 
 include!("agent_outcomes/community_ingestion.rs");

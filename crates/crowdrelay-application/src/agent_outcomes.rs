@@ -552,7 +552,10 @@ pub fn provenance_admission(
     // to the same provenance bar as outward proposals without pretending the
     // research itself is a send.
     if kind.disposition() != "require_approval"
-        && !matches!(kind, OutcomeKind::ContactResearch | OutcomeKind::FanProspects)
+        && !matches!(
+            kind,
+            OutcomeKind::ContactResearch | OutcomeKind::FanProspects
+        )
     {
         return Ok(());
     }
