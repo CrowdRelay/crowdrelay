@@ -66,6 +66,7 @@ fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<Orga
         .iter()
         .filter(|row| {
             row.active
+                && row.action_id.is_some()
                 && !row.ambiguous_owner
                 && row.published_at.is_some_and(|at| at <= mature_before)
         })
@@ -269,7 +270,12 @@ mod control_tests {
         ambiguous.ambiguous_owner = true;
         let mut unverified = row(now - Duration::days(3));
         unverified.published_at = None;
+        let mut unattributed = row(now - Duration::days(3));
+        unattributed.action_id = None;
 
-        assert_eq!(derive_control(&[recent, ambiguous, unverified], now), None);
+        assert_eq!(
+            derive_control(&[recent, ambiguous, unverified, unattributed], now),
+            None
+        );
     }
 }
