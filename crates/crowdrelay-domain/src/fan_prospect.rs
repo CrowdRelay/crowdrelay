@@ -123,6 +123,10 @@ pub enum ObservationKind {
     CollectsSimilarMusic,
     AskedAboutShow,
     AskedForMusic,
+    /// Explicitly asked how to follow/join/stay connected. This is stronger
+    /// than liking or replying and is the only observation that can unlock a
+    /// fanbase invitation in the first FAN SCOUT policy.
+    AskedToJoinOrFollow,
     ActiveUnderOurPost,
     SharedMaterial,
     Replied,
@@ -142,6 +146,7 @@ impl ObservationKind {
             Self::CollectsSimilarMusic => "collects_similar_music",
             Self::AskedAboutShow => "asked_about_show",
             Self::AskedForMusic => "asked_for_music",
+            Self::AskedToJoinOrFollow => "asked_to_join_or_follow",
             Self::ActiveUnderOurPost => "active_under_our_post",
             Self::SharedMaterial => "shared_material",
             Self::Replied => "replied",
