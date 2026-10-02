@@ -191,7 +191,7 @@ fn finding(observed_on: &str) -> serde_json::Value {
     json!({
         "type": "contact_research",
         "fact": "recenzja płyty „Szum” w audycji „Metalowy Wieczór”",
-        "praise": "Rzadko ktoś omawia tę płytę tak konkretnie.",
+        "praise": "W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.",
         "source_url": PAGE,
         "observed_on": observed_on,
         "language": "pl"
