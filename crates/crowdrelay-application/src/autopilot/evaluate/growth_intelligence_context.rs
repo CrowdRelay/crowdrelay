@@ -147,6 +147,15 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // routed to their producing template: back then a dispatch of one
         // template retired every other template's insights unread, which is
         // why this used to be tracked per template.
+        // One cycle-wide policy and sizing answer serves supply and portfolio.
+        let gi_policy = match &policy.config {
+            AutopilotPolicyConfig::GrowthIntelligence(gi) => gi.clone(),
+            _ => GrowthIntelligencePolicy::default(),
+        };
+        let sizing_multiplier = snapshots.first().map_or(1.0, |s| {
+            s.metacognition.sizing_multiplier() * s.agent_execution_health.sizing_multiplier()
+        });
+
         let mut pending_insights: std::collections::BTreeSet<Uuid> =
             std::collections::BTreeSet::new();
         // Collect all eligible candidates with their EFE scores
@@ -180,25 +189,37 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             )?;
             scored_candidates.extend(candidates);
         }
-        // ── Idle exploration: explore new horizons when all templates are on cooldown ──
-        //
-        // Kern's brain never idles — it always has event generators scanning for
-        // new data. CrowdRelay's brain waits for cooldowns to expire, which means
-        // it cycles every 5 minutes producing nothing when all templates are on
-        // cooldown. This is the "idling" problem.
-        //
-        // When all templates returned no candidates (all on cooldown) AND the
-        // brain's self-assessment says it needs to explore (Stagnant,
-        // Regressing, or Initializing), dispatch a growth-strategist "explore
-        // new horizons" run. This run asks the LLM to identify NEW platforms,
-        // communities, and audiences the brain has not yet investigated —
-        // Spotify playlists, Bandsintown, Facebook groups, Instagram, TikTok,
-        // YouTube, podcast communities, local event listings.
-        //
-        // This has its own 24-hour cooldown (separate from the growth-
-        // strategist's normal 12-hour cooldown) so it fires at most once per
-        // day when the brain is idle. The idempotency key uses a 24-hour
-        // window so the same dispatch does not recur within the window.
+
+        // Starved verified-organic acquisition may pull read-only research forward.
+        let capacity = portfolio::dispatch_capacity(
+            &gi_policy,
+            sizing_multiplier,
+            snapshots
+                .first()
+                .and_then(|snapshot| snapshot.world_model.objective.as_ref()),
+            now,
+        );
+        let organic_supply_recovery = capacity.goal.as_ref().is_some_and(|goal| {
+            goal.metric_key == "verified_organic_acquisitions" && goal.exploration_suppressed
+        });
+        maybe_replenish_acquisition_supply(
+            &snapshots,
+            &mut scored_candidates,
+            organic_supply_recovery,
+            capacity.applied_max_dispatches,
+            policy,
+            evidence.for_context(policy.context),
+            self.workspace_id,
+            now,
+            causal_model,
+            strategy,
+            &exploration_memory,
+            report,
+        )?;
+
+        // If every normal template is quiet, the existing daily idle-exploration
+        // path may ask the strategist for genuinely new channels. This is separate
+        // from supply recovery: it responds to total idleness, not a goal shortfall.
         if scored_candidates.is_empty()
             && let Some(candidate) =
                 idle_exploration_candidate(&snapshots, policy, self.workspace_id, now)?
@@ -250,13 +271,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // reduces operator noise; it does not create an economic blind
         // spot.
         //
-        // Extract the GI policy for resource costs and holdout config.
-        // When the autopilot isn't in GrowthIntelligence mode, use the
-        // default GI policy (which has sensible default costs).
-        let gi_policy = match &policy.config {
-            AutopilotPolicyConfig::GrowthIntelligence(gi) => gi.clone(),
-            _ => GrowthIntelligencePolicy::default(),
-        };
         // Run the portfolio optimizer to select the optimal set
         // of candidates, accounting for audience overlap, fatigue,
         // and resource costs. See `evaluate/portfolio.rs` for the
@@ -291,9 +305,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // all eligible candidates", not "effect among already-selected
         // winners."
         let holdout_probability = gi_policy.randomized_holdout_probability.clamp(0.0, 0.10);
-        // Group ALL direct-action candidates by intervention (template_id).
-        // Non-direct-action candidates (scanner, strategist) bypass
-        // experiments and go directly to the portfolio.
+        // Group audience-reaching actions by intervention. Intelligence
+        // templates bypass randomized treatment/control assignment: a scan has
+        // no audience to withhold treatment from. Use WorkerTemplate's closed
+        // vocabulary instead of another string list — that old list predated
+        // fanbase-scout and strategy-consult and incorrectly put both into
+        // campaign holdouts.
         type ExperimentGroup = (String, Vec<(usize, DecisionCandidate, DispatchPrediction)>);
         let mut experiment_groups: Vec<ExperimentGroup> = Vec::new();
         let mut non_experiment_indices: Vec<usize> = Vec::new();
@@ -302,15 +319,8 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 AutopilotActionPayload::RequestAgentRun { template_id, .. } => template_id.as_str(),
                 _ => "",
             };
-            let is_direct_action = !template_id.is_empty()
-                && !matches!(
-                    template_id,
-                    "reddit-scanner"
-                        | "telegram-scanner"
-                        | "metal-archives-scanner"
-                        | "bandcamp-scanner"
-                        | "growth-strategist"
-                );
+            let is_direct_action = WorkerTemplate::parse(template_id)
+                .is_some_and(|template| template.audience() != TemplateAudience::Intelligence);
             if !is_direct_action {
                 non_experiment_indices.push(i);
                 continue;
@@ -591,21 +601,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         // Run the portfolio optimizer on the treatment + non-experiment
         // candidates only. Control candidates are NOT in the pool.
         //
-        // Metacognition sizing_multiplier: the brain's self-assessment
-        // scales the dispatch budget. When Initializing or Regressing,
-        // the brain acts cautiously (fewer dispatches). When Improving,
-        // full budget. Taken from the first snapshot because metacognition
-        // is brain-wide (one state per tenant), not per-template.
-        //
-        // Multiplied by agent execution health: an independent signal for
-        // "is the worker layer producing usable outcomes right now",
-        // distinct from the North Star trend metacognition tracks. A brain
-        // that is Improving but whose only LLM provider is out of quota
-        // should still size down — the two questions are orthogonal, and a
-        // provider outage does not become growth-trend evidence for days.
-        let sizing_multiplier = snapshots.first().map_or(1.0, |s| {
-            s.metacognition.sizing_multiplier() * s.agent_execution_health.sizing_multiplier()
-        });
+        // Reuse the same sizing multiplier supply recovery saw.
         record_growth_assessment(&snapshots, sizing_multiplier, report);
         if let Some(first) = snapshots.first()
             && first.agent_execution_health.needs_attention()
