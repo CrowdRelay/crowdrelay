@@ -67,6 +67,10 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                COALESCE(relay_failed.source_ids, ARRAY[]::uuid[]) AS relay_failure_sources,
                COALESCE(relay_failed.counts, ARRAY[]::bigint[]) AS relay_failure_counts,
                COALESCE(relay_failed.last_failed, ARRAY[]::timestamptz[]) AS relay_failure_last,
+               last.last_draft_at,
+               provenance.converted_fans,
+               provenance.interactions,
+               durable.durable_fans,
                room.threads
         FROM agent_outreach_targets t
         LEFT JOIN discovery_places place
@@ -117,6 +121,55 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
                 GROUP BY source_part
             ) per_source
         ) relay_failed ON true
+        -- Quality is first-party outcome evidence, never follower-count proxy.
+        -- Keep the same semantics as the growth-intelligence community loader:
+        -- conversions outrank clicks, and fans who stayed outrank both.
+        LEFT JOIN LATERAL (
+            SELECT COUNT(DISTINCT pe.fan_id)
+                       FILTER (WHERE pe.event_kind = 'conversion')::bigint AS converted_fans,
+                   COUNT(DISTINCT COALESCE(pe.fan_id::text,
+                                           pe.anonymous_visitor_id::text))
+                       FILTER (WHERE pe.event_kind = 'interaction')::bigint AS interactions
+            FROM fan_provenance_events pe
+            WHERE pe.workspace_id = t.workspace_id
+              AND pe.channel = COALESCE(NULLIF(t.platform, ''), 'reddit')
+              AND normalize_subreddit(pe.community) =
+                  normalize_subreddit(COALESCE(t.subreddit, t.display_name))
+              AND pe.occurred_at >= now() - interval '90 days'
+        ) AS provenance ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS durable_fans
+            FROM fans AS fan
+            WHERE fan.workspace_id = t.workspace_id
+              AND fan.status = 'active'
+              AND fan.deleted_at IS NULL
+              AND fan.id IN (
+                  SELECT pe.fan_id
+                  FROM fan_provenance_events pe
+                  WHERE pe.workspace_id = t.workspace_id
+                    AND pe.event_kind = 'conversion'
+                    AND pe.channel = COALESCE(NULLIF(t.platform, ''), 'reddit')
+                    AND pe.fan_id IS NOT NULL
+                    AND normalize_subreddit(pe.community) =
+                        normalize_subreddit(COALESCE(t.subreddit, t.display_name))
+                    AND pe.occurred_at >= now() - interval '90 days'
+              )
+              AND EXISTS (
+                  SELECT 1 FROM fan_consents consent
+                  WHERE consent.workspace_id = fan.workspace_id
+                    AND consent.fan_id = fan.id
+                    AND consent.purpose = 'marketing'
+                    AND consent.granted
+                    AND consent.recorded_at = (
+                        SELECT max(latest.recorded_at) FROM fan_consents latest
+                        WHERE latest.workspace_id = fan.workspace_id
+                          AND latest.fan_id = fan.id
+                          AND latest.purpose = 'marketing'
+                    )
+              )
+              AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
+                  >= now() - interval '30 days'
+        ) AS durable ON true
         -- What the room is discussing now: the threads the community sweep read
         -- there (`fan_observations`, kind 'post'), each with its own date and
         -- permalink. The window is `room_reading::READ_MAX_AGE_DAYS`.
@@ -171,11 +224,12 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(MAX_RELAY_COMMUNITIES_PER_POST)
+    .bind(MAX_RELAY_COMMUNITIES_PER_POST.saturating_mul(4))
     .bind(MAX_WAITING_COMMUNITY_DRAFTS)
     .fetch_all(&repo.pool)
     .await
     .map_err(map_sqlx)?;
+    let rows = select_relay_targets(rows);
     let mut task_failures = load_failed_relay_tasks(repo, workspace_id).await?;
     rows.into_iter()
         .map(|row| {
@@ -224,5 +278,73 @@ struct RelayTargetRow {
     relay_failure_sources: Vec<Uuid>,
     relay_failure_counts: Vec<i64>,
     relay_failure_last: Vec<OffsetDateTime>,
+    last_draft_at: Option<OffsetDateTime>,
+    converted_fans: i64,
+    interactions: i64,
+    durable_fans: i64,
     threads: serde_json::Value,
+}
+
+fn relay_quality(row: &RelayTargetRow) -> (i64, i64, i64) {
+    (
+        row.durable_fans.max(0),
+        row.converted_fans.max(0),
+        row.interactions.max(0),
+    )
+}
+
+/// Select at most three rested communities for one source-bound relay.
+///
+/// Two slots exploit first-party outcome evidence; one slot is reserved for
+/// a community the relay has never attempted. A previously used room with zero
+/// yield is measured-zero, not exploration. The fallback fills any empty slots
+/// in rotation order, so a new tenant with no history behaves exactly
+/// like the old fair round-robin instead of being starved by "quality" it
+/// cannot possibly have measured yet.
+fn select_relay_targets(rows: Vec<RelayTargetRow>) -> Vec<RelayTargetRow> {
+    let limit = usize::try_from(MAX_RELAY_COMMUNITIES_PER_POST).unwrap_or(3);
+    if rows.len() <= limit {
+        return rows;
+    }
+
+    let mut selected = std::collections::BTreeSet::new();
+    let mut measured: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| (relay_quality(row) != (0, 0, 0)).then_some(index))
+        .collect();
+    measured.sort_by(|left, right| {
+        relay_quality(&rows[*right])
+            .cmp(&relay_quality(&rows[*left]))
+            .then_with(|| left.cmp(right))
+    });
+
+    for index in measured.into_iter().take(limit.saturating_sub(1)) {
+        selected.insert(index);
+    }
+
+    if let Some(index) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| {
+            (row.last_draft_at.is_none()
+                && relay_quality(row) == (0, 0, 0)
+                && !selected.contains(&index))
+            .then_some(index)
+        })
+    {
+        selected.insert(index);
+    }
+
+    for index in 0..rows.len() {
+        if selected.len() >= limit {
+            break;
+        }
+        selected.insert(index);
+    }
+
+    rows.into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| selected.contains(&index).then_some(row))
+        .collect()
 }
