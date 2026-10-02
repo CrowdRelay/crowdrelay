@@ -137,7 +137,7 @@ impl Fixture {
                  (workspace_id, normalized_email, fact, praise, source_url, observed_on,
                   researched_by)
              VALUES ($1, lower($2), 'recenzja płyty „Szum” w audycji „Metalowy Wieczór”',
-                     'Rzadko ktoś omawia tę płytę tak konkretnie.', 'https://example.test/' || $2,
+                     'W recenzji „Szum” zwróciło nam uwagę, że weszliście w aranżację, a nie tylko brzmienie.', 'https://example.test/' || $2,
                      (now() AT TIME ZONE 'UTC')::date - 10, 'test')",
         )
         .bind(self.ws())
