@@ -109,6 +109,7 @@ pub mod ids;
 pub mod iso_date;
 pub mod join_ask;
 pub mod join_kit;
+pub mod lane_ledger;
 pub mod latarnik;
 pub mod latarnik_invite;
 pub mod latarnik_mission;

@@ -60,6 +60,7 @@ pub mod gdrive;
 pub mod gig_outreach;
 pub mod gig_planning;
 pub mod join_ask;
+pub mod lane_ledger;
 pub mod lapsed_approvals;
 pub mod latarnik;
 pub mod latarnik_missions;

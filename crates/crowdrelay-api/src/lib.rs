@@ -96,6 +96,7 @@ mod fanbase;
 mod gdrive;
 mod gig_planning;
 mod http_metrics;
+mod lane_ledger_routes;
 mod latarnik_http;
 mod latarnik_routes;
 mod media;
