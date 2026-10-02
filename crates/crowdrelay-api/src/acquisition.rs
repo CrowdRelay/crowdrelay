@@ -16,7 +16,7 @@ use axum::{
         rejection::{JsonRejection, QueryRejection},
     },
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode,
         header::{
             CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, IF_NONE_MATCH, LOCATION, REFERER,
             REFERRER_POLICY, SET_COOKIE,
@@ -284,6 +284,9 @@ enum RenderCitiesError {
     List(ListCitiesError),
     Serialization,
 }
+
+mod automated_fetch;
+use automated_fetch::is_automated_fetch;
 
 include!("acquisition/redirect.rs");
 
