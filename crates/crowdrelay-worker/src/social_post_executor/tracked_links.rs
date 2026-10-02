@@ -40,8 +40,8 @@ impl SocialPostExecutorWorker {
         // A draft that already names one of our links binds to it rather
         // than minting a second for the same post — the same rule the
         // insert-time join applies, kept for rows written before it existed.
-        if let Some(slug) = cta_url
-            .and_then(|cta| slug_in_cta(cta, self.public_origin.trim_end_matches('/')))
+        if let Some(slug) =
+            cta_url.and_then(|cta| slug_in_cta(cta, self.public_origin.trim_end_matches('/')))
         {
             let bound = sqlx::query_scalar::<_, Option<Uuid>>(
                 r#"
@@ -202,10 +202,15 @@ fn fallback_tracking_destination(
         return None;
     }
     let home = public_origin.trim_end_matches('/');
-    Some(match member_site_base.map(str::trim).filter(|base| !base.is_empty()) {
-        Some(base) => format!("{}/signal/", base.trim_end_matches('/')),
-        None => home.to_owned(),
-    })
+    Some(
+        match member_site_base
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+        {
+            Some(base) => format!("{}/signal/", base.trim_end_matches('/')),
+            None => home.to_owned(),
+        },
+    )
 }
 
 /// The `/l/` slug a draft's CTA already names, when it names one of ours.
