@@ -1,13 +1,15 @@
 //! Tracked-link binding for claimed social-post rows.
 //!
 //! Split out of `social_post_executor.rs` so both stay inside the
-//! source-size ratchet. This is one job with one shape: a claimed row whose
-//! draft named a destination gets a `smart_links` row and a
+//! source-size ratchet. This is one job with one shape: a claimed row that can
+//! publish a clickable owned-site CTA gets a `smart_links` row and a
 //! `social_posts.smart_link_id` binding inside the claim transaction, so the
-//! click measurement has something to count through. A destination the
+//! click measurement has something to count through. A model destination the
 //! validator refuses stays untracked — the post still goes out, and its
 //! measurement abandons as `no_tracked_link` rather than recording a zero
-//! that was never observable.
+//! that was never observable. Facebook/X drafts with no CTA are different:
+ //! the executor itself can safely choose the tenant's Signal/home destination,
+ //! so missing model copy cannot silently remove acquisition instrumentation.
 
 use uuid::Uuid;
 
@@ -20,27 +22,27 @@ impl SocialPostExecutorWorker {
     /// post to it, inside the claim transaction.
     ///
     /// The slug is deterministic — `social-{action_id}` — so a reclaim after
-    /// a crash upserts rather than duplicating. Returns without binding when
-    /// the draft carried no usable destination: untracked is a state the
-    /// measurement can name, not a defect to retry.
+    /// a crash upserts rather than duplicating. Facebook and X are clickable
+    /// link surfaces, so a missing CTA falls back to the tenant's Signal page
+    /// (when configured) or public home. Instagram deliberately does not:
+    /// caption URLs are not a dependable clickable acquisition rail.
     pub(super) async fn resolve_tracked_link(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         row: &mut ClaimedAction,
     ) -> Result<(), SocialPostExecutorError> {
-        let Some(cta_url) = row
+        let cta_url = row
             .cta_url
             .as_deref()
             .map(str::trim)
-            .filter(|u| !u.is_empty())
-        else {
-            return Ok(());
-        };
+            .filter(|u| !u.is_empty());
         let ws = self.workspace_id.into_uuid();
         // A draft that already names one of our links binds to it rather
         // than minting a second for the same post — the same rule the
         // insert-time join applies, kept for rows written before it existed.
-        if let Some(slug) = slug_in_cta(cta_url, self.public_origin.trim_end_matches('/')) {
+        if let Some(slug) = cta_url
+            .and_then(|cta| slug_in_cta(cta, self.public_origin.trim_end_matches('/')))
+        {
             let bound = sqlx::query_scalar::<_, Option<Uuid>>(
                 r#"
                 UPDATE social_posts AS post
@@ -79,18 +81,29 @@ impl SocialPostExecutorWorker {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        let destination = match crowdrelay_domain::acquisition::agent_smart_link_destination(
-            cta_url, &allowed, None,
-        ) {
-            Ok(destination) => destination,
-            Err(refusal) => {
-                tracing::warn!(
-                    action_id = %row.action_id,
-                    refusal = %refusal,
-                    "refused a social-post link destination; the post goes out untracked"
-                );
-                return Ok(());
+        let destination = if let Some(cta_url) = cta_url {
+            match crowdrelay_domain::acquisition::agent_smart_link_destination(
+                cta_url, &allowed, None,
+            ) {
+                Ok(destination) => destination.into_owned(),
+                Err(refusal) => {
+                    tracing::warn!(
+                        action_id = %row.action_id,
+                        refusal = %refusal,
+                        "refused a social-post link destination; the post goes out untracked"
+                    );
+                    return Ok(());
+                }
             }
+        } else {
+            let Some(destination) = fallback_tracking_destination(
+                &row.platform,
+                member_origin.as_deref(),
+                self.public_origin.as_str(),
+            ) else {
+                return Ok(());
+            };
+            destination
         };
         let slug = format!("social-{}", row.action_id.simple());
         sqlx::query(
@@ -105,7 +118,7 @@ impl SocialPostExecutorWorker {
         )
         .bind(ws)
         .bind(&slug)
-        .bind(destination.as_str())
+        .bind(&destination)
         .bind(&row.platform)
         .execute(&mut **tx)
         .await?;
@@ -175,6 +188,27 @@ impl SocialPostExecutorWorker {
     }
 }
 
+
+/// A deterministic destination the executor may choose without model input.
+///
+/// Facebook and X render ordinary clickable links. Instagram captions do not,
+/// so inventing a tracked caption URL there would make the measurement layer
+/// look instrumented while the audience has no honest click path.
+fn fallback_tracking_destination(
+    platform: &str,
+    member_site_base: Option<&str>,
+    public_origin: &str,
+) -> Option<String> {
+    if !matches!(platform, "facebook" | "x") {
+        return None;
+    }
+    let home = public_origin.trim_end_matches('/');
+    Some(match member_site_base.map(str::trim).filter(|base| !base.is_empty()) {
+        Some(base) => format!("{}/signal/", base.trim_end_matches('/')),
+        None => home.to_owned(),
+    })
+}
+
 /// The `/l/` slug a draft's CTA already names, when it names one of ours.
 ///
 /// Only two shapes count: a bare `/l/{slug}` path, or the same path under the
@@ -198,7 +232,31 @@ pub(crate) fn slug_in_cta<'a>(cta_url: &'a str, public_origin: &str) -> Option<&
 
 #[cfg(test)]
 mod tests {
-    use super::slug_in_cta;
+    use super::{fallback_tracking_destination, slug_in_cta};
+
+    #[test]
+    fn fallback_tracking_exists_only_on_clickable_owned_social() {
+        assert_eq!(
+            fallback_tracking_destination(
+                "facebook",
+                Some("https://members.virya.music/"),
+                "https://virya.music/"
+            ),
+            Some("https://members.virya.music/signal/".to_owned())
+        );
+        assert_eq!(
+            fallback_tracking_destination("x", None, "https://virya.music/"),
+            Some("https://virya.music".to_owned())
+        );
+        assert_eq!(
+            fallback_tracking_destination(
+                "instagram",
+                Some("https://members.virya.music"),
+                "https://virya.music"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn slug_in_cta_only_reads_our_link_namespace() {
