@@ -71,6 +71,16 @@ async fn seed_drafted_action(
     template_id: &str,
     platform: &str,
 ) -> Result<Uuid> {
+    seed_drafted_action_with_cta(pool, workspace_id, template_id, platform, Some("https://virya.music")).await
+}
+
+async fn seed_drafted_action_with_cta(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    template_id: &str,
+    platform: &str,
+    cta_url: Option<&str>,
+) -> Result<Uuid> {
     create_foreign_task_table(pool).await?;
     let task_id = Uuid::now_v7();
     sqlx::query(
@@ -105,6 +115,13 @@ async fn seed_drafted_action(
     .context("insert decision")?;
 
     let action_id = Uuid::now_v7();
+    let mut draft = json!({
+        "platform": platform,
+        "text": "new single out friday"
+    });
+    if let Some(cta_url) = cta_url {
+        draft["cta_url"] = json!(cta_url);
+    }
     sqlx::query(
         r#"INSERT INTO autopilot_actions
            (id, workspace_id, decision_id, context, action_kind, subject_kind,
@@ -119,8 +136,9 @@ async fn seed_drafted_action(
     .bind(format!("pubartifact-action-{action_id}"))
     .bind(json!({
         "kind": "request_agent_content",
+        "template_id": template_id,
         "task_id": task_id,
-        "draft": { "platform": platform, "text": "new single out friday", "cta_url": "https://virya.music" },
+        "draft": draft,
     }))
     .execute(pool)
     .await
@@ -242,6 +260,71 @@ async fn wrong_template_ignored(pool: &PgPool) -> Result<()> {
     ensure!(
         rows.is_empty(),
         "the social executor must not claim a telegram-poster draft, got {rows:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn facebook_without_model_cta_gets_an_owned_tracked_fallback() -> Result<()> {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&database).await?;
+    let action_id =
+        seed_drafted_action_with_cta(&database, ws, "social-post", "facebook", None).await?;
+
+    executor(&database, ws).run_once().await?;
+
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<String>, Option<String>)>(
+        r#"
+        SELECT post.smart_link_id, post.smart_link, link.destination_url
+        FROM social_posts AS post
+        LEFT JOIN smart_links AS link
+          ON link.workspace_id = post.workspace_id
+         AND link.id = post.smart_link_id
+        WHERE post.workspace_id=$1 AND post.action_id=$2
+        "#,
+    )
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(row.0.is_some(), "facebook fallback must bind a smart_link_id");
+    let expected_link = format!("/l/social-{}", action_id.simple());
+    ensure!(
+        row.1.as_deref() == Some(expected_link.as_str()),
+        "facebook fallback must use the action-owned deterministic slug: {row:?}"
+    );
+    ensure!(
+        row.2.as_deref() == Some("https://virya.music"),
+        "without a member-site setting the safe fallback is the tenant public origin: {row:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn instagram_without_cta_does_not_fake_a_clickable_link() -> Result<()> {
+    let database = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&database).await?;
+    let action_id =
+        seed_drafted_action_with_cta(&database, ws, "social-post", "instagram", None).await?;
+
+    executor(&database, ws).run_once().await?;
+
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<String>)>(
+        "SELECT smart_link_id, smart_link FROM social_posts WHERE workspace_id=$1 AND action_id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        row == (None, None),
+        "an Instagram caption without an explicit CTA must stay untracked: {row:?}"
     );
     Ok(())
 }

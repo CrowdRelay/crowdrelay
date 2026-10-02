@@ -1,5 +1,28 @@
 use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
 
+
+/// Whether a social content draft has an honest tracked-click rail.
+///
+/// Social-post outcomes on Facebook/X no longer depend on the model remembering
+/// a CTA: the social executor deterministically binds an owned-site fallback.
+/// Instagram still needs an explicit CTA to preserve the old contract; without
+/// one, a caption URL is not treated as a clickable acquisition surface.
+fn social_content_funnel_planned(
+    template_id: Option<&str>,
+    draft: &serde_json::Value,
+) -> bool {
+    let platform = draft.get("platform").and_then(serde_json::Value::as_str);
+    let has_cta = draft
+        .get("cta_url")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| !url.trim().is_empty());
+    match platform {
+        Some("facebook" | "x") if template_id == Some("social-post") => true,
+        Some("instagram" | "facebook" | "x") => has_cta,
+        _ => false,
+    }
+}
+
 pub(super) async fn schedule_effect_measurement(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
@@ -873,7 +896,9 @@ pub(super) async fn schedule_effect_measurement(
         // when the post is still awaiting manual publication. When the
         // operator registers the manual post URL, the measurement window is
         // re-anchored to the actual publication time.
-        AutopilotActionPayload::RequestAgentContent { draft, .. } => {
+        AutopilotActionPayload::RequestAgentContent {
+            template_id, draft, ..
+        } => {
             plans.push((
                 AutopilotMeasurementKind::IncrementalFanGrowth14d,
                 action_id.into_uuid(),
@@ -886,23 +911,11 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::days(3),
             ));
-            // What the post's own tracked link did — clicks on the `/l/`
-            // redirect the social executor mints for the draft's `cta_url`,
-            // joined through `social_posts.smart_link_id`. Scheduled only when
-            // the draft names a link for a platform the social executor
-            // claims; a draft with no link has nothing to attribute, and a
-            // telegram/discord draft's links ride untracked in its text, so
-            // scheduling there would produce a structural zero the learner
-            // would read as the content failing.
-            let linkable_platform = draft
-                .get("platform")
-                .and_then(|p| p.as_str())
-                .is_some_and(|p| matches!(p, "instagram" | "facebook" | "x"));
-            let has_cta = draft
-                .get("cta_url")
-                .and_then(|u| u.as_str())
-                .is_some_and(|u| !u.trim().is_empty());
-            if linkable_platform && has_cta {
+            // What the post's own tracked link did. An explicit CTA keeps the
+            // old Instagram/Facebook/X path. New social-post Facebook/X drafts
+            // are also measurable without model CTA because the executor
+            // guarantees a tenant-owned fallback before publication.
+            if social_content_funnel_planned(template_id.as_deref(), draft) {
                 for kind in [
                     AutopilotMeasurementKind::ContentLinkClicks7d,
                     AutopilotMeasurementKind::ContentFanAcquisition7d,
@@ -971,4 +984,38 @@ pub(super) async fn schedule_effect_measurement(
         .map_err(map_sqlx)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod owned_social_measurement_tests {
+    use super::social_content_funnel_planned;
+    use serde_json::json;
+
+    #[test]
+    fn social_post_fallback_plans_only_honest_clickable_rails() {
+        assert!(social_content_funnel_planned(
+            Some("social-post"),
+            &json!({"platform":"facebook","text":"hello"})
+        ));
+        assert!(social_content_funnel_planned(
+            Some("social-post"),
+            &json!({"platform":"x","text":"hello"})
+        ));
+        assert!(!social_content_funnel_planned(
+            Some("social-post"),
+            &json!({"platform":"instagram","text":"hello"})
+        ));
+        assert!(social_content_funnel_planned(
+            Some("social-post"),
+            &json!({
+                "platform":"instagram",
+                "text":"hello",
+                "cta_url":"https://band.example/signal/"
+            })
+        ));
+        assert!(!social_content_funnel_planned(
+            Some("press-pitch"),
+            &json!({"platform":"facebook","text":"hello"})
+        ));
+    }
 }

@@ -874,6 +874,7 @@ impl AgentOutcomeWorker {
                     OutcomeKind::SocialPost => Some((
                         json!({
                             "kind": "request_agent_content",
+                            "template_id": "social-post",
                             "task_id": outcome.task_id,
                             "draft": outcome.payload.item.clone().unwrap_or(Value::Null),
                         }),
