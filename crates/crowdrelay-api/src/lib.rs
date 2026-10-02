@@ -90,6 +90,7 @@ mod fan_demand_routes;
 mod fan_identity;
 mod fan_lifecycle;
 mod fan_privacy;
+mod fan_prospect_routes;
 mod fanbase;
 mod gdrive;
 mod gig_planning;

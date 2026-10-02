@@ -59,6 +59,7 @@ pub mod ops_watchdog;
 pub mod osm_venue_sweep;
 pub mod outbox;
 pub mod peer_observation;
+pub mod prospect_sweep;
 mod publish_links;
 pub mod push_delivery;
 pub mod receipt_reconciliation;

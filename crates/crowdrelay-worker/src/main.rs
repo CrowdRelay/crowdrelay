@@ -891,6 +891,7 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     let social_post_executor_shutdown = shutdown_receiver.clone();
     let community_join_executor_shutdown = shutdown_receiver.clone();
     let contact_research_shutdown = shutdown_receiver.clone();
+    let prospect_sweep_shutdown = shutdown_receiver.clone();
     let community_rules_shutdown = shutdown_receiver.clone();
     let growth_metric_sync_shutdown = shutdown_receiver.clone();
     let video_source_sync_shutdown = shutdown_receiver.clone();
@@ -1133,6 +1134,19 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
         );
         spawn_named(&mut runtime_tasks, "contact research sweep", async move {
             worker.run(contact_research_shutdown).await;
+        });
+    }
+    // Reads people who already spoke to the band in public into prospects, and
+    // expires the ones who never progress. Writes only the person layer; it
+    // contacts nobody. See `prospect_sweep`.
+    {
+        let worker = crowdrelay_worker::prospect_sweep::ProspectSweep::new(
+            database.clone(),
+            workspace_id,
+            config.database.operation_timeout,
+        );
+        spawn_named(&mut runtime_tasks, "prospect sweep", async move {
+            worker.run(prospect_sweep_shutdown).await;
         });
     }
     if let Some(worker) = community_rules::CommunityRulesWorker::new(

@@ -32,6 +32,7 @@ mod outbox_http;
 mod outbox_materialization;
 mod owned_social_channel;
 mod peer_observation;
+mod prospect_sweep;
 mod publication_artifact;
 mod receipt_reconciliation;
 mod retention_approvals;

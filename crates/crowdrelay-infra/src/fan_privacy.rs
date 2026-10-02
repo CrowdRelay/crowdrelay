@@ -200,6 +200,12 @@ impl PostgresFanPrivacyRepository {
             "DELETE FROM event_reminder_jobs WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM event_interests WHERE workspace_id = $1 AND fan_id = $2",
             "DELETE FROM fan_audience_tags WHERE workspace_id = $1 AND fan_id = $2",
+            // The person layer: the public handle the band observed before this
+            // fan joined, and every observation about it. Deleting the person
+            // cascades its identities, prospects and evidence.
+            "DELETE FROM persons WHERE workspace_id = $1 AND id IN (
+                 SELECT person_id FROM fan_prospects
+                 WHERE workspace_id = $1 AND linked_fan_id = $2)",
         ] {
             sqlx::query(statement)
                 .bind(workspace_id)

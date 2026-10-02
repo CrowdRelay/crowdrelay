@@ -103,6 +103,7 @@ mod fan_demand;
 mod fan_identity;
 mod fan_lifecycle;
 mod fan_privacy_unpublish;
+mod fan_prospects;
 mod first_tenant_member_site;
 mod gdrive_contacts;
 mod gig_outreach;
