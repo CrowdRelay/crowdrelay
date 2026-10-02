@@ -208,6 +208,17 @@ impl PersonalHook {
             .map(collapse)
             .map(|text| text.trim().to_owned())
             .filter(|text| !text.is_empty());
+        // Hard violations (register, links) outrank content quality: a hook
+        // that is both generic and off-register must report the register —
+        // that is the part no edit can rescue.
+        for text in std::iter::once(fact.as_str()).chain(praise.as_deref()) {
+            if text.contains('!') || text.contains('#') {
+                return Err(HookRefusal::NotOurRegister);
+            }
+            if has_link(text) {
+                return Err(HookRefusal::LinkInText);
+            }
+        }
         if let Some(opening) = praise.as_deref() {
             let len = opening.chars().count();
             if len < PRAISE_MIN_CHARS {
@@ -243,14 +254,6 @@ impl PersonalHook {
             }
             if !grounded_opening(opening, &fact) {
                 return Err(HookRefusal::UngroundedOpening);
-            }
-        }
-        for text in std::iter::once(fact.as_str()).chain(praise.as_deref()) {
-            if text.contains('!') || text.contains('#') {
-                return Err(HookRefusal::NotOurRegister);
-            }
-            if has_link(text) {
-                return Err(HookRefusal::LinkInText);
             }
         }
         let source_url = source_url.trim().to_owned();
@@ -312,13 +315,18 @@ pub fn known_paragraph(
     // exactly how an AI assistant explains itself and exactly how a real
     // curator spots automation. The research worker now supplies one grounded
     // human sentence in `praise`; render that sentence, not the machinery.
-    hook.praise_sentence().unwrap_or_else(|| {
-        if hook.fact.ends_with(['.', '?']) {
-            hook.fact.clone()
-        } else {
-            format!("{}.", hook.fact)
+    // The verbatim fact still rides after an em dash — the letter must name
+    // the concrete thing the band read, not just allude to it.
+    match hook.praise_sentence() {
+        Some(praise) => format!("{praise} — {}.", hook.fact),
+        None => {
+            if hook.fact.ends_with(['.', '?']) {
+                hook.fact.clone()
+            } else {
+                format!("{}.", hook.fact)
+            }
         }
-    })
+    }
 }
 
 /// Inserts the opening after a letter's greeting line.
