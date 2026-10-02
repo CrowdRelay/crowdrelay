@@ -64,6 +64,9 @@ pub struct FanProspectActionInput {
     pub warm_engagement: bool,
     /// The tenant has an owned member site that can receive a tracked opt-in.
     pub member_site_ready: bool,
+    /// This exact medium has a deterministic tracked join path. The first
+    /// executable FAN SCOUT slice supports this only for owned Meta replies.
+    pub same_thread_join_capture_supported: bool,
     /// The band said something to this person inside the cooldown (a
     /// `fan_prospect_touches` row). One voice at a time: a person who was just
     /// answered is not answered again because the evidence that earned the
@@ -131,17 +134,10 @@ pub const fn evaluate_fan_prospect(input: FanProspectActionInput) -> FanProspect
             cooldown_hours: Some(168),
             measurement: "invite -> tracked_join_click -> verified_fan_or_timeout",
         },
-        _ if input.recently_engaged => FanProspectDecision {
-            action: Action::Hold,
-            medium: None,
-            cta_intent: None,
-            reason: "the band spoke to this person recently; wait for them to answer before speaking again",
-            cooldown_hours: Some(72),
-            measurement: "touch -> reply_or_tracked_click -> reevaluate",
-        },
         _ if input.explicit_join_or_follow_intent
             && input.has_same_thread_context
-            && input.member_site_ready =>
+            && input.member_site_ready
+            && input.same_thread_join_capture_supported =>
         {
             FanProspectDecision {
                 action: Action::InviteToFanbase,
@@ -172,6 +168,26 @@ pub const fn evaluate_fan_prospect(input: FanProspectActionInput) -> FanProspect
                 measurement: "safe_contact_context -> reevaluate",
             }
         }
+        _ if input.explicit_join_or_follow_intent
+            && !input.same_thread_join_capture_supported =>
+        {
+            FanProspectDecision {
+                action: Action::Hold,
+                medium: None,
+                cta_intent: None,
+                reason: "join intent exists but this platform has no approved same-thread tracked capture path",
+                cooldown_hours: None,
+                measurement: "safe_join_capture_medium -> reevaluate",
+            }
+        }
+        _ if input.recently_engaged => FanProspectDecision {
+            action: Action::Hold,
+            medium: None,
+            cta_intent: None,
+            reason: "the band spoke to this person recently; wait for them to answer before speaking again",
+            cooldown_hours: Some(72),
+            measurement: "touch -> reply_or_tracked_click -> reevaluate",
+        },
         _ if input.has_same_thread_context && input.question_intent => FanProspectDecision {
             action: Action::EngageInContext,
             medium: Some(Medium::SameThreadReply),
@@ -211,6 +227,7 @@ mod tests {
             question_intent: false,
             warm_engagement: false,
             member_site_ready: true,
+            same_thread_join_capture_supported: true,
             recently_engaged: false,
         }
     }
@@ -266,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn a_person_just_answered_is_not_answered_again_for_the_same_evidence() {
+    fn a_person_just_answered_is_not_answered_again_unless_they_explicitly_ask_to_join() {
         let asked = FanProspectActionInput {
             question_intent: true,
             ..input(ProspectStatus::Observed)
@@ -281,12 +298,34 @@ mod tests {
         });
         assert_eq!(answered.action, FanProspectActionKind::Hold);
         assert_eq!(answered.cooldown_hours, Some(72));
-        // A no still outranks the cooldown, and a fan still leaves the engine.
+
+        let explicit_join = evaluate_fan_prospect(FanProspectActionInput {
+            explicit_join_or_follow_intent: true,
+            recently_engaged: true,
+            ..input(ProspectStatus::Warming)
+        });
+        assert_eq!(
+            explicit_join.action,
+            FanProspectActionKind::InviteToFanbase,
+            "a person explicitly asking how to join gets the answer they requested"
+        );
+
         let refused = evaluate_fan_prospect(FanProspectActionInput {
+            explicit_join_or_follow_intent: true,
             recently_engaged: true,
             ..input(ProspectStatus::Refused)
         });
         assert_eq!(refused.action, FanProspectActionKind::DoNotContact);
+    }
+
+    #[test]
+    fn explicit_join_waits_when_this_platform_has_no_tracked_capture_path() {
+        let decision = evaluate_fan_prospect(FanProspectActionInput {
+            explicit_join_or_follow_intent: true,
+            same_thread_join_capture_supported: false,
+            ..input(ProspectStatus::Observed)
+        });
+        assert_eq!(decision.action, FanProspectActionKind::Hold);
     }
 
     #[test]
