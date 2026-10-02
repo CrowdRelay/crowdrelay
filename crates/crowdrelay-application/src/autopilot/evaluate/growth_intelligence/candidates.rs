@@ -106,6 +106,14 @@ fn candidate_from_request(
         priority: request.priority,
         tier: request.tier,
     };
+    let selected_social_platform = (request.template_id == "social-post")
+        .then(|| {
+            crowdrelay_brain::platform_yield::preferred_owned_social_platform(
+                &snapshot.world_model.channel_yield,
+            )
+        })
+        .flatten();
+
     Ok(ScoredCandidate {
         candidate: DecisionCandidate {
             context: policy.context,
@@ -117,6 +125,7 @@ fn candidate_from_request(
             input_snapshot: serde_json::json!({
                 "snapshot": snapshot,
                 "prediction": &request.prediction,
+                "selected_social_platform": selected_social_platform,
             }),
             policy_snapshot: policy_evidence(policy, domain_policy)?,
             action,

@@ -117,6 +117,7 @@ include!("agent_outcomes/strategy_proposals.rs");
 include!("agent_outcomes/creative_family.rs");
 include!("agent_outcomes/community_engagement.rs");
 include!("agent_outcomes/room_reading.rs");
+include!("agent_outcomes/social_platform.rs");
 
 /// True for a relative in-app route the Signal app can resolve.
 ///
@@ -421,6 +422,24 @@ impl AgentOutcomeWorker {
             self.reject_outcome(outcome.id, &rejection.to_string())
                 .await?;
             return Ok((None, None));
+        }
+
+        // A measured channel choice is product policy, not model discretion.
+        // Enforce it before opening the transaction so a rejected draft creates
+        // no decision/action side effects.
+        if outcome.kind == OutcomeKind::SocialPost
+            && let Some(expected) = self.selected_social_platform(outcome).await
+        {
+            let found = outcome
+                .payload
+                .item
+                .as_ref()
+                .and_then(|item| item.get("platform"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if found.as_deref() != Some(expected.as_str()) {
+                return Err(OutcomeRejection::SocialPlatformMismatch { expected, found }.into());
+            }
         }
 
         // Resolved before the transaction opens: the lookup touches a table the

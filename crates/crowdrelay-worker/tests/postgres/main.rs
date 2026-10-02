@@ -27,6 +27,7 @@ mod import_outreach;
 mod join_ask;
 mod no_agent_service;
 mod ops_watchdog;
+mod owned_social_channel;
 mod osm_venue_sweep;
 mod outbox_http;
 mod outbox_materialization;

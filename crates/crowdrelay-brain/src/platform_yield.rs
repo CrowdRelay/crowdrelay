@@ -247,6 +247,49 @@ pub fn template_channels(template: &str) -> &'static [&'static str] {
     }
 }
 
+/// The owned-social channel with the strongest direct first-party yield.
+///
+/// This is intentionally narrower than `rank_templates`: it answers which
+/// platform the already-selected `social-post` worker should target. Only
+/// attributed channel evidence may choose it. No followers, impressions or
+/// model judgement can override a channel that produced retained/converted
+/// fans. With no direct evidence the caller gets `None` and keeps the
+/// existing exploratory behavior.
+///
+/// Order of evidence strength:
+/// 1. durable attributed fans;
+/// 2. fresh attributed conversions;
+/// 3. tracked unique clickers.
+///
+/// Ties keep a stable prior (Facebook, Instagram, X) so identical evidence
+/// does not make the selected channel flap between cycles.
+#[must_use]
+pub fn preferred_owned_social_platform(channel_yield: &[ChannelYield]) -> Option<&'static str> {
+    const PRIOR: [&str; 3] = ["facebook", "instagram", "x"];
+    PRIOR
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, platform)| {
+            channel_yield
+                .iter()
+                .find(|entry| entry.channel == platform)
+                .and_then(|entry| {
+                    let evidence = (
+                        entry.durable_90d,
+                        entry.conversions_30d,
+                        entry.unique_clickers_30d,
+                    );
+                    (evidence != (0, 0, 0)).then_some((platform, evidence, index))
+                })
+        })
+        .max_by(|left, right| {
+            left.1
+                .cmp(&right.1)
+                .then_with(|| right.2.cmp(&left.2))
+        })
+        .map(|(platform, _, _)| platform)
+}
+
 /// What a platform is ranked on: trustworthy rate in basis points, then the
 /// absolute weighted gain. `None` when the platform is unmeasured.
 ///
@@ -384,6 +427,40 @@ mod tests {
         "growth-strategist",
         "signal-inviter",
     ];
+
+    #[test]
+    fn owned_social_repeats_the_strongest_direct_channel() {
+        let mut facebook = yielded("facebook", 1, 3);
+        facebook.durable_90d = 1;
+        let instagram = yielded("instagram", 20, 100);
+        let x = yielded("x", 0, 5000);
+
+        assert_eq!(
+            preferred_owned_social_platform(&[instagram, x, facebook]),
+            Some("facebook"),
+            "one retained fan is stronger than fresh conversions or click volume"
+        );
+    }
+
+    #[test]
+    fn owned_social_has_no_winner_without_direct_evidence() {
+        assert_eq!(preferred_owned_social_platform(&[]), None);
+        assert_eq!(
+            preferred_owned_social_platform(&[yielded("facebook", 0, 0)]),
+            None
+        );
+    }
+
+    #[test]
+    fn owned_social_ties_are_stable() {
+        assert_eq!(
+            preferred_owned_social_platform(&[
+                yielded("x", 1, 0),
+                yielded("facebook", 1, 0),
+            ]),
+            Some("facebook")
+        );
+    }
 
     #[test]
     fn no_evidence_leaves_the_strategy_order_untouched() {
