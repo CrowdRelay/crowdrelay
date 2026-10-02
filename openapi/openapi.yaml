@@ -1252,6 +1252,73 @@ paths:
           $ref: '#/components/responses/PrivateProblem'
         '500':
           $ref: '#/components/responses/PrivateProblem'
+  /me/latarnik:
+    get:
+      operationId: getMyLatarnikRole
+      summary: Read where the signed-in fan stands with the Latarnik invitation
+      description: >-
+        The Latarnik invitation is delivered here, in the fan's own signed-in
+        Signal session, and nowhere else: no email, no push. `state` is `none`
+        until the band has actually asked (an internal candidate is not shown),
+        then `invited`, `active`, `paused`, or `ended` (terminal, so the
+        surface never offers the role again). The response says nothing about
+        why the band asked. The session cookie is the only identity accepted.
+      security: [{ fanSession: [] }]
+      responses:
+        '200':
+          description: The fan's own role state.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/PrivateNoStore' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [state]
+                properties:
+                  state: { type: string, enum: [none, invited, active, paused, ended] }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+        '500': { $ref: '#/components/responses/PrivateProblem' }
+  /me/latarnik/answer:
+    post:
+      operationId: answerMyLatarnikRole
+      summary: Accept, decline, pause, resume or leave the Latarnik role
+      description: >-
+        Runs through the same status machine as the operator's decision.
+        `accept` and `decline` need an outstanding invitation; `pause` and
+        `leave` need an active role; `resume` needs a paused one. A decline is
+        terminal and recorded, so the band asks once. Anything that does not
+        fit the current state is a 409.
+      security: [{ fanSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [answer]
+              properties:
+                answer: { type: string, enum: [accept, decline, pause, resume, leave] }
+      responses:
+        '200':
+          description: The role's new status.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/PrivateNoStore' }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: { type: string, enum: [candidate, invited, active, paused, revoked] }
+        '401': { $ref: '#/components/responses/PrivateProblem' }
+        '404': { $ref: '#/components/responses/PrivateProblem' }
+        '409': { $ref: '#/components/responses/PrivateProblem' }
+        '503': { $ref: '#/components/responses/PrivateProblem' }
+        '500': { $ref: '#/components/responses/PrivateProblem' }
   /commerce/coupons/redeem:
     post:
       operationId: redeemMerchCoupon

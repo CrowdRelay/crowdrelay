@@ -478,6 +478,11 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .route("/r/{code}", get(referrals::redirect_referral))
         .route("/v1/r/{code}", get(referrals::redirect_referral))
         .route("/v1/me/referral", get(referrals::referral_progress))
+        .route("/v1/me/latarnik", get(fan_latarnik::get_my_latarnik))
+        .route(
+            "/v1/me/latarnik/answer",
+            post(fan_latarnik::answer_my_latarnik),
+        )
         .route(
             "/v1/commerce/coupons/redeem",
             post(referrals::redeem_coupon),
