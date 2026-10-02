@@ -828,11 +828,7 @@ mod tests {
 
     #[test]
     fn contact_research_is_internal_but_still_requires_grounded_provenance() {
-        let unverified = outcome_with(
-            "contact_research",
-            &payload("internal evidence"),
-            8_000,
-        );
+        let unverified = outcome_with("contact_research", &payload("internal evidence"), 8_000);
         assert_eq!(unverified.kind.disposition(), "recommend_only");
         assert_eq!(
             provenance_admission(unverified.kind, unverified.payload.provenance.as_ref()),
