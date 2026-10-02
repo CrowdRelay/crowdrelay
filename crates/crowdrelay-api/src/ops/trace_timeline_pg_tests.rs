@@ -143,6 +143,186 @@ mod trace_timeline_postgres_tests {
         assert_eq!(fan_metric.action_id.as_deref(), Some(action_id.to_string().as_str()));
     }
 
+    /// The plan's one-trace proof: one real person walked from what the band read
+    /// about them, through the thing it said and the tracked link it carried, to
+    /// the fan they became — every step under the single `trace_id` of the touch,
+    /// the arrival labelled as the inference it is, and a touch that was NOT the
+    /// one whose link they clicked carrying none of it.
+    #[tokio::test]
+    async fn trace_walks_prospect_to_touch_to_link_to_fan() {
+        use crowdrelay_domain::fan_prospect::{ObservationKind, ProspectSource};
+        use crowdrelay_infra::fan_prospects::{
+            ObserveOutcome, ObservedPerson, TouchKind, TouchReceipt, attribute_conversions,
+            observe, record_touch,
+        };
+        let Ok(database_url) = std::env::var("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect");
+        crowdrelay_infra::database::MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let workspace_id = WorkspaceId::new();
+        let w = workspace_id.into_uuid();
+        sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,$3)")
+            .bind(w)
+            .bind(format!("scout-trace-{}", w.simple()))
+            .bind("Scout Trace")
+            .execute(&pool)
+            .await
+            .expect("workspace");
+        let now = OffsetDateTime::now_utc();
+        let ObserveOutcome::Created { prospect_id } = observe(
+            &pool,
+            w,
+            &ObservedPerson {
+                source: ProspectSource::OwnComments,
+                platform: "instagram",
+                platform_user_id: None,
+                handle: Some("kuba_metal"),
+                display_identity: "kuba_metal",
+                display_name: None,
+                profile_url: None,
+                kind: ObservationKind::AskedAboutShow,
+                source_ref: "comment-1",
+                source_url: None,
+                observed_at: now - time::Duration::days(3),
+                evidence: "Kiedy gracie Wrocław?",
+                confidence_basis_points: 8_000,
+            },
+        )
+        .await
+        .expect("observe") else {
+            panic!("created");
+        };
+        let link: Uuid = sqlx::query_scalar(
+            "INSERT INTO smart_links (workspace_id, slug, destination_url, active)
+             VALUES ($1,$2,'https://band.example/signal',true) RETURNING id",
+        )
+        .bind(w)
+        .bind(format!("t-{}", Uuid::now_v7().simple()))
+        .fetch_one(&pool)
+        .await
+        .expect("link");
+        // Two touches: an earlier plain answer, then the invitation that carried the link.
+        record_touch(
+            &pool,
+            w,
+            &TouchReceipt {
+                prospect_id,
+                kind: TouchKind::Engage,
+                source: "owned_reply",
+                source_ref: "reply-1",
+                smart_link_id: None,
+                touched_at: now - time::Duration::days(2),
+            },
+        )
+        .await
+        .expect("engage");
+        record_touch(
+            &pool,
+            w,
+            &TouchReceipt {
+                prospect_id,
+                kind: TouchKind::Invite,
+                source: "owned_reply",
+                source_ref: "reply-2",
+                smart_link_id: Some(link),
+                touched_at: now - time::Duration::days(1),
+            },
+        )
+        .await
+        .expect("invite");
+        let visitor = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(w)
+        .bind(link)
+        .bind(visitor)
+        .bind(now - time::Duration::hours(20))
+        .execute(&pool)
+        .await
+        .expect("click");
+        let fan = Uuid::now_v7();
+        sqlx::query("INSERT INTO fans (id, workspace_id, normalized_email, status) VALUES ($1,$2,'kuba@fan.test','active')")
+            .bind(fan)
+            .bind(w)
+            .execute(&pool)
+            .await
+            .expect("fan");
+        sqlx::query(
+            "INSERT INTO fan_acquisition_events (workspace_id, fan_id, anonymous_visitor_id, source, request_id, occurred_at)
+             VALUES ($1,$2,$3,'public_signup','req-trace',$4)",
+        )
+        .bind(w)
+        .bind(fan)
+        .bind(visitor)
+        .bind(now - time::Duration::hours(19))
+        .execute(&pool)
+        .await
+        .expect("arrival");
+        assert_eq!(
+            attribute_conversions(&pool, w, now, 10).await.expect("attribute"),
+            1
+        );
+
+        let trace_of = |source_ref: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT trace_id FROM fan_prospect_touches WHERE workspace_id=$1 AND source_ref=$2",
+                )
+                .bind(w)
+                .bind(source_ref)
+                .fetch_one(&pool)
+                .await
+                .expect("trace")
+            }
+        };
+        let ops = OpsState::new(workspace_id, pool.clone(), Duration::from_secs(10));
+
+        // The invitation's trace carries the whole path, in order, with honest labels.
+        let events = load_trace_timeline(&ops, &trace_of("reply-2").await)
+            .await
+            .expect("trace query must execute against a real schema");
+        let path: Vec<(&str, &str, &str)> = events
+            .iter()
+            .map(|e| (e.source.as_str(), e.kind.as_str(), e.certainty.as_str()))
+            .collect();
+        assert_eq!(
+            path,
+            [
+                ("scout_observation", "asked_about_show", "FACT"),
+                ("scout_touch", "invite", "FACT"),
+                ("scout_arrival", "public_signup", "INFERENCE"),
+                ("scout_conversion", "prospect_converted", "FACT"),
+            ],
+            "{events:?}"
+        );
+        assert_eq!(
+            events.iter().find(|e| e.source == "scout_conversion").and_then(|e| e.state.as_deref()),
+            Some("active")
+        );
+        // No stranger's words ride the trace: kinds only.
+        assert!(!format!("{events:?}").contains("Wrocław"));
+
+        // The earlier plain answer did not carry the link: it has its own trace
+        // with the observation and the touch, and neither the arrival nor the
+        // conversion is claimed by it.
+        let earlier = load_trace_timeline(&ops, &trace_of("reply-1").await)
+            .await
+            .expect("trace");
+        let sources: Vec<&str> = earlier.iter().map(|e| e.source.as_str()).collect();
+        assert_eq!(sources, ["scout_observation", "scout_touch"], "{earlier:?}");
+    }
+
     /// The attention board's band notices read the escalation lane's durable
     /// record — deduplicated per subject, prefix stripped, delivery state
     /// reported rather than trusted.
