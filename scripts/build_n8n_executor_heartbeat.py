@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from n8n_manifest_capabilities import WELCOME_V2_CAPABILITY, row_capabilities
+
 MAX_ATTESTATION_AGE = timedelta(days=14)
 MAX_TTL = timedelta(hours=2)
 
@@ -76,6 +78,8 @@ def validate_attestation(
         for key in ("eventValidation", "providerReceipt", "receiptBeforeRetry", "credentialCheck"):
             if smoke.get(key) is not True:
                 raise ValueError(f"workflow smoke check {key} is not proven: {workflow_id}")
+        if WELCOME_V2_CAPABILITY in row_capabilities(row) and smoke.get("welcomeActivation") is not True:
+            raise ValueError(f"workflow welcomeActivation is not proven: {workflow_id}")
         if smoke.get("executionClaim") is False:
             raise ValueError(f"workflow execution claim is not proven: {workflow_id}")
     return attestation, manifest_digest
@@ -98,7 +102,7 @@ def build_heartbeat(
         raise ValueError("heartbeat TTL must be in (0, 120] minutes")
     rows = read_manifest(manifest)
     attestation, manifest_digest = validate_attestation(manifest, rows, attestation_path, now)
-    capabilities = sorted({row["capability"] for row in rows if row.get("enabled") == "1"})
+    capabilities = sorted({cap for row in rows if row.get("enabled") == "1" for cap in row_capabilities(row)})
     if not capabilities:
         raise ValueError("production manifest advertises no capabilities")
     attestation_digest = sha256_bytes(attestation_path)

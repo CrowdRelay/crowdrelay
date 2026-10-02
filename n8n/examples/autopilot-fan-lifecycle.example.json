@@ -30,7 +30,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $json.action_id + '/execution-claim' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -47,7 +47,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,version:'1',observed_at:new Date().toISOString(),expires_at:new Date(Date.now()+30*60*1000).toISOString(),capabilities:['fan.lifecycle.message','fan.lifecycle.welcome.v2']}) }}",
+        "body": "={{ JSON.stringify({executor_id:$env.VIRYA_N8N_EXECUTOR_ID,occurred_at:new Date().toISOString()}) }}",
         "options": {
           "timeout": 10000
         }
@@ -63,7 +63,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Fail closed. Only `claimed` may send; `already_succeeded` is a no-op\n// replay; `in_flight` and `ambiguous` require reconciliation instead of a\n// second send.\nconst c = $input.first().json;\nconst plan = $('Validate lifecycle request').first().json;\nif (c.status === 'already_succeeded') return [];\nif (c.status !== 'claimed') throw new Error('claim not granted: ' + c.status);\nreturn [{ json: { ...plan, claim_token: c.claim_token } }];"
+        "jsCode": "// Fail closed. Only `claimed` may send; `already_succeeded` is a no-op\n// replay; `in_flight` and `ambiguous` require reconciliation instead of a\n// second send.\nconst c = $input.first().json;\nconst plan = $('Validate lifecycle request').first().json;\nif (c.disposition === 'already_succeeded') return [];\nif (c.disposition !== 'claimed' || typeof c.claim_token !== 'string' || !c.claim_token) throw new Error('claim not granted: ' + c.disposition);\nreturn [{ json: { ...plan, claim_token: c.claim_token } }];"
       },
       "id": "fl-gate",
       "name": "Fail-closed claim gate",
@@ -103,12 +103,13 @@
       "position": [
         480,
         0
-      ]
+      ],
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -125,7 +126,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':succeeded:' + ($json.threadId || 'gmail'), executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'succeeded', claim_token: $('Fail-closed claim gate').first().json.claim_token, provider_reference: $json.threadId || null, metadata:{template_key:$('Fail-closed claim gate').first().json.template_key, delivered_to:$('Fail-closed claim gate').first().json.email}, observed_at:new Date().toISOString()}) }}",
+        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':' + $('Fail-closed claim gate').first().json.claim_token + ':succeeded', executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'succeeded', claim_token: $('Fail-closed claim gate').first().json.claim_token, provider_reference: $json.threadId || null, metadata:{template_key:$('Fail-closed claim gate').first().json.template_key, delivered_to:$('Fail-closed claim gate').first().json.email}, occurred_at:new Date().toISOString()}) }}",
         "options": {
           "timeout": 10000
         }
@@ -141,8 +142,21 @@
     },
     {
       "parameters": {
+        "jsCode": "// A timeout/unknown transport failure may have sent the email. Retain\n// the durable claim for reconciliation; never turn uncertainty into a retry.\nconst item = $input.first().json;\nconst e = item.error || item;\nconst code = Number(e.httpCode || e.statusCode || e.status || e.response?.statusCode || e.response?.status || 0);\nif (![400,401,403,404,422,429].includes(code)) throw new Error('ambiguous provider result; reconcile the held execution claim');\nreturn [{json:{error:'provider rejected (' + code + ')'}}];"
+      },
+      "id": "fl-error-gate",
+      "name": "Classify provider failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        200
+      ]
+    },
+    {
+      "parameters": {
         "method": "POST",
-        "url": "=={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
+        "url": "={{ $env.CROWDRELAY_INTERNAL_BASE_URL + '/v1/internal/autopilot/actions/' + $('Fail-closed claim gate').first().json.action_id + '/execution-report' }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -159,7 +173,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':failed', executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'failed', claim_token: $('Fail-closed claim gate').first().json.claim_token, error_kind:'provider_reject', metadata:{template_key:$('Fail-closed claim gate').first().json.template_key, error: $json.error || 'unknown'}, observed_at:new Date().toISOString()}) }}",
+        "body": "={{ JSON.stringify({receipt_key: $('Fail-closed claim gate').first().json.action_id + ':' + $env.VIRYA_N8N_EXECUTOR_ID + ':' + $('Fail-closed claim gate').first().json.claim_token + ':failed', executor_id:$env.VIRYA_N8N_EXECUTOR_ID, status:'failed', claim_token: $('Fail-closed claim gate').first().json.claim_token, error_kind:'provider_reject', metadata:{template_key:$('Fail-closed claim gate').first().json.template_key, error: $json.error || 'unknown'}, occurred_at:new Date().toISOString()}) }}",
         "options": {
           "timeout": 10000
         }
@@ -171,8 +185,7 @@
       "position": [
         700,
         200
-      ],
-      "onError": "continueRegularOutput"
+      ]
     }
   ],
   "connections": {
@@ -240,6 +253,17 @@
             "index": 0
           }
         ],
+        [
+          {
+            "node": "Classify provider failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify provider failure": {
+      "main": [
         [
           {
             "node": "Report failure receipt",

@@ -606,18 +606,22 @@ pub(super) async fn schedule_effect_measurement(
         // Its measurement is scheduled when that receipt arrives, via
         // `apply_success_side_effects` → `schedule_effect_measurement`.
         //
-        // The measurement counts per-fan engagement events (ticket orders,
-        // Signal push endpoint creations, referral redemptions) in the 7-day
-        // window after the message was confirmed delivered. The baseline is 0
-        // — lifecycle messages target new or dormant fans who haven't
-        // engaged yet. This closes the learning loop: the brain learns which
-        // message templates actually move individual fans to action.
+        // Welcome v2 observes binary deliberate activation after the success
+        // receipt. Legacy templates keep their event-count metric unchanged.
+        // A provider receipt does not prove inbox delivery or causal lift.
         AutopilotActionPayload::RequestFanLifecycleMessage { .. } => {
             // Re-bind fan_id from the reference — the { .. } pattern keeps
             // the contract test happy while still extracting the subject.
-            if let AutopilotActionPayload::RequestFanLifecycleMessage { fan_id, template_key, .. } = payload {
+            if let AutopilotActionPayload::RequestFanLifecycleMessage {
+                fan_id, template_key, ..
+            } = payload {
+                let kind = if template_key == WELCOME_V2_TEMPLATE {
+                    AutopilotMeasurementKind::FanLifecycleActivation7d
+                } else {
+                    AutopilotMeasurementKind::FanLifecycleEngagement7d
+                };
                 plans.push((
-                    if template_key == WELCOME_V2_TEMPLATE { AutopilotMeasurementKind::FanLifecycleActivation7d } else { AutopilotMeasurementKind::FanLifecycleEngagement7d },
+                    kind,
                     fan_id.into_uuid(),
                     0.0,
                     now + time::Duration::days(7),

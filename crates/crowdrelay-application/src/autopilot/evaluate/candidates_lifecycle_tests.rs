@@ -213,4 +213,27 @@ mod lifecycle_tests {
         assert_ne!(first.action_idempotency_key, second.action_idempotency_key);
         Ok(())
     }
+    #[test]
+    fn a_new_welcome_names_v2_without_broadening_policy_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fan = snapshot();
+        fan.last_marketing_touch_at = None;
+        let c = lifecycle_candidate(
+            fan.clone(),
+            &policy(AutonomyLevel::BoundedAuto)?,
+            datetime!(2026-10-18 18:00 UTC),
+        )?
+        .expect("welcome");
+        assert!(
+            matches!(&c.action,AutopilotActionPayload::RequestFanLifecycleMessage{template_key,..} if template_key=="crowdrelay.fan.welcome.v2")
+        );
+        let observe = lifecycle_candidate(
+            fan,
+            &policy(AutonomyLevel::Observe)?,
+            datetime!(2026-10-18 18:00 UTC),
+        )?
+        .expect("observed welcome");
+        assert_eq!(observe.disposition, PolicyDisposition::ObserveOnly);
+        Ok(())
+    }
 }

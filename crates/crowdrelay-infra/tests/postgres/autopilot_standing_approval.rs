@@ -36,6 +36,8 @@ mod episode_tests;
 mod install_tests;
 #[path = "autopilot_standing_approval/snapshot_tests.rs"]
 mod snapshot_tests;
+#[path = "autopilot_standing_approval/welcome_tests.rs"]
+mod welcome_tests;
 
 struct Fixture {
     pool: sqlx::PgPool,

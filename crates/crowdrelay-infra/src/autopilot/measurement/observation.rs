@@ -681,7 +681,7 @@ pub(super) async fn observe_with_metrics(
                           AND COALESCE((SELECT granted FROM fan_consents WHERE workspace_id=$1
                             AND fan_id=fan.id AND purpose='marketing' AND recorded_at<=$4
                             ORDER BY recorded_at DESC,id DESC LIMIT 1),false)
-                          AND fan_has_engagement_between($1,fan.id,fan.normalized_email,$3,LEAST($4,$3+INTERVAL '7 days'))
+                          AND fan_has_engagement_between($1,fan.id,fan.normalized_email,$3::timestamptz,LEAST($4::timestamptz,$3::timestamptz+INTERVAL '7 days'))
                     ) THEN 1.0::double precision ELSE 0.0::double precision END
                     "#,
                 ).bind(workspace_id.into_uuid()).bind(measurement.subject_id)
