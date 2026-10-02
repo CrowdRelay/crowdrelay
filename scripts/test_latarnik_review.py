@@ -202,5 +202,33 @@ class Entry(unittest.TestCase):
         self.assertNotIn("print(env(", source)
 
 
+class ResearchLoop(unittest.TestCase):
+    def test_it_sends_each_person_up_to_the_limit_and_reports_every_answer(self):
+        asked, out = [], []
+
+        def request(beacon_id):
+            asked.append(beacon_id)
+            return {"queued": "t"} if beacon_id != "b" else {"refused": "read recently"}
+
+        rows = [{"beacon_id": i, "display_name": i.upper()} for i in ["a", "b", "c", "d"]]
+        counts = module.research_loop(rows, limit=3, request=request, out=out.append)
+        self.assertEqual(asked, ["a", "b", "c"])
+        self.assertEqual(counts, {"queued": 2, "refused": 1})
+        self.assertIn("read recently", "\n".join(out))
+
+    def test_the_limit_is_bounded(self):
+        for bad in (0, -1, module.MAX_PER_SESSION + 1):
+            with self.assertRaises(module.OperatorError):
+                module.research_loop([], limit=bad, request=lambda _: None, out=lambda _: None)
+
+    def test_research_never_touches_the_send_endpoint(self):
+        source = SCRIPT.read_text()
+        start = source.index("def command_research")
+        body = source[start : source.index("def command_note")]
+        self.assertIn("research/request", body)
+        self.assertNotIn("latarnik-invite", body)
+
+
 if __name__ == "__main__":
     unittest.main()
+

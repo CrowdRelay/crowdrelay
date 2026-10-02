@@ -811,6 +811,14 @@ pub(crate) fn router(state: crate::AppState) -> Router {
             put(crate::latarnik_http::record_research),
         )
         .route(
+            "/v1/control-plane/contacts/{beacon_id}/research/request",
+            post(crate::latarnik_http::request_research),
+        )
+        .route(
+            "/v1/control-plane/contacts/targets/{target_id}/research/request",
+            post(crate::latarnik_http::request_target_research),
+        )
+        .route(
             "/v1/control-plane/audience/segments/{slug}/preview",
             get(crate::audience::preview_segment),
         )

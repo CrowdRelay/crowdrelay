@@ -37,6 +37,11 @@ pub enum OutcomeKind {
     /// and implemented within bounded authority, or rejected with the
     /// reason the next consultation reads back.
     StrategyProposals,
+    /// One dated, sourced thing a person did lately, found by the
+    /// `contact-researcher` agent so the band can write to them knowing
+    /// something true. Lands as a `contact_research` row if CrowdRelay can
+    /// check the citation; never as an action, because it contacts nobody.
+    ContactResearch,
 }
 
 impl OutcomeKind {
@@ -54,6 +59,7 @@ impl OutcomeKind {
             Self::GenericInsight => "generic_insight",
             Self::OpportunityFindings => "opportunity_findings",
             Self::StrategyProposals => "strategy_proposals",
+            Self::ContactResearch => "contact_research",
         }
     }
 
@@ -64,7 +70,7 @@ impl OutcomeKind {
             Self::PressPitch | Self::SocialPost => "promotion_budget",
             Self::SignalPush | Self::AudienceSegments => "fan_lifecycle",
             Self::OutreachTargets | Self::OpportunityFindings => "booking_opportunity",
-            Self::BeaconCandidates => "beacon",
+            Self::BeaconCandidates | Self::ContactResearch => "beacon",
             Self::CampaignInsight
             | Self::ReleasePlanNote
             | Self::GenericInsight
@@ -93,7 +99,8 @@ impl OutcomeKind {
             Self::AudienceSegments
             | Self::CampaignInsight
             | Self::ReleasePlanNote
-            | Self::GenericInsight => "recommend_only",
+            | Self::GenericInsight
+            | Self::ContactResearch => "recommend_only",
         }
     }
 
@@ -108,6 +115,7 @@ impl OutcomeKind {
             Self::BeaconCandidates => "agent_beacon_candidate",
             Self::OpportunityFindings => "agent_opportunity_finding",
             Self::StrategyProposals => "agent_strategy_consult",
+            Self::ContactResearch => "agent_contact_research",
             Self::CampaignInsight | Self::ReleasePlanNote | Self::GenericInsight => "agent_insight",
         }
     }
@@ -401,6 +409,7 @@ pub fn validate(
         "generic_insight" => OutcomeKind::GenericInsight,
         "opportunity_findings" => OutcomeKind::OpportunityFindings,
         "strategy_proposals" => OutcomeKind::StrategyProposals,
+        "contact_research" => OutcomeKind::ContactResearch,
         other => return Err(OutcomeValidationError::UnknownKind(other.to_owned())),
     };
     let self_reported_confidence = ModelSelfReportedConfidence::parse(confidence_basis_points)?;
