@@ -1,5 +1,8 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
-use super::ports::{AutopilotDecisionRepository, LoadedCausalModel};
+use super::ports::{
+    AutopilotDecisionRepository, LoadedCausalModel, OrganicFunnelControl,
+    OrganicFunnelDirective,
+};
 use super::{evidence_ledger::EvidenceLedger, model::*, policy_config::*};
 use crowdrelay_brain::{
     DispatchPrediction, GrowthIntelligencePolicy, GrowthStrategy, context_hash,
@@ -104,7 +107,8 @@ use content_strategy::{content_arc_candidate, content_strategy_candidate};
 use crowdrelay_domain::worker_template::{TemplateAudience, WorkerTemplate};
 use growth_debt::growth_debt_candidate;
 use growth_intelligence::{
-    ScoredCandidate, build_dispatch_context, cooldown_window, growth_intelligence_candidate,
+    ScoredCandidate, apply_organic_funnel_control, build_dispatch_context, cooldown_window,
+    growth_intelligence_candidate, organic_funnel_control_summary,
 };
 use growth_metrics::growth_metric_candidate;
 use join_ask::evaluate_join_ask_candidates;
@@ -901,11 +905,24 @@ where
                         .repository
                         .load_join_ask_snapshot(self.workspace_id, now)
                         .await?;
-                    let evaluation =
-                        evaluate_join_ask_candidates(&snapshot, &policy, self.workspace_id, now)?;
-                    report.join_ask_held.extend(evaluation.held);
-                    for candidate in &evaluation.candidates {
-                        self.persist(candidate, &mut limits, &mut report).await?;
+                    let funnel_control = self
+                        .repository
+                        .load_organic_funnel_control(self.workspace_id, now)
+                        .await?;
+                    if funnel_control
+                        .is_none_or(|control| control.directive.permits_join_ask())
+                    {
+                        let evaluation =
+                            evaluate_join_ask_candidates(&snapshot, &policy, self.workspace_id, now)?;
+                        report.join_ask_held.extend(evaluation.held);
+                        for candidate in &evaluation.candidates {
+                            self.persist(candidate, &mut limits, &mut report).await?;
+                        }
+                    } else if let Some(control) = funnel_control {
+                        report.gi_dispatch_log.push(format!(
+                            "organic funnel control: held join-ask while directive={} — do not add signups ahead of the current downstream leak",
+                            control.directive.as_str()
+                        ));
                     }
                 }
                 AutopilotContext::Representation | AutopilotContext::BookingAgent => {
