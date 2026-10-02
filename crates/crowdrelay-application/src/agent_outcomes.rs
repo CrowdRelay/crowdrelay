@@ -490,7 +490,10 @@ pub fn provenance_admission(
     kind: OutcomeKind,
     provenance: Option<&OutcomeProvenance>,
 ) -> Result<(), ProvenanceRejection> {
-    if kind.disposition() != "require_approval" {
+    // ContactResearch is internal evidence, not an approval card, but it can
+    // later shape text sent to a real person. Hold it to the same provenance
+    // bar as outward proposals without pretending research itself is a send.
+    if kind.disposition() != "require_approval" && kind != OutcomeKind::ContactResearch {
         return Ok(());
     }
     let Some(provenance) = provenance else {
@@ -608,6 +611,7 @@ mod tests {
             "generic_insight",
             "release_plan_note",
             "audience_segments",
+            "contact_research",
         ] {
             let outcome = validate(
                 Uuid::now_v7(),
@@ -820,6 +824,26 @@ mod tests {
                 "{kind} with a clean grounding check and a healthy context is admissible",
             );
         }
+    }
+
+    #[test]
+    fn contact_research_is_internal_but_still_requires_grounded_provenance() {
+        let unverified = outcome_with("contact_research", &payload("internal evidence"), 8_000);
+        assert_eq!(unverified.kind.disposition(), "recommend_only");
+        assert_eq!(
+            provenance_admission(unverified.kind, unverified.payload.provenance.as_ref()),
+            Err(ProvenanceRejection::Missing),
+        );
+
+        let grounded = outcome_with(
+            "contact_research",
+            &provenance_json("grounding_check_passed", false),
+            8_000,
+        );
+        assert_eq!(
+            provenance_admission(grounded.kind, grounded.payload.provenance.as_ref()),
+            Ok(()),
+        );
     }
 
     #[test]

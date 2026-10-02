@@ -28,9 +28,10 @@
 
 use crowdrelay_application::IdempotencyKey;
 use crowdrelay_application::autopilot::AutopilotActionPayload;
-use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::contact_research::relationship_is_worth_researching;
 use crowdrelay_domain::latarnik_invite::{ContactStanding, InviteDecision, decide};
 use crowdrelay_domain::trace::TraceContext;
+use crowdrelay_domain::{BeaconId, WorkspaceId};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -328,6 +329,77 @@ pub async fn dual_role_contact(
         .fetch_optional(pool)
         .await?;
     Ok(row.map(|row| row_to_contact(&row, reason_available).0))
+}
+
+/// The small queue of warm relationships worth learning about now.
+///
+/// This is not an invitation queue. It asks a narrower question: which warm,
+/// rested professional relationships are worth learning about now because the
+/// act has a concrete row-backed reason that may make the context useful soon.
+///
+/// Fan/marketing state is deliberately not part of this eligibility decision:
+/// somebody may already be a fan, have a pending opt-in, or have withdrawn
+/// marketing consent while still remaining a journalist/promoter/creator the
+/// act legitimately works with. Those states constrain later sends, not memory.
+///
+/// At most three contacts enter one cycle: deep-research attention is scarce
+/// and quality falls before throughput becomes useful.
+pub async fn relationship_research_queue(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<crowdrelay_application::autopilot::RelationshipResearchSnapshot>, sqlx::Error> {
+    const MAX_RESEARCH_PER_CYCLE: usize = 3;
+    let review = dual_role_review(pool, workspace_id, now, true).await?;
+    let mut queue = Vec::new();
+
+    for contact in review.contacts {
+        if queue.len() >= MAX_RESEARCH_PER_CYCLE {
+            break;
+        }
+
+        // Research eligibility belongs to the professional relationship, not
+        // the marketing role. A contact may already be a fan, have a pending
+        // fan opt-in, or have withdrawn marketing consent and still remain a
+        // journalist/promoter/creator the act legitimately works with. Those
+        // states constrain later fan/marketing sends; they do not rewrite the
+        // history of the working relationship or make public research illicit.
+        if !relationship_is_worth_researching(
+            contact.has_replied,
+            contact.relationship_score,
+            contact.accepts_outreach,
+            contact.do_not_contact,
+            contact.days_since_last_contact,
+            contact.has_research,
+        ) {
+            continue;
+        }
+
+        // Spend deep-research budget only when there is a concrete row-backed
+        // reason that could make the context useful soon: an upcoming date in
+        // their city, a shared night, or a recent release. This still grants no
+        // permission to message them; downstream policy decides the use.
+        let language = contact_language(pool, workspace_id, contact.beacon_id).await?;
+        if invite_reason(pool, workspace_id, contact.beacon_id, language, now)
+            .await?
+            .is_none()
+        {
+            continue;
+        }
+
+        queue.push(
+            crowdrelay_application::autopilot::RelationshipResearchSnapshot {
+                beacon_id: BeaconId::from_uuid(contact.beacon_id),
+                display_name: contact.display_name,
+                role: contact.role,
+                city: contact.city,
+                relationship_score: contact.relationship_score,
+                has_replied: contact.has_replied,
+                days_since_last_contact: contact.days_since_last_contact,
+            },
+        );
+    }
+    Ok(queue)
 }
 
 /// One decoded row → the standing, the decision and the contact the console

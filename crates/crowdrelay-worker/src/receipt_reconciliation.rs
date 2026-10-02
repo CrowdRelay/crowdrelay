@@ -62,7 +62,7 @@ use crowdrelay_domain::action_ledger::{
     ActionState, LegalTransition, ProviderDeliveryState, ResolutionEvidence, SuccessEvidence,
     legal_transition, resolve_observation,
 };
-use crowdrelay_infra::autopilot::payload_requires_executor;
+use crowdrelay_infra::autopilot::{OPERATOR_EXECUTOR_ID, payload_requires_executor};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -203,6 +203,14 @@ impl ReceiptReconciliationWorker {
                   WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                     AND r.status IN ('succeeded', 'failed')
               )
+              -- An open operator claim is a human mid-send; the missing
+              -- receipt is the point of the lane, not a gap to relabel.
+              AND NOT EXISTS (
+                  SELECT 1 FROM autopilot_execution_claims c
+                  WHERE c.workspace_id = a.workspace_id AND c.action_id = a.id
+                    AND c.executor_id = $4
+                    AND c.status = 'claimed'
+              )
             ORDER BY a.finished_at
             LIMIT $3
             "#,
@@ -210,6 +218,7 @@ impl ReceiptReconciliationWorker {
         .bind(self.workspace_id.into_uuid())
         .bind(RECEIPT_GAP_THRESHOLD.as_secs() as i64)
         .bind(SWEEP_BATCH_LIMIT)
+        .bind(OPERATOR_EXECUTOR_ID)
         .fetch_all(&mut **transaction)
         .await?;
 
@@ -688,6 +697,15 @@ impl ReceiptReconciliationWorker {
                   WHERE r.workspace_id = a.workspace_id AND r.action_id = a.id
                     AND r.status IN ('succeeded', 'failed')
               )
+              -- An open operator claim is a human mid-send; resolving the
+              -- action from webhook state while they hold it would strand
+              -- the claim and hide the ask from the queue.
+              AND NOT EXISTS (
+                  SELECT 1 FROM autopilot_execution_claims c
+                  WHERE c.workspace_id = a.workspace_id AND c.action_id = a.id
+                    AND c.executor_id = $3
+                    AND c.status = 'claimed'
+              )
             -- One action can hold several events (keyed emissions send more
             -- than once). A delivered delivery is the only positive proof a
             -- send happened, so it resolves before terminal siblings;
@@ -706,6 +724,7 @@ impl ReceiptReconciliationWorker {
         )
         .bind(self.workspace_id.into_uuid())
         .bind(SWEEP_BATCH_LIMIT)
+        .bind(OPERATOR_EXECUTOR_ID)
         .fetch_all(&mut **transaction)
         .await?;
 
