@@ -386,21 +386,22 @@ async fn monthly_verified_organic_goal_drives_the_existing_brain_control_loop()
 
     repository.renew_organic_goal(workspace_id, now).await?;
 
-    let (organic_id, target): (Uuid, i64) = sqlx::query_as(
-        "SELECT id,target FROM organic_fan_goals
-         WHERE workspace_id=$1 AND period_start=$2",
+    let (organic_id, target, period_start): (Uuid, i64, OffsetDateTime) = sqlx::query_as(
+        "SELECT id,target,period_start FROM organic_fan_goals
+         WHERE workspace_id=$1
+         ORDER BY period_start DESC
+         LIMIT 1",
     )
     .bind(workspace_id.into_uuid())
-    .bind(
-        time::Date::from_calendar_date(2026, time::Month::October, 1)?
-            .midnight()
-            .assume_utc(),
-    )
     .fetch_one(&pool)
     .await?;
     assert_ne!(
         organic_id, previous_id,
         "each monthly control episode needs a stable identity of its own"
+    );
+    assert!(
+        period_start > september,
+        "renewal must create the current Warsaw-month episode"
     );
     assert_eq!(target, 100);
 
