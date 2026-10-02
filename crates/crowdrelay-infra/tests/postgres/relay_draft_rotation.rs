@@ -173,6 +173,7 @@ async fn fresh_drop_selection_exploits_real_yield_but_keeps_one_exploration_slot
     let converted = seed_community(&pool, ws, "convertedroom", None).await?;
     let strong_clicks = seed_community(&pool, ws, "strongclicks", None).await?;
     let weak_click = seed_community(&pool, ws, "weakclick", None).await?;
+    let measured_zero = seed_community(&pool, ws, "measuredzero", None).await?;
     let explore_a = seed_community(&pool, ws, "explorea", None).await?;
     let explore_b = seed_community(&pool, ws, "exploreb", None).await?;
     let explore_c = seed_community(&pool, ws, "explorec", None).await?;
@@ -180,6 +181,7 @@ async fn fresh_drop_selection_exploits_real_yield_but_keeps_one_exploration_slot
     seed_community_conversion(&pool, ws, "convertedroom").await?;
     seed_community_clicks(&pool, ws, "strongclicks", 3).await?;
     seed_community_clicks(&pool, ws, "weakclick", 1).await?;
+    seed_post(&pool, ws, measured_zero, "measuredzero", "posted", 20).await?;
 
     let targets = repo.load_relay_community_targets(ws).await?;
     let picked: std::collections::BTreeSet<Uuid> =
@@ -201,6 +203,10 @@ async fn fresh_drop_selection_exploits_real_yield_but_keeps_one_exploration_slot
     assert!(
         !picked.contains(&weak_click),
         "the weaker measured room must not crowd out deliberate exploration"
+    );
+    assert!(
+        !picked.contains(&measured_zero),
+        "a room already tried with zero yield is measured-zero, not exploration"
     );
     assert_eq!(
         exploration, 1,
