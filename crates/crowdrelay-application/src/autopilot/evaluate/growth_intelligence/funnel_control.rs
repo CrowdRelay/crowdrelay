@@ -108,6 +108,15 @@ mod organic_funnel_control_tests {
     }
 
     #[test]
+    fn join_ask_is_only_a_reach_or_direct_conversion_recovery() {
+        assert!(OrganicFunnelDirective::ExpandReach.permits_join_ask());
+        assert!(OrganicFunnelDirective::RepairConversion.permits_join_ask());
+        assert!(!OrganicFunnelDirective::RepairConfirmation.permits_join_ask());
+        assert!(!OrganicFunnelDirective::ActivateFans.permits_join_ask());
+        assert!(!OrganicFunnelDirective::RetainFans.permits_join_ask());
+    }
+
+    #[test]
     fn downstream_leaks_stop_growth_intelligence_from_buying_more_top_of_funnel() {
         for directive in [
             OrganicFunnelDirective::RepairConversion,
