@@ -3,9 +3,10 @@
 //! Reads the facts a mission is made of (the Latarnik's own city, published
 //! shows, recent releases, their own referral code), writes the one mission the
 //! pure chooser (`crowdrelay_domain::latarnik_mission`) hands back, and measures
-//! it by the only thing that counts: a referred person who arrived through the
-//! Latarnik's own code after the tap. Every statement names `workspace_id` on
-//! every table it reads.
+//! it by the only thing that counts: a referred person whose browser traversed
+//! this mission's action-owned Smart Link and then signed up with the same
+//! visitor id through this Latarnik's code. Timing alone is never causality.
+//! Every statement names `workspace_id` on every table it reads.
 //!
 //! The referral link is the stored `member_site_base_url` or nothing — never the
 //! shipped default, because a default URL in a text a person sends to a friend
@@ -83,25 +84,16 @@ pub async fn load_carriers(
                 history.offered_90d,
                 history.tapped_90d,
                 COALESCE((
-                    SELECT count(DISTINCT provenance.anonymous_visitor_id)::bigint
-                    FROM fan_provenance_events provenance
-                    WHERE provenance.workspace_id = lr.workspace_id
-                      AND provenance.event_kind = 'interaction'
-                      AND provenance.channel = 'referral'
-                      AND provenance.attribution_method = 'referral_click'
-                      AND provenance.anonymous_visitor_id IS NOT NULL
-                      AND provenance.source_target = 'fan:' || fan.id::text
-                      AND EXISTS (
-                          SELECT 1
-                          FROM latarnik_missions measured
-                          WHERE measured.workspace_id = lr.workspace_id
-                            AND measured.role_id = lr.id
-                            AND measured.offered_at >= $3 - interval '90 days'
-                            AND measured.tapped_at IS NOT NULL
-                            AND provenance.occurred_at >= measured.tapped_at
-                            AND provenance.occurred_at
-                                <= measured.expires_at + interval '7 days'
-                      )
+                    SELECT count(DISTINCT funnel.anonymous_visitor_id)::bigint
+                    FROM latarnik_missions measured
+                    CROSS JOIN LATERAL latarnik_mission_funnel(
+                        lr.workspace_id,
+                        measured.id,
+                        $3
+                    ) AS funnel
+                    WHERE measured.workspace_id = lr.workspace_id
+                      AND measured.role_id = lr.id
+                      AND measured.offered_at >= $3 - interval '90 days'
                 ), 0)::bigint AS human_clickers_90d,
                 history.completed_90d,
                 history.seen_event_ids,
@@ -564,10 +556,11 @@ pub async fn offer(
 /// there is); an open one past its expiry is `expired`. Returns
 /// `(completed, expired)`.
 ///
-/// "Brought someone" is a *qualified* referral attribution to the Latarnik's
-/// own code (a pending, rejected or reversed one is not a fan), qualified at or
-/// after the tap and inside the mission's life plus a week for the friend to
-/// act. A tap alone never completes anything.
+/// "Brought someone" means one exact first-party chain:
+/// mission action-owned smart link -> human click visitor -> signup by that
+/// same visitor using this Latarnik's referral code -> qualified referral.
+/// Same-referrer activity merely near the mission in time is not completion.
+/// A tap alone never completes anything.
 ///
 /// # Errors
 ///
@@ -584,18 +577,12 @@ pub async fn settle(
             AND m.status = 'tapped'
             AND EXISTS (
                 SELECT 1
-                  FROM latarnik_roles lr
-                  JOIN person_identities pi
-                    ON pi.workspace_id = lr.workspace_id AND pi.person_id = lr.person_id
-                   AND pi.kind = 'email' AND pi.platform IS NULL
-                  JOIN fans fan
-                    ON fan.workspace_id = pi.workspace_id AND fan.normalized_email = pi.value
-                  JOIN referral_attributions ra
-                    ON ra.workspace_id = fan.workspace_id AND ra.referrer_fan_id = fan.id
-                 WHERE lr.workspace_id = m.workspace_id AND lr.id = m.role_id
-                   AND ra.status = 'qualified'
-                   AND ra.qualified_at >= m.tapped_at
-                   AND ra.qualified_at <= m.expires_at + interval '7 days')",
+                FROM latarnik_mission_funnel($1, m.id, $2) AS funnel
+                WHERE funnel.referral_status = 'qualified'
+                  AND funnel.qualified_at IS NOT NULL
+                  AND funnel.qualified_at <= funnel.outcome_deadline
+                  AND funnel.qualified_at <= $2
+            )",
     )
     .bind(workspace_id)
     .bind(now)
