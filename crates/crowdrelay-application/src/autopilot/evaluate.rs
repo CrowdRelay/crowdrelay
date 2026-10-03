@@ -133,7 +133,16 @@ where
         &self,
         now: OffsetDateTime,
     ) -> Result<AutopilotCycleReport, AutopilotError> {
-        let policies = self.repository.load_policies(self.workspace_id).await?;
+        let mut policies = self.repository.load_policies(self.workspace_id).await?;
+        // One bottleneck snapshot governs the whole cycle. Without this,
+        // FanLifecycle and acquisition contexts can observe different funnel
+        // stages a few milliseconds apart and spend the same cycle in opposite
+        // directions.
+        let organic_funnel_control = self
+            .repository
+            .load_organic_funnel_control(self.workspace_id, now)
+            .await?;
+        policies.sort_by_key(|policy| funnel_context_rank(policy.context, organic_funnel_control));
         // Loaded once per cycle rather than per candidate: the ceiling is an
         // operator setting that does not change mid-cycle, and re-reading it
         // for every decision would be a query per finding.
@@ -219,6 +228,7 @@ where
                         now,
                         &mut limits,
                         &mut report,
+                        organic_funnel_control,
                     )
                     .await?;
                 }
@@ -544,7 +554,7 @@ where
                     ordered.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.occurred_at));
                     let mut produced = 0usize;
                     for snapshot in ordered {
-                        for candidate in content_candidates(
+                        for mut candidate in content_candidates(
                             snapshot,
                             &policy,
                             &communities,
@@ -552,6 +562,22 @@ where
                             evidence.for_context(policy.context),
                             now,
                         )? {
+                            if let Some(control) = organic_funnel_control {
+                                attach_organic_funnel_control(&mut candidate, control);
+                            }
+                            if !funnel_allows_content_supply(
+                                &candidate,
+                                organic_funnel_control,
+                            ) {
+                                if let Some(control) = organic_funnel_control {
+                                    report.gi_dispatch_log.push(format!(
+                                        "organic funnel control: held content-supply public reach decision={} while directive={}",
+                                        candidate.decision_kind,
+                                        control.directive.as_str()
+                                    ));
+                                }
+                                continue;
+                            }
                             let relay_push = match &candidate.action {
                                 AutopilotActionPayload::RequestSignalPush {
                                     title, body, ..
@@ -863,6 +889,7 @@ where
                         now,
                         &mut limits,
                         &mut report,
+                        organic_funnel_control,
                     )
                     .await?;
                 }
@@ -888,8 +915,14 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
-                    self.evaluate_join_ask_week(&policy, now, &mut limits, &mut report)
-                        .await?;
+                    self.evaluate_join_ask_week(
+                        &policy,
+                        now,
+                        &mut limits,
+                        &mut report,
+                        organic_funnel_control,
+                    )
+                    .await?;
                 }
                 AutopilotContext::Representation | AutopilotContext::BookingAgent => {
                     // Approaches are band-initiated: the evaluator never
