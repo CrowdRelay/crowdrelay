@@ -189,18 +189,20 @@ pub(in crate::autopilot) async fn load_show_growth_snapshots(
               AND fci.city_id = event.city_id
         ) AS city_signal ON true
         LEFT JOIN LATERAL (
-            SELECT COUNT(DISTINCT referral.referrer_fan_id)::bigint AS qualified_referrers
-            FROM referral_attributions AS referral
+            SELECT COUNT(*)::bigint AS qualified_referrers
+            FROM fans AS fan
             JOIN fan_city_interests AS fci
-              ON fci.workspace_id = referral.workspace_id
-             AND fci.fan_id = referral.referrer_fan_id
-            JOIN fans AS fan
-              ON fan.workspace_id = referral.workspace_id
-             AND fan.id = referral.referrer_fan_id
-             AND fan.status = 'active'
-            WHERE referral.workspace_id = event.workspace_id
+              ON fci.workspace_id = fan.workspace_id
+             AND fci.fan_id = fan.id
+            WHERE fan.workspace_id = event.workspace_id
+              AND fan.status = 'active'
+              AND fan.deleted_at IS NULL
+              AND fan.merged_into_fan_id IS NULL
               AND event.city_id IS NOT NULL
               AND fci.city_id = event.city_id
+              AND canonical_qualified_referral_count(
+                    fan.workspace_id, fan.id, NULL
+                  ) > 0
         ) AS referrers ON true
         LEFT JOIN LATERAL (
             SELECT COUNT(*)::bigint AS beacon_partners
