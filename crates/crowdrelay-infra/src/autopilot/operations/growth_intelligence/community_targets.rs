@@ -108,11 +108,17 @@ pub(super) async fn load_community_targets(
         -- fan is evidence about where this band's fans come from, and it
         -- outranks a bigger community that only ever produced reach.
         LEFT JOIN LATERAL (
-            SELECT COUNT(DISTINCT pe.fan_id)
-                       FILTER (WHERE pe.event_kind = 'conversion')::bigint
-                       AS converted_fans,
-                   COUNT(DISTINCT COALESCE(pe.fan_id::text,
-                                           pe.anonymous_visitor_id::text))
+            SELECT COUNT(DISTINCT canonical_fan_id(
+                           t.workspace_id, pe.fan_id
+                       ))
+                       FILTER (
+                           WHERE pe.event_kind = 'conversion'
+                             AND pe.fan_id IS NOT NULL
+                       )::bigint AS converted_fans,
+                   COUNT(DISTINCT COALESCE(
+                       canonical_fan_id(t.workspace_id, pe.fan_id)::text,
+                       pe.anonymous_visitor_id::text
+                   ))
                        FILTER (WHERE pe.event_kind = 'interaction')::bigint
                        AS interactions
             FROM fan_provenance_events pe
@@ -137,8 +143,12 @@ pub(super) async fn load_community_targets(
             FROM fans AS fan
             WHERE fan.workspace_id = t.workspace_id
               AND fan.status = 'active'
+              AND fan.deleted_at IS NULL
+              AND fan.merged_into_fan_id IS NULL
               AND fan.id IN (
-                  SELECT pe.fan_id
+                  SELECT DISTINCT canonical_fan_id(
+                      t.workspace_id, pe.fan_id
+                  )
                   FROM fan_provenance_events pe
                   WHERE pe.workspace_id = t.workspace_id
                     AND pe.event_kind = 'conversion'
@@ -148,19 +158,15 @@ pub(super) async fn load_community_targets(
                         normalize_subreddit(COALESCE(t.subreddit, t.display_name))
                     AND pe.occurred_at >= now() - interval '90 days'
               )
-              AND EXISTS (
-                  SELECT 1 FROM fan_consents AS consent
+              AND COALESCE((
+                  SELECT consent.granted
+                  FROM fan_consents AS consent
                   WHERE consent.workspace_id = fan.workspace_id
                     AND consent.fan_id = fan.id
                     AND consent.purpose = 'marketing'
-                    AND consent.granted
-                    AND consent.recorded_at = (
-                        SELECT max(latest.recorded_at) FROM fan_consents AS latest
-                        WHERE latest.workspace_id = fan.workspace_id
-                          AND latest.fan_id = fan.id
-                          AND latest.purpose = 'marketing'
-                    )
-              )
+                  ORDER BY consent.recorded_at DESC, consent.id DESC
+                  LIMIT 1
+              ), false)
               AND fan_last_meaningful_action(fan.workspace_id, fan.id, fan.normalized_email)
                   >= now() - interval '30 days'
         ) AS durable ON true
