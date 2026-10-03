@@ -1088,6 +1088,21 @@ pub enum AutopilotActionPayload {
     IssueReferralCode {
         fan_id: FanId,
     },
+    /// Offer one already-active Latarnik one small first-party mission in their
+    /// signed-in Signal session. The action is the attribution owner of the
+    /// Smart Link embedded in the frozen share text; it sends nothing itself.
+    OfferLatarnikMission {
+        role_id: uuid::Uuid,
+        fan_id: FanId,
+        mission_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<uuid::Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_source_id: Option<uuid::Uuid>,
+        prompt: String,
+        share_text: String,
+        destination_url: String,
+    },
     /// The content engine's ask: commit to this beat. The suggestion row
     /// already carries the concept, the reason, the evidence and the
     /// distribution promise; this action is the surface the band answers on.
@@ -1473,6 +1488,10 @@ impl AutopilotActionPayload {
             // undoes the park — first-party and reversible either way.
             | Self::RaiseDeclineAdvisory { .. }
             | Self::IssueReferralCode { .. }
+            // A Latarnik mission is a card in an already authenticated
+            // first-party session. Offering/removing it is a reversible DB
+            // write; the eventual friend click is measured separately.
+            | Self::OfferLatarnikMission { .. }
             // Raising a suggestion or an arc flips one row inside the
             // workspace. It reaches nobody — the promises they name are
             // carried out by separately classed actions, each gated on its
