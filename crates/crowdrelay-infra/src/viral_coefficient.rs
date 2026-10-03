@@ -45,7 +45,17 @@ pub async fn k_counts(
 ) -> Result<KSeries, sqlx::Error> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(
         r#"
-        WITH cohort AS (
+        WITH RECURSIVE family(root_id, member_id) AS (
+            SELECT fan.id, fan.id
+            FROM fans fan
+            WHERE fan.workspace_id = $1 AND fan.merged_into_fan_id IS NULL
+            UNION ALL
+            SELECT family.root_id, child.id
+            FROM family
+            JOIN fans child
+              ON child.workspace_id = $1
+             AND child.merged_into_fan_id = family.member_id
+        ), cohort AS (
             SELECT f.id AS fan_id
             FROM fans f
             WHERE f.workspace_id = $1
@@ -67,21 +77,27 @@ pub async fn k_counts(
               AND lr.status = 'active'
               AND lr.activated_at <= $2 - interval '60 days'
         ), fan_refs AS (
-            SELECT ra.referred_fan_id
+            SELECT DISTINCT referred.root_id AS referred_fan_id
             FROM referral_attributions ra
-            JOIN cohort c ON c.fan_id = ra.referrer_fan_id
+            JOIN family referrer ON referrer.member_id = ra.referrer_fan_id
+            JOIN cohort c ON c.fan_id = referrer.root_id
+            JOIN family referred ON referred.member_id = ra.referred_fan_id
             WHERE ra.workspace_id = $1
               AND ra.status = 'qualified'
               AND ra.qualified_at >= $2 - interval '60 days'
               AND ra.qualified_at <  $2 - interval '30 days'
+              AND referred.root_id <> referrer.root_id
         ), lat_refs AS (
-            SELECT ra.referred_fan_id
+            SELECT DISTINCT referred.root_id AS referred_fan_id
             FROM referral_attributions ra
-            JOIN latarniks l ON l.fan_id = ra.referrer_fan_id
+            JOIN family referrer ON referrer.member_id = ra.referrer_fan_id
+            JOIN latarniks l ON l.fan_id = referrer.root_id
+            JOIN family referred ON referred.member_id = ra.referred_fan_id
             WHERE ra.workspace_id = $1
               AND ra.status = 'qualified'
               AND ra.qualified_at >= GREATEST(l.activated_at, $2 - interval '60 days')
               AND ra.qualified_at <  $2 - interval '30 days'
+              AND referred.root_id <> referrer.root_id
         )
         SELECT
           (SELECT count(*) FROM cohort),
