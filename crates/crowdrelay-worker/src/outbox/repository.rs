@@ -161,7 +161,17 @@ impl PgOutboxStore {
         let (inserted, completed) = sqlx::query_as::<_, (i64, i64)>(
             r#"
             WITH eligible AS (
-                SELECT event.id, event.workspace_id, event.event_type
+                SELECT event.id, event.workspace_id, event.event_type,
+                       EXISTS (
+                           SELECT 1
+                           FROM webhook_endpoints AS route
+                           WHERE route.workspace_id = event.workspace_id
+                             AND route.active
+                             AND (
+                                   route.event_types IS NULL
+                                   OR event.event_type = ANY(route.event_types)
+                                 )
+                       ) AS has_delivery_route
                 FROM outbox_events AS event
                 WHERE event.id = ANY($1)
                   AND event.status = 'processing'
@@ -194,13 +204,48 @@ impl PgOutboxStore {
             ), completed AS (
                 UPDATE outbox_events AS event
                 SET
-                    status = 'delivered',
+                    -- Outbox "delivered" normally means fan-out was
+                    -- materialized, not that the downstream provider accepted
+                    -- anything. Authentication mail is different: with zero
+                    -- matching endpoints there is literally no confirmation
+                    -- attempt, and calling that delivered strands the fan in
+                    -- pending forever. Make the missing route terminal and
+                    -- visible so confirmation recovery / ops can act on fact.
+                    status = CASE
+                        WHEN eligible.event_type IN (
+                            'fan.confirmation_requested',
+                            'fan.session_requested'
+                        ) AND NOT eligible.has_delivery_route
+                            THEN 'dead'
+                        ELSE 'delivered'
+                    END,
                     locked_at = NULL,
                     lock_owner = NULL,
                     lease_expires_at = NULL,
-                    last_error_kind = NULL,
-                    delivered_at = now(),
-                    dead_at = NULL
+                    last_error_kind = CASE
+                        WHEN eligible.event_type IN (
+                            'fan.confirmation_requested',
+                            'fan.session_requested'
+                        ) AND NOT eligible.has_delivery_route
+                            THEN 'endpoint_missing_route'
+                        ELSE NULL
+                    END,
+                    delivered_at = CASE
+                        WHEN eligible.event_type IN (
+                            'fan.confirmation_requested',
+                            'fan.session_requested'
+                        ) AND NOT eligible.has_delivery_route
+                            THEN NULL
+                        ELSE now()
+                    END,
+                    dead_at = CASE
+                        WHEN eligible.event_type IN (
+                            'fan.confirmation_requested',
+                            'fan.session_requested'
+                        ) AND NOT eligible.has_delivery_route
+                            THEN now()
+                        ELSE NULL
+                    END
                 FROM eligible
                 WHERE event.id = eligible.id
                   AND event.workspace_id = eligible.workspace_id
