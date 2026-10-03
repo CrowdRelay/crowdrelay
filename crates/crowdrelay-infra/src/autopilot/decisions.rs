@@ -500,7 +500,8 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<Option<crowdrelay_application::autopilot::OrganicFunnelControl>, RepositoryError> {
+    ) -> Result<Option<crowdrelay_application::autopilot::OrganicFunnelControl>, RepositoryError>
+    {
         crate::organic_funnel::control(&self.pool, workspace_id.into_uuid(), now)
             .await
             .map_err(map_sqlx)

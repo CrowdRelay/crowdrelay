@@ -49,7 +49,6 @@ pub async fn read(
         .await
 }
 
-
 pub async fn control(
     pool: &PgPool,
     workspace: Uuid,
@@ -193,7 +192,6 @@ SELECT link.id AS link_id,link.slug,link.campaign_id,link.action_id,link.channel
    WHEN counts.retained=0 THEN 'no_observed_retention' ELSE 'retained_fans_observed' END AS diagnosis
 FROM links link JOIN counts ON counts.id=link.id
 "#;
-
 
 #[cfg(test)]
 mod control_tests {

@@ -53,7 +53,6 @@ use super::model::{
 };
 use crate::RepositoryError;
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrganicFunnelDirective {

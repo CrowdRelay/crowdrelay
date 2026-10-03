@@ -91,7 +91,6 @@ async fn organic_funnel_requires_deliberate_action_current_consent_and_unambiguo
     assert_eq!(rows[0].diagnosis, "ambiguous_link_owner");
 }
 
-
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
 async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
@@ -102,13 +101,8 @@ async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
     let action = insert_dispatch(&f, "organic-control", posted).await;
     live_post(&f, action, "organic-control", posted).await;
 
-    let control = || {
-        crowdrelay_infra::organic_funnel::control(
-            &f.pool,
-            f.workspace_id.into_uuid(),
-            f.now,
-        )
-    };
+    let control =
+        || crowdrelay_infra::organic_funnel::control(&f.pool, f.workspace_id.into_uuid(), f.now);
 
     assert_eq!(
         control().await.expect("control").map(|c| c.directive),

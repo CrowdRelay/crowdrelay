@@ -1,7 +1,6 @@
 //! Thin orchestration from typed snapshots to durable decision candidates.
 use super::ports::{
-    AutopilotDecisionRepository, LoadedCausalModel, OrganicFunnelControl,
-    OrganicFunnelDirective,
+    AutopilotDecisionRepository, LoadedCausalModel, OrganicFunnelControl, OrganicFunnelDirective,
 };
 use super::{evidence_ledger::EvidenceLedger, model::*, policy_config::*};
 use crowdrelay_brain::{
@@ -909,11 +908,13 @@ where
                         .repository
                         .load_organic_funnel_control(self.workspace_id, now)
                         .await?;
-                    if funnel_control
-                        .is_none_or(|control| control.directive.permits_join_ask())
-                    {
-                        let evaluation =
-                            evaluate_join_ask_candidates(&snapshot, &policy, self.workspace_id, now)?;
+                    if funnel_control.is_none_or(|control| control.directive.permits_join_ask()) {
+                        let evaluation = evaluate_join_ask_candidates(
+                            &snapshot,
+                            &policy,
+                            self.workspace_id,
+                            now,
+                        )?;
                         report.join_ask_held.extend(evaluation.held);
                         for candidate in &evaluation.candidates {
                             self.persist(candidate, &mut limits, &mut report).await?;
