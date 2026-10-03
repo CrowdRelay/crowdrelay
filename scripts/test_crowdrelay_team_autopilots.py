@@ -133,6 +133,11 @@ class TeamAutopilotsContract(unittest.TestCase):
         actions = text(
             "crates/crowdrelay-infra/src/autopilot/actions_execution.rs"
         )
+        # Ordinary lifecycle emission is intentionally extracted from the
+        # action switch; keep the contract following the implementation module.
+        actions += text(
+            "crates/crowdrelay-infra/src/autopilot/lifecycle_execution.rs"
+        )
         self.assertIn("crowdrelay.fan_lifecycle.message_requested", actions)
         self.assertIn('"email": fan.0', actions)
         self.assertIn('"display_name": fan.1', actions)

@@ -43,6 +43,9 @@ ROOT = Path(__file__).resolve().parents[1]
 EVALUATE_MODULE = "crates/crowdrelay-application/src/autopilot/evaluate.rs"
 CONTRACT = ROOT / "n8n" / "crowdrelay-executor-contract.md"
 EXECUTION = ROOT / "crates" / "crowdrelay-infra" / "src" / "autopilot" / "actions_execution.rs"
+LIFECYCLE_EXECUTION = (
+    ROOT / "crates" / "crowdrelay-infra" / "src" / "autopilot" / "lifecycle_execution.rs"
+)
 TENANT_SETTINGS = ROOT / "crates" / "crowdrelay-infra" / "src" / "tenant_settings.rs"
 WORKFLOW = ROOT / "n8n" / "examples" / "autopilot-fan-lifecycle.example.json"
 
@@ -131,6 +134,7 @@ class TheVocabularyIsPublished(unittest.TestCase):
         contract = CONTRACT.read_text(encoding="utf-8")
         section = contract.split("### Fan lifecycle messages", 1)[1].split("\n## ", 1)[0]
         execution = EXECUTION.read_text(encoding="utf-8")
+        execution += LIFECYCLE_EXECUTION.read_text(encoding="utf-8")
         settings = TENANT_SETTINGS.read_text(encoding="utf-8")
         self.assertIn('"referral_url": referral_url', execution)
         self.assertIn("brand.referral_url(&code)", execution)
