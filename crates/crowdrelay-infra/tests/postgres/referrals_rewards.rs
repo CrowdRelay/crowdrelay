@@ -461,6 +461,198 @@ async fn pinned_referral_code_stays_live_and_rewards_the_canonical_survivor_afte
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_REFERRAL_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn merging_duplicate_referred_people_revokes_ambiguous_double_credit_and_unmerge_restores_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_application::UnmergeFanCommand;
+
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_REFERRAL_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!(
+        "referral-ambiguity-{}",
+        workspace_id.into_uuid().simple()
+    ))?;
+    seed_fixture(&pool, workspace_id, &workspace_slug).await?;
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let acquisition = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        CountryCode::parse("PL")?,
+        &database,
+        false,
+        test_sensitive_response_codec(),
+    );
+    let referrals =
+        PostgresReferralRepository::new(pool.clone(), workspace_slug.clone(), &database);
+    let identity = PgFanIdentityRepository::new(pool.clone());
+
+    let referrer_a = acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "ambiguity-referrer-a@example.test",
+            None,
+            "ambiguity-referrer-a",
+        )?)
+        .await?;
+    let referrer_b = acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "ambiguity-referrer-b@example.test",
+            None,
+            "ambiguity-referrer-b",
+        )?)
+        .await?;
+    let code_a = referrer_a.referral_code.clone().ok_or("code A")?;
+    let code_b = referrer_b.referral_code.clone().ok_or("code B")?;
+
+    for (index, code, prefix) in [
+        (1, code_a.clone(), "a"),
+        (2, code_a.clone(), "a"),
+        (1, code_b.clone(), "b"),
+        (2, code_b.clone(), "b"),
+    ] {
+        acquisition
+            .persist_fan_signup(&signup_command(
+                workspace_id,
+                &format!("ambiguity-{prefix}-{index}@example.test"),
+                Some(code),
+                &format!("ambiguity-{prefix}-{index}"),
+            )?)
+            .await?;
+    }
+
+    // These look like two different third people before identity resolution,
+    // so each referrer legitimately reaches threshold 3 at this point.
+    let duplicate_a = acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "ambiguity-duplicate-a@example.test",
+            Some(code_a),
+            "ambiguity-duplicate-a",
+        )?)
+        .await?;
+    let duplicate_b = acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "ambiguity-duplicate-b@example.test",
+            Some(code_b),
+            "ambiguity-duplicate-b",
+        )?)
+        .await?;
+
+    for referrer in [&referrer_a, &referrer_b] {
+        let progress = referrals
+            .load_referral_progress(
+                workspace_id,
+                referrer.fan_session_token.as_ref().ok_or("session")?,
+            )
+            .await?;
+        assert_eq!(progress.qualified_referrals, 3);
+        assert_eq!(progress.coupons.len(), 1);
+    }
+
+    identity
+        .merge_fans(&MergeFansCommand {
+            workspace_id,
+            survivor_fan_id: duplicate_a.fan_id.into_uuid(),
+            merged_fan_id: duplicate_b.fan_id.into_uuid(),
+            reason: Some("same referred person".to_owned()),
+            merged_by: "referral-ambiguity-test".to_owned(),
+            request_id: "merge-ambiguous-referred".to_owned(),
+        })
+        .await?;
+
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT canonical_qualified_referral_owner_id($1,$2)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(duplicate_a.fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        owner, None,
+        "two distinct canonical referrers for one human are ambiguous, never timestamp-resolved"
+    );
+
+    for referrer in [&referrer_a, &referrer_b] {
+        let progress = referrals
+            .load_referral_progress(
+                workspace_id,
+                referrer.fan_session_token.as_ref().ok_or("session")?,
+            )
+            .await?;
+        assert_eq!(
+            progress.qualified_referrals, 2,
+            "ambiguous person must credit neither referrer"
+        );
+        let issued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reward_grants
+             WHERE workspace_id=$1 AND fan_id=$2 AND status='issued'",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(referrer.fan_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(issued, 0, "merge reconciliation must revoke unearned issued reward");
+        let revoked_coupon: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+             FROM merch_coupons coupon
+             JOIN reward_grants grant_row
+               ON grant_row.workspace_id=coupon.workspace_id
+              AND grant_row.id=coupon.reward_grant_id
+             WHERE coupon.workspace_id=$1
+               AND grant_row.fan_id=$2
+               AND coupon.status='revoked'",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(referrer.fan_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(revoked_coupon, 1);
+    }
+
+    identity
+        .unmerge_fan(&UnmergeFanCommand {
+            workspace_id,
+            merged_fan_id: duplicate_b.fan_id.into_uuid(),
+            unmerged_by: "referral-ambiguity-test".to_owned(),
+            request_id: "unmerge-ambiguous-referred".to_owned(),
+        })
+        .await?;
+
+    for referrer in [&referrer_a, &referrer_b] {
+        let progress = referrals
+            .load_referral_progress(
+                workspace_id,
+                referrer.fan_session_token.as_ref().ok_or("session")?,
+            )
+            .await?;
+        assert_eq!(progress.qualified_referrals, 3);
+        let issued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reward_grants
+             WHERE workspace_id=$1 AND fan_id=$2 AND status='issued'",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(referrer.fan_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            issued, 1,
+            "unmerge reconciliation may reactivate the same entitlement exactly once"
+        );
+    }
+    Ok(())
+}
+
 async fn outbox_token_for_fan(
     pool: &PgPool,
     workspace_id: WorkspaceId,
