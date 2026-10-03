@@ -227,14 +227,21 @@ async fn community_yield_counts_one_canonical_person_and_latest_consent()
     // Same timestamp, opposite decisions. id is the deterministic tie-breaker:
     // the later inserted revoke must win and durable_fans must stay zero.
     let at = OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let first = Uuid::now_v7();
+    let second = Uuid::now_v7();
+    let (grant_id, revoke_id) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    };
     sqlx::query(
         "INSERT INTO fan_consents(
              id,workspace_id,fan_id,purpose,granted,policy_version,source,recorded_at
          ) VALUES($1,$3,$4,'marketing',true,'v1','test',$5),
                  ($2,$3,$4,'marketing',false,'v2','test',$5)",
     )
-    .bind(Uuid::from_u128(1))
-    .bind(Uuid::from_u128(2))
+    .bind(grant_id)
+    .bind(revoke_id)
     .bind(ws)
     .bind(root)
     .bind(at)
