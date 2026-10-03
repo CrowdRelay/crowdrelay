@@ -87,6 +87,9 @@ pub async fn k_counts(
               AND ra.qualified_at >= $2 - interval '60 days'
               AND ra.qualified_at <  $2 - interval '30 days'
               AND referred.root_id <> referrer.root_id
+              AND canonical_qualified_referral_owner_id(
+                    $1, referred.root_id
+                  ) = referrer.root_id
         ), lat_refs AS (
             SELECT DISTINCT referred.root_id AS referred_fan_id
             FROM referral_attributions ra
@@ -98,6 +101,9 @@ pub async fn k_counts(
               AND ra.qualified_at >= GREATEST(l.activated_at, $2 - interval '60 days')
               AND ra.qualified_at <  $2 - interval '30 days'
               AND referred.root_id <> referrer.root_id
+              AND canonical_qualified_referral_owner_id(
+                    $1, referred.root_id
+                  ) = referrer.root_id
         )
         SELECT
           (SELECT count(*) FROM cohort),
