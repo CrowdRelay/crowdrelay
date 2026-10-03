@@ -292,7 +292,12 @@ pub async fn confirmation_recovery_snapshots(
 
 const FUNNEL_SQL: &str = r#"
 WITH publications AS (
- SELECT smart_link_id AS link_id,action_id,posted_at FROM social_posts WHERE workspace_id=$1 AND smart_link_id IS NOT NULL AND posted_at IS NOT NULL
+ SELECT smart_link_id AS link_id,action_id,posted_at FROM social_posts
+ WHERE workspace_id=$1
+   AND smart_link_id IS NOT NULL
+   AND posted_at IS NOT NULL
+   AND status='posted'
+   AND COALESCE(NULLIF(btrim(platform_post_id),''),NULLIF(btrim(platform_post_url),'')) IS NOT NULL
  UNION ALL SELECT smart_link_id,action_id,posted_at FROM telegram_posts WHERE workspace_id=$1 AND smart_link_id IS NOT NULL AND posted_at IS NOT NULL
  UNION ALL SELECT smart_link_id,action_id,posted_at FROM discord_posts WHERE workspace_id=$1 AND smart_link_id IS NOT NULL AND posted_at IS NOT NULL
  UNION ALL SELECT link.id,post.action_id,post.posted_at FROM community_posts post
