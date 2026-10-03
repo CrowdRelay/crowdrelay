@@ -33,14 +33,102 @@ async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     Ok(WorkspaceId::from_uuid(id))
 }
 
-/// Inserts an outcome row directly, as the agents service would — with the
-/// provenance block `require_approval` kinds need to pass admission.
-async fn insert_outcome(
+async fn create_foreign_task_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_service_tasks (
+            id uuid PRIMARY KEY,
+            workspace_id uuid NOT NULL,
+            template_id text NOT NULL,
+            model_id text NOT NULL,
+            prompt text NOT NULL,
+            status text NOT NULL DEFAULT 'queued',
+            tier text NOT NULL DEFAULT 'basic',
+            metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+            created_at timestamptz NOT NULL DEFAULT now()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("create agent_service_tasks")?;
+    Ok(())
+}
+
+fn collect_payload_urls(value: &serde_json::Value, urls: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_payload_urls(item, urls);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if matches!(key.as_str(), "url" | "community_url" | "source_url")
+                    && let Some(url) = value.as_str()
+                    && url.starts_with("http")
+                {
+                    urls.push(url.to_owned());
+                }
+                if key == "evidence_urls"
+                    && let Some(items) = value.as_array()
+                {
+                    for url in items.iter().filter_map(serde_json::Value::as_str) {
+                        if url.starts_with("http") {
+                            urls.push(url.to_owned());
+                        }
+                    }
+                }
+                collect_payload_urls(value, urls);
+            }
+        }
+        _ => {}
+    }
+    urls.sort();
+    urls.dedup();
+}
+
+async fn insert_outcome_with_task_evidence(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     kind: &str,
     payload: serde_json::Value,
+    evidence_override: Option<Vec<String>>,
 ) -> Result<Uuid> {
+    create_foreign_task_table(pool).await?;
+    let mut evidence_urls = Vec::new();
+    collect_payload_urls(&payload, &mut evidence_urls);
+    if let Some(override_urls) = evidence_override {
+        evidence_urls = override_urls;
+    }
+    let task_id = Uuid::now_v7();
+    let template = match kind {
+        "strategy_proposals" => "strategy-consult",
+        "outreach_targets" => "fanbase-scout",
+        _ => "test-template",
+    };
+    let evidence = evidence_urls
+        .iter()
+        .map(|url| json!({
+            "url": url,
+            "snippet": "fixture evidence",
+            "tool": "test",
+            "fetched_at": time::OffsetDateTime::now_utc().to_string(),
+        }))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "INSERT INTO agent_service_tasks(
+             id,workspace_id,template_id,model_id,prompt,status,tier,metadata
+         ) VALUES($1,$2,$3,'test-model','fixture prompt','completed','basic',$4)",
+    )
+    .bind(task_id)
+    .bind(workspace_id.into_uuid())
+    .bind(template)
+    .bind(json!({"evidence":{"urls":evidence}}))
+    .execute(pool)
+    .await
+    .context("insert producing task")?;
+
     let mut payload = payload;
     if let Some(obj) = payload.as_object_mut() {
         obj.entry("provenance").or_insert(json!({
@@ -61,7 +149,7 @@ async fn insert_outcome(
     )
     .bind(id)
     .bind(workspace_id.into_uuid())
-    .bind(Uuid::now_v7())
+    .bind(task_id)
     .bind(Uuid::now_v7())
     .bind(kind)
     .bind(&payload)
@@ -70,6 +158,17 @@ async fn insert_outcome(
     .await
     .context("insert outcome")?;
     Ok(id)
+}
+
+/// Inserts an outcome row directly, as the agents service would — with the
+/// provenance block `require_approval` kinds need to pass admission.
+async fn insert_outcome(
+    pool: &PgPool,
+    workspace_id: WorkspaceId,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<Uuid> {
+    insert_outcome_with_task_evidence(pool, workspace_id, kind, payload, None).await
 }
 
 fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
