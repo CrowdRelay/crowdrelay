@@ -258,6 +258,8 @@ macro_rules! decision_core_reads {
                       AND action.subject_id = fan.id
                       AND action.action_kind = 'fan.lifecycle.message.request'
                       AND action.status = 'succeeded'
+                      AND COALESCE(action.payload->>'template_key','') <>
+                          'crowdrelay.fan.confirmation_recovery.v1'
                     ORDER BY action.finished_at DESC, action.id DESC
                     LIMIT 1
                 ) AS lifecycle_touch ON true
