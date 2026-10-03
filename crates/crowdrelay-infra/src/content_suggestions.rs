@@ -694,12 +694,39 @@ impl PostgresContentEngineRepository {
                       ) AS promised(peer_name)
                       WHERE NOT (promised.peer_name = ANY($2::text[]))
                   )
-                RETURNING suggestion.id
+                RETURNING suggestion.workspace_id, suggestion.id
+            ),
+            cancelled_actions AS (
+                UPDATE autopilot_actions AS action
+                SET status = 'cancelled',
+                    finished_at = now(),
+                    last_error_kind = 'peer_reach_unavailable',
+                    idempotency_key =
+                        action.idempotency_key || ':peer-reach:' || action.id::text
+                FROM stale_peer_reach AS stale
+                WHERE action.workspace_id = stale.workspace_id
+                  AND action.subject_kind = 'content_suggestion'
+                  AND action.subject_id = stale.id
+                  AND action.status = 'awaiting_approval'
+                RETURNING action.workspace_id, action.id
+            ),
+            cancelled_assignments AS (
+                UPDATE team_assignments AS assignment
+                SET status = 'cancelled',
+                    completed_at = NULL,
+                    next_reminder_at = NULL,
+                    updated_at = now()
+                FROM cancelled_actions AS action
+                WHERE assignment.workspace_id = action.workspace_id
+                  AND assignment.action_id = action.id
+                  AND assignment.status = 'open'
+                RETURNING assignment.id
             )
             INSERT INTO suggestion_outcomes (
                 workspace_id, suggestion_id, outcome, decided_by, reason
             )
-            SELECT $1, stale_peer_reach.id, 'expired', 'system',
+            SELECT stale_peer_reach.workspace_id, stale_peer_reach.id,
+                   'expired', 'system',
                    'peer audience is no longer an executable consented route'
             FROM stale_peer_reach
             "#,
