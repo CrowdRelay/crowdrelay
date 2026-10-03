@@ -5,12 +5,14 @@
 use crate::common;
 
 use anyhow::{Result, ensure};
+use crowdrelay_application::{FanIdentityRepository, MergeFansCommand};
 use crowdrelay_domain::{
     WorkspaceId,
     latarnik::{FanEvidence, RoleStatus},
     viral_coefficient::{Withheld, read},
 };
 use crowdrelay_infra::{
+    fan_identity::PgFanIdentityRepository,
     latarnik_roles::{record_candidate, transition_role},
     viral_coefficient::k_counts,
 };
@@ -182,6 +184,61 @@ async fn k_counts_only_qualified_referrals_that_were_retained_in_staggered_windo
     let other = workspace(&pool).await?;
     let theirs = k_counts(&pool, other.into_uuid(), now).await?;
     ensure!(theirs.fans.cohort == 0 && theirs.fans.qualified_referrals == 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn k_canonicalizes_pinned_referrals_across_identity_merges() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    let live_referrer = fan(&pool, ws, "live-referrer@fan.test").await?;
+    let old_referrer = fan(&pool, ws, "old-referrer@fan.test").await?;
+    acted(&pool, ws, old_referrer, 75).await?;
+
+    let live_referred = fan(&pool, ws, "live-referred@fan.test").await?;
+    let referred_a = fan(&pool, ws, "referred-a@fan.test").await?;
+    let referred_b = fan(&pool, ws, "referred-b@fan.test").await?;
+    acted(&pool, ws, referred_a, 3).await?;
+    acted(&pool, ws, referred_b, 3).await?;
+
+    // Two historical rows can legitimately exist before identity resolution.
+    // Once A and B are known to be one canonical human, K must count one
+    // referred person, not two. The referrer attribution itself is pinned to
+    // old_referrer and therefore also has to resolve through the identity tree.
+    referral(&pool, ws, old_referrer, referred_a, 45, "qualified").await?;
+    referral(&pool, ws, old_referrer, referred_b, 44, "qualified").await?;
+
+    let repo = PgFanIdentityRepository::new(pool.clone());
+    let merge = |survivor, merged, request: &str| MergeFansCommand {
+        workspace_id: ws,
+        survivor_fan_id: survivor,
+        merged_fan_id: merged,
+        reason: Some("test canonical referral identity".to_string()),
+        merged_by: "viral-coefficient-test".to_string(),
+        request_id: request.to_string(),
+    };
+    repo.merge_fans(&merge(live_referrer, old_referrer, "merge-referrer"))
+        .await?;
+    repo.merge_fans(&merge(live_referred, referred_a, "merge-referred-a"))
+        .await?;
+    repo.merge_fans(&merge(live_referred, referred_b, "merge-referred-b"))
+        .await?;
+
+    let series = k_counts(&pool, ws.into_uuid(), now).await?;
+    ensure!(series.fans.cohort == 1, "{:?}", series.fans);
+    ensure!(
+        series.fans.qualified_referrals == 1,
+        "two pinned rows for one canonical referred person must dedupe: {:?}",
+        series.fans
+    );
+    ensure!(
+        series.fans.retained_referrals == 1,
+        "retention must follow the referred canonical survivor: {:?}",
+        series.fans
+    );
     Ok(())
 }
 
