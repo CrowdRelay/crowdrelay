@@ -145,14 +145,21 @@ impl GrowthReadiness {
         &self,
         pool: &sqlx::PgPool,
         workspace_id: crowdrelay_domain::WorkspaceId,
-        missing_switch: Option<&str>,
+        community_missing_switch: Option<&str>,
+        social_missing_switch: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         for (component, enabled) in self.components() {
-            // The switch is only known for the publishing component; the rest
-            // carry null rather than a guess.
-            let switch = (component == "community_executor" && !enabled)
-                .then_some(missing_switch)
-                .flatten();
+            // Publishing components carry the exact switch the worker read.
+            // The rest stay null rather than guessing.
+            let switch = if enabled {
+                None
+            } else {
+                match component {
+                    "community_executor" => community_missing_switch,
+                    "social_post_executor" => social_missing_switch,
+                    _ => None,
+                }
+            };
             sqlx::query(
                 r#"
                 INSERT INTO growth_component_state
@@ -626,7 +633,12 @@ mod record_tests {
             random_draws_enabled: true,
         };
         readiness
-            .record(&pool, workspace_id, Some("CROWDRELAY_REDDIT_WRITE_ENABLED"))
+            .record(
+                &pool,
+                workspace_id,
+                Some("CROWDRELAY_REDDIT_WRITE_ENABLED"),
+                Some("CROWDRELAY_SOCIAL_AUTO_POST"),
+            )
             .await
             .expect("record");
 
@@ -659,6 +671,20 @@ mod record_tests {
             "the switch an operator has to set must travel with the reading"
         );
 
+        let social_switch: Option<String> = sqlx::query_scalar(
+            "SELECT missing_switch FROM growth_component_state
+             WHERE workspace_id = $1 AND component = 'social_post_executor'",
+        )
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("social executor row");
+        assert_eq!(
+            social_switch.as_deref(),
+            Some("CROWDRELAY_SOCIAL_AUTO_POST"),
+            "Day-0 readiness must name the same deployment gate the executor obeys"
+        );
+
         // A component that is on carries no switch: there is nothing to set.
         let autopilot_switch: Option<String> = sqlx::query_scalar(
             "SELECT missing_switch FROM growth_component_state \
@@ -673,7 +699,7 @@ mod record_tests {
         // Re-reporting is what every worker restart does, so it must update
         // rather than fail on the primary key.
         readiness
-            .record(&pool, workspace_id, None)
+            .record(&pool, workspace_id, None, None)
             .await
             .expect("re-record");
         let after: i64 = sqlx::query_scalar(
