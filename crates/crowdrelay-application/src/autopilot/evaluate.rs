@@ -214,18 +214,13 @@ where
                     }
                 }
                 AutopilotContext::FanLifecycle => {
-                    let snapshots = self
-                        .repository
-                        .load_fan_lifecycle_snapshots(self.workspace_id, now)
-                        .await?;
-                    for snapshot in snapshots {
-                        if let Some(candidate) = lifecycle_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut limits, &mut report).await?;
-                        }
-                    }
-
-                    self.evaluate_relationship_research(&policy, now, &mut limits, &mut report)
-                        .await?;
+                    self.evaluate_fan_lifecycle_with_funnel(
+                        &policy,
+                        now,
+                        &mut limits,
+                        &mut report,
+                    )
+                    .await?;
                 }
                 AutopilotContext::CampaignLifecycle => {
                     let snapshots = self
@@ -966,6 +961,7 @@ include!("evaluate/live_terms.rs");
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
 include!("evaluate/candidates_lifecycle.rs");
+include!("evaluate/funnel_recovery.rs");
 include!("evaluate/candidates_terms.rs");
 include!("evaluate/candidates_relay.rs");
 include!("evaluate/candidates_drop_surge.rs");
