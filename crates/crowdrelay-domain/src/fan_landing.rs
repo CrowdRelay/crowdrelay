@@ -26,6 +26,10 @@ pub const CAPTURE_CHANNELS: &[&str] = &[
     "tiktok",
 ];
 
+/// The `utm_source` an unlabelled owned link lands with, so the join form and
+/// the funnel can tell it from a channel-minted click.
+const OWNED_SOURCE: &str = "owned";
+
 /// Rule words that forbid an off-site landing page. A community whose
 /// verified rules summary names any of these — as a substring, so "links"
 /// catches "link" — gets the plain redirect.
@@ -121,8 +125,20 @@ pub fn landing_for(
     if !is_owned(id) {
         return None;
     }
-    let channel = inputs.channel?.trim().to_lowercase();
-    let allowed = CAPTURE_CHANNELS.contains(&channel.as_str())
+    // A link minted with neither a channel nor a community is the band's own
+    // placement — its site, its bio, a hand-made release link — not a post in
+    // somebody else's room. There is no community rule it could break, and it
+    // is the traffic most worth capturing: on 2026-10-03 one such link carried
+    // 50 of the tenant's 160 clicks (25 from virya.music itself) straight to
+    // YouTube, and none of those visitors could join. A link that names a
+    // community but no channel stays a bare redirect, as before.
+    let channel = match inputs.channel.map(|c| c.trim().to_lowercase()) {
+        Some(channel) if !channel.is_empty() => channel,
+        _ if inputs.community.is_none_or(|c| c.trim().is_empty()) => OWNED_SOURCE.to_owned(),
+        _ => return None,
+    };
+    let allowed = channel == OWNED_SOURCE
+        || CAPTURE_CHANNELS.contains(&channel.as_str())
         || (channel == "reddit"
             && inputs
                 .community
@@ -241,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_without_a_channel_never_lands() {
+    fn an_owned_link_with_no_channel_and_no_community_lands_labelled_owned() {
         assert_eq!(
             landing_for(
                 LandingInputs {
@@ -251,6 +267,38 @@ mod tests {
                 },
                 owned,
                 offsite_ok,
+                ORIGIN,
+            )
+            .as_deref(),
+            Some("https://virya.music/watch/abc123DEF_-/?utm_source=owned&utm_medium=watch")
+        );
+        // A blank channel is no channel.
+        assert!(
+            landing_for(
+                LandingInputs {
+                    destination: "https://youtu.be/abc123DEF_-",
+                    channel: Some("  "),
+                    community: None,
+                },
+                owned,
+                offsite_ok,
+                ORIGIN,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_link_that_names_a_community_but_no_channel_never_lands() {
+        assert_eq!(
+            landing_for(
+                LandingInputs {
+                    destination: "https://youtu.be/abc123DEF_-",
+                    channel: None,
+                    community: Some("r/metalcore"),
+                },
+                owned,
+                |_| true,
                 ORIGIN,
             ),
             None
