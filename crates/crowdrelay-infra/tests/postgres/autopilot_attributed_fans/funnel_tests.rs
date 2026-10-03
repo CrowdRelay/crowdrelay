@@ -509,7 +509,10 @@ async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
     )
     .bind(canonical_referrer)
     .bind(f.workspace_id.into_uuid())
-    .bind(format!("canonical-{}@example.test", canonical_referrer.simple()))
+    .bind(format!(
+        "canonical-{}@example.test",
+        canonical_referrer.simple()
+    ))
     .bind(old_acquired)
     .execute(&f.pool)
     .await

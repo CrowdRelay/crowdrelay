@@ -211,7 +211,8 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn merged_referral_history_stays_canonical_and_self_referrals_do_not_become_activity() -> Result<()> {
+async fn merged_referral_history_stays_canonical_and_self_referrals_do_not_become_activity()
+-> Result<()> {
     use crowdrelay_application::{FanIdentityRepository, MergeFansCommand};
 
     let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
