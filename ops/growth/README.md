@@ -13,6 +13,21 @@ action — manual invites and imports do not count. The canonical shared impleme
 `ops/growth/FAN_100_PLAN.md`. Local agent copies such as
 `~/.devin/plans/FAN_100_PLAN.md` are mirrors only and must not override the in-repo plan.
 
+## After a deploy: one command
+
+```sh
+ops/growth/verify-deploy.sh [ssh-host]     # default virya-crowdrelay
+```
+
+Reads the database and worker logs over ssh plus the public `/v1/meta`, and prints
+`[ok]` / `[zero]` / `[warn]` / `[info]` per proof: build vs `origin/main`, the reply
+lane halt and `scout_own_handles`, the brain's seeded prior, the artifact-lane breaker,
+the publish-token scope check and the Day-0 switches, owned-link landings, prepared
+YouTube capture comments, and the funnel as it stands. It never writes, never calls an
+authenticated API and never GETs a tracked link (that would record a real click). A
+failed query prints a `[warn]`, never a blank a check could read as zero. A `[zero]` is
+a measured result, not a failure. Exit status is always 0: it reports, it does not gate.
+
 ## Reproduce the read-only snapshot
 
 Use a database role with read access. Do not put a database password in a report or
