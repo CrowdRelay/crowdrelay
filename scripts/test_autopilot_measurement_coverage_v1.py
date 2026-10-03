@@ -84,9 +84,9 @@ KNOWN_UNMEASURED = {
 # whole purpose is a change the brain can observe; losing its measurement
 # would silently reopen the learning gap this test exists to close.
 MUST_BE_MEASURED = {
-    # A produced artifact is content an audience sees; the fan-growth trio
-    # answers whether the brain's request moved anyone. The empty arm was
-    # how a shipped video left nothing the learner reads back.
+    # Artifact production has a proximal observable: was the produced asset
+    # actually used in a downstream publication? Fan growth is owned by that
+    # publication/send action, not by the act of rendering a draft.
     "RequestContentArtifact",
     "RequestSignalPush",
     "RequestAgentRun",
