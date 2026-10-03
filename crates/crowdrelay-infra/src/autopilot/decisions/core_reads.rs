@@ -180,22 +180,8 @@ macro_rules! decision_core_reads {
                           AND ticket_order.status IN ('paid', 'partially_refunded')
                           AND ticket_order.paid_at <= $2
                     ) AS paid_ticket_count,
-                    (
-                        SELECT count(DISTINCT canonical_fan_id(
-                            fan.workspace_id, referral.referred_fan_id
-                        ))
-                        FROM referral_attributions AS referral
-                        WHERE referral.workspace_id = fan.workspace_id
-                          AND referral.referrer_fan_id IN (
-                              SELECT fan_id FROM canonical_fan_family(
-                                  fan.workspace_id, fan.id
-                              )
-                          )
-                          AND referral.status = 'qualified'
-                          AND referral.qualified_at <= $2
-                          AND canonical_fan_id(
-                              fan.workspace_id, referral.referred_fan_id
-                          ) IS DISTINCT FROM fan.id
+                    canonical_qualified_referral_count(
+                        fan.workspace_id, fan.id, $2
                     ) AS qualified_referrals,
                     (
                         SELECT max(referral.qualified_at)
@@ -211,6 +197,9 @@ macro_rules! decision_core_reads {
                           AND canonical_fan_id(
                               fan.workspace_id, referral.referred_fan_id
                           ) IS DISTINCT FROM fan.id
+                          AND canonical_qualified_referral_owner_id(
+                              fan.workspace_id, referral.referred_fan_id
+                          ) = fan.id
                     ) AS last_qualified_referral_at,
                     EXISTS (
                         SELECT 1 FROM referral_codes AS code
