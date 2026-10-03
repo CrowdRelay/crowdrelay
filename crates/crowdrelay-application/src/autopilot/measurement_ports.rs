@@ -526,6 +526,9 @@ impl AutopilotMeasurementKind {
                 | Self::ArtifactOutcome7d
                 | Self::SignalInstalls1d
                 | Self::AgentRunSignalInstalls7d
+                // Harm reduction is valuable but does not prove that more
+                // unattended external action is warranted.
+                | Self::CampaignUnsubscribe7d
         )
     }
 
