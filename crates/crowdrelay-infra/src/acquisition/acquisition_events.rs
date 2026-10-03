@@ -235,38 +235,52 @@ impl PostgresAcquisitionRepository {
             LEFT JOIN LATERAL (
                 SELECT post.action_id, source.format_key
                 FROM (
-                    -- community_posts stores only the text form of the link.
-                    -- posted_at is the "was live" fact: a pending or failed
-                    -- row never has one, while a post cancelled after going
-                    -- live keeps it — and the click it earned stays honest.
+                    -- Publication ownership is allowed only from a durable
+                    -- provider receipt. posted_at by itself is an internal
+                    -- timestamp and must never manufacture action provenance.
                     SELECT action_id, posted_at, created_at
                     FROM community_posts
                     WHERE workspace_id = $1 AND smart_link = '/l/' || link.slug
+                      AND status = 'posted'
                       AND posted_at IS NOT NULL
                       AND posted_at <= click.occurred_at
+                      AND COALESCE(
+                            NULLIF(btrim(reddit_post_id), ''),
+                            NULLIF(btrim(reddit_post_url), '')
+                          ) IS NOT NULL
                     UNION ALL
                     -- The other three carry the link's id too; matching it
-                    -- survives a NULL or rewritten text column.
+                    -- survives a NULL or rewritten text column. A status word
+                    -- and timestamp are still not provider evidence.
                     SELECT action_id, posted_at, created_at
                     FROM social_posts
                     WHERE workspace_id = $1
                       AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                      AND status = 'posted'
                       AND posted_at IS NOT NULL
                       AND posted_at <= click.occurred_at
+                      AND COALESCE(
+                            NULLIF(btrim(platform_post_id), ''),
+                            NULLIF(btrim(platform_post_url), '')
+                          ) IS NOT NULL
                     UNION ALL
                     SELECT action_id, posted_at, created_at
                     FROM telegram_posts
                     WHERE workspace_id = $1
                       AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                      AND status = 'posted'
                       AND posted_at IS NOT NULL
                       AND posted_at <= click.occurred_at
+                      AND message_id IS NOT NULL
                     UNION ALL
                     SELECT action_id, posted_at, created_at
                     FROM discord_posts
                     WHERE workspace_id = $1
                       AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                      AND status = 'posted'
                       AND posted_at IS NOT NULL
                       AND posted_at <= click.occurred_at
+                      AND NULLIF(btrim(message_id), '') IS NOT NULL
                 ) AS post
                 LEFT JOIN autopilot_actions AS act
                   ON act.workspace_id = $1
