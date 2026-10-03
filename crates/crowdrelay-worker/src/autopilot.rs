@@ -1296,6 +1296,7 @@ pub(crate) fn repository_error_kind(error: RepositoryError) -> &'static str {
             if reason == AutopilotMeasurementKind::NO_RELEASE_LINK
                 || reason == AutopilotMeasurementKind::NO_RELEASE_SERIES_DATA
                 || reason == AutopilotMeasurementKind::NO_TRACKED_LINK
+                || reason == AutopilotMeasurementKind::ARTIFACT_NOT_PUBLICATION
                 // A stack without an agent service names the same thing in
                 // both directions: a measurement it can never read and a
                 // dispatch it can never run are `no_agent_service`, not a
