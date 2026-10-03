@@ -4,6 +4,7 @@ mod action_recovery;
 mod actions;
 mod actions_execution;
 mod capture_plans;
+mod confirmation_recovery;
 mod control;
 mod cycle_trigger;
 mod daily_briefing;
