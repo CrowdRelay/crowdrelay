@@ -10,7 +10,10 @@ use crowdrelay_application::{
     RepositoryError,
     autopilot::{CONFIRMATION_RECOVERY_TEMPLATE, ConfirmationRecoverySnapshot},
 };
-use crowdrelay_domain::{AutopilotActionId, FanId, WorkspaceId};
+use crowdrelay_domain::{
+    AutopilotActionId, FanId, WorkspaceId,
+    action_ledger::provider_delivery_failure_is_definitive,
+};
 use serde_json::json;
 use sqlx::{Postgres, Transaction};
 use time::OffsetDateTime;
@@ -127,43 +130,53 @@ pub(super) async fn execute(
     let policy_version = latest_consent.1;
 
     #[allow(clippy::type_complexity)]
-    let latest: Option<(Uuid, String, i64, i64, i64, i64)> = sqlx::query_as(
-        r#"
-        SELECT event.id,
-               event.status,
-               COALESCE(delivery.delivered,0)::bigint,
-               COALESCE(delivery.in_flight,0)::bigint,
-               COALESCE(delivery.dead,0)::bigint,
-               COALESCE(delivery.cancelled,0)::bigint
-        FROM outbox_events AS event
-        LEFT JOIN LATERAL (
-            SELECT
-                count(*) FILTER (WHERE d.status='delivered') AS delivered,
-                count(*) FILTER (WHERE d.status IN ('pending','processing')) AS in_flight,
-                count(*) FILTER (WHERE d.status='dead') AS dead,
-                count(*) FILTER (WHERE d.status='cancelled') AS cancelled
-            FROM webhook_deliveries AS d
-            WHERE d.workspace_id=event.workspace_id
-              AND d.outbox_event_id=event.id
-        ) AS delivery ON true
-        WHERE event.workspace_id=$1
-          AND event.event_type='fan.confirmation_requested'
-          AND event.payload->>'fan_id'=$2
-          AND event.created_at >= $3
-          AND event.created_at <= $4
-        ORDER BY event.created_at DESC,event.id DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(fan_id.into_uuid().to_string())
-    .bind(snapshot.acquired_at)
-    .bind(now)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(super::map_sqlx)?;
+    let latest: Option<(Uuid, String, Option<String>, i64, i64, Vec<String>)> =
+        sqlx::query_as(
+            r#"
+            SELECT event.id,
+                   event.status,
+                   event.last_error_kind,
+                   COALESCE(delivery.delivered,0)::bigint,
+                   COALESCE(delivery.in_flight,0)::bigint,
+                   COALESCE(delivery.terminal_error_kinds, ARRAY[]::text[])
+            FROM outbox_events AS event
+            LEFT JOIN LATERAL (
+                SELECT
+                    count(*) FILTER (WHERE d.status='delivered') AS delivered,
+                    count(*) FILTER (WHERE d.status IN ('pending','processing')) AS in_flight,
+                    array_agg(
+                        COALESCE(NULLIF(d.last_error_kind, ''), 'unknown')
+                        ORDER BY d.updated_at, d.id
+                    ) FILTER (WHERE d.status IN ('dead','cancelled')) AS terminal_error_kinds
+                FROM webhook_deliveries AS d
+                WHERE d.workspace_id=event.workspace_id
+                  AND d.outbox_event_id=event.id
+            ) AS delivery ON true
+            WHERE event.workspace_id=$1
+              AND event.event_type='fan.confirmation_requested'
+              AND event.payload->>'fan_id'=$2
+              AND event.created_at >= $3
+              AND event.created_at <= $4
+            ORDER BY event.created_at DESC,event.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id.into_uuid().to_string())
+        .bind(snapshot.acquired_at)
+        .bind(now)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(super::map_sqlx)?;
 
-    let Some((latest_event_id, event_status, delivered, in_flight, dead, cancelled)) = latest
+    let Some((
+        latest_event_id,
+        event_status,
+        event_error_kind,
+        delivered,
+        in_flight,
+        terminal_error_kinds,
+    )) = latest
     else {
         return Err(RepositoryError::ConflictBecause(
             "confirmation recovery refused: confirmation history disappeared",
@@ -174,11 +187,18 @@ pub(super) async fn execute(
             "confirmation recovery refused: a newer confirmation request exists",
         ));
     }
-    let terminal_failure =
-        event_status == "dead" || (delivered == 0 && in_flight == 0 && dead + cancelled > 0);
+    let event_failure_is_definitive = event_status == "dead"
+        && event_error_kind
+            .as_deref()
+            .is_some_and(provider_delivery_failure_is_definitive);
+    let deliveries_are_definitive = !terminal_error_kinds.is_empty()
+        && terminal_error_kinds
+            .iter()
+            .all(|kind| provider_delivery_failure_is_definitive(kind));
+    let terminal_failure = event_failure_is_definitive || deliveries_are_definitive;
     if delivered > 0 || in_flight > 0 || !terminal_failure {
         return Err(RepositoryError::ConflictBecause(
-            "confirmation recovery refused: latest confirmation is not a terminal delivery failure",
+            "confirmation recovery refused: latest confirmation is not a definitive delivery failure",
         ));
     }
 
