@@ -25,6 +25,24 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             let mut evaluation =
                 evaluate_join_ask_candidates(&snapshot, policy, self.workspace_id, now)?;
             if let Some(control) = funnel_control {
+                if matches!(control.directive, OrganicFunnelDirective::ExpandReach) {
+                    let before = evaluation.candidates.len();
+                    evaluation.candidates.retain(|candidate| match &candidate.action {
+                        AutopilotActionPayload::PublishJoinAsk { platform, .. } => {
+                            crowdrelay_domain::join_ask::join_ask_channel_permits(
+                                &snapshot,
+                                platform,
+                            )
+                        }
+                        _ => false,
+                    });
+                    let held_manual = before.saturating_sub(evaluation.candidates.len());
+                    if held_manual > 0 {
+                        report.gi_dispatch_log.push(format!(
+                            "organic funnel control: suppressed {held_manual} join-ask lane(s) without standing platform authority while expanding reach"
+                        ));
+                    }
+                }
                 for candidate in &mut evaluation.candidates {
                     attach_organic_funnel_control(candidate, control);
                 }

@@ -239,12 +239,12 @@ pub struct JoinAskSnapshot {
     /// the first tenant's own site, which for anyone else was another band's
     /// signup page.
     pub member_site_base_url: Option<String>,
-    /// The `social_auto_post` tenant flag — the channel's standing publish
-    /// approval. The same flag `AutoPostPlatforms::permits` reads for the
-    /// agent-draft path: on means the operator already approved this
-    /// channel publishing unattended, off means a person sees the post
-    /// first.
+    /// The tenant's master publish-without-asking switch.
     pub social_auto_post: bool,
+    /// Exact platform scope of that standing authority. The executor already
+    /// enforces this list at send time; carrying it into the decision snapshot
+    /// prevents the Brain from claiming an ungranted lane is autonomous.
+    pub social_autopost_platforms: Vec<String>,
     /// `fanbase_connections.platform` values whose row is `connected`.
     pub connected_platforms: Vec<String>,
     /// Every join-ask `social_posts` row, any status — the rotation count
@@ -643,7 +643,12 @@ pub fn evaluate_join_ask(snapshot: &JoinAskSnapshot, now: OffsetDateTime) -> Joi
 /// publish time — a channel that permits here can still draft there.
 #[must_use]
 pub fn join_ask_channel_permits(snapshot: &JoinAskSnapshot, platform: &str) -> bool {
-    snapshot.social_auto_post && EXECUTABLE_PLATFORMS.contains(&platform)
+    snapshot.social_auto_post
+        && EXECUTABLE_PLATFORMS.contains(&platform)
+        && snapshot
+            .social_autopost_platforms
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(platform))
 }
 
 #[cfg(test)]
@@ -677,11 +682,22 @@ mod tests {
             platforms: vec!["facebook".to_owned(), "instagram".to_owned()],
             member_site_base_url: Some("https://virya.music".to_owned()),
             social_auto_post: true,
+            social_autopost_platforms: vec!["facebook".to_owned()],
             connected_platforms: vec!["facebook".to_owned(), "instagram".to_owned()],
             posts: Vec::new(),
             instagram_photo_count: 1,
             image_url: None,
         }
+    }
+
+    #[test]
+    fn standing_authority_is_platform_scoped_not_a_global_yes() {
+        let snapshot = snapshot();
+        assert!(join_ask_channel_permits(&snapshot, "facebook"));
+        assert!(
+            !join_ask_channel_permits(&snapshot, "instagram"),
+            "a Facebook-only grant must not promote Instagram to unattended publishing"
+        );
     }
 
     #[test]
@@ -872,6 +888,7 @@ mod tests {
             // `NoSiteUrl` never fired for anyone.
             member_site_base_url: None,
             social_auto_post: false,
+            social_autopost_platforms: Vec::new(),
             connected_platforms: Vec::new(),
             posts: Vec::new(),
             instagram_photo_count: 0,

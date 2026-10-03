@@ -23,6 +23,7 @@ mod join_ask_tests {
             platforms: vec!["facebook".to_owned()],
             member_site_base_url: Some("https://virya.music".to_owned()),
             social_auto_post: true,
+            social_autopost_platforms: vec!["facebook".to_owned()],
             connected_platforms: vec!["facebook".to_owned()],
             posts: Vec::new(),
             instagram_photo_count: 0,
@@ -92,6 +93,35 @@ mod join_ask_tests {
             "https://virya.music/signal?utm_source=facebook&utm_medium=join_ask&utm_campaign=join_ask_w39"
         );
         assert_eq!(*image_url, None);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_scope_clamps_an_ungranted_join_ask_even_with_global_switch_on()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(7));
+        let mut snapshot = snapshot();
+        snapshot.platforms.push("instagram".to_owned());
+        snapshot.connected_platforms.push("instagram".to_owned());
+        snapshot.instagram_photo_count = 1;
+
+        let evaluation = evaluate_join_ask_candidates(
+            &snapshot,
+            &policy(AutonomyLevel::BoundedAuto)?,
+            workspace_id,
+            OffsetDateTime::now_utc(),
+        )?;
+        assert_eq!(evaluation.candidates.len(), 2);
+        assert_eq!(
+            evaluation.candidates[0].disposition,
+            PolicyDisposition::AutoExecute,
+            "the explicitly granted Facebook lane stays autonomous"
+        );
+        assert_eq!(
+            evaluation.candidates[1].disposition,
+            PolicyDisposition::RequireApproval,
+            "the master switch must not silently grant Instagram"
+        );
         Ok(())
     }
 
