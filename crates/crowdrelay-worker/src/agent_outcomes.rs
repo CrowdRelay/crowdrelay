@@ -662,7 +662,14 @@ impl AgentOutcomeWorker {
             OutcomeKind::OutreachTargets => {
                 if let Some(item) = &outcome.payload.item {
                     outreach_target_auto_promoted =
-                        self.insert_outreach_target(&mut tx, outcome, item).await?.0;
+                        self.insert_outreach_target(
+                            &mut tx,
+                            outcome,
+                            item,
+                            producing_task.as_ref(),
+                        )
+                        .await?
+                        .0;
                 }
             }
             OutcomeKind::StrategyProposals => {
@@ -1554,6 +1561,7 @@ impl AgentOutcomeWorker {
         tx: &mut Transaction<'_, Postgres>,
         outcome: &ValidatedOutcome,
         item: &Value,
+        producing_task: Option<&(String, String, Value)>,
     ) -> Result<(bool, Uuid), AgentOutcomeError> {
         let target_kind = item
             .get("target_kind")
@@ -1623,6 +1631,36 @@ impl AgentOutcomeWorker {
         // stores (one dedup index per community, platform 'reddit' whenever
         // a subreddit won). Non-community kinds carry none of these fields.
         let identity = community_identity(item);
+        if is_community {
+            let Some((_, _, task_metadata)) = producing_task else {
+                return Err(OutcomeRejection::UngroundedCommunityTarget {
+                    reason: "producing task is unavailable".to_owned(),
+                }
+                .into());
+            };
+            let task_urls = evidence_urls(task_metadata);
+            let identity_url = if let Some(subreddit) = identity.subreddit.as_deref() {
+                Some(format!("https://www.reddit.com/r/{subreddit}"))
+            } else {
+                identity.community_url.clone()
+            };
+            let grounded = identity_url.as_deref().is_some_and(|url| {
+                let direct = normalize_evidence_url(url);
+                if task_urls.contains_key(&direct) {
+                    return true;
+                }
+                let canonical = canonical_place_url(url);
+                task_urls
+                    .keys()
+                    .any(|seen| canonical_place_url(seen) == canonical)
+            });
+            if !grounded {
+                return Err(OutcomeRejection::UngroundedCommunityTarget {
+                    reason: "community identity URL/subreddit is not among the URLs this task's evidence showed the model".to_owned(),
+                }
+                .into());
+            }
+        }
         let (place_id, verdict, refusal) = if is_community {
             self.screen_community_target(
                 tx,
