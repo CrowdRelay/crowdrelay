@@ -466,6 +466,7 @@ mod tests {
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: None,
         };
         let policy = AutopilotPolicy {
@@ -549,6 +550,7 @@ mod tests {
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: Some(SocialPostFact {
                 title: "soundcheck done".to_owned(),
                 url: Some("https://instagram.com/p/abc".to_owned()),
@@ -729,6 +731,7 @@ mod tests {
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: Some(SocialPostFact {
                 title: "new demo up".to_owned(),
                 url: None,
@@ -802,6 +805,7 @@ mod tests {
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: Some(SocialPostFact {
                 title: "rehearsal cut".to_owned(),
                 url: Some("https://instagram.com/p/xyz".to_owned()),
@@ -925,6 +929,7 @@ mod tests {
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: Some(SocialPostFact {
                 title: "soundcheck done".to_owned(),
                 url: Some("https://instagram.com/p/abc".to_owned()),

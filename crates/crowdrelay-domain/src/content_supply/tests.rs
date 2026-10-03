@@ -23,6 +23,7 @@ fn event_requests_live_listing_before_channel_specific_artifacts() {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
         source_key: String::new(),
         title: String::new(),
@@ -68,6 +69,7 @@ fn event_builds_press_hook_after_canonical_listing() {
         completed_artifacts: vec![ContentArtifactKind::LiveListing],
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
     };
 
     assert_eq!(
@@ -107,6 +109,7 @@ fn event_with_failed_listing(failures: u32, minutes_ago: i64) -> ContentSupplySn
             failures,
             last_failed_at: now() - Duration::minutes(minutes_ago),
         }],
+        lane_outages: Vec::new(),
     }
 }
 
@@ -179,6 +182,7 @@ fn release_requests_artifacts_one_at_a_time_and_respects_inflight() {
         completed_artifacts: vec![ContentArtifactKind::SignalPush],
         in_flight_artifacts: vec![ContentArtifactKind::SocialFeed],
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
     };
 
     assert_eq!(
@@ -206,6 +210,7 @@ fn a_year_old_event_is_stale_but_a_year_old_video_is_share_material() {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
         source_key: String::new(),
         title: String::new(),
@@ -255,6 +260,7 @@ fn a_finished_show_waits_out_its_material_window_before_harvesting() {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
         source_key: String::new(),
         title: String::new(),
@@ -309,6 +315,7 @@ fn release_snapshot() -> ContentSupplySnapshot {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
         source_key: String::new(),
         title: String::new(),
@@ -408,6 +415,7 @@ fn a_synced_social_post_without_facts_cannot_relay() {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
         source_key: String::new(),
         title: String::new(),
@@ -562,6 +570,7 @@ fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: Some(SocialPostFact {
             acquired_fans,
             ..fact(Some(resonance))
@@ -600,4 +609,46 @@ fn an_outlier_stays_relayable_for_a_week_and_an_ordinary_post_does_not() {
         evaluate_content_supply(&snapshot(ordinary, 1), policy, now),
         ContentSupplyDecision::Relay { .. }
     ));
+}
+
+fn outage(consecutive_failures: u32, minutes_ago: i64) -> ArtifactLaneOutage {
+    ArtifactLaneOutage {
+        artifact: ContentArtifactKind::LiveListing,
+        consecutive_failures,
+        last_failed_at: now() - Duration::minutes(minutes_ago),
+    }
+}
+
+#[test]
+fn a_down_lane_takes_no_new_request_for_its_artifact() {
+    let mut snapshot = event_with_failed_listing(0, 0);
+    snapshot.failed_artifacts.clear();
+    assert!(
+        requested(&snapshot).is_some(),
+        "control: the artifact is owed"
+    );
+    snapshot.lane_outages = vec![outage(5, 10)];
+    // The owed artifact is skipped, not retried under a fresh key.
+    assert_ne!(
+        requested(&snapshot).map(|(artifact, _)| artifact),
+        Some(ContentArtifactKind::LiveListing)
+    );
+}
+
+#[test]
+fn probes_back_off_from_an_hour_to_six() {
+    let at = |failures| outage(failures, 0).next_probe_at() - now();
+    assert_eq!(at(LANE_OUTAGE_THRESHOLD), Duration::hours(1));
+    assert_eq!(at(LANE_OUTAGE_THRESHOLD + 1), Duration::hours(2));
+    assert_eq!(at(LANE_OUTAGE_THRESHOLD + 2), Duration::hours(4));
+    assert_eq!(at(LANE_OUTAGE_THRESHOLD + 9), Duration::hours(6));
+}
+
+#[test]
+fn only_the_lanes_own_failures_count_as_the_lane_failing() {
+    assert!(is_lane_failure("artifact_surface_unavailable"));
+    assert!(is_lane_failure("artifact_delivery_missing"));
+    assert!(is_lane_failure("provider_rejected"));
+    assert!(!is_lane_failure("state_changed"));
+    assert!(!is_lane_failure("subject_not_found"));
 }

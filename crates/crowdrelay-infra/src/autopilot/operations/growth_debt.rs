@@ -897,6 +897,7 @@ mod tests {
             completed_artifacts: completed,
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: None,
             source_key: String::new(),
             title: String::new(),
