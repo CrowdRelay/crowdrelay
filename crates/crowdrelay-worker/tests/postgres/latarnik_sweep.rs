@@ -667,6 +667,17 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     .bind(now + Span::minutes(30))
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO click_events
+             (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+         VALUES ($1,$2,$3,$4)",
+    )
+    .bind(w)
+    .bind(mission_link)
+    .bind(visitor)
+    .bind(now + Span::minutes(30))
+    .execute(&pool)
+    .await?;
     let carrier = load_carriers(&pool, w, now + Span::hours(1), 100)
         .await?
         .into_iter()
@@ -684,13 +695,65 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     );
 
     // Someone Kuba brought arrives through his code after the tap: completed.
-    let friend = fan(&pool, ws, "friend@fan.test", 1, true).await?;
+    // The same visitor id follows the tracked click into the acquisition row,
+    // and the normal last-tracked-click provenance names the mission action.
     let code_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
     )
     .bind(w)
     .bind(kuba)
     .fetch_one(&pool)
+    .await?;
+    let friend = Uuid::now_v7();
+    let acquired_at = now + Span::hours(2);
+    sqlx::query(
+        "INSERT INTO fans
+             (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1,$2,'friend@fan.test','active',$3)",
+    )
+    .bind(friend)
+    .bind(w)
+    .bind(acquired_at)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents
+             (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at)
+         VALUES ($1,$2,'marketing',true,'v1','public_signup',$3)",
+    )
+    .bind(w)
+    .bind(friend)
+    .bind(acquired_at)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events
+             (workspace_id, fan_id, anonymous_visitor_id, source, request_id,
+              referral_code_id, referrer_fan_id, occurred_at)
+         VALUES ($1,$2,$3,'public_signup',$4,$5,$6,$7)",
+    )
+    .bind(w)
+    .bind(friend)
+    .bind(visitor)
+    .bind(format!("mission-friend-{friend}"))
+    .bind(code_id)
+    .bind(kuba)
+    .bind(acquired_at)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (workspace_id, fan_id, event_kind, channel, source_target, action_id,
+              attribution_method, attribution_confidence, occurred_at)
+         VALUES ($1,$2,'conversion','latarnik',$3,$4,
+                 'last_tracked_click',1.0,$5)",
+    )
+    .bind(w)
+    .bind(friend)
+    .bind(&slug)
+    .bind(mission_action)
+    .bind(acquired_at)
+    .execute(&pool)
     .await?;
     sqlx::query(
         "INSERT INTO referral_attributions
@@ -702,9 +765,28 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     .bind(kuba)
     .bind(friend)
     .bind(code_id)
-    .bind(now + Span::hours(2))
+    .bind(acquired_at)
     .execute(&pool)
     .await?;
+
+    let cohort = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, bool)>(
+        "SELECT fan_id, action_id, link_id, verified
+         FROM organic_fan_cohort($1,$2,$3,$4)
+         WHERE fan_id=$5",
+    )
+    .bind(w)
+    .bind(now)
+    .bind(now + Span::days(30))
+    .bind(now + Span::hours(3))
+    .bind(friend)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        cohort.1 == Some(mission_action)
+            && cohort.2 == Some(mission_link)
+            && cohort.3,
+        "a confirmed Latarnik referral must enter the canonical FAN_100 cohort: {cohort:?}"
+    );
     let (done, _) = settle(&pool, w, now + Span::hours(3)).await?;
     ensure!(done == 1, "{done}");
     let status: String =
