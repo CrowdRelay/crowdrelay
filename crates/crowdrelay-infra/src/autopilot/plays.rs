@@ -1094,7 +1094,9 @@ pub(super) async fn execute_play_step(
     // rather than invented, and its absence voids this send the same way a
     // withdrawn consent does: the world changed after the decision.
     let follow_link = match play_kind {
-        PlayKind::FollowAskLadder => Some(follow_ask_link(transaction, workspace_id).await?),
+        PlayKind::FollowAskLadder => Some(
+            follow_ask_link(transaction, workspace_id, action_id).await?
+        ),
         PlayKind::TrackUsAsk
         | PlayKind::ListingCompletenessSweep
         | PlayKind::DormantRevival
@@ -1337,17 +1339,62 @@ pub(super) async fn execute_play_step(
 async fn follow_ask_link(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
+    action_id: AutopilotActionId,
 ) -> Result<String, RepositoryError> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT slug FROM smart_links WHERE workspace_id=$1 AND slug=$2 AND active",
+    let destination = sqlx::query_scalar::<_, String>(
+        "SELECT destination_url
+         FROM smart_links
+         WHERE workspace_id=$1 AND slug=$2 AND active",
     )
     .bind(workspace_id.into_uuid())
     .bind(FOLLOW_ASK_SMART_LINK_SLUG)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?
-    .map(|slug| format!("/l/{slug}"))
-    .ok_or(RepositoryError::Conflict)
+    .ok_or(RepositoryError::Conflict)?;
+
+    // Never hand two sends the same click identity. The operator-owned base
+    // follow link remains destination configuration; each outward action wraps
+    // it in its own deterministic redirect, so click -> action causality is
+    // exact and crash retries are idempotent.
+    let slug = format!("play-follow-{}", action_id.into_uuid().simple());
+    sqlx::query(
+        r#"
+        INSERT INTO smart_links (
+            workspace_id, slug, destination_url, active, channel_source, action_id
+        )
+        VALUES ($1,$2,$3,true,'play_follow',$4)
+        ON CONFLICT (workspace_id,slug) DO UPDATE SET
+            destination_url = EXCLUDED.destination_url,
+            active = true,
+            action_id = COALESCE(smart_links.action_id, EXCLUDED.action_id)
+        WHERE smart_links.action_id IS NULL
+           OR smart_links.action_id = EXCLUDED.action_id
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(destination)
+    .bind(action_id.into_uuid())
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?;
+
+    let owner = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT action_id
+         FROM smart_links
+         WHERE workspace_id=$1 AND slug=$2 AND active",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(&slug)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sqlx)?
+    .flatten();
+    if owner != Some(action_id.into_uuid()) {
+        return Err(RepositoryError::Conflict);
+    }
+    Ok(format!("/l/{slug}"))
 }
 
 /// What a listing sweep found on the anchor's own record.
