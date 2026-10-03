@@ -394,7 +394,10 @@ WITH RECURSIVE family(root_id, member_id) AS (
     JOIN family referred ON referred.member_id=referral.referred_fan_id
     WHERE c.link_id=link.id AND referral.status='qualified'
       AND referral.qualified_at>c.acquired_at AND referral.qualified_at <= $6
-      AND referred.root_id<>referrer.root_id) AS qualified_referrals
+      AND referred.root_id<>referrer.root_id
+      AND canonical_qualified_referral_owner_id(
+            $1,referred.root_id
+          )=referrer.root_id) AS qualified_referrals
  FROM links link CROSS JOIN LATERAL (
    SELECT COUNT(DISTINCT fan_id) AS signups,
      COUNT(DISTINCT fan_id) FILTER(WHERE contactable) AS confirmed,
