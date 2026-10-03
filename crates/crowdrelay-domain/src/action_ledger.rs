@@ -392,12 +392,15 @@ pub fn provider_delivery_set_is_definitive_failure(
     if delivered > 0 || in_flight > 0 {
         return false;
     }
+    if terminal_error_kinds
+        .iter()
+        .any(|kind| !provider_delivery_failure_is_definitive(kind))
+    {
+        return false;
+    }
     let event_failure = event_status == "dead"
         && event_error_kind.is_some_and(provider_delivery_failure_is_definitive);
-    let terminal_deliveries = !terminal_error_kinds.is_empty()
-        && terminal_error_kinds
-            .iter()
-            .all(|kind| provider_delivery_failure_is_definitive(kind));
+    let terminal_deliveries = !terminal_error_kinds.is_empty();
     event_failure || terminal_deliveries
 }
 
@@ -731,6 +734,10 @@ mod tests {
         ));
 
         let permanent = vec!["http_permanent_status".to_owned()];
+        let mixed = vec![
+            "http_permanent_status".to_owned(),
+            "transport_timeout".to_owned(),
+        ];
         assert!(provider_delivery_set_is_definitive_failure(
             "dead",
             Some("http_permanent_status"),
@@ -738,6 +745,16 @@ mod tests {
             0,
             &[],
         ));
+        assert!(
+            !provider_delivery_set_is_definitive_failure(
+                "dead",
+                Some("http_permanent_status"),
+                0,
+                0,
+                &mixed,
+            ),
+            "one ambiguous endpoint vetoes destructive retry even beside a permanent event error"
+        );
         assert!(provider_delivery_set_is_definitive_failure(
             "delivered",
             None,
