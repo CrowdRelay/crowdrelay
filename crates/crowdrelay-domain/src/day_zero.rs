@@ -10,10 +10,11 @@
 //! was one owner decision away from an autonomous rail and said nothing about
 //! it; the brain meanwhile ranked actions for lanes that could only draft.
 //!
-//! This is a pure function of facts. It decides nothing about publishing, grants
-//! nothing and never reads a credential: a connection is not consent, and the
-//! only prerequisite it can name as the owner's to give is the standing
-//! authority to publish.
+//! This is a pure function of facts. It decides nothing about publishing,
+ //! grants nothing and never reads a credential: a connection is not consent.
+ //! It distinguishes tenant-owner work (for example standing authority) from
+ //! deployment-operator work (for example a worker kill switch), so the UI
+ //! cannot offer an owner button for something only a deployment can repair.
 
 use serde::Serialize;
 
@@ -84,8 +85,9 @@ pub struct Rail {
 pub struct Missing {
     pub code: &'static str,
     pub what: String,
-    /// Only a person can do it: the system never grants itself authority,
-    /// credentials or consent.
+    /// Whether the tenant owner can resolve this from the product. False means
+    /// deployment/operator work; the system never grants itself authority or
+    /// pretends an environment switch is a tenant preference.
     pub owner_action: bool,
 }
 
