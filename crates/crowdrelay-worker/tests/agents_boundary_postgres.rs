@@ -685,6 +685,44 @@ async fn duplicate_cycle_scenario(pool: &PgPool, env: &Env, workspace: Uuid) -> 
     Ok(())
 }
 
+const JOIN_UNCONFIRMED_OK: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                    Content-Length: 11\r\nConnection: close\r\n\r\n\
+                                    {\"ok\":true}\r\n\r\n";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a disposable database"]
+async fn a_2xx_without_provider_membership_receipt_stays_unknown() -> Result<()> {
+    let Some(env) = Env::load() else {
+        eprintln!("skipped: agents boundary variables are not set");
+        return Ok(());
+    };
+    let pool = connect(&env).await?;
+    let workspace = Uuid::now_v7();
+    let agents = CountingAgents::start(JOIN_UNCONFIRMED_OK).await?;
+    seed_workspace(&pool, workspace).await?;
+    let place = seed_joinable_place(&pool, workspace, "r/unconfirmed").await?;
+    let worker = executor(&pool, workspace, &agents.url, &env.auth_key)?;
+
+    let first = worker.run_once().await?;
+    ensure!(first == 0, "unconfirmed 2xx must not count as joined");
+    let (state, note) = membership(&pool, workspace, place).await?;
+    ensure!(
+        state == "join_unknown",
+        "transport success is not provider membership proof: {state} {note:?}"
+    );
+    ensure!(agents.requests() == 1);
+
+    let second = worker.run_once().await?;
+    ensure!(second == 0);
+    ensure!(
+        agents.requests() == 1,
+        "UNKNOWN provider outcome must block automatic duplicate join"
+    );
+    cleanup(&pool, &[workspace]).await?;
+    pool.close().await;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // G. One tenant's dependency is down
 // ---------------------------------------------------------------------------
