@@ -22,13 +22,13 @@ pub(super) async fn execute(
     )
     .bind(workspace_id.into_uuid())
     .bind(fan_id.into_uuid())
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
     let wordmark = sqlx::query_scalar::<_, String>("SELECT crowdrelay_workspace_wordmark($1)")
         .bind(workspace_id.into_uuid())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
     let activation = if template_key == WELCOME_V2_TEMPLATE {
@@ -64,7 +64,7 @@ pub(super) async fn execute(
         )
         .bind(workspace_id.into_uuid())
         .bind(fan_id.into_uuid())
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(map_sqlx)?
         .flatten()
@@ -103,7 +103,7 @@ pub(super) async fn execute(
         )
         .bind(workspace_id.into_uuid())
         .bind(fan_id.into_uuid())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut **transaction)
         .await
         .map_err(map_sqlx)? {
             let brand = crate::tenant_settings::TenantSettingsRepository::new(
@@ -137,7 +137,7 @@ pub(super) async fn execute(
             ))?;
             let bound=sqlx::query("UPDATE smart_links SET action_id=$3 WHERE workspace_id=$1 AND slug=$2 AND (action_id IS NULL OR action_id=$3)")
                 .bind(workspace_id.into_uuid()).bind(&slug).bind(action.id.into_uuid())
-                .execute(&mut *transaction).await.map_err(map_sqlx)?;
+                .execute(&mut **transaction).await.map_err(map_sqlx)?;
             if bound.rows_affected()!=1 {return Err(RepositoryError::ConflictBecause("install ask link belongs to another action"));}
             Some(link.as_str().to_owned())
         } else {
@@ -177,7 +177,7 @@ pub(super) async fn execute(
         .bind(workspace_id.into_uuid())
         .bind(&slug)
         .bind(action.id.into_uuid())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .map_err(map_sqlx)?;
         if bound.rows_affected() != 1 {
