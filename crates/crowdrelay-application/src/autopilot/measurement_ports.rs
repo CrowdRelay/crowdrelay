@@ -67,8 +67,10 @@ pub enum AutopilotMeasurementKind {
     /// displaces the fourteen-day number, and the learner prefers the
     /// fourteen-day one wherever it exists.
     IncrementalFanGrowth3d,
-    /// Signal install delta in the 7 days after an agent dispatch. Measures
-    /// whether the worker's output moved fans toward the Signal app (growth).
+    /// Canonical people who installed/activated a Signal push endpoint within
+    /// 7 days after a direct acquisition action, where that same action lineage
+    /// owns the person's exact last-tracked-click conversion. This is an
+    /// attributed count with counterfactual zero, never a workspace-wide delta.
     AgentRunSignalInstalls7d,
     /// Community engagement metric delta in the 7 days after a community
     /// engagement dispatch. Measures whether the posts produced meaningful
@@ -134,9 +136,9 @@ pub enum AutopilotMeasurementKind {
     /// the scanner: the 14-day measurement stays for downstream value, but
     /// the insight count is the fast feedback signal.
     StrategistInsightQuality1h,
-    /// Signal install checkpoint 1 day after an agent dispatch. Faster than
-    /// the 7-day window — the brain gets next-cycle feedback on whether the
-    /// worker moved fans toward Signal within 24 hours, not a week.
+    /// One-day checkpoint over the same exact action-owned Signal acquisition
+    /// chain as AgentRunSignalInstalls7d. Parallel campaigns cannot share an
+    /// install and multiple devices owned by one canonical fan count once.
     SignalInstalls1d,
     /// Whether a booking-agent approach got an answer in the 30 days after
     /// dispatch. An agent decides on a season's timescale, not a pitch's
