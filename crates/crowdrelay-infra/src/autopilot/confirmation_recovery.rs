@@ -8,7 +8,7 @@
 
 use crowdrelay_application::{
     RepositoryError,
-    autopilot::{ConfirmationRecoverySnapshot, CONFIRMATION_RECOVERY_TEMPLATE},
+    autopilot::{CONFIRMATION_RECOVERY_TEMPLATE, ConfirmationRecoverySnapshot},
 };
 use crowdrelay_domain::{AutopilotActionId, FanId, WorkspaceId};
 use serde_json::json;
@@ -163,7 +163,8 @@ pub(super) async fn execute(
     .await
     .map_err(super::map_sqlx)?;
 
-    let Some((latest_event_id, event_status, delivered, in_flight, dead, cancelled)) = latest else {
+    let Some((latest_event_id, event_status, delivered, in_flight, dead, cancelled)) = latest
+    else {
         return Err(RepositoryError::ConflictBecause(
             "confirmation recovery refused: confirmation history disappeared",
         ));
