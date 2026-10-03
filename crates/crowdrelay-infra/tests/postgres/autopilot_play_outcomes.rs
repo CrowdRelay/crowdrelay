@@ -318,6 +318,171 @@ async fn a_play_settles_one_correlational_verdict_and_refuses_the_attributed_cla
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn attributed_play_clicks_require_exact_action_owned_links()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture("outcome-action-clicks").await?;
+    let series_id = create_series(&fixture).await?;
+    seed_series(&fixture, series_id, -14, 10, 500, 1).await?;
+
+    let start = play_start(&fixture, 10);
+    assert!(fixture.repository.start_play(fixture.workspace_id, &start).await?);
+    let play_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM plays WHERE workspace_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let step_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM play_steps WHERE workspace_id=$1 AND play_id=$2 AND step_index=0",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(play_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    let fan_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans(id,workspace_id,normalized_email,status)
+         VALUES($1,$2,$3,'active')",
+    )
+    .bind(fan_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("play-click-{}@example.test", fan_id.simple()))
+    .execute(&fixture.pool)
+    .await?;
+
+    let decision_id = Uuid::now_v7();
+    let action_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO autopilot_decisions(
+            id,workspace_id,decision_key,context,subject_kind,subject_id,
+            decision_kind,confidence_basis_points,disposition,reason,
+            input_snapshot,policy_snapshot,recommendation,trace_id)
+        VALUES($1,$2,$3,'plays','fan',$4,'run_play_step',9000,'auto_execute',
+               'test','{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())
+        "#,
+    )
+    .bind(decision_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("play-click-proof-{decision_id}"))
+    .bind(fan_id)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO autopilot_actions(
+            id,workspace_id,decision_id,context,action_kind,subject_kind,subject_id,
+            idempotency_key,payload,status,action_class,finished_at)
+        VALUES($1,$2,$3,'plays','play.step.run','fan',$4,$5,'{}'::jsonb,
+               'succeeded','owned_audience',$6)
+        "#,
+    )
+    .bind(action_id)
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(fan_id)
+    .bind(format!("play-click-action-{action_id}"))
+    .bind(fixture.now)
+    .execute(&fixture.pool)
+    .await?;
+
+    let delivered_at = fixture.now + time::Duration::minutes(1);
+    sqlx::query(
+        "INSERT INTO play_step_recipients(
+             workspace_id,step_id,fan_id,action_id,created_at
+         ) VALUES($1,$2,$3,$4,$5)",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(step_id)
+    .bind(fan_id)
+    .bind(action_id)
+    .bind(delivered_at)
+    .execute(&fixture.pool)
+    .await?;
+
+    let action_link: Uuid = sqlx::query_scalar(
+        "INSERT INTO smart_links(
+             workspace_id,slug,destination_url,active,action_id,channel_source
+         ) VALUES($1,$2,'https://example.test/follow',true,$3,'play_follow')
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("play-proof-{}", action_id.simple()))
+    .bind(action_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    // A shared link is intentionally not action-owned and must never contribute.
+    let shared_link: Uuid = sqlx::query_scalar(
+        "INSERT INTO smart_links(
+             workspace_id,slug,destination_url,active
+         ) VALUES($1,$2,'https://example.test/follow',true)
+         RETURNING id",
+    )
+    .bind(fixture.workspace_id.into_uuid())
+    .bind(format!("shared-proof-{}", action_id.simple()))
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    let visitor_a = Uuid::now_v7();
+    let visitor_b = Uuid::now_v7();
+    for (link, visitor, occurred_at) in [
+        (action_link, visitor_a, delivered_at - time::Duration::seconds(1)),
+        (action_link, visitor_a, delivered_at + time::Duration::minutes(1)),
+        (action_link, visitor_a, delivered_at + time::Duration::minutes(2)),
+        (action_link, visitor_b, delivered_at + time::Duration::minutes(3)),
+        (shared_link, Uuid::now_v7(), delivered_at + time::Duration::minutes(4)),
+    ] {
+        sqlx::query(
+            "INSERT INTO click_events(
+                 workspace_id,smart_link_id,anonymous_visitor_id,occurred_at
+             ) VALUES($1,$2,$3,$4)",
+        )
+        .bind(fixture.workspace_id.into_uuid())
+        .bind(link)
+        .bind(visitor)
+        .bind(occurred_at)
+        .execute(&fixture.pool)
+        .await?;
+    }
+
+    let after = fixture.now + time::Duration::days(11);
+    let claimed = fixture
+        .repository
+        .claim_due_play_outcomes(fixture.workspace_id, 8, after)
+        .await?;
+    let attributed = claimed
+        .iter()
+        .find(|claim| claim.claim == PlayClaim::Attributed)
+        .ok_or("attributed claim")?;
+    let observation = fixture
+        .repository
+        .observe_play_outcome(fixture.workspace_id, attributed, after)
+        .await?;
+    assert_eq!(observation.recipients_reached, 1);
+    assert_eq!(
+        observation.attributed_clicks,
+        Some(2),
+        "distinct post-delivery visitors on this play's exact action link only"
+    );
+    let verdict = assess_play_claim(
+        attributed,
+        &observation,
+        PlayMeasurementPolicy::default(),
+    );
+    assert!(matches!(
+        verdict,
+        crowdrelay_domain::play_measurement::PlayOutcomeVerdict::Measured {
+            assessment: None,
+            delta_basis_points: None,
+        }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_campaign_that_reached_nobody_settles_as_a_non_event()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("outcome-empty").await?;
