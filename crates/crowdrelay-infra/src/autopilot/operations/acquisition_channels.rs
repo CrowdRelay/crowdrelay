@@ -150,12 +150,12 @@ pub(in crate::autopilot) async fn load_acquisition_channels(
                           AND merch.fan_id = attributed.fan_id
                           AND merch.confirmed_at IS NOT NULL
                     )) THEN 'merch_purchase'
-                    WHEN bool_or(attributed.stayed AND EXISTS (
-                        SELECT 1 FROM referral_attributions ref
-                        WHERE ref.workspace_id = attributed.workspace_id
-                          AND ref.referrer_fan_id = attributed.fan_id
-                          AND ref.status = 'qualified'
-                    )) THEN 'qualified_referral'
+                    WHEN bool_or(
+                        attributed.stayed
+                        AND canonical_qualified_referral_count(
+                            attributed.workspace_id, attributed.fan_id, NULL
+                        ) > 0
+                    ) THEN 'qualified_referral'
                     WHEN bool_or(attributed.stayed AND (
                         EXISTS (
                             SELECT 1 FROM concert_checkins checkin
