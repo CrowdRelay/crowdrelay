@@ -70,6 +70,15 @@ pub struct LearningLoopEntry {
     pub confidence_basis_points: i32,
     pub disposition: String,
     pub reason: String,
+    /// Funnel state that caused this decision, copied verbatim from the
+    /// decision-time input snapshot. None means the decision was not
+    /// funnel-controlled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funnel_control: Option<serde_json::Value>,
+    /// Current mature organic bottleneck at read time. This is a current
+    /// diagnostic, not evidence that the action caused the change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_funnel: Option<crowdrelay_application::autopilot::OrganicFunnelControl>,
     #[serde(with = "time::serde::rfc3339")]
     pub evaluated_at: OffsetDateTime,
     /// The action that resulted from this decision, if one was created.
@@ -119,6 +128,32 @@ pub struct LearningLoopAction {
     pub status: String,
     #[serde(with = "time::serde::rfc3339::option")]
     pub finished_at: Option<OffsetDateTime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor_receipt: Option<LearningLoopExecutorReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_delivery: Option<LearningLoopWebhookDelivery>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LearningLoopExecutorReceipt {
+    pub status: String,
+    pub executor_id: String,
+    pub provider_reference: Option<String>,
+    pub error_kind: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub occurred_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LearningLoopWebhookDelivery {
+    pub delivered: i64,
+    pub in_flight: i64,
+    pub dead: i64,
+    pub cancelled: i64,
+    pub last_response_status: Option<i16>,
+    pub last_error_kind: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_updated_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,12 +175,25 @@ struct LearningLoopRow {
     confidence_basis_points: i32,
     disposition: String,
     reason: String,
+    funnel_control: Option<serde_json::Value>,
     evaluated_at: OffsetDateTime,
     // Action fields — nullable
     action_id: Option<Uuid>,
     action_kind: Option<String>,
     action_status: Option<String>,
     action_finished_at: Option<OffsetDateTime>,
+    executor_status: Option<String>,
+    executor_id: Option<String>,
+    executor_provider_reference: Option<String>,
+    executor_error_kind: Option<String>,
+    executor_occurred_at: Option<OffsetDateTime>,
+    webhook_delivered: i64,
+    webhook_in_flight: i64,
+    webhook_dead: i64,
+    webhook_cancelled: i64,
+    webhook_last_response_status: Option<i16>,
+    webhook_last_error_kind: Option<String>,
+    webhook_last_updated_at: Option<OffsetDateTime>,
     // Outcome fields — nullable
     outcome_effect_assessment: Option<String>,
     outcome_metric_key: Option<String>,
@@ -244,6 +292,7 @@ async fn load_learning_loop(
             d.confidence_basis_points,
             d.disposition,
             d.reason,
+            d.input_snapshot->'organic_funnel_control' AS funnel_control,
             d.evaluated_at,
             -- Action fields (nullable: observe_only decisions have no action).
             -- LATERAL LIMIT 1: multiple actions per decision is invalid/
@@ -253,6 +302,18 @@ async fn load_learning_loop(
             a.action_kind,
             a.action_status,
             a.action_finished_at,
+            receipt.status AS executor_status,
+            receipt.executor_id,
+            receipt.provider_reference AS executor_provider_reference,
+            receipt.error_kind AS executor_error_kind,
+            receipt.occurred_at AS executor_occurred_at,
+            COALESCE(webhook.delivered,0)::bigint AS webhook_delivered,
+            COALESCE(webhook.in_flight,0)::bigint AS webhook_in_flight,
+            COALESCE(webhook.dead,0)::bigint AS webhook_dead,
+            COALESCE(webhook.cancelled,0)::bigint AS webhook_cancelled,
+            webhook.last_response_status AS webhook_last_response_status,
+            webhook.last_error_kind AS webhook_last_error_kind,
+            webhook.last_updated_at AS webhook_last_updated_at,
             -- Outcome fields (nullable: not all actions have measured outcomes)
             o.effect_assessment AS outcome_effect_assessment,
             o.metric_key AS outcome_metric_key,
@@ -266,6 +327,47 @@ async fn load_learning_loop(
             ORDER BY created_at DESC
             LIMIT 1
         ) a ON true
+        LEFT JOIN LATERAL (
+            SELECT status,executor_id,provider_reference,error_kind,occurred_at
+            FROM autopilot_execution_reports
+            WHERE workspace_id=$1 AND action_id=a.action_id
+              AND status IN ('succeeded','failed')
+            ORDER BY occurred_at DESC,id DESC
+            LIMIT 1
+        ) receipt ON a.action_id IS NOT NULL
+        LEFT JOIN LATERAL (
+            SELECT
+                count(*) FILTER (WHERE delivery.status='delivered')::bigint AS delivered,
+                count(*) FILTER (WHERE delivery.status IN ('pending','processing'))::bigint AS in_flight,
+                count(*) FILTER (WHERE delivery.status='dead')::bigint AS dead,
+                count(*) FILTER (WHERE delivery.status='cancelled')::bigint AS cancelled,
+                (
+                    SELECT newest.last_response_status
+                    FROM outbox_events event2
+                    JOIN webhook_deliveries newest
+                      ON newest.workspace_id=event2.workspace_id
+                     AND newest.outbox_event_id=event2.id
+                    WHERE event2.workspace_id=$1 AND event2.action_id=a.action_id
+                    ORDER BY newest.updated_at DESC,newest.id DESC
+                    LIMIT 1
+                ) AS last_response_status,
+                (
+                    SELECT newest.last_error_kind
+                    FROM outbox_events event2
+                    JOIN webhook_deliveries newest
+                      ON newest.workspace_id=event2.workspace_id
+                     AND newest.outbox_event_id=event2.id
+                    WHERE event2.workspace_id=$1 AND event2.action_id=a.action_id
+                    ORDER BY newest.updated_at DESC,newest.id DESC
+                    LIMIT 1
+                ) AS last_error_kind,
+                max(delivery.updated_at) AS last_updated_at
+            FROM outbox_events event
+            JOIN webhook_deliveries delivery
+              ON delivery.workspace_id=event.workspace_id
+             AND delivery.outbox_event_id=event.id
+            WHERE event.workspace_id=$1 AND event.action_id=a.action_id
+        ) webhook ON a.action_id IS NOT NULL
         LEFT JOIN LATERAL (
             SELECT effect_assessment, metric_key, delta_basis_points, observed_at
             FROM autopilot_outcomes
@@ -284,6 +386,20 @@ async fn load_learning_loop(
     .fetch_all(pool)
     .await?;
 
+    let current_funnel = match crowdrelay_infra::organic_funnel::control(
+        pool,
+        workspace_id,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    {
+        Ok(control) => control,
+        Err(error) => {
+            tracing::warn!(%error, "could not load current organic funnel for learning loop");
+            None
+        }
+    };
+
     Ok(rows
         .into_iter()
         .map(|r| {
@@ -295,12 +411,48 @@ async fn load_learning_loop(
             // surface it, don't fabricate.
             let action = r.action_id.and_then(|id| {
                 match (r.action_kind.as_ref(), r.action_status.as_ref()) {
-                    (Some(kind), Some(status)) => Some(LearningLoopAction {
-                        action_id: id,
-                        action_kind: kind.clone(),
-                        status: status.clone(),
-                        finished_at: r.action_finished_at,
-                    }),
+                    (Some(kind), Some(status)) => {
+                        let executor_receipt = match (
+                            r.executor_status.as_ref(),
+                            r.executor_id.as_ref(),
+                            r.executor_occurred_at,
+                        ) {
+                            (Some(status), Some(executor_id), Some(occurred_at)) => {
+                                Some(LearningLoopExecutorReceipt {
+                                    status: status.clone(),
+                                    executor_id: executor_id.clone(),
+                                    provider_reference: r.executor_provider_reference.clone(),
+                                    error_kind: r.executor_error_kind.clone(),
+                                    occurred_at,
+                                })
+                            }
+                            _ => None,
+                        };
+                        let webhook_delivery = (
+                            r.webhook_delivered
+                                + r.webhook_in_flight
+                                + r.webhook_dead
+                                + r.webhook_cancelled
+                                > 0
+                        )
+                        .then(|| LearningLoopWebhookDelivery {
+                            delivered: r.webhook_delivered,
+                            in_flight: r.webhook_in_flight,
+                            dead: r.webhook_dead,
+                            cancelled: r.webhook_cancelled,
+                            last_response_status: r.webhook_last_response_status,
+                            last_error_kind: r.webhook_last_error_kind.clone(),
+                            last_updated_at: r.webhook_last_updated_at,
+                        });
+                        Some(LearningLoopAction {
+                            action_id: id,
+                            action_kind: kind.clone(),
+                            status: status.clone(),
+                            finished_at: r.action_finished_at,
+                            executor_receipt,
+                            webhook_delivery,
+                        })
+                    }
                     _ => {
                         action_warning = Some(format!(
                             "action {id} exists but has missing required fields"
@@ -355,6 +507,8 @@ async fn load_learning_loop(
                 confidence_basis_points: r.confidence_basis_points,
                 disposition: r.disposition,
                 reason: r.reason,
+                funnel_control: r.funnel_control,
+                current_funnel,
                 evaluated_at: r.evaluated_at,
                 action,
                 outcome,
