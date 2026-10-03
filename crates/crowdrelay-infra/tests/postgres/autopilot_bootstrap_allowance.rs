@@ -336,6 +336,23 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
         "the machine cannot earn external authority by grading its own work"
     );
 
+    // Proxy-like external metrics may rank tactics, but they are not enough
+    // to widen unattended authority. A few upvotes/comments or a channel-lift
+    // spike can be algorithmic, botted or otherwise weak evidence of safe,
+    // reputation-preserving action.
+    for kind in ["agent_run_community_engagement_7d", "release_channel_lift_14d"] {
+        resolved_evidence_action(
+            &pool,
+            workspace_id,
+            "content_supply",
+            &[kind],
+            "improved",
+            10.0,
+            now - time::Duration::seconds(30),
+        )
+        .await?;
+    }
+
     // A lower-is-better harm metric can be "improved" without proving any
     // positive audience response. Harm avoidance is not a licence to widen
     // unattended reach.

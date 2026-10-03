@@ -505,30 +505,51 @@ impl AutopilotMeasurementKind {
         )
     }
 
-    /// Whether resolving this measurement may help a context earn unattended
-    /// external authority.
+    /// Whether a positive resolved observation may help a context earn
+    /// unattended external authority.
     ///
-    /// This is deliberately stricter than "learnable". The brain may learn
-    /// diagnostics from its own machinery, but it must not become trusted to
-    /// act on people because a worker produced a draft, a scanner found rows,
-    /// or an artifact was later reused. Authority is earned from an outcome
-    /// outside the machine: audience response, attributed fan movement,
-    /// replies, purchases, attendance, engagement, delivery harm, etc.
+    /// This is an explicit allowlist, not a denylist. New measurement kinds
+    /// therefore fail closed: they may be learned/ranked, but they cannot
+    /// silently widen the machine's right to act on people until a reviewer
+    /// intentionally classifies them here.
+    ///
+    /// The bar is also stricter than "external". Raw engagement scores,
+    /// channel lift, process quality, discovery counts and harm reduction are
+    /// useful evidence, but are too proxy-like to grant more authority. This
+    /// list is reserved for attributable human/business outcomes: real replies,
+    /// tracked visits/clicks, deliberate activation, fan acquisition, orders,
+    /// revenue and attendance.
     #[must_use]
     pub const fn earns_unattended_authority(self) -> bool {
-        !matches!(
+        matches!(
             self,
-            Self::AgentRunOutcomeQuality1h
-                | Self::ScannerDiscoveryQuality1h
-                | Self::ScannerDiscoveryQuality14d
-                | Self::StrategistInsightQuality1h
-                | Self::StrategistInsightQuality14d
-                | Self::ArtifactOutcome7d
-                | Self::SignalInstalls1d
-                | Self::AgentRunSignalInstalls7d
-                // Harm reduction is valuable but does not prove that more
-                // unattended external action is warranted.
-                | Self::CampaignUnsubscribe7d
+            Self::TicketRevenue72h
+                | Self::MerchGrossProxy7d
+                | Self::PromotionRoas7d
+                | Self::BookingReply7d
+                | Self::BookingAgentReply30d
+                | Self::OutreachReply7d
+                | Self::AudienceTicketRevenue72h
+                | Self::ShowTicketRevenue7d
+                | Self::ShowGrowthSurfaceClicks7d
+                | Self::ShowGrowthAttributedTicketOrders7d
+                | Self::GrassrootsActivationReplies14d
+                | Self::BeaconOutreachReplyQuality14d
+                | Self::BeaconOutreachUniqueVisitors14d
+                | Self::AgentRunFanGrowth14d
+                | Self::AgentRunFanGrowth3d
+                | Self::IncrementalFanGrowth14d
+                | Self::IncrementalFanGrowth3d
+                | Self::DurableFanGrowth30d
+                | Self::FanLifecycleEngagement7d
+                | Self::FanLifecycleActivation7d
+                | Self::ShowAttendanceRate14d
+                | Self::ReleaseBoundAcquisition14d
+                | Self::ReleaseLinkClicks14d
+                | Self::ReleaseFanConversion14d
+                | Self::CampaignTicketConversion14d
+                | Self::ContentLinkClicks7d
+                | Self::ContentFanAcquisition7d
         )
     }
 
