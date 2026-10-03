@@ -554,7 +554,9 @@ where
                             now,
                         )? {
                             if !Self::prepare_content_candidate_for_funnel(
-                                &mut candidate, organic_funnel_control, &mut report,
+                                &mut candidate,
+                                organic_funnel_control,
+                                &mut report,
                             ) {
                                 continue;
                             }
