@@ -55,8 +55,14 @@ async fn confirmation_without_a_subscribed_endpoint_is_dead_not_delivered() -> R
 
         let event_id = seed_confirmation_event(&pool, workspace_id).await?;
         let worker = test_worker(&pool, event_id)?;
-        let stats = worker.run_once().await.context("run unrouted confirmation")?;
-        ensure!(stats.outbox_claimed == 1, "confirmation event was not claimed");
+        let stats = worker
+            .run_once()
+            .await
+            .context("run unrouted confirmation")?;
+        ensure!(
+            stats.outbox_claimed == 1,
+            "confirmation event was not claimed"
+        );
         ensure!(
             stats.deliveries_materialized == 0,
             "an unsubscribed endpoint must not receive confirmation mail"
