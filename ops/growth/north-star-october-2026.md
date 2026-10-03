@@ -105,3 +105,21 @@ Production acceptance is practical: during a mature `expand_reach` window, the
 next executable Content Supply actions should be routes capable of reaching
 non-fans, not Signal/email delivery to people already counted in the audience.
 
+## Checkpoint — cold-start reach means net-new audience, not any outbound channel
+
+The first-ten problem is distribution, not another scoring layer. While the canonical
+funnel says `expand_reach`, Content Supply now distinguishes routes that can plausibly
+introduce CrowdRelay to a new person from routes that mostly deliver to an audience the
+tenant already owns.
+
+- community placements and public social posts remain net-new reach candidates;
+- Signal, source email, owned Telegram and owned Discord are existing-audience delivery;
+- `expand_reach` does not spend scarce fan-out on those existing-audience routes;
+- activation and retention may still use them once the measured bottleneck moves
+  downstream.
+
+This does not grant publishing authority. Credentials, standing approvals, moderator
+holds, lane health and deployment kill switches remain binding. It only prevents the
+Brain from diagnosing "we need new people" and then spending its next action talking to
+people already inside an owned channel.
+
