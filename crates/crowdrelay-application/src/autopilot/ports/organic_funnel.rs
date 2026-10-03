@@ -1,14 +1,14 @@
-use crowdrelay_domain::FanId;
-use time::OffsetDateTime;
-use uuid::Uuid;
-
-pub const CONFIRMATION_RECOVERY_TEMPLATE: &str = "crowdrelay.fan.confirmation_recovery.v1";
-
 //! The organic funnel's control vocabulary — the mature verified-organic
 //! funnel's current limiting stage, read per cycle so the brain does not
 //! add signups ahead of a downstream leak. Split out of `ports.rs` under the
 //! source-size ratchet; re-exported as `ports::organic_funnel::*` like
 //! `booking_discovery`.
+
+use crowdrelay_domain::FanId;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+pub const CONFIRMATION_RECOVERY_TEMPLATE: &str = "crowdrelay.fan.confirmation_recovery.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,7 +68,6 @@ pub struct OrganicFunnelControl {
     pub retention_mature: u32,
     pub retained: u32,
 }
-
 
 /// One pending fan whose original double-opt-in email did not reach a live
 /// delivery path. This is not "they did not click": the snapshot exists only
