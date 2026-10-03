@@ -81,6 +81,7 @@ async fn evaluate_strategy_proposals(
     tx: &mut Transaction<'_, Postgres>,
     outcome: &ValidatedOutcome,
     item: &Value,
+    producing_task: Option<&(String, String, Value)>,
 ) -> Result<(), AgentOutcomeError> {
     let Some(proposals) = item.get("proposals").and_then(Value::as_array) else {
         // The quality guard already refuses an item with no proposals array;
@@ -96,7 +97,9 @@ async fn evaluate_strategy_proposals(
     // schema's word. Overflow proposals still land a rejected verdict —
     // the consultant reads back that the extra asks never ran.
     for (index, proposal) in proposals.iter().enumerate().take(MAX_PROPOSALS) {
-        let verdict = self.evaluate_one_proposal(tx, outcome, proposal).await?;
+        let verdict = self
+            .evaluate_one_proposal(tx, outcome, proposal, producing_task)
+            .await?;
         // The stored proposal is the model's words verbatim plus the
         // outcome-level headline/detail it was filed under — the consultant
         // reads these back, so the record is what it said, not a summary.
@@ -172,6 +175,7 @@ async fn evaluate_one_proposal(
     tx: &mut Transaction<'_, Postgres>,
     outcome: &ValidatedOutcome,
     proposal: &Value,
+    producing_task: Option<&(String, String, Value)>,
 ) -> Result<ProposalVerdict, AgentOutcomeError> {
     let action_raw = proposal
         .get("action")
@@ -184,7 +188,13 @@ async fn evaluate_one_proposal(
     };
     match action {
         ProposalAction::ProposeCommunity => {
-            self.evaluate_propose_community(tx, outcome, proposal).await
+            self.evaluate_propose_community(
+                tx,
+                outcome,
+                proposal,
+                producing_task,
+            )
+            .await
         }
         ProposalAction::Rescan => self.evaluate_rescan(tx, outcome, proposal).await,
         ProposalAction::AdjustCadence => {
@@ -207,6 +217,7 @@ async fn evaluate_propose_community(
     tx: &mut Transaction<'_, Postgres>,
     outcome: &ValidatedOutcome,
     proposal: &Value,
+    producing_task: Option<&(String, String, Value)>,
 ) -> Result<ProposalVerdict, AgentOutcomeError> {
     let Some(community) = proposal.get("community").filter(|c| c.is_object()) else {
         return Ok(rejected("no community block"));
@@ -290,7 +301,9 @@ async fn evaluate_propose_community(
         "evidence_urls": [url],
         "contact_domain": community_url_host(url),
     });
-    let (_, target_id) = self.insert_outreach_target(tx, outcome, &synthesized).await?;
+    let (_, target_id) = self
+        .insert_outreach_target(tx, outcome, &synthesized, producing_task)
+        .await?;
     // Read back the screening verdict so the consultant learns the real
     // outcome — a community the screener refused is recorded, not joined,
     // and "accepted (refused: too_small)" teaches that honestly.
