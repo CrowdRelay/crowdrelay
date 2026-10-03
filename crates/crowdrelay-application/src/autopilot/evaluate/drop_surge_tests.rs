@@ -224,8 +224,8 @@ fn expand_reach_routes_owned_social_only_to_executable_rails()
         .iter()
         .find(|candidate| {
             matches!(
-                candidate.action,
-                AutopilotActionPayload::RequestAgentRun { ref template_id, .. }
+                &candidate.action,
+                AutopilotActionPayload::RequestAgentRun { template_id, .. }
                     if template_id == "community-engager"
             )
         })
