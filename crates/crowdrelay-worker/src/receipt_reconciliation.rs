@@ -60,7 +60,7 @@ use crowdrelay_application::autopilot::AutopilotActionPayload;
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_domain::action_ledger::{
     ActionState, LegalTransition, ProviderDeliveryState, ResolutionEvidence, SuccessEvidence,
-    legal_transition, resolve_observation,
+    legal_transition, provider_delivery_failure_is_definitive, resolve_observation,
 };
 use crowdrelay_infra::autopilot::{OPERATOR_EXECUTOR_ID, payload_requires_executor};
 use serde_json::Value;
@@ -1094,19 +1094,6 @@ fn content_post_to_evidence(
 /// vs ambiguous. The canonical resolver (`resolve_observation` +
 /// `legal_transition`) makes the semantic decision; the adapters just
 /// convert provider state into domain facts.
-fn is_permanent_error_kind(kind: &str) -> bool {
-    kind.starts_with("http_permanent")
-        || kind == "recipient_ineligible"
-        || kind.starts_with("secret_")
-        || kind.starts_with("endpoint_")
-        || kind == "invalid_signing_secret"
-        || kind == "event_serialization"
-        || kind == "invalid_endpoint_url"
-        || kind == "invalid_event_timestamp"
-        || kind == "materialization_timeout"
-        || kind == "materialization_database"
-}
-
 fn outbox_event_to_evidence(
     outbox_status: &str,
     last_error_kind: Option<&str>,
@@ -1116,7 +1103,7 @@ fn outbox_event_to_evidence(
         "delivered" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed),
         // Outbox event is dead → check the error kind.
         "dead" => {
-            if last_error_kind.is_some_and(is_permanent_error_kind) {
+            if last_error_kind.is_some_and(provider_delivery_failure_is_definitive) {
                 // Permanent rejection (provider saw it and rejected)
                 // → definitively failed.
                 ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)
