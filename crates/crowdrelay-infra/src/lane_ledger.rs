@@ -116,7 +116,13 @@ pub async fn lane_verdicts(
     Ok(lane_rows(pool, workspace_id, days)
         .await?
         .into_iter()
-        .map(|row| (row.scope, row.lane, crowdrelay_domain::lane_ledger::verdict(&row.counts)))
+        .map(|row| {
+            (
+                row.scope,
+                row.lane,
+                crowdrelay_domain::lane_ledger::verdict(&row.counts),
+            )
+        })
         .collect())
 }
 

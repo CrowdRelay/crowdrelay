@@ -163,7 +163,10 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
     );
     assert_eq!(verdict(&reddit.counts), Verdict::HeldForPerson);
     assert_eq!(reddit.oldest_unfinished_hours, Some(50));
-    assert_eq!(verdict(&find(LaneScope::Community, "forum").counts), Verdict::HeldForPerson);
+    assert_eq!(
+        verdict(&find(LaneScope::Community, "forum").counts),
+        Verdict::HeldForPerson
+    );
     let telegram = find(LaneScope::Owned, "telegram");
     assert_eq!(telegram.counts.delivered, 2);
     assert_eq!(
@@ -175,7 +178,10 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
         verdict(&find(LaneScope::Owned, "instagram").counts),
         Verdict::DeliveringPartly
     );
-    assert_eq!(verdict(&find(LaneScope::Owned, "discord_channel").counts), Verdict::Queued);
+    assert_eq!(
+        verdict(&find(LaneScope::Owned, "discord_channel").counts),
+        Verdict::Queued
+    );
     assert!(lanes.iter().all(|lane| lane.unknown_statuses == 0));
     assert_eq!(
         verdict(&find(LaneScope::Community, "telegram").counts),

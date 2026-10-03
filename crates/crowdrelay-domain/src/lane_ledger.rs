@@ -166,10 +166,9 @@ impl Verdict {
             Self::Delivering => PlanningAvailability::Open,
             Self::Quiet => PlanningAvailability::Probe,
             Self::Queued => PlanningAvailability::Busy,
-            Self::DeliveringPartly
-            | Self::HeldForPerson
-            | Self::RateLimited
-            | Self::Failing => PlanningAvailability::Blocked,
+            Self::DeliveringPartly | Self::HeldForPerson | Self::RateLimited | Self::Failing => {
+                PlanningAvailability::Blocked
+            }
         }
     }
 
@@ -282,16 +281,28 @@ mod tests {
 
     #[test]
     fn planning_opens_only_proven_delivery_and_probes_quiet_once_upstream() {
-        assert_eq!(Verdict::Delivering.planning_availability(), PlanningAvailability::Open);
-        assert_eq!(Verdict::Quiet.planning_availability(), PlanningAvailability::Probe);
-        assert_eq!(Verdict::Queued.planning_availability(), PlanningAvailability::Busy);
+        assert_eq!(
+            Verdict::Delivering.planning_availability(),
+            PlanningAvailability::Open
+        );
+        assert_eq!(
+            Verdict::Quiet.planning_availability(),
+            PlanningAvailability::Probe
+        );
+        assert_eq!(
+            Verdict::Queued.planning_availability(),
+            PlanningAvailability::Busy
+        );
         for verdict in [
             Verdict::DeliveringPartly,
             Verdict::HeldForPerson,
             Verdict::RateLimited,
             Verdict::Failing,
         ] {
-            assert_eq!(verdict.planning_availability(), PlanningAvailability::Blocked);
+            assert_eq!(
+                verdict.planning_availability(),
+                PlanningAvailability::Blocked
+            );
         }
     }
 

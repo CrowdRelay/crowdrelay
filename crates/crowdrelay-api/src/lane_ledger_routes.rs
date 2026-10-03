@@ -38,7 +38,9 @@ async fn list(
     Query(query): Query<ListQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let days = query.days.unwrap_or(crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS);
+    let days = query
+        .days
+        .unwrap_or(crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS);
     if !(1..=90).contains(&days) {
         return Problem::bad_request(request_id(&headers))
             .private()
