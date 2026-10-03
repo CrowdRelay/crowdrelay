@@ -2,6 +2,8 @@ use crowdrelay_domain::FanId;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+pub const CONFIRMATION_RECOVERY_TEMPLATE: &str = "crowdrelay.fan.confirmation_recovery.v1";
+
 //! The organic funnel's control vocabulary — the mature verified-organic
 //! funnel's current limiting stage, read per cycle so the brain does not
 //! add signups ahead of a downstream leak. Split out of `ports.rs` under the
