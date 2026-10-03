@@ -97,6 +97,9 @@ info "worker reports social_post_executor enabled: ${gate:-not reported}"
 echo "== capture (crowdrelay#533, #535)"
 owned="$(sql "select count(*) from fan_ad_attribution where utm_source='owned'")"
 if [ "${owned:-0}" = "0" ]; then zero "no signup has come through an owned-link landing yet (utm_source=owned)"; else ok "$owned signup(s) via owned-link landing"; fi
+yt_grant="$(sql "select coalesce((select value from tenant_settings where key='youtube_capture_comment_auto_post'),'unset')")"
+yt_conn="$(sql "select coalesce(health,'?')||', scope has force-ssl='||coalesce(position('youtube.force-ssl' in coalesce(token_scope,''))>0,false)::text from fanbase_connections where platform='youtube_account' limit 1")"
+info "YouTube capture comment: grant youtube_capture_comment_auto_post=$yt_grant (own key; unrelated to social_auto_post); youtube_account: ${yt_conn:-no connection}"
 drafts="$(sql "select count(*) from content_sources cs where cs.source_kind='video' and cs.metadata ? 'fan_capture_draft_at' and not (cs.metadata ? 'fan_capture_comment_posted_unix') and cs.occurred_at > now() - interval '30 days'")"
 if [ "${drafts:-0}" -gt 0 ] 2>/dev/null; then info "$drafts YouTube capture comment(s) prepared for a person to paste (see ops/attention unpublished_drafts.youtube)"; else info "no YouTube capture comment prepared yet"; fi
 

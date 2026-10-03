@@ -25,6 +25,33 @@ pub const DRAFT_WINDOW_DAYS: i32 = 30;
 /// chore nobody does; the newest few are the ones that still matter.
 pub const OPEN_DRAFTS_MAX: i64 = 3;
 
+/// What the capture lane may do right now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureMode {
+    /// Prepare the placement for a person; write nothing to YouTube.
+    Prepare,
+    /// Post the comment.
+    Post,
+}
+
+/// Decides between preparing and posting.
+///
+/// Posting needs both halves: the deployment's publish gate
+/// (`CROWDRELAY_SOCIAL_AUTO_POST`) and the tenant's own YouTube grant. The
+/// broad `social_auto_post` switch is deliberately *not* an input: it covers
+/// Pages and Instagram feeds, and it used to be the only key this lane read, so
+/// an owner who wanted a join link under their own video had to hand over every
+/// other surface with it. Turning the broad switch on no longer posts here, and
+/// turning this grant on posts nothing anywhere else.
+#[must_use]
+pub fn capture_mode(deployment_gate: bool, youtube_grant: bool) -> CaptureMode {
+    if deployment_gate && youtube_grant {
+        CaptureMode::Post
+    } else {
+        CaptureMode::Prepare
+    }
+}
+
 /// Prepares at most one capture comment draft. Returns whether it did.
 ///
 /// # Errors
@@ -150,4 +177,17 @@ pub async fn prepare_fan_capture_draft(
     .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_both_halves_together_post() {
+        assert_eq!(capture_mode(true, true), CaptureMode::Post);
+        assert_eq!(capture_mode(true, false), CaptureMode::Prepare);
+        assert_eq!(capture_mode(false, true), CaptureMode::Prepare);
+        assert_eq!(capture_mode(false, false), CaptureMode::Prepare);
+    }
 }

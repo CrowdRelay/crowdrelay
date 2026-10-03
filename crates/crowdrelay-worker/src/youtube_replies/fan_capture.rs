@@ -9,7 +9,10 @@
 //! than a view.
 //!
 //! The lane is deliberately conservative:
-//! - it runs only under the existing global + tenant standing publish approval;
+//! - it posts only under the tenant's own narrow YouTube grant
+//!   (`youtube_capture_comment_auto_post`) plus the deployment gate; the broad
+//!   `social_auto_post` switch for Pages and Instagram is not consulted, and
+//!   without the grant it only prepares a draft for a person;
 //! - it never comments when the video description already contains `/signal`;
 //! - it posts at most once per source, with a small workspace daily cap;
 //! - it gives up after bounded failures and leaves the reason on source metadata;
@@ -60,8 +63,14 @@ impl YoutubeRepliesWorker {
             return Ok(0);
         };
         // Nothing may post it: prepare the placement for a person instead of
-        // doing nothing. Preparing writes nothing to YouTube.
-        if !flag("CROWDRELAY_SOCIAL_AUTO_POST") || !brand.social_auto_post {
+        // doing nothing. Preparing writes nothing to YouTube. Posting is the
+        // tenant's own narrow YouTube grant plus the deployment gate; the broad
+        // `social_auto_post` switch (Pages, Instagram feeds) is not consulted.
+        if super::fan_capture_draft::capture_mode(
+            flag("CROWDRELAY_SOCIAL_AUTO_POST"),
+            brand.youtube_capture_comment_auto_post,
+        ) == super::fan_capture_draft::CaptureMode::Prepare
+        {
             return Ok(usize::from(
                 super::fan_capture_draft::prepare_fan_capture_draft(
                     &self.pool,

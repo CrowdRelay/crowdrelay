@@ -756,3 +756,68 @@ async fn signup_channels_split_joins_by_tag_and_never_guess_a_channel()
     );
     Ok(())
 }
+
+/// The YouTube capture grant is its own key: granting it does not grant the
+/// broad social switch, and the broad switch does not grant it. Settings are
+/// cached per workspace for a minute, so each case is its own tenant.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_youtube_capture_grant_is_independent_of_the_broad_social_switch()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::tenant_settings::{
+        EDITABLE_KEYS, KEY_YOUTUBE_CAPTURE_AUTO_POST, TenantSettingsRepository,
+    };
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let repo = TenantSettingsRepository::new(pool.clone());
+    assert!(
+        EDITABLE_KEYS.contains(&KEY_YOUTUBE_CAPTURE_AUTO_POST),
+        "the owner can set it through the audited settings surface"
+    );
+    let case = |label: &'static str, settings: &'static [(&'static str, &'static str)]| {
+        let pool = pool.clone();
+        async move {
+            let ws = workspace(&pool, label).await?;
+            for (key, value) in settings {
+                sqlx::query(
+                    "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1,$2,$3)",
+                )
+                .bind(ws)
+                .bind(key)
+                .bind(value)
+                .execute(&pool)
+                .await?;
+            }
+            Ok::<Uuid, Box<dyn std::error::Error>>(ws)
+        }
+    };
+
+    let untouched = case("yt-none", &[]).await?;
+    let b = repo.brand_settings(untouched).await?;
+    assert!(
+        !b.youtube_capture_comment_auto_post && !b.social_auto_post,
+        "off by default"
+    );
+
+    let only_youtube = case("yt-only", &[("youtube_capture_comment_auto_post", "true")]).await?;
+    let b = repo.brand_settings(only_youtube).await?;
+    assert!(b.youtube_capture_comment_auto_post);
+    assert!(!b.social_auto_post, "the YouTube grant grants nothing else");
+
+    let only_broad = case("yt-broad", &[("social_auto_post", "true")]).await?;
+    let b = repo.brand_settings(only_broad).await?;
+    assert!(b.social_auto_post);
+    assert!(
+        !b.youtube_capture_comment_auto_post,
+        "the broad switch does not grant it"
+    );
+
+    let junk = case("yt-junk", &[("youtube_capture_comment_auto_post", "yes")]).await?;
+    assert!(
+        !repo
+            .brand_settings(junk)
+            .await?
+            .youtube_capture_comment_auto_post,
+        "only the literal value true grants"
+    );
+    Ok(())
+}

@@ -80,6 +80,13 @@ Also: after the migration, record the owner's own accounts as durable exclusions
 form of `scout_own_handles`), e.g. `POST /v1/control-plane/growth/prospect-identity-exclusions`
 for `instagram` / `wojciech_bator` and `youtube` / `@wojciechbator` with reason `own_account`.
 
+**YouTube capture comment (not Facebook):** its own narrow grant, `youtube_capture_comment_auto_post`
+(editable like any tenant setting; default off). With it on and the worker gate on, the worker posts
+exactly one comment per fresh owned video: the tenant's own join-ask words plus the tracked join link.
+It does not read `social_auto_post` and grants nothing on any Page or feed. Off (today), the lane only
+prepares the drafts described above. The `youtube_account` OAuth connection already holds
+`youtube.force-ssl`; `verify-deploy.sh` prints its health.
+
 ## 6. Proofs to run after deploy
 
 ```sh
