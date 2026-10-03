@@ -674,8 +674,13 @@ impl AgentOutcomeWorker {
             }
             OutcomeKind::StrategyProposals => {
                 if let Some(item) = &outcome.payload.item {
-                    self.evaluate_strategy_proposals(&mut tx, outcome, item)
-                        .await?;
+                    self.evaluate_strategy_proposals(
+                        &mut tx,
+                        outcome,
+                        item,
+                        producing_task.as_ref(),
+                    )
+                    .await?;
                 }
             }
             _ => {}
