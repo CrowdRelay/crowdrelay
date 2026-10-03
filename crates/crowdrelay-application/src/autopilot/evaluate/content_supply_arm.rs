@@ -2,6 +2,42 @@
 // the organic funnel's directive. Extracted from `execute`'s match under the
 // modularity contract's 1000-line parent ceiling.
 
+fn cold_start_social_platform(candidate: &DecisionCandidate) -> Option<&str> {
+    if candidate.decision_kind != "drop_surge_fanout" {
+        return None;
+    }
+    match &candidate.action {
+        AutopilotActionPayload::RequestAgentContent {
+            template_id: Some(template_id),
+            draft,
+            ..
+        } if template_id == "social-post" => draft.get("platform")?.as_str(),
+        _ => None,
+    }
+}
+
+fn cold_start_social_is_executable(
+    candidate: &DecisionCandidate,
+    control: Option<OrganicFunnelControl>,
+    executable_platforms: &[String],
+) -> bool {
+    if !matches!(
+        control,
+        Some(OrganicFunnelControl {
+            directive: OrganicFunnelDirective::ExpandReach,
+            ..
+        })
+    ) {
+        return true;
+    }
+    let Some(platform) = cold_start_social_platform(candidate) else {
+        return true;
+    };
+    executable_platforms
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(platform))
+}
+
 impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
     /// The mature visitor→signup leak can downgrade or veto fan-out; the arm
     /// otherwise scores supply exactly as before.
@@ -46,6 +82,21 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         } else {
             Vec::new()
         };
+        let executable_owned_social = if has_relay_material
+            && matches!(
+                organic_funnel_control,
+                Some(OrganicFunnelControl {
+                    directive: OrganicFunnelDirective::ExpandReach,
+                    ..
+                })
+            )
+        {
+            self.repository
+                .load_executable_owned_social_platforms(self.workspace_id)
+                .await?
+        } else {
+            Vec::new()
+        };
         let mut lane_gate = DeliveryLaneGate::new(
             if has_relay_material {
                 self.repository
@@ -82,6 +133,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         let mut ordered: Vec<&ContentSupplySnapshot> = snapshots.iter().collect();
         ordered.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.occurred_at));
         let mut produced = 0usize;
+        let mut held_non_executable_social = false;
         for snapshot in ordered {
             for mut candidate in content_candidates(
                 snapshot,
@@ -96,6 +148,19 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     organic_funnel_control,
                     report,
                 ) {
+                    continue;
+                }
+                if !cold_start_social_is_executable(
+                    &candidate,
+                    organic_funnel_control,
+                    &executable_owned_social,
+                ) {
+                    held_non_executable_social = true;
+                    if let Some(platform) = cold_start_social_platform(&candidate) {
+                        report.gi_dispatch_log.push(format!(
+                            "cold-start routing: held non-executable owned social platform={platform}"
+                        ));
+                    }
                     continue;
                 }
                 // Funnel control answers *which stage* needs work. Lane health
@@ -137,8 +202,14 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             }
         }
         let ordinary_wait = supply_quiet_reason(&snapshots, policy, produced, now);
+        let cold_start_wait = held_non_executable_social.then_some(
+            "expand_reach has fresh public-social work but no executable owned-social rail",
+        );
         report.supply_wait_reason = if produced == 0 {
-            lane_gate.wait_reason().or(ordinary_wait)
+            lane_gate
+                .wait_reason()
+                .or(cold_start_wait.map(str::to_owned))
+                .or(ordinary_wait)
         } else {
             ordinary_wait
         };
