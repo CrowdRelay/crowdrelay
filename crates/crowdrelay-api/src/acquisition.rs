@@ -2,6 +2,8 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -55,8 +57,27 @@ const CITY_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 const MAX_CITY_SNAPSHOT_LIMIT: u32 = 100;
 const DEFAULT_CITY_LIMIT: u32 = 20;
 
-/// Closure that accepts a click event for asynchronous batched persistence.
-pub type ClickSubmitter = Arc<dyn Fn(ClickEvent) + Send + Sync>;
+/// Result of handing one human click to the ingestion pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClickSubmission {
+    /// The click is either queued for the batch writer or already durable via
+    /// the bounded overflow fallback.
+    Accepted,
+    /// No durable click proof could be obtained. The redirect must fail closed
+    /// instead of sending a person onward with an attribution cookie that can
+    /// never be justified later.
+    Unavailable,
+}
+
+/// Future returned by the click submitter. Healthy-buffer submissions resolve
+/// immediately; only the exceptional overflow path waits for one bounded
+/// repository write.
+pub type ClickSubmissionFuture =
+    Pin<Box<dyn Future<Output = ClickSubmission> + Send + 'static>>;
+/// Closure that accepts one human click without adding database latency to the
+/// healthy redirect path.
+pub type ClickSubmitter =
+    Arc<dyn Fn(ClickEvent) -> ClickSubmissionFuture + Send + Sync>;
 /// Closure that returns a point-in-time snapshot of click ingestion counters.
 pub type ClickMetricsReader = Arc<dyn Fn() -> ClickMetricsSnapshot + Send + Sync>;
 
@@ -67,7 +88,11 @@ pub struct ClickMetricsSnapshot {
     pub queued: u64,
     /// Total click events durably written to PostgreSQL.
     pub persisted: u64,
-    /// Total click events dropped under overload or shutdown.
+    /// Times the bounded queue could not accept a human click.
+    pub overflowed: u64,
+    /// Overflow clicks recovered by the direct durable fallback.
+    pub overflow_recovered: u64,
+    /// Total click events actually lost after shutdown or persistence failure.
     pub dropped: u64,
     /// Total click events lost after a bounded persistence failure.
     pub persistence_failed: u64,
