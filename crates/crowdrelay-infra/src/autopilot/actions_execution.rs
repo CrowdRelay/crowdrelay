@@ -690,6 +690,17 @@ impl PostgresAutopilotRepository {
                     .await
                     .map_err(map_sqlx)?;
                 }
+                AutopilotActionPayload::OfferLatarnikMission { .. } => {
+                    // Mission offers are materialized atomically by the
+                    // Latarnik sweep together with their action-owned Smart
+                    // Link. They are inserted already succeeded because the
+                    // first-party card is the side effect. Reaching this arm
+                    // would mean a malformed queued legacy row; refuse rather
+                    // than pretend the mission was shown.
+                    return Err(RepositoryError::ConflictBecause(
+                        "latarnik mission offer must be materialized atomically by the mission sweep",
+                    ));
+                }
                 AutopilotActionPayload::RaiseGrowthDebt { .. } => {
                     // Deliberately no side effect, for the same reason as the
                     // raised growth opportunity: the finding is the work, and
