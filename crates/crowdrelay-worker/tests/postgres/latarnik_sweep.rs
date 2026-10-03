@@ -171,6 +171,7 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
                 light_ask_ready: 1,
                 referral_opportunities_recorded: 1,
                 missions_offered: 0,
+                missions_held_by_funnel: 0,
                 missions_completed: 0,
                 missions_expired: 0,
             },
