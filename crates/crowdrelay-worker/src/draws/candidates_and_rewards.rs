@@ -12,12 +12,9 @@ async fn load_candidates(
             checkin_count.concert_checkins
         FROM fans AS fan
         CROSS JOIN LATERAL (
-            SELECT count(*)::bigint AS qualified_referrals
-            FROM referral_attributions AS attribution
-            WHERE attribution.workspace_id = fan.workspace_id
-              AND attribution.referrer_fan_id = fan.id
-              AND attribution.status = 'qualified'
-              AND attribution.qualified_at <= $4
+            SELECT canonical_qualified_referral_count(
+                fan.workspace_id, fan.id, $4
+            ) AS qualified_referrals
         ) AS referral_count
         CROSS JOIN LATERAL (
             SELECT count(*)::bigint AS concert_checkins
