@@ -306,6 +306,56 @@ impl PostgresAutopilotRepository {
             .fetch_one(&mut *transaction)
             .await
             .map_err(map_sqlx)?;
+            // Attributed evidence is deliberately action-owned. A play with
+            // no action-bound smart link has no join key and returns NULL; a
+            // play that minted one but received no clicks returns 0. Clicks
+            // count distinct visitors and must postdate the exact recipient
+            // delivery that exposed the link.
+            let attributed_clicks = sqlx::query_scalar::<_, Option<i64>>(
+                r#"
+                SELECT CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM play_step_recipients recipient
+                        JOIN play_steps step
+                          ON step.workspace_id=recipient.workspace_id
+                         AND step.id=recipient.step_id
+                        JOIN smart_links link
+                          ON link.workspace_id=recipient.workspace_id
+                         AND link.action_id=recipient.action_id
+                         AND link.active
+                        WHERE recipient.workspace_id=$1
+                          AND step.play_id=$2
+                    )
+                    THEN (
+                        SELECT count(DISTINCT click.anonymous_visitor_id)::bigint
+                        FROM play_step_recipients recipient
+                        JOIN play_steps step
+                          ON step.workspace_id=recipient.workspace_id
+                         AND step.id=recipient.step_id
+                        JOIN smart_links link
+                          ON link.workspace_id=recipient.workspace_id
+                         AND link.action_id=recipient.action_id
+                         AND link.active
+                        JOIN click_events click
+                          ON click.workspace_id=link.workspace_id
+                         AND click.smart_link_id=link.id
+                        WHERE recipient.workspace_id=$1
+                          AND step.play_id=$2
+                          AND click.occurred_at >= recipient.created_at
+                          AND click.occurred_at <= $3
+                    )
+                    ELSE NULL
+                END
+                "#,
+            )
+            .bind(workspace_id.into_uuid())
+            .bind(outcome.play_id.into_uuid())
+            .bind(outcome.window_end)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(map_sqlx)?;
+
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(PlayOutcomeObservation {
                 observed_at: outcome.window_end,
@@ -313,11 +363,7 @@ impl PostgresAutopilotRepository {
                 observed_milli_per_day: series.milli_per_day,
                 recipients_reached: u32::try_from(recipients_reached)
                     .map_err(|_| RepositoryError::Unexpected)?,
-                // No play mints a tracked link yet, so no click can be joined
-                // to one. `None` says exactly that. Returning `Some(0)` would
-                // claim we looked and found nothing, which is the difference
-                // between a measured null result and an unanswerable question.
-                attributed_clicks: None,
+                attributed_clicks,
                 direction: series.direction,
                 ambiguous_series: series.ambiguous,
             })
