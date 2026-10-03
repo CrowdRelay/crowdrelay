@@ -121,6 +121,9 @@ pub async fn load_fan_evidence(
                        AND r.status = 'qualified'
                        AND r.qualified_at >= $2 - interval '90 days'
                        AND referred.root_id <> referrer.root_id
+                       AND canonical_qualified_referral_owner_id(
+                             f.workspace_id,referred.root_id
+                           ) = referrer.root_id
                  ))::int
                + (EXISTS (SELECT 1 FROM concert_checkins c
                            WHERE c.workspace_id = f.workspace_id AND c.fan_id = f.id
@@ -160,6 +163,9 @@ pub async fn load_fan_evidence(
                  WHERE r.workspace_id = f.workspace_id
                    AND r.status = 'qualified'
                    AND referred.root_id <> referrer.root_id
+                   AND canonical_qualified_referral_owner_id(
+                         f.workspace_id,referred.root_id
+                       ) = referrer.root_id
                ) AS qualified_referrals,
                EXISTS (SELECT 1 FROM outreach_targets t
                         WHERE t.workspace_id = f.workspace_id
