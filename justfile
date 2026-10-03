@@ -187,7 +187,8 @@ test-postgres-env:
       video_promotion \
       autopilot_relay_loader \
       a_content_artifact_receipt_writes_the_envelope_and_growth_measurements \
-      a_failed_artifact_is_retried_under_a_new_key
+      a_failed_artifact_is_retried_under_a_new_key \
+      tenant_setting_values_fit_what_the_settings_api_accepts
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
       the_outcome_appears_in_the_timeline_it_caused \
       the_drip_claims_one_post_per_batch_per_interval \
