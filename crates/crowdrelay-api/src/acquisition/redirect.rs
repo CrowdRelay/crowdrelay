@@ -67,19 +67,42 @@ pub async fn redirect_smart_link(
         record_dropped(reason);
         tracing::debug!(smart_link_id = %link.id(), "tracked-link fetch by an automated agent not recorded as a click");
     } else {
+        let occurred_at = OffsetDateTime::now_utc();
         let referrer_host = referrer_host(&headers);
-        match ClickEvent::from_link(
+        let event = match ClickEvent::from_link(
             &link,
             Some(visitor_id),
             referrer_host,
-            OffsetDateTime::now_utc(),
+            occurred_at,
         ) {
-            Ok(event) => (state.acquisition.click_submitter)(event),
+            Ok(event) => event,
             Err(error) => {
-                // Analytics is explicitly best effort. A malformed referrer must
-                // never delay or break the redirect path.
+                // Referrer is optional metadata, never the click itself. A
+                // malformed external Referer header must not erase a real
+                // human interaction. Retry the same observed click with no
+                // referrer rather than sending an unprovable visitor onward.
                 tracing::debug!(%error, "discarded invalid click referrer metadata");
+                match ClickEvent::from_link(&link, Some(visitor_id), None, occurred_at) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to construct click without optional referrer");
+                        return Problem::internal(request_id(&headers))
+                            .private()
+                            .into_response();
+                    }
+                }
             }
+        };
+        if (state.acquisition.click_submitter)(event).await
+            == ClickSubmission::Unavailable
+        {
+            tracing::warn!(
+                smart_link_id = %link.id(),
+                "human tracked click could not reach a durable ingestion path"
+            );
+            return Problem::service_unavailable(request_id(&headers))
+                .private()
+                .into_response();
         }
     }
 
