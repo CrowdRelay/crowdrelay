@@ -13,6 +13,7 @@ use crowdrelay_domain::WorkspaceId;
 use crowdrelay_worker::social_post_executor::SocialPostExecutorWorker;
 use serde_json::json;
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
@@ -147,6 +148,7 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
     let row = sqlx::query_as::<
         _,
         (
+            Uuid,
             String,
             String,
             Option<String>,
@@ -154,7 +156,7 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
             serde_json::Value,
         ),
     >(
-        "SELECT platform, status, smart_link, smart_link_id, content
+        "SELECT id, platform, status, smart_link, smart_link_id, content
          FROM social_posts WHERE workspace_id = $1 AND action_id = $2",
     )
     .bind(ws.into_uuid())
@@ -162,7 +164,7 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
     .fetch_one(&database)
     .await
     .context("read the join-ask social_posts row")?;
-    let (platform, status, smart_link, smart_link_id, content) = row;
+    let (social_post_id, platform, status, smart_link, smart_link_id, content) = row;
     ensure!(
         platform == "facebook",
         "platform must survive, got {platform}"
@@ -182,8 +184,8 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
     );
     let link_id = smart_link_id.context("a tracked post must bind a smart_link_id")?;
 
-    let link = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT slug, destination_url, channel_source
+    let link = sqlx::query_as::<_, (String, String, Option<String>, Option<Uuid>)>(
+        "SELECT slug, destination_url, channel_source, action_id
          FROM smart_links WHERE workspace_id = $1 AND id = $2",
     )
     .bind(ws.into_uuid())
@@ -202,6 +204,126 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
         link.2.as_deref() == Some("facebook"),
         "channel_source must name the platform, got {:?}",
         link.2
+    );
+    ensure!(
+        link.3 == Some(action_id),
+        "the acquisition link must be owned by the action that published it, got {:?}",
+        link.3
+    );
+
+    // Internal dispatch and a filed draft are not publication evidence.
+    let premature_outcomes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM autopilot_outcomes
+         WHERE workspace_id=$1 AND action_id=$2 AND metric_key='join_ask_published'",
+    )
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        premature_outcomes == 0,
+        "a draft must not claim publication, got {premature_outcomes} outcomes"
+    );
+    let premature_measurements: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM autopilot_measurements
+         WHERE workspace_id=$1 AND action_id=$2
+           AND measurement_kind IN ('content_link_clicks_7d','content_fan_acquisition_7d')",
+    )
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        premature_measurements == 0,
+        "measurement windows must wait for provider publication, got {premature_measurements}"
+    );
+
+    let before = crowdrelay_infra::organic_funnel::read(
+        &database,
+        ws.into_uuid(),
+        Some(action_id),
+        None,
+        7,
+        10,
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    ensure!(before.len() == 1, "expected one funnel link, got {}", before.len());
+    ensure!(
+        before[0].published_at.is_none() && before[0].diagnosis == "publication_unverified",
+        "draft must remain publication_unverified, got {:?} / {}",
+        before[0].published_at,
+        before[0].diagnosis
+    );
+
+    // Register a real provider receipt. This is the first moment publication
+    // evidence and the click/fan windows are allowed to exist.
+    crowdrelay_infra::fanbase::register_manual_social_post(
+        &database,
+        ws.into_uuid(),
+        social_post_id,
+        "https://www.facebook.com/joinask-provider-post",
+        Some("joinask-provider-post"),
+    )
+    .await?;
+
+    let confirmed_outcomes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM autopilot_outcomes
+         WHERE workspace_id=$1 AND action_id=$2 AND metric_key='join_ask_published'",
+    )
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        confirmed_outcomes == 1,
+        "provider receipt must create exactly one publication outcome, got {confirmed_outcomes}"
+    );
+    let confirmed_measurements: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM autopilot_measurements
+         WHERE workspace_id=$1 AND action_id=$2
+           AND measurement_kind IN ('content_link_clicks_7d','content_fan_acquisition_7d')",
+    )
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        confirmed_measurements == 2,
+        "provider receipt must open exactly the click and fan windows, got {confirmed_measurements}"
+    );
+
+    let receipt = sqlx::query_as::<_, (Option<String>, Option<String>, Option<time::OffsetDateTime>)>(
+        "SELECT platform_post_id, platform_post_url, posted_at
+         FROM social_posts WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(social_post_id)
+    .fetch_one(&database)
+    .await?;
+    ensure!(
+        receipt.0.as_deref() == Some("joinask-provider-post")
+            && receipt.1.as_deref() == Some("https://www.facebook.com/joinask-provider-post")
+            && receipt.2.is_some(),
+        "durable provider receipt missing: {receipt:?}"
+    );
+
+    let after = crowdrelay_infra::organic_funnel::read(
+        &database,
+        ws.into_uuid(),
+        Some(action_id),
+        None,
+        7,
+        10,
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    ensure!(after.len() == 1, "expected one funnel row after receipt");
+    ensure!(
+        after[0].published_at.is_some() && after[0].diagnosis == "awaiting_traffic_window",
+        "provider receipt must open the traffic window, got {:?} / {}",
+        after[0].published_at,
+        after[0].diagnosis
     );
     Ok(())
 }
