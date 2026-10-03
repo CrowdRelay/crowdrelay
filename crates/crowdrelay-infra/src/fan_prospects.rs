@@ -401,21 +401,30 @@ pub async fn link_verified_fan(
     now: OffsetDateTime,
 ) -> Result<bool, ProspectError> {
     let linked = sqlx::query_scalar::<_, Uuid>(
-        "UPDATE fan_prospects AS prospect
-         SET linked_fan_id=$3,
+        "WITH canonical AS (
+             SELECT canonical_fan_id($1,$3) AS fan_id
+         )
+         UPDATE fan_prospects AS prospect
+         SET linked_fan_id=canonical.fan_id,
              status='converted',
              last_seen_at=GREATEST(prospect.last_seen_at,$4),
              updated_at=$4
+         FROM canonical
          WHERE prospect.workspace_id=$1
            AND prospect.id=$2
+           AND canonical.fan_id IS NOT NULL
            AND prospect.status NOT IN ('refused','suppressed')
-           AND (prospect.linked_fan_id IS NULL OR prospect.linked_fan_id=$3)
+           AND (
+               prospect.linked_fan_id IS NULL
+               OR canonical_fan_id($1,prospect.linked_fan_id)=canonical.fan_id
+           )
            AND EXISTS (
                SELECT 1 FROM fans AS fan
                WHERE fan.workspace_id=$1
-                 AND fan.id=$3
+                 AND fan.id=canonical.fan_id
                  AND fan.status='active'
                  AND fan.deleted_at IS NULL
+                 AND fan.merged_into_fan_id IS NULL
                  AND EXISTS (
                      SELECT 1 FROM fan_identifiers AS identifier
                      WHERE identifier.workspace_id=fan.workspace_id
