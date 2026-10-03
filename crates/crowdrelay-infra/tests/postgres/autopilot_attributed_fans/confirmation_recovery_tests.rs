@@ -271,14 +271,7 @@ async fn recovery_execution_mints_one_action_owned_confirmation_without_fake_gro
     let (fan, source_action) =
         seed_pending_attributed_fan(&f, "execute-confirmation", acquired).await;
     let failed = confirmation_event(&f, fan, acquired + time::Duration::hours(1)).await;
-    delivery(
-        &f,
-        failed,
-        ep,
-        "dead",
-        acquired + time::Duration::hours(2),
-    )
-    .await;
+    delivery(&f, failed, ep, "dead", acquired + time::Duration::hours(2)).await;
 
     let snapshot = crowdrelay_infra::organic_funnel::confirmation_recovery_snapshots(
         &f.pool,
