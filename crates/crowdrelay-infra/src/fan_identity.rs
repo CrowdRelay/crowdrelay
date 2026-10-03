@@ -673,6 +673,18 @@ impl FanIdentityRepository for PgFanIdentityRepository {
             FanIdentityError::Unavailable
         })?;
 
+        crate::referrals::reconcile_referral_rewards_after_identity_merge(
+            &mut tx,
+            command.workspace_id,
+            command.survivor_fan_id,
+            command.request_id.as_str(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "referral reward reconciliation failed during fan merge");
+            FanIdentityError::Unavailable
+        })?;
+
         // Resolve every open candidate for this pair — the human decided.
         let (fan_a, fan_b) = canonical_pair(command.survivor_fan_id, command.merged_fan_id);
         sqlx::query(
@@ -928,6 +940,24 @@ impl FanIdentityRepository for PgFanIdentityRepository {
             tracing::warn!(%error, "fan identity store failed");
             FanIdentityError::Unavailable
         })?;
+
+        for fan_id in [survivor_id, command.merged_fan_id] {
+            crate::referrals::reconcile_referral_rewards_after_identity_merge(
+                &mut tx,
+                command.workspace_id,
+                fan_id,
+                command.request_id.as_str(),
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    %fan_id,
+                    "referral reward reconciliation failed during fan unmerge"
+                );
+                FanIdentityError::Unavailable
+            })?;
+        }
 
         // Reopen the candidates this merge resolved — the undo means the
         // pair is suspect again, and the pair UNIQUE would otherwise keep
