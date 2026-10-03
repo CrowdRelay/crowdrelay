@@ -40,9 +40,11 @@ pub struct ConnectionFact {
 pub struct ReadinessFacts<'a> {
     /// The tenant's own public site root, where signup lives.
     pub site_root: Option<&'a str>,
-    /// The tenant has written join-ask words of its own.
+    /// Safe join-ask copy exists: either an explicit tenant variant or one
+    /// deterministic starter derived from current tenant-owned content.
     pub join_copy: bool,
-    /// A video, release or event inside the freshness window to promote.
+    /// A video, release, event or synced owned-social post inside the
+    /// freshness window to promote.
     pub fresh_asset: bool,
     /// Whether the running worker reports the deployment-level social
     /// publisher gate as enabled. None means no worker has reported it yet.
@@ -143,7 +145,7 @@ pub fn assess(facts: &ReadinessFacts<'_>) -> Readiness {
     } else if !facts.join_copy {
         Some(Missing {
             code: "no_join_ask_copy",
-            what: "No join-ask words of the tenant's own are set; the product will not invent a voice."
+            what: "No explicit join-ask wording or safe current tenant-owned source text is available; the product will not invent a voice."
                 .to_owned(),
             owner_action: true,
         })
