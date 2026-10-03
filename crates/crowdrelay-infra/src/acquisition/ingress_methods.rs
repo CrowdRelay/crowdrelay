@@ -97,6 +97,50 @@ impl PostgresAcquisitionRepository {
             .collect()
     }
 
+    async fn load_active_smart_link_inner(
+        &self,
+        workspace_id: WorkspaceId,
+        slug: &SmartLinkSlug,
+    ) -> Result<Option<ResolvedSmartLink>, StoreError> {
+        let row = sqlx::query_as::<_, SmartLinkRow>(
+            r#"
+            SELECT
+                smart_links.id,
+                smart_links.workspace_id,
+                smart_links.campaign_id,
+                smart_links.slug,
+                smart_links.destination_url,
+                smart_links.version,
+                smart_links.channel_source,
+                smart_links.channel_community
+            FROM smart_links
+            INNER JOIN workspaces
+                ON workspaces.id = smart_links.workspace_id
+            LEFT JOIN campaigns
+                ON campaigns.workspace_id = smart_links.workspace_id
+                AND campaigns.id = smart_links.campaign_id
+            WHERE workspaces.slug = $1
+              AND smart_links.workspace_id = $2
+              AND smart_links.slug = $3
+              AND smart_links.active
+              AND (
+                    smart_links.campaign_id IS NULL
+                    OR campaigns.active
+                  )
+            LIMIT 1
+            "#,
+        )
+        .bind(self.workspace_slug.as_str())
+        .bind(workspace_id.into_uuid())
+        .bind(slug.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::from_sqlx)?;
+
+        row.map(|row| ResolvedSmartLink::try_from(row).map_err(|_| StoreError::Unexpected))
+            .transpose()
+    }
+
     /// The workspace's owned video ids and the subreddits whose verified
     /// rules allow an off-site landing page — one read for the redirect
     /// snapshot, on the same refresh as the links it rides with.

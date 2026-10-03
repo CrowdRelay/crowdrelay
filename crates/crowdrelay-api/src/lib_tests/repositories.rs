@@ -9,6 +9,7 @@
     struct TestRepository {
         signup_result: Result<FanSignupResult, RepositoryError>,
         cities_result: Result<Vec<CitySignal>, RepositoryError>,
+        smart_links_result: Result<Vec<ResolvedSmartLink>, RepositoryError>,
         signup_commands: Mutex<Vec<SignupFanCommand>>,
     }
 
@@ -17,6 +18,7 @@
             Self {
                 signup_result: Err(RepositoryError::Unavailable),
                 cities_result: Err(RepositoryError::Unavailable),
+                smart_links_result: Err(RepositoryError::Unavailable),
                 signup_commands: Mutex::new(Vec::new()),
             }
         }
@@ -43,8 +45,14 @@
                     CountryCode::parse("PL")?,
                     42,
                 )?]),
+                smart_links_result: Ok(Vec::new()),
                 signup_commands: Mutex::new(Vec::new()),
             })
+        }
+
+        fn with_smart_links(mut self, links: Vec<ResolvedSmartLink>) -> Self {
+            self.smart_links_result = Ok(links);
+            self
         }
     }
 
@@ -58,7 +66,7 @@
         }
 
         async fn load_active_smart_links(&self) -> Result<Vec<ResolvedSmartLink>, RepositoryError> {
-            Err(RepositoryError::Unavailable)
+            self.smart_links_result.clone()
         }
 
         async fn load_redirect_context(
