@@ -670,6 +670,44 @@ impl PostgresContentEngineRepository {
         .bind(ws)
         .execute(&mut *tx)
         .await?;
+        // Distribution authority can disappear before a person answers a
+        // suggestion: a peer consent may be revoked, its monthly cap may fill,
+        // or every reachable fan may enter cooldown. A raised collaboration
+        // that promised that peer audience is no longer the same executable
+        // ask. Retire it before queue headroom is counted instead of leaving a
+        // stale "promote/collaborate with this band" task for a human to clean
+        // up. Approved rows are deliberately left alone: approval is a human
+        // commitment and changing it requires a human decision, not silent
+        // system withdrawal.
+        sqlx::query(
+            r#"
+            WITH stale_peer_reach AS (
+                UPDATE content_suggestions AS suggestion
+                SET status = 'expired', updated_at = now()
+                WHERE suggestion.workspace_id = $1
+                  AND suggestion.status = 'raised'
+                  AND jsonb_typeof(suggestion.distribution_promise->'peer_audience') = 'array'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements_text(
+                          suggestion.distribution_promise->'peer_audience'
+                      ) AS promised(peer_name)
+                      WHERE NOT (promised.peer_name = ANY($2::text[]))
+                  )
+                RETURNING suggestion.id
+            )
+            INSERT INTO suggestion_outcomes (
+                workspace_id, suggestion_id, outcome, decided_by, reason
+            )
+            SELECT $1, stale_peer_reach.id, 'expired', 'system',
+                   'peer audience is no longer an executable consented route'
+            FROM stale_peer_reach
+            "#,
+        )
+        .bind(ws)
+        .bind(&reach.peers)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             r#"
             WITH unreported AS (
