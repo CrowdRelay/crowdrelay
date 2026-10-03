@@ -367,7 +367,9 @@ SELECT link.id AS link_id,link.slug,link.campaign_id,link.action_id,link.channel
    WHEN counts.unique_visitors=0 THEN 'no_observed_visitors' WHEN counts.signups=0 THEN 'visitors_without_signup'
    WHEN counts.confirmed=0 THEN 'signup_without_confirmation' WHEN counts.activation_mature=0 THEN 'awaiting_activation_window'
    WHEN counts.activated_mature=0 THEN 'confirmed_without_activation' WHEN counts.retention_mature=0 THEN 'awaiting_retention_window'
-   WHEN counts.retained=0 THEN 'no_observed_retention' ELSE 'retained_fans_observed' END AS diagnosis
+   WHEN counts.retained=0 THEN 'no_observed_retention'
+   WHEN counts.qualified_referrals=0 THEN 'retained_without_referral'
+   ELSE 'referral_multiplication_observed' END AS diagnosis
 FROM links link JOIN counts ON counts.id=link.id
 "#;
 
