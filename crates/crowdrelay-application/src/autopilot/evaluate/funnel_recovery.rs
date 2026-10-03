@@ -17,10 +17,18 @@ fn funnel_context_rank(
         OrganicFunnelDirective::RepairConfirmation
         | OrganicFunnelDirective::ActivateFans
         | OrganicFunnelDirective::RetainFans => {
-            if context == AutopilotContext::FanLifecycle { 0 } else { 10 }
+            if context == AutopilotContext::FanLifecycle {
+                0
+            } else {
+                10
+            }
         }
         OrganicFunnelDirective::RepairConversion => {
-            if context == AutopilotContext::ContentStrategy { 0 } else { 10 }
+            if context == AutopilotContext::ContentStrategy {
+                0
+            } else {
+                10
+            }
         }
         OrganicFunnelDirective::ExpandReach => 10,
     }
@@ -310,12 +318,24 @@ mod funnel_recovery_tests {
             OrganicFunnelDirective::RetainFans,
         ] {
             let c = control(directive);
-            assert_eq!(funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)), 0);
-            assert_eq!(funnel_context_rank(AutopilotContext::ContentSupply, Some(c)), 10);
+            assert_eq!(
+                funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)),
+                0
+            );
+            assert_eq!(
+                funnel_context_rank(AutopilotContext::ContentSupply, Some(c)),
+                10
+            );
         }
         let c = control(OrganicFunnelDirective::RepairConversion);
-        assert_eq!(funnel_context_rank(AutopilotContext::ContentStrategy, Some(c)), 0);
-        assert_eq!(funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)), 10);
+        assert_eq!(
+            funnel_context_rank(AutopilotContext::ContentStrategy, Some(c)),
+            0
+        );
+        assert_eq!(
+            funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)),
+            10
+        );
     }
 
     #[test]
@@ -355,8 +375,16 @@ mod funnel_recovery_tests {
             &public,
             Some(control(OrganicFunnelDirective::ExpandReach))
         ));
-        attach_organic_funnel_control(&mut public, control(OrganicFunnelDirective::ExpandReach));
-        assert!(public.input_snapshot.get("organic_funnel_control").is_some());
+        attach_organic_funnel_control(
+            &mut public,
+            control(OrganicFunnelDirective::ExpandReach),
+        );
+        assert!(
+            public
+                .input_snapshot
+                .get("organic_funnel_control")
+                .is_some()
+        );
     }
 
     #[test]
