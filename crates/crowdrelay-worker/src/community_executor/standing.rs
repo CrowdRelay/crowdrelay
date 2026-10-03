@@ -36,6 +36,7 @@ type HistoryRow = (
     Option<String>,
     Option<OffsetDateTime>,
     Option<OffsetDateTime>,
+    bool,
 );
 
 /// Every post this workspace published in the history window.
@@ -51,13 +52,22 @@ where
 {
     let rows: Vec<HistoryRow> = sqlx::query_as(
         r#"
-        SELECT normalize_subreddit(subreddit), posted_at, removed_by_category,
-               removal_seen_at, last_seen_live_at
-        FROM community_posts
-        WHERE workspace_id = $1
-          AND status = 'posted'
-          AND posted_at IS NOT NULL
-          AND posted_at > now() - make_interval(days => $2)
+        SELECT normalize_subreddit(post.subreddit), post.posted_at,
+               post.removed_by_category, post.removal_seen_at, post.last_seen_live_at,
+               COALESCE(latest.score > 1 OR latest.num_comments > 0, false)
+        FROM community_posts AS post
+        LEFT JOIN LATERAL (
+            SELECT metric.score, metric.num_comments
+            FROM community_post_metrics AS metric
+            WHERE metric.workspace_id = post.workspace_id
+              AND metric.community_post_id = post.id
+            ORDER BY metric.measured_at DESC, metric.id DESC
+            LIMIT 1
+        ) AS latest ON true
+        WHERE post.workspace_id = $1
+          AND post.status = 'posted'
+          AND post.posted_at IS NOT NULL
+          AND post.posted_at > now() - make_interval(days => $2)
         "#,
     )
     .bind(workspace_id)
@@ -67,12 +77,20 @@ where
     Ok(rows
         .into_iter()
         .map(
-            |(subreddit, posted_at, category, removal_seen_at, last_seen_live_at)| PostRecord {
+            |(
+                subreddit,
+                posted_at,
+                category,
+                removal_seen_at,
+                last_seen_live_at,
+                community_responded,
+            )| PostRecord {
                 subreddit,
                 posted_at,
                 removal: category.as_deref().and_then(RemovalCause::from_category),
                 removal_seen_at,
                 last_seen_live_at,
+                community_responded,
             },
         )
         .collect())
