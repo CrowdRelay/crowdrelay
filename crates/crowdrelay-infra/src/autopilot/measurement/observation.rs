@@ -724,13 +724,20 @@ pub(super) async fn observe_with_metrics(
                 .map_err(map_sqlx)?;
                 let referral_attributions = sqlx::query_scalar::<_, f64>(
                     r#"
-                    SELECT COUNT(*)::double precision
-                    FROM referral_attributions
-                    WHERE workspace_id = $1
-                      AND referrer_fan_id = $2
-                      AND status = 'qualified'
-                      AND qualified_at >= $3
-                      AND qualified_at < $3 + INTERVAL '7 days'
+                    SELECT COUNT(DISTINCT canonical_fan_id(
+                        $1, attribution.referred_fan_id
+                    ))::double precision
+                    FROM referral_attributions attribution
+                    WHERE attribution.workspace_id = $1
+                      AND attribution.referrer_fan_id IN (
+                          SELECT fan_id FROM canonical_fan_family($1,$2)
+                      )
+                      AND attribution.status = 'qualified'
+                      AND attribution.qualified_at >= $3
+                      AND attribution.qualified_at < $3 + INTERVAL '7 days'
+                      AND canonical_qualified_referral_owner_id(
+                          $1, attribution.referred_fan_id
+                      ) = canonical_fan_id($1,$2)
                     "#,
                 )
                 .bind(workspace_id.into_uuid())
