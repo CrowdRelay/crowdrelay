@@ -373,6 +373,9 @@ pub async fn record_publish_scopes(
     workspace_id: Uuid,
     scopes: &[String],
 ) -> Result<(), sqlx::Error> {
+    // The full grant list can exceed the 512-character `tenant_settings.value`
+    // limit; the readiness decision reads only the publish scopes.
+    let scopes = crowdrelay_domain::day_zero::publish_relevant_scopes(scopes);
     let mut tx = pool.begin().await?;
     for (key, value) in [
         (KEY_META_PUBLISH_SCOPES, scopes.join(" ")),

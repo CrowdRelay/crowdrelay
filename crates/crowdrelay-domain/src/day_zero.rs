@@ -64,6 +64,26 @@ pub fn required_publish_scope(platform: &str) -> Option<&'static str> {
     }
 }
 
+/// The scopes worth keeping from a token's full grant list: only those a
+/// publish call needs. Graph tokens can list dozens of scopes, which does not
+/// fit a tenant setting (512 characters); the readiness decision reads nothing
+/// but these, so dropping the rest changes no answer. An empty result is still
+/// a real "this token cannot publish".
+#[must_use]
+pub fn publish_relevant_scopes(scopes: &[String]) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for scope in scopes {
+        let relevant = ["facebook", "instagram"]
+            .into_iter()
+            .filter_map(required_publish_scope)
+            .any(|needed| needed == scope);
+        if relevant && !kept.contains(scope) {
+            kept.push(scope.clone());
+        }
+    }
+    kept
+}
+
 /// How long a verification stays good. A token can be rotated or lose a grant,
 /// so a two-day-old answer is not trusted as current.
 pub const PUBLISH_CHECK_MAX_AGE_HOURS: i64 = 48;
@@ -525,6 +545,25 @@ mod tests {
                 .caveats
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_long_grant_list_keeps_only_the_publish_scopes() {
+        let long: Vec<String> = (0..80)
+            .map(|n| format!("some_graph_permission_{n}"))
+            .chain([
+                "pages_manage_posts".to_owned(),
+                "pages_manage_posts".to_owned(),
+            ])
+            .collect();
+        let kept = publish_relevant_scopes(&long);
+        assert_eq!(kept, vec!["pages_manage_posts".to_owned()]);
+        assert!(kept.join(" ").len() <= 512);
+        assert_eq!(
+            publish_permission("facebook", Some(&kept), Some(1)),
+            PublishPermission::Verified
+        );
+        assert!(publish_relevant_scopes(&["pages_read_engagement".to_owned()]).is_empty());
     }
 
     #[test]
