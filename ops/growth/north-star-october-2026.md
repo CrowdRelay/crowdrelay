@@ -82,3 +82,26 @@ Production acceptance for this checkpoint is:
 4. while activation/retention is the mature leak, new community/public acquisition work is observably held before it consumes the cycle ahead of recovery.
 
 Next highest-leverage step: prove this recovery loop against live production cohorts and then close the next measured non-executable stage. If `activate_fans` is the live limiter, verify that welcome/Signal/show-recall receipts create attributable activation; if `retain_fans` is the limiter, verify dormant reactivation is actually eligible and delivered before adding any new retention machinery.
+
+## Checkpoint — scarce fan-out follows the measured funnel stage
+
+The content-supply fan-out now spends outward capacity on work that can move the
+stage the canonical organic funnel says is limiting.
+
+- `expand_reach`: public social/community reach remains executable, while
+  fresh-drop Signal pushes and source email to already-consented fans are held;
+- `repair_conversion` and `repair_confirmation`: both generic public fan-out
+  and unrelated existing-fan blasts are held because those stages have dedicated
+  recovery paths;
+- `activate_fans` and `retain_fans`: public acquisition fan-out is held while
+  consented owned-audience delivery remains available.
+
+Internal precursor work remains allowed because it reaches nobody and does not
+consume outward touch capacity. This closes a product-level failure mode where the
+system correctly diagnosed "we need new people" but could still spend scarce fan
+touches telling the existing audience about the same drop.
+
+Production acceptance is practical: during a mature `expand_reach` window, the
+next executable Content Supply actions should be routes capable of reaching
+non-fans, not Signal/email delivery to people already counted in the audience.
+
