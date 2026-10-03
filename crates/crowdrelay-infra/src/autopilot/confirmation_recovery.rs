@@ -12,7 +12,7 @@ use crowdrelay_application::{
 };
 use crowdrelay_domain::{
     AutopilotActionId, FanId, WorkspaceId,
-    action_ledger::provider_delivery_failure_is_definitive,
+    action_ledger::provider_delivery_set_is_definitive_failure,
 };
 use serde_json::json;
 use sqlx::{Postgres, Transaction};
@@ -187,16 +187,13 @@ pub(super) async fn execute(
             "confirmation recovery refused: a newer confirmation request exists",
         ));
     }
-    let event_failure_is_definitive = event_status == "dead"
-        && event_error_kind
-            .as_deref()
-            .is_some_and(provider_delivery_failure_is_definitive);
-    let deliveries_are_definitive = !terminal_error_kinds.is_empty()
-        && terminal_error_kinds
-            .iter()
-            .all(|kind| provider_delivery_failure_is_definitive(kind));
-    let terminal_failure = event_failure_is_definitive || deliveries_are_definitive;
-    if delivered > 0 || in_flight > 0 || !terminal_failure {
+    if !provider_delivery_set_is_definitive_failure(
+        &event_status,
+        event_error_kind.as_deref(),
+        delivered,
+        in_flight,
+        &terminal_error_kinds,
+    ) {
         return Err(RepositoryError::ConflictBecause(
             "confirmation recovery refused: latest confirmation is not a definitive delivery failure",
         ));
