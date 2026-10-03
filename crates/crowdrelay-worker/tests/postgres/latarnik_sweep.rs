@@ -211,6 +211,123 @@ async fn the_loader_reads_what_a_fan_did_and_the_sweep_asks_nobody() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn merged_referral_history_stays_canonical_and_self_referrals_do_not_become_activity() -> Result<()> {
+    use crowdrelay_application::{FanIdentityRepository, MergeFansCommand};
+
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let now = OffsetDateTime::now_utc();
+
+    let canonical = fan(&pool, ws, "canonical-referrer@fan.test", 120, true).await?;
+    let legacy = fan(&pool, ws, "legacy-referrer@fan.test", 120, true).await?;
+    let external = fan(&pool, ws, "external-referred@fan.test", 30, true).await?;
+    let code: Uuid = sqlx::query_scalar(
+        "INSERT INTO referral_codes(workspace_id,fan_id,code)
+         VALUES($1,$2,encode(gen_random_bytes(18),'hex')) RETURNING id",
+    )
+    .bind(ws.into_uuid())
+    .bind(legacy)
+    .fetch_one(&pool)
+    .await?;
+
+    // One real referral and one pre-merge cross-record referral that becomes
+    // a canonical self-referral after identity resolution.
+    for (referred, days) in [(external, 5_i32), (canonical, 4_i32)] {
+        sqlx::query(
+            "INSERT INTO referral_attributions(
+                 workspace_id,referrer_fan_id,referred_fan_id,referral_code_id,
+                 accepted_at,status,qualified_at
+             ) VALUES($1,$2,$3,$4,now()-make_interval(days=>$5),'qualified',
+                      now()-make_interval(days=>$5))",
+        )
+        .bind(ws.into_uuid())
+        .bind(legacy)
+        .bind(referred)
+        .bind(code)
+        .bind(days)
+        .execute(&pool)
+        .await?;
+    }
+
+    let identity = crowdrelay_infra::fan_identity::PgFanIdentityRepository::new(pool.clone());
+    identity
+        .merge_fans(&MergeFansCommand {
+            workspace_id: ws,
+            survivor_fan_id: canonical,
+            merged_fan_id: legacy,
+            reason: Some("same person".to_owned()),
+            merged_by: "latarnik-test".to_owned(),
+            request_id: "latarnik-referral-merge".to_owned(),
+        })
+        .await?;
+
+    let observed = load_fan_evidence(&pool, ws.into_uuid(), now, 100).await?;
+    let canonical_evidence = observed
+        .iter()
+        .find(|fan| fan.fan_id == canonical)
+        .ok_or_else(|| anyhow::anyhow!("missing canonical fan"))?
+        .evidence;
+    ensure!(
+        canonical_evidence.qualified_referrals == 1,
+        "only the external canonical person may count: {canonical_evidence:?}"
+    );
+    ensure!(
+        canonical_evidence.active_now && canonical_evidence.distinct_actions_90d == 1,
+        "the pinned real referral must remain canonical meaningful activity: {canonical_evidence:?}"
+    );
+
+    // A second identity family has only a referral to its own duplicate.
+    // After merge it must not manufacture activity or advocacy evidence.
+    let self_root = fan(&pool, ws, "self-root@fan.test", 120, true).await?;
+    let self_legacy = fan(&pool, ws, "self-legacy@fan.test", 120, true).await?;
+    let self_code: Uuid = sqlx::query_scalar(
+        "INSERT INTO referral_codes(workspace_id,fan_id,code)
+         VALUES($1,$2,encode(gen_random_bytes(18),'hex')) RETURNING id",
+    )
+    .bind(ws.into_uuid())
+    .bind(self_legacy)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO referral_attributions(
+             workspace_id,referrer_fan_id,referred_fan_id,referral_code_id,
+             accepted_at,status,qualified_at
+         ) VALUES($1,$2,$3,$4,now()-interval '3 days','qualified',now()-interval '3 days')",
+    )
+    .bind(ws.into_uuid())
+    .bind(self_legacy)
+    .bind(self_root)
+    .bind(self_code)
+    .execute(&pool)
+    .await?;
+    identity
+        .merge_fans(&MergeFansCommand {
+            workspace_id: ws,
+            survivor_fan_id: self_root,
+            merged_fan_id: self_legacy,
+            reason: Some("same person".to_owned()),
+            merged_by: "latarnik-test".to_owned(),
+            request_id: "latarnik-self-referral-merge".to_owned(),
+        })
+        .await?;
+
+    let observed = load_fan_evidence(&pool, ws.into_uuid(), now, 100).await?;
+    let self_evidence = observed
+        .iter()
+        .find(|fan| fan.fan_id == self_root)
+        .ok_or_else(|| anyhow::anyhow!("missing self-referral fan"))?
+        .evidence;
+    ensure!(
+        self_evidence.qualified_referrals == 0
+            && self_evidence.distinct_actions_90d == 0
+            && !self_evidence.active_now,
+        "canonical self-referral must be zero evidence: {self_evidence:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_candidate_is_one_person_keyed_role_and_the_machine_is_enforced() -> Result<()> {
     let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
     let ws = workspace(&pool).await?;
