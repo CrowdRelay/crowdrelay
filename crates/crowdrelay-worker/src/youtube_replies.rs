@@ -662,7 +662,6 @@ impl YoutubeRepliesWorker {
             }
         }
     }
-}    }
 }
 
 #[cfg(test)]
