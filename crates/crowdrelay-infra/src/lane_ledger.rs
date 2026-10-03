@@ -164,13 +164,16 @@ pub async fn day_zero_facts(
 ) -> Result<DayZeroFacts, sqlx::Error> {
     let settings = crate::tenant_settings::TenantSettingsRepository::new(pool.clone());
     let brand = settings.brand_settings(workspace_id).await?;
-    let join_copy = settings.join_ask_config(workspace_id).await?.is_some();
+    let explicit_join_copy = settings.join_ask_config(workspace_id).await?.is_some();
+    let grounded_join_copy =
+        crate::join_ask::load_grounded_starter_variant(pool, workspace_id).await?;
+    let join_copy = explicit_join_copy || grounded_join_copy.is_some();
     let fresh_asset: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM content_sources
             WHERE workspace_id = $1 AND active
-              AND source_kind IN ('video', 'release', 'event')
+              AND source_kind IN ('video', 'release', 'event', 'social_post')
               AND expires_at > now()
               AND occurred_at > now() - interval '30 days'
         )

@@ -131,21 +131,13 @@ The product should deliberately prove **+1**, then repeat to **10**, before assu
 
 ## Cold-start content problem
 
-A brand-new workspace can currently reach a `NoVariants` join-ask hold when nobody supplied `join_ask_variants`. That is a safe fail-closed behavior, but it is not acceptable as the final Day-0 experience.
+The first grounded starter path is now implemented for current tenant-owned content sources.
 
-The product must evolve toward a grounded starter-content path that does not require the operator to become the Brain's copywriter.
+When `join_ask_variants` is absent, CrowdRelay may seed exactly one deterministic starter from a fresh active release/video/event title or synced owned-social caption. The source line is preserved verbatim and the system adds only the neutral signup CTA owned by the product. Explicit tenant wording always wins. Blank or overlong source text still fails closed as `NoVariants`; the product does not truncate a claim or invent voice merely to escape the hold.
 
-Acceptable sources include tenant-owned and current facts already available to CrowdRelay, such as:
+This closes the copywriter prerequisite for tenants that already supplied real content. The same existing join-ask executor, standing authority, cadence, tracked link, publication receipt and fan-attribution path remain authoritative.
 
-- connected-profile owned content;
-- a current release/show/video/content source;
-- tenant-approved bio/brand copy;
-- existing press assets;
-- explicit onboarding text supplied once.
-
-The system may compose from those sources under existing publish/review guards. It may not fabricate voice or facts merely to escape the hold.
-
-Until this is implemented, `NoVariants` is a real Day-0 product gap and should remain visible in prioritization.
+Still-valid future grounding sources include tenant-approved bio/brand copy, press assets and explicit onboarding text supplied once. Those should widen safe coverage only when needed; they are not a reason to delay proving the current source-derived path in production.
 
 ## Autonomous rerouting
 
@@ -223,7 +215,7 @@ No audit-only runs.
 ### Phase 0 — prove Day-0 distribution
 - [ ] one supported tenant can complete minimum growth setup without hidden prerequisites;
 - [ ] at least one net-new lane is executable under standing authority;
-- [ ] first grounded acquisition post is generated without requiring per-post copywriting;
+- [x] first grounded acquisition post is generated without requiring per-post copywriting;
 - [ ] provider publication receipt is durable and action-linked;
 - [ ] tracked link is present and canonical funnel recognizes the publication;
 - [ ] dead/manual-only lanes do not consume acquisition capacity.

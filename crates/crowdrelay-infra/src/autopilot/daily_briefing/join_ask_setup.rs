@@ -84,8 +84,12 @@ pub(super) async fn append_join_ask_setup(
 /// body is capped at 1650 characters and the panel carries the full text.
 const fn join_ask_hold_phrase(hold: JoinAskHold, locale: BriefingLocale) -> &'static str {
     match (hold, locale) {
-        (JoinAskHold::NoVariants, BriefingLocale::Pl) => "napisz zaproszenie własnymi słowami",
-        (JoinAskHold::NoVariants, BriefingLocale::En) => "write the ask in your own words",
+        (JoinAskHold::NoVariants, BriefingLocale::Pl) => {
+            "dodaj własny tekst zaproszenia lub świeżą treść, którą można bezpiecznie zacytować"
+        }
+        (JoinAskHold::NoVariants, BriefingLocale::En) => {
+            "add your own ask or fresh owned content CrowdRelay can quote safely"
+        }
         (JoinAskHold::NoSiteUrl, BriefingLocale::Pl) => "ustaw adres strony dla fanów",
         (JoinAskHold::NoSiteUrl, BriefingLocale::En) => "set the member site URL",
         (JoinAskHold::NotConnected, BriefingLocale::Pl) => "podłącz konto",

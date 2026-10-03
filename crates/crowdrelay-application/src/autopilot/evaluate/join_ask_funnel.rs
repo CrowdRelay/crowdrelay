@@ -3,13 +3,12 @@
 // line limit.
 
 impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
-    /// §5: the weekly join-ask rides this context — a post on
-    /// the band's own pages in the band's own words is the
-    /// strategy surface's work. Evaluated for every tenant,
-    /// including one that has written nothing: it is held on
-    /// `NoVariants` rather than skipped, so a workspace nobody
-    /// has set up reports what it is waiting on instead of
-    /// producing a cycle that reads as healthy and empty.
+    /// §5: the weekly join-ask rides this context — a grounded post on the
+    /// tenant's own pages is the strategy surface's work. Explicit wording
+    /// wins; otherwise one fresh tenant-owned source may seed a deterministic
+    /// starter. A tenant with neither still lands on `NoVariants`, so a truly
+    /// empty workspace reports what it is waiting on instead of producing a
+    /// cycle that reads as healthy and empty.
     async fn evaluate_join_ask_week(
         &self,
         policy: &AutopilotPolicy,

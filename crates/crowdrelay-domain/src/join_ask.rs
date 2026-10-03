@@ -1,12 +1,11 @@
 //! The weekly join-ask: the tenant's own words, rotated onto its own
 //! social channels on a cadence the operator sets.
 //!
-//! This is the LLM-free growth loop (§5). The text a post carries is one of
-//! the variants the tenant wrote, verbatim — the system rotates them and
-//! never rewrites them, because the operator's words are the honest source
-//! today (there are no `social_post_source_sync` rows to learn voice from,
-//! and a model guessing at the band's voice is exactly the failure this
-//! feature exists to avoid).
+//! This is the LLM-free growth loop (§5). Explicit variants remain verbatim.
+//! When a tenant has not written one yet, the repository may seed exactly one
+//! deterministic starter variant from a fresh tenant-owned content fact. The
+//! system never invents anecdotes, endorsements or artist facts: it preserves
+//! the source line and adds only the neutral signup CTA this feature owns.
 //!
 //! One post per platform per ISO week: the decision key carries the week,
 //! so however many cycles run, one ask exists. The cadence setting only
@@ -68,6 +67,27 @@ pub fn parse_variants(raw: &str) -> Option<Vec<String>> {
         variants.push(text.to_owned());
     }
     Some(variants)
+}
+
+/// Builds the one safe Day-0 fallback when explicit join-ask variants are
+/// absent. `fact` must already be tenant-owned truth selected by the
+/// repository (for example a fresh release/video/event title or the first
+/// line of a synced owned-social caption).
+///
+/// The source text is not rewritten. We only append the product-owned CTA
+/// describing what the first-party `/signal` destination does. Overlong
+/// facts fail closed rather than being truncated into a claim the tenant did
+/// not actually make.
+#[must_use]
+pub fn grounded_starter_variant(fact: &str) -> Option<String> {
+    const SUFFIX: &str = "\n\nJoin for updates.";
+
+    let fact = fact.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let available = JOIN_ASK_MAX_VARIANT_CHARS.saturating_sub(SUFFIX.chars().count());
+    if fact.chars().count() > available {
+        return None;
+    }
+    Some(format!("{fact}{SUFFIX}"))
 }
 
 /// Parses `join_ask_cadence_days` — a bare integer inside
@@ -203,8 +223,10 @@ pub struct JoinAskPostRow {
 pub struct JoinAskSnapshot {
     /// First-signup navigation promise, scoped to this offer.
     pub capture_context: Option<crate::acquisition::FanCaptureContext>,
-    /// The operator's own texts, trimmed and non-empty by the writer's
-    /// validation. Rotation reads `prior_count % variants.len()`.
+    /// Grounded texts, trimmed and non-empty. Explicit tenant variants are
+    /// preferred; Day-0 may supply one deterministic starter derived from a
+    /// fresh tenant-owned content fact. Rotation reads
+    /// `prior_count % variants.len()`.
     pub variants: Vec<String>,
     /// Minimum days between join-ask posts on one platform.
     pub cadence_days: u16,
@@ -241,8 +263,10 @@ pub struct JoinAskSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JoinAskAsk {
     pub platform: String,
-    /// Which tenant-authored variant posts this week. Unseen variants are
-    /// explored first; after every current variant has mature evidence, a
+    /// Which grounded variant posts this week. Explicit tenant wording is
+    /// preferred; an unconfigured Day-0 tenant may have one deterministic
+    /// source-derived starter. Unseen variants are explored first; after every
+    /// current variant has mature evidence, a
     /// deterministic UCB1 bandit balances acquired-fan reward with continued
     /// exploration.
     pub variant_index: u32,
@@ -288,15 +312,10 @@ pub enum JoinAskHold {
     NoInstagramPhoto,
     /// `member_site_base_url` is unset — the CTA would have no destination.
     NoSiteUrl,
-    /// The tenant's variant list is empty — the ask has no words.
-    ///
-    /// This is the ordinary state of a workspace nobody has set up yet, and
-    /// it is the first thing a cold tenant is waiting on. It was previously
-    /// unreachable: the snapshot loader returned nothing at all for a tenant
-    /// with no variants, so the cycle skipped the context and the hold was
-    /// documented as defense in depth against a hand-edited row. The loader
-    /// now assembles a snapshot either way, which makes this the cold-start
-    /// signal rather than a corruption check.
+    /// No explicit variant and no safe grounded starter source exists — the
+    /// ask has no words. A fresh tenant-owned content fact normally clears
+    /// this automatically; the hold remains fail-closed for a truly empty
+    /// tenant rather than manufacturing copy.
     NoVariants,
 }
 
@@ -334,7 +353,7 @@ impl JoinAskHold {
             }
             Self::NoSiteUrl => "set the member site URL on Settings → Workspace",
             Self::NoVariants => {
-                "write the join-ask in the band's own words on Settings → Workspace"
+                "add join-ask wording or fresh owned content CrowdRelay can quote safely"
             }
         }
     }
@@ -631,6 +650,24 @@ pub fn join_ask_channel_permits(snapshot: &JoinAskSnapshot, platform: &str) -> b
 mod tests {
     use super::*;
     use time::macros::datetime;
+
+    #[test]
+    fn grounded_starter_preserves_source_truth_and_fails_closed_when_unsafe() {
+        assert_eq!(
+            grounded_starter_variant("  Seed Of Doubt  "),
+            Some("Seed Of Doubt\n\nJoin for updates.".to_owned())
+        );
+        assert_eq!(
+            grounded_starter_variant("\n\nLive in Wrocław\nsecond line"),
+            Some("Live in Wrocław\n\nJoin for updates.".to_owned())
+        );
+        assert_eq!(grounded_starter_variant("   \n "), None);
+        assert_eq!(
+            grounded_starter_variant(&"x".repeat(JOIN_ASK_MAX_VARIANT_CHARS)),
+            None,
+            "never truncate tenant truth merely to escape NoVariants"
+        );
+    }
 
     fn snapshot() -> JoinAskSnapshot {
         JoinAskSnapshot {

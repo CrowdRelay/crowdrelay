@@ -8,29 +8,77 @@
 //! rather than being restated per surface, the same rule
 //! `load_blocked_communities` follows for the community queue.
 
-use crowdrelay_domain::join_ask::{JoinAskConfig, JoinAskPostRow, JoinAskSnapshot};
+use crowdrelay_domain::join_ask::{
+    JoinAskConfig, JoinAskPostRow, JoinAskSnapshot, grounded_starter_variant,
+};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Assembles one workspace's join-ask snapshot from six small scoped reads.
+/// Finds one bounded, current tenant-owned fact that can seed Day-0 copy.
+///
+/// Explicit `join_ask_variants` always win. This fallback reads only active,
+/// unexpired first-party content sources from the last 30 days. Synced owned
+/// social captions are preferred over their generated title; release/video/event
+/// sources prefer their title. The domain helper preserves that line verbatim
+/// and adds only the neutral signup CTA.
+pub async fn load_grounded_starter_variant(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"
+        SELECT source_kind, title, metadata->>'body'
+        FROM content_sources
+        WHERE workspace_id = $1
+          AND active
+          AND source_kind IN ('video', 'release', 'event', 'social_post')
+          AND expires_at > now()
+          AND occurred_at > now() - interval '30 days'
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT 12
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    for (source_kind, title, body) in rows {
+        let candidates = if source_kind == "social_post" {
+            [body.as_deref(), Some(title.as_str())]
+        } else {
+            [Some(title.as_str()), body.as_deref()]
+        };
+        for fact in candidates.into_iter().flatten() {
+            if let Some(variant) = grounded_starter_variant(fact) {
+                return Ok(Some(variant));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Assembles one workspace's join-ask snapshot from scoped first-party reads.
 ///
 /// A tenant that never wrote variants is **not** absent here. It resolves to
-/// [`JoinAskConfig::unconfigured`] — empty words, default platforms — so the
-/// cold-start case reaches the gates and is reported as held. The earlier
-/// shape returned `None` for that tenant and the cycle skipped the context
-/// without recording anything, which made a brand-new workspace read exactly
-/// like an evaluator that never ran. That is the one outcome `JoinAskHold`
-/// exists to prevent, and the emptiest tenants were the ones getting it.
+/// [`JoinAskConfig::unconfigured`] and then receives one source-derived
+/// starter when fresh tenant-owned truth exists. A truly empty tenant still
+/// reaches `NoVariants`, so cold start cannot silently disappear or invent
+/// copy merely to look healthy.
 pub async fn load_join_ask_snapshot(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<JoinAskSnapshot, sqlx::Error> {
     let settings = crate::tenant_settings::TenantSettingsRepository::new(pool.clone());
-    let config = settings
+    let mut config = settings
         .join_ask_config(workspace_id)
         .await?
         .unwrap_or_else(JoinAskConfig::unconfigured);
+    if config.variants.is_empty() {
+        if let Some(starter) = load_grounded_starter_variant(pool, workspace_id).await? {
+            config.variants.push(starter);
+        }
+    }
 
     // The site URL and the standing publish approval ride the brand seam, not
     // a raw row read, so every consumer builds links the same way. A tenant

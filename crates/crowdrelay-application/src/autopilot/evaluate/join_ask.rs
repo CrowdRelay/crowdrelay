@@ -26,8 +26,10 @@ pub(super) struct JoinAskEvaluation {
     pub held: Vec<(String, JoinAskHold)>,
 }
 
-/// The ask is fixed — the tenant wrote the words, and the fan-outcome
-/// selector chose which one to test/exploit this week. Confidence here answers
+/// The ask is fixed — either the tenant wrote the words explicitly or Day-0
+/// derived one bounded starter from fresh tenant-owned source text. The
+/// fan-outcome selector chooses which grounded variant to test/exploit.
+/// Confidence here answers
 /// "is this worth doing at all", not "which wording wins": the followers
 /// already on the page are the cheapest fans to win, so the ask is confident
 /// whenever it is eligible. Variant choice stays auditable in the input
@@ -60,7 +62,7 @@ fn join_ask_candidate(
         decision_kind: "publish_join_ask",
         confidence,
         disposition,
-        reason: "weekly join ask; tenant-authored wording selected from first-party fan outcomes",
+        reason: "weekly join ask; grounded wording selected from first-party fan outcomes",
         input_snapshot: serde_json::json!({
             "capture_context": snapshot.capture_context,
             "platform": ask.platform,
