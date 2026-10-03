@@ -240,7 +240,7 @@ async fn staff_self_and_test_identities_never_enter_the_prospect_lane() -> Resul
     .context("valid exclusion")?;
     ensure!(exclusion.value == "wojciech_bator", "{exclusion:?}");
 
-    comment(
+    let self_comment = comment(
         &pool,
         ws,
         source,
@@ -249,6 +249,17 @@ async fn staff_self_and_test_identities_never_enter_the_prospect_lane() -> Resul
         "self test",
         0,
     )
+    .await?;
+    // Production-harvested owned comments enter unanswered. The helper uses
+    // skipped by default because most sweep tests do not exercise the reply
+    // queue, so put this row into the real lane state explicitly.
+    sqlx::query(
+        "UPDATE community_comments SET status='unanswered', hold_reason=NULL
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(self_comment)
+    .execute(&pool)
     .await?;
     comment(
         &pool,
@@ -276,6 +287,20 @@ async fn staff_self_and_test_identities_never_enter_the_prospect_lane() -> Resul
     .fetch_one(&pool)
     .await?;
     ensure!(staff_rows == 0, "staff identity entered prospect spine");
+    let (comment_status, hold_reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, hold_reason FROM community_comments
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(self_comment)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        comment_status == "skipped"
+            && hold_reason.as_deref()
+                == Some("FAN SCOUT: explicit staff/own-account/test identity exclusion"),
+        "excluded owned comment must leave the reply queue: {comment_status} {hold_reason:?}"
+    );
 
     // A later explicit test exclusion suppresses a prospect that already
     // exists, but leaves its observation history intact for audit.
