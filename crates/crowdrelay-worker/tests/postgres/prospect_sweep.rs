@@ -48,8 +48,9 @@ async fn comment(
     sqlx::query(
         "INSERT INTO community_comments
              (id, workspace_id, platform_comment_id, parent_id, author, body, status, platform,
-              content_source_id, created_at)
-         VALUES ($1,$2,$3,'18088912784228243',$4,$5,'skipped',$6,$7, now() - make_interval(days => $8::int))",
+              content_source_id, created_at, provider_observed_at)
+         VALUES ($1,$2,$3,'18088912784228243',$4,$5,'skipped',$6,$7,
+                 now() - make_interval(days => $8::int), now())",
     )
     .bind(id)
     .bind(ws.into_uuid())
@@ -63,6 +64,44 @@ async fn comment(
     .await
     .context("insert comment")?;
     Ok(id)
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn storage_row_without_provider_receipt_never_becomes_a_prospect() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let source = video(&pool, ws).await?;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO community_comments(
+             id,workspace_id,platform_comment_id,parent_id,author,body,status,
+             platform,content_source_id,created_at
+         ) VALUES(
+             $1,$2,$3,'18088912784228243','synthetic_person',
+             'Kiedy koncert?','skipped','youtube',$4,now()
+         )",
+    )
+    .bind(id)
+    .bind(ws.into_uuid())
+    .bind((id.as_u128() % 100_000_000_000_000_000).to_string())
+    .bind(source)
+    .execute(&pool)
+    .await?;
+
+    let sweep = ProspectSweep::new(pool.clone(), ws, Duration::from_secs(10));
+    let report = sweep.run_once(OffsetDateTime::now_utc()).await?;
+    ensure!(
+        report.unverified_source == 1 && report.created == 0,
+        "storage is not provider evidence: {report:?}"
+    );
+    let prospects: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fan_prospects WHERE workspace_id=$1")
+            .bind(ws.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    ensure!(prospects == 0, "synthetic discovery leaked into FAN SCOUT");
+    Ok(())
 }
 
 #[tokio::test]
