@@ -7,7 +7,10 @@
 use crate::common;
 
 use anyhow::{Context, Result, ensure};
-use crowdrelay_domain::WorkspaceId;
+use crowdrelay_domain::{
+    WorkspaceId,
+    fan_prospect::{ProspectIdentityExclusionReason, ProspectIdentityKind},
+};
 use crowdrelay_worker::prospect_sweep::{ProspectSweep, SweepReport};
 use sqlx::PgPool;
 use std::time::Duration;
@@ -121,6 +124,7 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 appended: 1,
                 already_known: 0,
                 not_collected: 0,
+                excluded_identity: 0,
                 not_an_identity: 1,
                 touched: 0,
                 converted: 0,
@@ -136,6 +140,7 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 appended: 0,
                 already_known: 3,
                 not_collected: 0,
+                excluded_identity: 0,
                 not_an_identity: 1,
                 touched: 0,
                 converted: 0,
@@ -212,6 +217,128 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
     .fetch_all(&pool)
     .await?;
     ensure!(left == [("zine_pl".to_owned(),)], "{left:?}");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn staff_self_and_test_identities_never_enter_the_prospect_lane() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let source = video(&pool, ws).await?;
+
+    let exclusion = crowdrelay_infra::fan_prospect_exclusions::exclude_identity(
+        &pool,
+        ws.into_uuid(),
+        ProspectIdentityKind::PlatformHandle,
+        "instagram",
+        "@Wojciech_Bator",
+        ProspectIdentityExclusionReason::Staff,
+        "fan100-test",
+    )
+    .await?
+    .context("valid exclusion")?;
+    ensure!(exclusion.value == "wojciech_bator", "{exclusion:?}");
+
+    comment(
+        &pool,
+        ws,
+        source,
+        "instagram",
+        "WOJCIECH_BATOR",
+        "self test",
+        0,
+    )
+    .await?;
+    comment(
+        &pool,
+        ws,
+        source,
+        "instagram",
+        "kuba_metal",
+        "Kiedy gracie Wrocław?",
+        0,
+    )
+    .await?;
+
+    let sweep = ProspectSweep::new(pool.clone(), ws, Duration::from_secs(10));
+    let now = OffsetDateTime::now_utc();
+    let first = sweep.run_once(now).await?;
+    ensure!(
+        first.created == 1 && first.excluded_identity == 1,
+        "staff identity is counted as an explicit exclusion, never a prospect: {first:?}"
+    );
+    let staff_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_prospects
+         WHERE workspace_id=$1 AND lower(external_identity)='wojciech_bator'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(staff_rows == 0, "staff identity entered prospect spine");
+
+    // A later explicit test exclusion suppresses a prospect that already
+    // exists, but leaves its observation history intact for audit.
+    let before_observations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_prospect_observations WHERE workspace_id=$1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    crowdrelay_infra::fan_prospect_exclusions::exclude_identity(
+        &pool,
+        ws.into_uuid(),
+        ProspectIdentityKind::PlatformHandle,
+        "instagram",
+        "KUBA_METAL",
+        ProspectIdentityExclusionReason::Test,
+        "fan100-test",
+    )
+    .await?
+    .context("valid existing-prospect exclusion")?;
+    let (status, reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, status_reason FROM fan_prospects
+         WHERE workspace_id=$1 AND lower(external_identity)='kuba_metal'",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        status == "suppressed" && reason.as_deref() == Some("identity_exclusion:test"),
+        "{status} {reason:?}"
+    );
+    let after_observations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fan_prospect_observations WHERE workspace_id=$1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        after_observations == before_observations,
+        "suppression keeps history; it must not invent or delete evidence"
+    );
+
+    // Exclusions are tenant-scoped: the same public handle is a normal person
+    // for another act unless that act explicitly excludes it too.
+    let other = workspace(&pool).await?;
+    let other_source = video(&pool, other).await?;
+    comment(
+        &pool,
+        other,
+        other_source,
+        "instagram",
+        "wojciech_bator",
+        "Kiedy gracie?",
+        0,
+    )
+    .await?;
+    let other_report = ProspectSweep::new(pool.clone(), other, Duration::from_secs(10))
+        .run_once(now)
+        .await?;
+    ensure!(
+        other_report.created == 1 && other_report.excluded_identity == 0,
+        "exclusion leaked across tenants: {other_report:?}"
+    );
     Ok(())
 }
 
