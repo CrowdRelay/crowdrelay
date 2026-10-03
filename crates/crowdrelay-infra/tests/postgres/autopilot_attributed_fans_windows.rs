@@ -157,6 +157,57 @@ async fn a_future_conversion_does_not_teach_an_acquisition_that_has_not_happened
     );
 }
 
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn historical_artifact_growth_measurements_can_never_claim_a_later_publication() {
+    let f = setup().await.expect("fixture");
+    let finished = f.now - time::Duration::days(10);
+    let action = insert_dispatch(&f, "window:old-artifact", finished).await;
+
+    // Recreate a pre-fix artifact action that already owns fan-growth
+    // measurements. A later tracked post in its lineage must not resurrect
+    // those rows and let the artifact producer share the publication's fan.
+    sqlx::query(
+        "UPDATE autopilot_actions SET action_kind='content.artifact.request' WHERE id=$1",
+    )
+    .bind(action)
+    .execute(&f.pool)
+    .await
+    .expect("mark historical artifact");
+    live_post(&f, action, "old-artifact-post", finished + time::Duration::days(1)).await;
+    converted_fan(
+        &f,
+        action,
+        finished + time::Duration::days(2),
+        finished + time::Duration::days(2),
+        "active",
+    )
+    .await;
+    let measurement = queue_measurement(
+        &f,
+        action,
+        AutopilotMeasurementKind::IncrementalFanGrowth3d,
+        0.0,
+        finished,
+    )
+    .await;
+
+    let result = f
+        .repository
+        .observe_measurement(f.workspace_id, &measurement, f.now)
+        .await;
+    match result {
+        Err(crowdrelay_application::RepositoryError::ConflictBecause(reason)) => {
+            assert_eq!(
+                reason,
+                AutopilotMeasurementKind::ARTIFACT_NOT_PUBLICATION,
+                "old artifact rows are audit only; the publication owns the fan"
+            );
+        }
+        other => panic!("artifact production must never claim a later publication: {other:?}"),
+    }
+}
+
 /// The content 7d kinds share the same publication clock: a measurement the
 /// dispatcher scheduled at action-finish waits out the real `posted_at`
 /// window rather than reading a four-day partial as a finished seven.

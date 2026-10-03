@@ -209,31 +209,49 @@ pub(super) async fn load_growth_evidence_on(
     .await
 }
 
-/// Counts, per context, the dispatches whose outcome was actually measured.
+/// Counts, per context, the distinct actions whose *external* outcome was
+/// actually measured.
 ///
-/// The count is of resolved evidence rows, not of actions: an action that
-/// dispatched and is still inside its measurement window has taught the
-/// context nothing yet, and counting it would let a context earn unattended
-/// execution by acting rather than by learning. `resolved_at IS NOT NULL` is
-/// the whole difference.
+/// This is an authority counter, not a generic learning counter. Internal
+/// process checks and proximal production facts remain useful evidence for
+/// diagnosis and ranking, but they cannot earn the right to act on people
+/// unattended. The distinction is load-bearing: a context must not reach its
+/// autonomy floor because its own worker produced twenty valid drafts.
 ///
-/// The context lives on the action rather than the evidence row, so this joins
-/// rather than reading one table. A context with no measured outcome produces
-/// no row and is absent from the ledger, which reads as none.
+/// A row counts only when:
+/// - the action's evidence resolved;
+/// - a measurement produced a durable `autopilot_outcomes` row classified
+///   `improved`; and
+/// - that measurement kind is classified as earning unattended authority.
+///
+/// Multiple qualifying measurements for one action count once. The floor asks
+/// how many real interventions were observed, not how many horizons one
+/// intervention scheduled.
 pub(in crate::autopilot) async fn load_resolved_evidence_counts(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
 ) -> Result<EvidenceLedger, RepositoryError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
+    let rows: Vec<(String, uuid::Uuid, String)> = sqlx::query_as(
         r#"
-        SELECT a.context, COUNT(*)
-        FROM growth_evidence e
-        JOIN autopilot_actions a
-          ON a.id = e.action_id
-         AND a.workspace_id = e.workspace_id
-        WHERE e.workspace_id = $1
-          AND e.resolved_at IS NOT NULL
-        GROUP BY a.context
+        SELECT DISTINCT a.context, a.id, measurement.measurement_kind
+        FROM growth_evidence AS evidence
+        JOIN autopilot_actions AS a
+          ON a.id = evidence.action_id
+         AND a.workspace_id = evidence.workspace_id
+        JOIN autopilot_outcomes AS outcome
+          ON outcome.workspace_id = a.workspace_id
+         AND outcome.action_id = a.id
+         AND outcome.measurement_id IS NOT NULL
+        JOIN autopilot_measurements AS measurement
+          ON measurement.workspace_id = outcome.workspace_id
+         AND measurement.id = outcome.measurement_id
+         AND measurement.action_id = a.id
+        WHERE evidence.workspace_id = $1
+          AND evidence.resolved_at IS NOT NULL
+          -- A cleanly measured zero is useful learning, not earned trust.
+          -- Worsened outcomes have their own authority guardrail; only an
+          -- improvement is evidence that unattended work deserves more room.
+          AND outcome.effect_assessment = 'improved'
         "#,
     )
     .bind(workspace_id.into_uuid())
@@ -241,14 +259,35 @@ pub(in crate::autopilot) async fn load_resolved_evidence_counts(
     .await
     .map_err(map_sqlx)?;
 
-    // A context this build cannot parse is skipped rather than failing the
-    // cycle. Skipping treats it as unmeasured, so it needs approval; failing
-    // would stop every context from evaluating. The first is the safe
-    // direction and the one the policy overview already chose not to take.
-    let counts = rows
+    let mut actions_by_context: std::collections::BTreeMap<
+        AutopilotContext,
+        std::collections::BTreeSet<uuid::Uuid>,
+    > = std::collections::BTreeMap::new();
+    for (context, action_id, kind) in rows {
+        let Some(context) = AutopilotContext::from_storage(&context) else {
+            continue;
+        };
+        let Ok(kind) = super::super::parse_measurement_kind(&kind) else {
+            // Unknown vocabulary earns no authority. Failing closed here
+            // prevents a newer measurement kind from silently widening an
+            // older worker's autonomy.
+            continue;
+        };
+        if kind.earns_unattended_authority() {
+            actions_by_context
+                .entry(context)
+                .or_default()
+                .insert(action_id);
+        }
+    }
+
+    let counts = actions_by_context
         .into_iter()
-        .filter_map(|(context, count)| {
-            AutopilotContext::from_storage(&context).map(|context| (context, count))
+        .map(|(context, actions)| {
+            (
+                context,
+                i64::try_from(actions.len()).unwrap_or(i64::MAX),
+            )
         })
         .collect();
     Ok(EvidenceLedger::from_counts(counts))

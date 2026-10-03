@@ -20,12 +20,16 @@
 //!    moderators. Either holds every draft for a person until the window
 //!    passes.
 //! 4. **The daily ceiling is earned.** One post a day until posts have
-//!    demonstrably survived: each block of posts that stayed up for a week —
-//!    seen live by a removal-aware read, not merely unreported — earns one
-//!    more, to a hard ceiling. Any removal in the window drops it back.
+//!    demonstrably survived *and somebody in the community responded*: each
+//!    block of such posts earns one more, to a hard ceiling. Staying up while
+//!    being ignored is not evidence that the machine understands the room.
+//! 5. **One current moderation verdict revokes unattended posting.** The
+//!    stronger account halt still needs the site filter or repeated removals,
+//!    but after one moderator/AutoModerator "no", only a person may decide
+//!    whether posting elsewhere is appropriate until the 30-day window ages out.
 //!
-//! Fail closed: a post whose removal state was never read has not survived.
-//! It earns nothing and proves nothing.
+//! Fail closed: a post whose removal state or audience response was never read
+//! earns nothing and proves nothing.
 
 use time::{Duration, OffsetDateTime};
 
@@ -81,6 +85,11 @@ pub struct PostRecord {
     /// The latest removal-aware read that saw the post live. `None` when no
     /// read could establish removal state at all.
     pub last_seen_live_at: Option<OffsetDateTime>,
+    /// Whether the community did anything beyond Reddit's initial score:
+    /// latest score > 1 or at least one comment. "Not removed" is safety
+    /// evidence; this is the minimal audience signal required before that post
+    /// may teach the machine that its judgement belongs in the room.
+    pub community_responded: bool,
 }
 
 /// How long a removal keeps the account halted or the ceiling at its floor.
@@ -91,17 +100,18 @@ pub const REPEATED_REMOVALS_HALT: usize = 2;
 pub const SUBREDDIT_MEMORY: Duration = Duration::days(180);
 /// A post must be at least this old to count as survived.
 pub const SURVIVAL_AGE: Duration = Duration::days(7);
-/// …and must have been seen live at least this long after posting. Automod
-/// acts at once and moderators within a day or two; a post last checked an
-/// hour after going up has not survived anything.
-pub const SURVIVAL_OBSERVED_AFTER: Duration = Duration::hours(48);
+/// …and must have been seen live at least this long after posting. The metrics
+/// poller carries a low-frequency tail past this boundary; a post last checked
+/// on day two has not proved that it survived the week.
+pub const SURVIVAL_OBSERVED_AFTER: Duration = Duration::days(7);
 /// A fresh automation does not get to experiment on the band's public
 /// identity. At least this many posts must have been published and then
-/// observed alive past the moderation window before unattended posting is
-/// earned. Those seed posts may be published manually; the point is that a
-/// person proves the room/copy fit before the machine is trusted with it.
+/// observed alive past the moderation window *and* received a real community
+/// response before unattended posting is earned. Those seed posts may be
+/// published manually; the point is that people prove the room/copy fit
+/// before the machine is trusted with it.
 pub const MIN_SURVIVED_POSTS_FOR_AUTONOMY: usize = 3;
-/// Survived posts that earn one more post per day.
+/// Survived, audience-responded posts that earn one more post per day.
 pub const SURVIVED_POSTS_PER_STEP: usize = 5;
 /// The floor: one post a day, which reads as somebody who posts occasionally.
 pub const BASE_DAILY_CAP: u32 = 1;
@@ -165,24 +175,69 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
             daily_cap: BASE_DAILY_CAP,
         };
     }
-    let survived = history.iter().filter(|post| survived(post, now)).count();
-    let earned = u32::try_from(survived / SURVIVED_POSTS_PER_STEP).unwrap_or(u32::MAX);
+    let quality_survived = history
+        .iter()
+        .filter(|post| survived_with_signal(post, now))
+        .count();
+    let earned =
+        u32::try_from(quality_survived / SURVIVED_POSTS_PER_STEP).unwrap_or(u32::MAX);
     RedditStanding::Open {
         daily_cap: BASE_DAILY_CAP.saturating_add(earned).min(MAX_DAILY_CAP),
     }
 }
 
-/// Whether unattended posting has earned the right to use the account.
-///
-/// Rate limits answer "how much"; this answers the prior question "may the
-/// machine publish at all yet?". A clean slate is not evidence of judgement.
-/// The first posts are the calibration set a person publishes and the worker
-/// observes for removals. Only then may automation take over.
-#[must_use]
-pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
-    history.iter().filter(|post| survived(post, now)).count() >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
+/// Why unattended posting has not been earned (or has been revoked).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyHoldReason {
+    RecentModerationVerdict,
+    InsufficientQualityHistory,
 }
 
+impl AutonomyHoldReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RecentModerationVerdict => {
+                "held: a moderator or AutoModerator removed one of our posts in the last 30 days — unattended Reddit posting is revoked; a person must decide what, if anything, is appropriate next"
+            }
+            Self::InsufficientQualityHistory => {
+                "held: unattended Reddit posting is not earned yet — manually publish and observe at least three posts that stay live and receive a real community response; silence is not proof that the machine understands the room"
+            }
+        }
+    }
+}
+
+/// Why unattended posting may not use the account right now.
+///
+/// The stronger account-level breaker still owns site-filter and repeated-
+/// removal emergencies. This gate is intentionally earlier: after a single
+/// moderator verdict the machine loses posting authority even though a person
+/// may still inspect and use the account.
+#[must_use]
+pub fn autonomy_hold_reason(
+    history: &[PostRecord],
+    now: OffsetDateTime,
+) -> Option<AutonomyHoldReason> {
+    let recent_verdict = history.iter().any(|post| {
+        post.removal.is_some_and(RemovalCause::is_verdict)
+            && now - post.removal_seen_at.unwrap_or(post.posted_at) <= REMOVAL_WINDOW
+    });
+    if recent_verdict {
+        return Some(AutonomyHoldReason::RecentModerationVerdict);
+    }
+    let proven = history
+        .iter()
+        .filter(|post| survived_with_signal(post, now))
+        .count()
+        >= MIN_SURVIVED_POSTS_FOR_AUTONOMY;
+    (!proven).then_some(AutonomyHoldReason::InsufficientQualityHistory)
+}
+
+/// Whether unattended posting has earned the right to use the account.
+#[must_use]
+pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
+    autonomy_hold_reason(history, now).is_none()
+}
 /// Whether a community's moderators (or its AutoModerator) removed one of our
 /// posts recently enough that its drafts should go to a person instead.
 #[must_use]
@@ -207,6 +262,10 @@ fn survived(post: &PostRecord, now: OffsetDateTime) -> bool {
             .is_some_and(|seen| seen - post.posted_at >= SURVIVAL_OBSERVED_AFTER)
 }
 
+fn survived_with_signal(post: &PostRecord, now: OffsetDateTime) -> bool {
+    survived(post, now) && post.community_responded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,7 +281,8 @@ mod tests {
             posted_at,
             removal: None,
             removal_seen_at: None,
-            last_seen_live_at: Some(posted_at + Duration::hours(60)),
+            last_seen_live_at: Some(posted_at + Duration::days(8)),
+            community_responded: true,
         }
     }
 
@@ -234,6 +294,7 @@ mod tests {
             removal: Some(cause),
             removal_seen_at: Some(posted_at + Duration::hours(3)),
             last_seen_live_at: None,
+            community_responded: false,
         }
     }
 
@@ -265,6 +326,40 @@ mod tests {
             })
             .collect();
         assert!(!autonomy_proven(&history, now()));
+    }
+
+    #[test]
+    fn ignored_but_unremoved_posts_do_not_earn_autonomy_or_volume() {
+        let ignored: Vec<_> = (8..20)
+            .map(|days| PostRecord {
+                community_responded: false,
+                ..live(days)
+            })
+            .collect();
+        assert!(!autonomy_proven(&ignored, now()));
+        assert_eq!(
+            autonomy_hold_reason(&ignored, now()),
+            Some(AutonomyHoldReason::InsufficientQualityHistory)
+        );
+        assert_eq!(
+            reddit_standing(&ignored, now()),
+            RedditStanding::Open { daily_cap: BASE_DAILY_CAP }
+        );
+    }
+
+    #[test]
+    fn one_recent_moderator_verdict_revokes_unattended_posting() {
+        let mut history: Vec<_> = (8..20).map(live).collect();
+        assert!(autonomy_proven(&history, now()));
+        history.push(removed(2, RemovalCause::Moderator, "metal"));
+        assert!(
+            !autonomy_proven(&history, now()),
+            "a fresh moderation verdict returns Reddit to human control"
+        );
+        assert_eq!(
+            autonomy_hold_reason(&history, now()),
+            Some(AutonomyHoldReason::RecentModerationVerdict)
+        );
     }
 
     #[test]

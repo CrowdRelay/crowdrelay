@@ -170,14 +170,17 @@ const SUBREDDIT_COOLDOWN_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 /// the ten-minute retry window, and still stops rather than retrying forever.
 const MAX_TRANSIENT_ATTEMPTS: i32 = 6;
 
-/// How long after a post was created do we keep polling its metrics.
-/// After this window, engagement is considered stale and polling stops.
-const METRICS_WINDOW: Duration = Duration::from_secs(72 * 60 * 60);
+/// Keep a low-frequency tail beyond the seven-day autonomy boundary. A
+/// worker that stops observing on day three cannot honestly claim on day seven
+/// that the post survived moderation.
+const METRICS_WINDOW: Duration = Duration::from_secs(9 * 24 * 60 * 60);
 
-/// Poll interval: 30 min while a post is under 6h old (when removals land),
-/// then 3h — ~34 reads a post through the one session, not ~288.
+/// Poll 30 min while a post is fresh, then every 3h through the usual
+/// moderation/engagement window, then only once per day. The long tail is
+/// safety evidence, not engagement analytics, so it must be cheap.
 const METRICS_POLL_MIN_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const METRICS_POLL_SETTLED_INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
+const METRICS_POLL_SURVIVAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Maximum posts to poll for metrics in a single cycle. Bounded to keep
 /// the cycle fast even if many posts are in the window.
@@ -1938,8 +1941,8 @@ impl CommunityExecutorWorker {
     /// Polls Reddit for post performance metrics on recently posted content.
     /// Only polls posts that:
     /// - Have `status = 'posted'` with a non-null `reddit_post_id`
-    /// - Were posted within the last `METRICS_WINDOW` (72h)
-    /// - Haven't been polled in the last `METRICS_POLL_MIN_INTERVAL` / `_SETTLED_INTERVAL`
+    /// - Were posted within the last `METRICS_WINDOW` (9d)
+    /// - Haven't been polled in the age-appropriate 30m / 3h / 24h interval
     ///
     /// This is the feedback loop: the system learns which posts generate
     /// engagement (upvotes, comments) and which don't.
@@ -1959,7 +1962,8 @@ impl CommunityExecutorWorker {
                   metrics_last_fetched_at IS NULL
                   OR metrics_last_fetched_at < now() - make_interval(secs => CASE
                       WHEN posted_at > now() - INTERVAL '6 hours' THEN $3::double precision
-                      ELSE $5::double precision END)
+                      WHEN posted_at > now() - INTERVAL '72 hours' THEN $5::double precision
+                      ELSE $6::double precision END)
               )
             ORDER BY posted_at DESC
             LIMIT $4
@@ -1970,6 +1974,7 @@ impl CommunityExecutorWorker {
         .bind(METRICS_POLL_MIN_INTERVAL.as_secs() as i64)
         .bind(METRICS_POLL_BATCH)
         .bind(METRICS_POLL_SETTLED_INTERVAL.as_secs() as i64)
+        .bind(METRICS_POLL_SURVIVAL_INTERVAL.as_secs() as i64)
         .fetch_all(&self.pool)
         .await?;
 

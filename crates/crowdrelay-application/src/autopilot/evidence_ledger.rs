@@ -1,4 +1,4 @@
-//! How much measured evidence each context has behind it.
+//! How much externally-observed evidence each context has earned toward autonomy.
 //!
 //! Its own module rather than a section of `model.rs`: the authority gate asks
 //! two separate questions of a context, and the answer to "how confident are
@@ -11,7 +11,10 @@ use crowdrelay_domain::autonomy::{BootstrapAllowance, ContextEvidence, EvidenceC
 
 use super::model::AutopilotContext;
 
-/// How much measured evidence each context has behind it, read once per cycle.
+/// How many distinct externally-observed interventions each context has
+/// behind it, read once per cycle. Internal process checks may teach the
+/// learner, but they deliberately do not appear here and cannot unlock
+/// unattended execution.
 ///
 /// The authority gate asks a context how confident it is and, until this
 /// existed, had no way to ask what that confidence was computed from. The two
@@ -37,7 +40,7 @@ pub struct EvidenceLedger {
 }
 
 impl EvidenceLedger {
-    /// Builds a ledger from `(context, resolved outcome count)` pairs.
+    /// Builds a ledger from `(context, authority-earning action count)` pairs.
     ///
     /// The warm-up is absent until [`Self::with_bootstrap`] attaches it, which
     /// means a caller that forgets it gets no warm-up at all. That is the
@@ -75,7 +78,7 @@ impl EvidenceLedger {
         }
     }
 
-    /// Every context that has at least one measured outcome, for the posture
+    /// Every context that has at least one authority-earning outcome, for the posture
     /// read. Contexts with none are deliberately omitted rather than rendered
     /// as zero rows.
     pub fn measured(&self) -> impl Iterator<Item = (AutopilotContext, i64)> + '_ {

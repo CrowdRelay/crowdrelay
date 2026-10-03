@@ -437,6 +437,11 @@ impl AutopilotMeasurementKind {
     /// not have produced one.
     pub const NO_TRACKED_LINK: &'static str = "no_tracked_link";
 
+    /// Historical artifact requests used to schedule attributed fan-growth
+    /// windows at production time. Producing a draft is not publication, so
+    /// those old rows are audit history only and can never earn fan credit.
+    pub const ARTIFACT_NOT_PUBLICATION: &'static str = "artifact_not_publication";
+
     /// Why an agent-run measurement was abandoned: the stack has no agent
     /// service, so the task rows the observation joins through do not exist
     /// and never will on this deployment. "Cannot ever be read" is a
@@ -449,13 +454,14 @@ impl AutopilotMeasurementKind {
     /// them and moves on without marking the cycle degraded. Since fan
     /// outcomes became attributed (#325), `no_tracked_link` is routine, and
     /// counting it as a degraded phase turned the cycle ledger into noise.
-    pub const ABANDONMENTS: [&'static str; 7] = [
+    pub const ABANDONMENTS: [&'static str; 8] = [
         Self::NEVER_PUBLISHED,
         Self::EVENT_CANCELLED,
         Self::NO_ISSUED_PASSES,
         Self::NO_RELEASE_LINK,
         Self::NO_RELEASE_SERIES_DATA,
         Self::NO_TRACKED_LINK,
+        Self::ARTIFACT_NOT_PUBLICATION,
         Self::NO_AGENT_SERVICE,
     ];
 
@@ -496,6 +502,30 @@ impl AutopilotMeasurementKind {
         matches!(
             self,
             Self::SignalInstalls1d | Self::AgentRunSignalInstalls7d
+        )
+    }
+
+    /// Whether resolving this measurement may help a context earn unattended
+    /// external authority.
+    ///
+    /// This is deliberately stricter than "learnable". The brain may learn
+    /// diagnostics from its own machinery, but it must not become trusted to
+    /// act on people because a worker produced a draft, a scanner found rows,
+    /// or an artifact was later reused. Authority is earned from an outcome
+    /// outside the machine: audience response, attributed fan movement,
+    /// replies, purchases, attendance, engagement, delivery harm, etc.
+    #[must_use]
+    pub const fn earns_unattended_authority(self) -> bool {
+        !matches!(
+            self,
+            Self::AgentRunOutcomeQuality1h
+                | Self::ScannerDiscoveryQuality1h
+                | Self::ScannerDiscoveryQuality14d
+                | Self::StrategistInsightQuality1h
+                | Self::StrategistInsightQuality14d
+                | Self::ArtifactOutcome7d
+                | Self::SignalInstalls1d
+                | Self::AgentRunSignalInstalls7d
         )
     }
 

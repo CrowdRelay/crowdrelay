@@ -635,7 +635,9 @@ fn claimed_measurement(
     })
 }
 
-fn parse_measurement_kind(value: &str) -> Result<AutopilotMeasurementKind, RepositoryError> {
+pub(in crate::autopilot) fn parse_measurement_kind(
+    value: &str,
+) -> Result<AutopilotMeasurementKind, RepositoryError> {
     match value {
         "ticket_revenue_72h" => Ok(AutopilotMeasurementKind::TicketRevenue72h),
         "merch_gross_proxy_7d" => Ok(AutopilotMeasurementKind::MerchGrossProxy7d),
