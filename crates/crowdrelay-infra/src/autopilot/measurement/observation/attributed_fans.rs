@@ -126,9 +126,9 @@ pub(super) async fn observe_attributed_fans(
     .map_err(map_sqlx)
 }
 
-/// When the lineage's first tracked post went live; NULL when none did.
-/// `posted_at` is the "was live" fact in all four ledgers — a draft, a failed
-/// send or a row awaiting a manual post has none.
+/// When the lineage's first tracked publication has durable provider proof;
+/// NULL when none did. A `posted_at` timestamp is internal state, not proof
+/// that an external audience could actually see the post.
 pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST: &str = r#"
     WITH lineage AS (
         SELECT $2::uuid AS action_id
@@ -144,22 +144,30 @@ pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST: &str = r#"
     FROM (
         SELECT posted_at FROM community_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL AND smart_link LIKE '/l/%'
+          AND COALESCE(NULLIF(btrim(reddit_post_id),''),NULLIF(btrim(reddit_post_url),'')) IS NOT NULL
         UNION ALL
         SELECT posted_at FROM social_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+          AND COALESCE(NULLIF(btrim(platform_post_id),''),NULLIF(btrim(platform_post_url),'')) IS NOT NULL
         UNION ALL
         SELECT posted_at FROM telegram_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+          AND message_id IS NOT NULL
         UNION ALL
         SELECT posted_at FROM discord_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+          AND NULLIF(btrim(message_id),'') IS NOT NULL
         UNION ALL
         -- Non-post delivery lanes bind the redirect directly to the action.
         -- finished_at is the delivery-success anchor; link.created_at can be
@@ -201,22 +209,30 @@ pub(in crate::autopilot::measurement) const FIRST_TRACKED_POST_WITH_TASKS: &str 
     FROM (
         SELECT posted_at FROM community_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL AND smart_link LIKE '/l/%'
+          AND COALESCE(NULLIF(btrim(reddit_post_id),''),NULLIF(btrim(reddit_post_url),'')) IS NOT NULL
         UNION ALL
         SELECT posted_at FROM social_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+          AND COALESCE(NULLIF(btrim(platform_post_id),''),NULLIF(btrim(platform_post_url),'')) IS NOT NULL
         UNION ALL
         SELECT posted_at FROM telegram_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+          AND message_id IS NOT NULL
         UNION ALL
         SELECT posted_at FROM discord_posts
         WHERE workspace_id = $1 AND action_id IN (SELECT action_id FROM lineage)
+          AND status = 'posted'
           AND posted_at IS NOT NULL
           AND (smart_link LIKE '/l/%' OR smart_link_id IS NOT NULL)
+          AND NULLIF(btrim(message_id),'') IS NOT NULL
         UNION ALL
         -- Non-post delivery lanes bind the redirect directly to the action.
         -- finished_at is the delivery-success anchor; link.created_at can be
