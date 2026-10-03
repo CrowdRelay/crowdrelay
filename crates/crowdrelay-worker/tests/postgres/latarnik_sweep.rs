@@ -651,22 +651,10 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     let (done, _) = settle(&pool, w, now + Span::hours(1)).await?;
     ensure!(done == 0, "a tap earns nothing");
 
-    // A real human follows the referral. That click is not success, but it is
-    // durable evidence the cadence policy can see; the show is also remembered
-    // so this person can never be asked about the same fact twice.
+    // A real human follows the action-owned mission link. The canonical click
+    // ledger is enough; the secondary /r/ interaction receipt may arrive late
+    // or be absent and must not decide carrier yield.
     let visitor = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO fan_provenance_events
-             (workspace_id, event_kind, channel, source_target, anonymous_visitor_id,
-              attribution_method, attribution_confidence, occurred_at)
-         VALUES ($1,'interaction','referral',$2,$3,'referral_click',1.0,$4)",
-    )
-    .bind(w)
-    .bind(format!("fan:{kuba}"))
-    .bind(visitor)
-    .bind(now + Span::minutes(30))
-    .execute(&pool)
-    .await?;
     sqlx::query(
         "INSERT INTO click_events
              (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
@@ -694,9 +682,9 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
         "the already-asked show is frozen in mission history"
     );
 
-    // Someone Kuba brought arrives through his code after the tap: completed.
-    // The same visitor id follows the tracked click into the acquisition row,
-    // and the normal last-tracked-click provenance names the mission action.
+    // Hostile control: Kuba happens to get a completely separate qualified
+    // referral inside the mission's time window. Before the exact causal
+    // funnel this was enough to mark the tapped mission completed.
     let code_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
     )
@@ -704,6 +692,40 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     .bind(kuba)
     .fetch_one(&pool)
     .await?;
+    let unrelated = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans
+             (id, workspace_id, normalized_email, status, created_at)
+         VALUES ($1,$2,'unrelated-referral@fan.test','active',$3)",
+    )
+    .bind(unrelated)
+    .bind(w)
+    .bind(now + Span::hours(1))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO referral_attributions
+             (workspace_id, referrer_fan_id, referred_fan_id, referral_code_id, accepted_at,
+              status, qualified_at)
+         VALUES ($1,$2,$3,$4,$5,'qualified',$5)",
+    )
+    .bind(w)
+    .bind(kuba)
+    .bind(unrelated)
+    .bind(code_id)
+    .bind(now + Span::hours(1))
+    .execute(&pool)
+    .await?;
+    let (false_done, _) = settle(&pool, w, now + Span::hours(1)).await?;
+    ensure!(
+        false_done == 0,
+        "same-referrer timing is not mission causality"
+    );
+
+    // Someone Kuba brought arrives through the mission-owned link and his code:
+    // only this exact visitor/action/referral chain can complete the mission.
+    // The same visitor id follows the tracked click into the acquisition row,
+    // and the normal last-tracked-click provenance names the mission action.
     let friend = Uuid::now_v7();
     let acquired_at = now + Span::hours(2);
     sqlx::query(
