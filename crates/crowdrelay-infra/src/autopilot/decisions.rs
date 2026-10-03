@@ -170,28 +170,10 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
     async fn load_delivery_lane_verdicts(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<
-        Vec<(
-            crowdrelay_domain::lane_ledger::LaneScope,
-            String,
-            crowdrelay_domain::lane_ledger::Verdict,
-        )>,
-        RepositoryError,
-    > {
-        crate::lane_ledger::lane_rows(&self.pool, workspace_id.into_uuid(), crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS)
-            .await
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|row| {
-                        (
-                            row.scope,
-                            row.lane,
-                            crowdrelay_domain::lane_ledger::verdict(&row.counts),
-                        )
-                    })
-                    .collect()
-            })
-            .map_err(map_sqlx)
+    ) -> Result<Vec<crowdrelay_application::autopilot::DeliveryLaneVerdict>, RepositoryError> {
+        crate::lane_ledger::lane_verdicts(
+            &self.pool, workspace_id.into_uuid(), crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS,
+        ).await.map_err(map_sqlx)
     }
 
     async fn load_signal_push_audience(
