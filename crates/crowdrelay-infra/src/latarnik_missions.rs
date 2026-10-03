@@ -11,10 +11,15 @@
 //! shipped default, because a default URL in a text a person sends to a friend
 //! is a link to somebody else's website.
 
-use crowdrelay_domain::latarnik_mission::{
-    AdvocacyYield, Language, MISSION_LIFETIME, MissionContext, MissionPlan, ReleaseFact,
-    SHOW_HORIZON, ShowFact,
+use crowdrelay_application::autopilot::AutopilotActionPayload;
+use crowdrelay_domain::{
+    FanId, TraceContext, WorkspaceId,
+    latarnik_mission::{
+        AdvocacyYield, Language, MISSION_LIFETIME, MissionContext, MissionPlan, ReleaseFact,
+        SHOW_HORIZON, ShowFact,
+    },
 };
+use serde_json::json;
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -262,16 +267,267 @@ pub async fn offer(
     pool: &PgPool,
     workspace_id: Uuid,
     role_id: Uuid,
+    fan_id: Uuid,
     plan: &MissionPlan,
     now: OffsetDateTime,
 ) -> Result<Option<Uuid>, LatarnikError> {
-    Ok(sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO latarnik_missions
-             (workspace_id, role_id, kind, event_id, content_source_id, prompt, share_text,
-              offered_at, expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT DO NOTHING
-         RETURNING id",
+    let mut tx = pool.begin().await?;
+
+    // The carrier can pause or leave between the sweep read and this write.
+    // Re-pin the person and capability under the same transaction that will
+    // expose the card; stale eligibility produces no mission.
+    let still_eligible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM latarnik_roles lr
+            JOIN person_identities pi
+              ON pi.workspace_id = lr.workspace_id
+             AND pi.person_id = lr.person_id
+             AND pi.kind = 'email'
+             AND pi.platform IS NULL
+            JOIN fans fan
+              ON fan.workspace_id = pi.workspace_id
+             AND fan.normalized_email = pi.value
+            WHERE lr.workspace_id = $1
+              AND lr.id = $2
+              AND fan.id = $3
+              AND lr.status = 'active'
+              AND lr.capabilities ? 'referral_link'
+              AND fan.status = 'active'
+              AND fan.deleted_at IS NULL
+              AND fan.merged_into_fan_id IS NULL
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(role_id)
+    .bind(fan_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !still_eligible {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    // Re-read the trusted first-party root at the write seam. The chooser
+    // built the direct referral destination from this setting, but settings
+    // can change between its read and this transaction.
+    let Some(site_root) = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM tenant_settings
+         WHERE workspace_id = $1 AND key = 'member_site_base_url'",
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|value| value.trim().trim_end_matches('/').to_owned())
+    .filter(|value| !value.is_empty())
+    else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    if !plan
+        .destination_url
+        .starts_with(&format!("{site_root}/r/"))
+        || !plan.share_text.contains(&plan.destination_url)
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    // One fact is one durable intervention forever. The chooser also keeps
+    // history, but the action key is the race-safe backstop across workers.
+    let anchor = plan
+        .event_id
+        .or(plan.content_source_id)
+        .unwrap_or(role_id);
+    let decision_key = format!(
+        "latarnik.mission:{}:{}:{}",
+        role_id,
+        plan.kind.as_str(),
+        anchor
+    );
+    let idempotency_key = format!(
+        "latarnik-mission:{}:{}:{}",
+        role_id,
+        plan.kind.as_str(),
+        anchor
+    );
+    if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT mission.id
+        FROM latarnik_missions mission
+        JOIN autopilot_actions action
+          ON action.workspace_id = mission.workspace_id
+         AND action.id = mission.action_id
+        WHERE mission.workspace_id = $1
+          AND action.idempotency_key = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Some(existing));
+    }
+
+    let action_id = Uuid::now_v7();
+    let slug = format!("latarnik-{}", action_id.simple());
+    let tracked_url = format!("{site_root}/l/{slug}");
+    let share_text = plan
+        .share_text
+        .replacen(&plan.destination_url, &tracked_url, 1);
+    let payload = AutopilotActionPayload::OfferLatarnikMission {
+        role_id,
+        fan_id: FanId::from_uuid(fan_id),
+        mission_kind: plan.kind.as_str().to_owned(),
+        event_id: plan.event_id,
+        content_source_id: plan.content_source_id,
+        prompt: plan.prompt.clone(),
+        share_text: share_text.clone(),
+        destination_url: plan.destination_url.clone(),
+    };
+    let payload_json = serde_json::to_value(&payload)
+        .map_err(|error| LatarnikError::Database(sqlx::Error::Protocol(error.to_string())))?;
+    let trace = TraceContext::root(WorkspaceId::from_uuid(workspace_id));
+
+    let decision_id = match sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO autopilot_decisions (
+            id, workspace_id, decision_key, context, subject_kind, subject_id,
+            decision_kind, confidence_basis_points, disposition, reason,
+            input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id
+        ) VALUES (
+            $1,$2,$3,'fan_lifecycle','fan',$4,'latarnik.mission.offer',
+            10000,'auto_execute',
+            'Active Latarnik has one fresh, bounded referral mission',
+            $5,$6,$7,$8,$9
+        )
+        ON CONFLICT (workspace_id, decision_key) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(&decision_key)
+    .bind(fan_id)
+    .bind(json!({
+        "role_id": role_id,
+        "mission_kind": plan.kind.as_str(),
+        "event_id": plan.event_id,
+        "content_source_id": plan.content_source_id,
+    }))
+    .bind(json!({
+        "surface": "authenticated_signal",
+        "one_open_mission": true,
+        "one_person_ask": true,
+        "outbound_send": false,
+    }))
+    .bind(&payload_json)
+    .bind(now)
+    .bind(trace.trace_id().into_uuid())
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        Some(id) => id,
+        None => sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM autopilot_decisions
+             WHERE workspace_id = $1 AND decision_key = $2",
+        )
+        .bind(workspace_id)
+        .bind(&decision_key)
+        .fetch_one(&mut *tx)
+        .await?,
+    };
+
+    let action_trace = TraceContext::for_action(
+        WorkspaceId::from_uuid(workspace_id),
+        trace.trace_id(),
+        action_id,
+        Some(decision_id),
+    );
+    let action_inserted = sqlx::query(
+        r#"
+        INSERT INTO autopilot_actions (
+            id, workspace_id, decision_id, context, action_kind,
+            subject_kind, subject_id, idempotency_key, payload, status,
+            action_class, approved_at, approved_by, available_at,
+            finished_at, trace_id, causation_id
+        ) VALUES (
+            $1,$2,$3,'fan_lifecycle','latarnik.mission.offer',
+            'fan',$4,$5,$6,'succeeded','first_party_reversible',
+            $7,'policy:latarnik_mission',$7,$7,$8,$9
+        )
+        ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+        "#,
+    )
+    .bind(action_id)
+    .bind(workspace_id)
+    .bind(decision_id)
+    .bind(fan_id)
+    .bind(&idempotency_key)
+    .bind(&payload_json)
+    .bind(now)
+    .bind(action_trace.trace_id().into_uuid())
+    .bind(action_trace.causation_id().map(|id| id.into_uuid()))
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if action_inserted == 0 {
+        let existing = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT mission.id
+            FROM latarnik_missions mission
+            JOIN autopilot_actions action
+              ON action.workspace_id = mission.workspace_id
+             AND action.id = mission.action_id
+            WHERE mission.workspace_id = $1
+              AND action.idempotency_key = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(&idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        return Ok(existing);
+    }
+
+    // The action must exist first: smart_links.action_id has a workspace-scoped
+    // FK. Both rows still commit atomically with the mission.
+    let smart_link_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO smart_links (
+            workspace_id, slug, destination_url, active, channel_source, action_id
+        ) VALUES ($1,$2,$3,true,'latarnik',$4)
+        ON CONFLICT (workspace_id, slug) DO UPDATE SET
+            destination_url = EXCLUDED.destination_url,
+            active = true,
+            channel_source = EXCLUDED.channel_source,
+            action_id = EXCLUDED.action_id
+        RETURNING id
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(&slug)
+    .bind(&plan.destination_url)
+    .bind(action_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let mission_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO latarnik_missions (
+            workspace_id, role_id, kind, event_id, content_source_id,
+            prompt, share_text, action_id, smart_link_id, offered_at, expires_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        "#,
     )
     .bind(workspace_id)
     .bind(role_id)
@@ -279,11 +535,32 @@ pub async fn offer(
     .bind(plan.event_id)
     .bind(plan.content_source_id)
     .bind(&plan.prompt)
-    .bind(&plan.share_text)
+    .bind(&share_text)
+    .bind(action_id)
+    .bind(smart_link_id)
     .bind(now)
     .bind(now + MISSION_LIFETIME)
-    .fetch_optional(pool)
-    .await?)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(mission_id) = mission_id else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    sqlx::query(
+        "INSERT INTO autopilot_action_attempts
+             (workspace_id, action_id, attempt_number, outcome, occurred_at)
+         VALUES ($1,$2,1,'succeeded',$3)",
+    )
+    .bind(workspace_id)
+    .bind(action_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(Some(mission_id))
 }
 
 /// Closes what has run its course, in order: a mission whose person was
