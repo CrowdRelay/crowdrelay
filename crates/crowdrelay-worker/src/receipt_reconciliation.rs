@@ -444,14 +444,16 @@ impl ReceiptReconciliationWorker {
         Ok(resolved)
     }
 
-    /// Sweep 2c: resolve `agent.content.request` actions from their post
-    /// ledgers (`social_posts`, `telegram_posts`, `discord_posts`). These
-    /// executors are internal workers that don't file execution reports —
-    /// the post tables ARE their receipts. The outbox event is just the
-    /// dispatch notification, not provider-confirmed delivery.
+    /// Sweep 2c: resolve drafted-content and weekly join-ask actions from
+    /// their post ledgers (`social_posts`, `telegram_posts`,
+    /// `discord_posts`). These executors are internal workers that don't file
+    /// execution reports — the post tables ARE their receipts. A `posted`
+    /// status alone is not enough: the row must also carry the provider's
+    /// durable id/url/message id.
     ///
     /// Each post table has the same status lifecycle:
-    ///   `posted` → provider accepted → succeeded
+    ///   `posted` + provider receipt → succeeded
+    ///   `posted` without provider receipt → confirmation lost
     ///   `failed` → definitive failure (or crash-marked → confirmation lost)
     ///   `awaiting_manual_post` / `pending` / `posting` / `rate_limited` → in flight
     async fn resolve_content_posts(
@@ -1052,7 +1054,8 @@ fn community_post_to_evidence(
 /// `discord_posts` state into canonical [`ResolutionEvidence`] facts. All
 /// three tables share the same status vocabulary, so one adapter serves all.
 ///
-/// `posted` → provider confirmed the submission (succeeded).
+/// `posted` + a durable provider receipt → confirmed submission (succeeded).
+/// A bare `posted` status is confirmation-lost, never success.
 /// `failed` with a crash prefix → confirmation lost (the post may have
 /// succeeded but we lost the receipt).
 /// `failed` without a crash prefix → definitive failure.
