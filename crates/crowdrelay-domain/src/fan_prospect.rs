@@ -114,6 +114,74 @@ impl ProspectStatus {
     }
 }
 
+/// The public identity key used to recognize a prospect on a platform.
+///
+/// These are also the only identities that may be excluded from FAN SCOUT.
+/// Email is deliberately absent: prospect discovery is public-surface identity,
+/// while email belongs to first-party fan/contact state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProspectIdentityKind {
+    PlatformHandle,
+    PlatformUserId,
+}
+
+impl ProspectIdentityKind {
+    pub const ALL: [Self; 2] = [Self::PlatformHandle, Self::PlatformUserId];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PlatformHandle => "platform_handle",
+            Self::PlatformUserId => "platform_user_id",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+
+    #[must_use]
+    pub fn normalize(self, raw: &str) -> Option<String> {
+        match self {
+            Self::PlatformHandle => normalize_handle(raw),
+            Self::PlatformUserId => normalize_platform_user_id(raw),
+        }
+    }
+}
+
+/// Why an identity is never a FAN SCOUT prospect.
+///
+/// This is an explicit durable declaration, not a classifier guess. A staff
+/// member, the act's own account, or a test identity must not enter acquisition
+/// metrics or consume the autonomous reply envelope.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProspectIdentityExclusionReason {
+    Staff,
+    OwnAccount,
+    Test,
+}
+
+impl ProspectIdentityExclusionReason {
+    pub const ALL: [Self; 3] = [Self::Staff, Self::OwnAccount, Self::Test];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Staff => "staff",
+            Self::OwnAccount => "own_account",
+            Self::Test => "test",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.as_str() == value)
+    }
+}
+
 /// What a public signal was. An observation is evidence, never permission to
 /// contact.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

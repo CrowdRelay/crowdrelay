@@ -68,6 +68,8 @@ pub struct SweepReport {
     pub appended: u64,
     pub already_known: u64,
     pub not_collected: u64,
+    /// Comments belonging to explicit staff/own-account/test identities.
+    pub excluded_identity: u64,
     pub not_an_identity: u64,
     /// Replies the band sent that were recorded as touches this pass.
     pub touched: u64,
@@ -191,6 +193,26 @@ impl ProspectSweep {
                     appended: false, ..
                 } => report.already_known += 1,
                 ObserveOutcome::NotCollected { .. } => report.not_collected += 1,
+                ObserveOutcome::ExcludedIdentity => {
+                    report.excluded_identity += 1;
+                    // The reply worker treats a missing prospect decision as
+                    // "evidence not ready" and retries later. For an explicit
+                    // staff/self/test exclusion, waiting will never make the
+                    // person eligible, so retire an unanswered row here rather
+                    // than spending an LLM/cycle on it forever. Historical
+                    // replied/skipped rows are untouched.
+                    sqlx::query(
+                        "UPDATE community_comments
+                         SET status='skipped',
+                             hold_reason='FAN SCOUT: explicit staff/own-account/test identity exclusion',
+                             updated_at=now()
+                         WHERE workspace_id=$1 AND id=$2 AND status='unanswered'",
+                    )
+                    .bind(ws)
+                    .bind(comment.id)
+                    .execute(&self.pool)
+                    .await?;
+                }
                 ObserveOutcome::NotAnIdentity => report.not_an_identity += 1,
                 ObserveOutcome::IdentityConflict => {
                     tracing::warn!(

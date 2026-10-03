@@ -22,8 +22,8 @@ use crowdrelay_domain::{
         evaluate_fan_prospect,
     },
     fan_prospect::{
-        ObservationKind, ProspectSource, ProspectStatus, display_handle, normalize_handle,
-        normalize_platform, normalize_platform_user_id,
+        ObservationKind, ProspectIdentityKind, ProspectSource, ProspectStatus, display_handle,
+        normalize_handle, normalize_platform, normalize_platform_user_id,
     },
 };
 use sqlx::{FromRow, PgPool};
@@ -65,6 +65,9 @@ pub enum ObserveOutcome {
     Known { prospect_id: Uuid, appended: bool },
     /// The prospect has said no (or is suppressed). Nothing was written.
     NotCollected { prospect_id: Uuid },
+    /// An explicit staff/own-account/test identity exclusion matched. Nothing
+    /// was written, including no person row and no observation.
+    ExcludedIdentity,
     /// Neither a stable platform id nor a valid handle was present.
     NotAnIdentity,
     /// Supplied identities already belong to different people. Ingestion
@@ -122,6 +125,34 @@ pub async fn observe(
     }
     let expires_at = seen.source.expires_at(seen.observed_at);
     let mut tx = pool.begin().await?;
+
+    // Staff, the act's own accounts and declared test identities never enter
+    // the person/prospect spine. Check both stable provider id and handle when
+    // a source supplies both; either one is enough to stop collection.
+    for (kind, value) in [
+        stable_id
+            .as_deref()
+            .map(|value| (ProspectIdentityKind::PlatformUserId, value)),
+        handle
+            .as_deref()
+            .map(|value| (ProspectIdentityKind::PlatformHandle, value)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if crate::fan_prospect_exclusions::identity_is_excluded(
+            &mut tx,
+            workspace_id,
+            kind,
+            &platform,
+            value,
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(ObserveOutcome::ExcludedIdentity);
+        }
+    }
 
     let stable_person = if let Some(stable_id) = stable_id.as_deref() {
         sqlx::query_scalar::<_, Uuid>(

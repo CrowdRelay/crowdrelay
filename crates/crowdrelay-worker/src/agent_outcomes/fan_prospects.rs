@@ -176,6 +176,12 @@ impl AgentOutcomeWorker {
                 )
                 .into())
             }
+            crowdrelay_infra::fan_prospects::ObserveOutcome::ExcludedIdentity => {
+                Err(ungrounded_fan_prospect(
+                    "candidate identity is explicitly excluded from FAN SCOUT",
+                )
+                .into())
+            }
             crowdrelay_infra::fan_prospects::ObserveOutcome::NotAnIdentity => {
                 Err(ungrounded_fan_prospect("candidate identity is unusable").into())
             }
