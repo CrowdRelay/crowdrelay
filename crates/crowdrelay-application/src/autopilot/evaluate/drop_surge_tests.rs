@@ -32,6 +32,7 @@ fn fresh_video_snapshot(
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
     }
 }
@@ -432,6 +433,7 @@ fn a_failed_community_relay_retries_under_an_attempt_key()
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: Some(SocialPostFact {
             title: "rehearsal cut".to_owned(),
             url: Some("https://instagram.com/p/xyz".to_owned()),
