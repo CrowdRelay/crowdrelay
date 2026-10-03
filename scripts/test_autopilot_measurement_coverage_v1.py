@@ -84,9 +84,9 @@ KNOWN_UNMEASURED = {
 # whole purpose is a change the brain can observe; losing its measurement
 # would silently reopen the learning gap this test exists to close.
 MUST_BE_MEASURED = {
-    # A produced artifact is content an audience sees; the fan-growth trio
-    # answers whether the brain's request moved anyone. The empty arm was
-    # how a shipped video left nothing the learner reads back.
+    # Production is observable, but it is not distribution. The artifact arm
+    # must keep exactly one publication-outcome measurement; fan-growth belongs
+    # to the later attributable publish/delivery action.
     "RequestContentArtifact",
     "RequestSignalPush",
     "RequestAgentRun",
@@ -97,6 +97,13 @@ MUST_BE_MEASURED = {
     # clicks and signups through `content_link_clicks_7d` are the observable
     # the action exists to move.
     "PublishJoinAsk",
+}
+
+# Some payloads have a semantically strict measurement cardinality. This pins
+# the production/distribution boundary so a future "improve learning" change
+# cannot silently re-add Y3/Y14/Y30 to an internal asset-production request.
+EXACT_MEASUREMENT_COUNTS = {
+    "RequestContentArtifact": 1,
 }
 
 
@@ -135,6 +142,16 @@ class MeasurementCoverage(unittest.TestCase):
                 f"{variant} schedules no measurement. Its entire purpose is a "
                 f"change the brain can observe, so without one the brain keeps "
                 f"taking this action and never learns whether it works",
+            )
+
+    def test_semantically_strict_measurement_counts(self) -> None:
+        found = arms()
+        for variant, expected in EXACT_MEASUREMENT_COUNTS.items():
+            self.assertEqual(
+                found.get(variant),
+                expected,
+                f"{variant} must schedule exactly {expected} measurement(s); "
+                "production is not publication or fan acquisition",
             )
 
     def test_the_silent_bundle_does_not_grow_unnoticed(self) -> None:
