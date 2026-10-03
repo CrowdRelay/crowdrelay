@@ -27,7 +27,7 @@ fn organic_funnel_template_rank(
     .then_some(1)
 }
 
-pub(super) fn organic_funnel_control_summary(control: OrganicFunnelControl) -> String {
+pub(crate) fn organic_funnel_control_summary(control: OrganicFunnelControl) -> String {
     format!(
         "organic funnel control: directive={} mature_links={} visitors={} signups={} confirmed={} activation={}/{} retention={}/{}",
         control.directive.as_str(),
@@ -42,7 +42,7 @@ pub(super) fn organic_funnel_control_summary(control: OrganicFunnelControl) -> S
     )
 }
 
-pub(super) fn apply_organic_funnel_control(
+pub(crate) fn apply_organic_funnel_control(
     candidates: &mut Vec<ScoredCandidate>,
     control: OrganicFunnelControl,
 ) {

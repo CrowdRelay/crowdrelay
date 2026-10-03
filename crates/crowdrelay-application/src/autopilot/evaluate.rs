@@ -893,38 +893,8 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
-                    // §5: the weekly join-ask rides this context — a post on
-                    // the band's own pages in the band's own words is the
-                    // strategy surface's work. Evaluated for every tenant,
-                    // including one that has written nothing: it is held on
-                    // `NoVariants` rather than skipped, so a workspace nobody
-                    // has set up reports what it is waiting on instead of
-                    // producing a cycle that reads as healthy and empty.
-                    let snapshot = self
-                        .repository
-                        .load_join_ask_snapshot(self.workspace_id, now)
+                    self.evaluate_join_ask_week(&policy, now, &mut limits, &mut report)
                         .await?;
-                    let funnel_control = self
-                        .repository
-                        .load_organic_funnel_control(self.workspace_id, now)
-                        .await?;
-                    if funnel_control.is_none_or(|control| control.directive.permits_join_ask()) {
-                        let evaluation = evaluate_join_ask_candidates(
-                            &snapshot,
-                            &policy,
-                            self.workspace_id,
-                            now,
-                        )?;
-                        report.join_ask_held.extend(evaluation.held);
-                        for candidate in &evaluation.candidates {
-                            self.persist(candidate, &mut limits, &mut report).await?;
-                        }
-                    } else if let Some(control) = funnel_control {
-                        report.gi_dispatch_log.push(format!(
-                            "organic funnel control: held join-ask while directive={} — do not add signups ahead of the current downstream leak",
-                            control.directive.as_str()
-                        ));
-                    }
                 }
                 AutopilotContext::Representation | AutopilotContext::BookingAgent => {
                     // Approaches are band-initiated: the evaluator never
@@ -1014,4 +984,5 @@ include!("evaluate/growth_debt_tests.rs");
 include!("evaluate/content_strategy_tests.rs");
 include!("evaluate/plays_tests.rs");
 include!("evaluate/play_advance.rs");
+include!("evaluate/join_ask_funnel.rs");
 include!("evaluate/support.rs");
