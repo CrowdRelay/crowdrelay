@@ -638,44 +638,14 @@ pub(super) async fn schedule_effect_measurement(
                 }
             }
         }
-        // A Signal push exists to put the app in someone's hand, so measure
-        // exactly that: installs in the week after it went out.
-        //
-        // This sat in the bundled do-nothing arm above with 25 other variants,
-        // which is how production reached 108 succeeded actions and 9 measured
-        // ones. The metric and its observer already existed — only the
-        // scheduling was missing, so the brain kept pushing and never learned
-        // whether any of it worked.
-        //
-        // Baseline is the pre-period install rate: new endpoints created in
-        // the 7 days *before* the push. The observer counts new endpoints in
-        // the 7 days *after*. The effect is then a pre/post comparison —
-        // did the push accelerate installs beyond the baseline rate?
-        AutopilotActionPayload::RequestSignalPush { .. } => {
-            let baseline_installs =
-                pre_action_signal_installs(transaction, workspace_id, now, 7).await?;
-            let baseline_installs_1d =
-                pre_action_signal_installs(transaction, workspace_id, now, 1).await?;
-            plans.push((
-                AutopilotMeasurementKind::AgentRunSignalInstalls7d,
-                action_id.into_uuid(),
-                baseline_installs,
-                now + time::Duration::days(7),
-            ));
-            // Fast checkpoints: 1h outcome quality + 1d signal installs.
-            plans.push((
-                AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
-                action_id.into_uuid(),
-                0.0,
-                now + time::Duration::hours(1),
-            ));
-            plans.push((
-                AutopilotMeasurementKind::SignalInstalls1d,
-                action_id.into_uuid(),
-                baseline_installs_1d,
-                now + time::Duration::days(1),
-            ));
-        }
+        // A Signal push is delivered through fan_push_endpoints, so every
+        // recipient already has Signal push installed before this action can
+        // reach them. Measuring "new installs after the push" would therefore
+        // credit unrelated workspace growth to an action that cannot cause the
+        // claimed outcome. Its delivery/engagement/harm are measured through
+        // the push ledger; install acquisition belongs to actions that actually
+        // bring a person into Signal.
+        AutopilotActionPayload::RequestSignalPush { .. } => {}
         // Agent dispatches: measure whether the worker's intelligence
         // gathering actually grew fans. The baseline is the non-suppressed
         // fans that arrived in the matched window before dispatch; the
@@ -762,24 +732,20 @@ pub(super) async fn schedule_effect_measurement(
                 0.0,
                 now + time::Duration::days(44),
             ));
-            let baseline_installs =
-                pre_action_signal_installs(transaction, workspace_id, now, 7).await?;
-            let baseline_installs_1d =
-                pre_action_signal_installs(transaction, workspace_id, now, 1).await?;
+            // Signal success is action-owned, not a workspace pre/post
+            // counter. The observer follows this dispatch's action lineage to
+            // the exact attributed fan and then to that canonical person's new
+            // active endpoint. Its untreated count is therefore exactly zero.
             plans.push((
                 AutopilotMeasurementKind::AgentRunSignalInstalls7d,
                 action_id.into_uuid(),
-                baseline_installs,
+                0.0,
                 now + time::Duration::days(7),
             ));
-            // Fast checkpoint: 1-day signal installs. The brain gets
-            // next-cycle feedback on whether the worker moved fans toward
-            // Signal within 24 hours, not a week. Its baseline is the one day
-            // of installs before the dispatch, matched to its own width.
             plans.push((
                 AutopilotMeasurementKind::SignalInstalls1d,
                 action_id.into_uuid(),
-                baseline_installs_1d,
+                0.0,
                 now + time::Duration::days(1),
             ));
             } else if !is_relationship_research {
