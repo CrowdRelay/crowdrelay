@@ -96,6 +96,7 @@ fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<Orga
     let activated_mature = sum_rows(&mature, |row| row.activated_mature);
     let retention_mature = sum_rows(&mature, |row| row.retention_mature);
     let retained = sum_rows(&mature, |row| row.retained);
+    let qualified_referrals = sum_rows(&mature, |row| row.qualified_referrals);
 
     let directive = if !recent.is_empty() && unique_visitors == 0 {
         OrganicFunnelDirective::ExpandReach
@@ -107,6 +108,8 @@ fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<Orga
         OrganicFunnelDirective::ActivateFans
     } else if retention_mature > 0 && retained == 0 {
         OrganicFunnelDirective::RetainFans
+    } else if retained > 0 && qualified_referrals == 0 {
+        OrganicFunnelDirective::MultiplyReferrals
     } else {
         return None;
     };
@@ -121,6 +124,7 @@ fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<Orga
         activated_mature,
         retention_mature,
         retained,
+        qualified_referrals,
     })
 }
 
@@ -431,6 +435,12 @@ mod control_tests {
         );
 
         value.retained = 1;
+        assert_eq!(
+            derive_control(&[value.clone()], now).map(|c| c.directive),
+            Some(OrganicFunnelDirective::MultiplyReferrals)
+        );
+
+        value.qualified_referrals = 1;
         assert_eq!(derive_control(&[value], now), None);
     }
 
