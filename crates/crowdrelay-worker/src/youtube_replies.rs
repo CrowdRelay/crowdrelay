@@ -520,14 +520,47 @@ impl YoutubeRepliesWorker {
             .await;
         match result {
             Ok(response) if response.status().is_success() => {
-                let created = response.json::<Created>().await.ok().map(|c| c.id);
-                let reply_id = created.filter(|id| is_youtube_id(id));
+                let reply_id = match response.json::<Created>().await {
+                    Ok(created) if is_youtube_id(&created.id) => created.id,
+                    Ok(_) => {
+                        sqlx::query(
+                            "UPDATE community_comments
+                             SET status='unknown',
+                                 hold_reason='YouTube accepted the reply but returned an unusable provider id; do not resend automatically',
+                                 updated_at=now()
+                             WHERE id=$1 AND workspace_id=$2 AND status='replying'",
+                        )
+                        .bind(id)
+                        .bind(self.workspace_id)
+                        .execute(&self.pool)
+                        .await?;
+                        return Ok(0);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error.without_url(),
+                            "YouTube reply succeeded but provider receipt was unreadable"
+                        );
+                        sqlx::query(
+                            "UPDATE community_comments
+                             SET status='unknown',
+                                 hold_reason='YouTube accepted the reply but the provider receipt was unreadable; do not resend automatically',
+                                 updated_at=now()
+                             WHERE id=$1 AND workspace_id=$2 AND status='replying'",
+                        )
+                        .bind(id)
+                        .bind(self.workspace_id)
+                        .execute(&self.pool)
+                        .await?;
+                        return Ok(0);
+                    }
+                };
                 sqlx::query(
                     r#"
                     UPDATE community_comments
                     SET status = 'replied', reply_comment_id = $3, replied_at = now(),
                         hold_reason = NULL, updated_at = now()
-                    WHERE id = $1 AND workspace_id = $2
+                    WHERE id = $1 AND workspace_id = $2 AND status = 'replying'
                     "#,
                 )
                 .bind(id)
@@ -537,11 +570,38 @@ impl YoutubeRepliesWorker {
                 .await?;
                 Ok(1)
             }
+            Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                // 429 is an explicit refusal before the side effect. This is
+                // the only post-attempt response that is automatically retried.
+                sqlx::query(
+                    r#"
+                    UPDATE community_comments
+                    SET status = CASE WHEN $3 >= $4 THEN 'failed' ELSE 'approved' END,
+                        hold_reason = CASE
+                            WHEN $3 >= $4 THEN 'gave up: YouTube kept rate-limiting'
+                            ELSE 'waiting: YouTube rate limited the reply'
+                        END,
+                        not_before = now() + make_interval(mins => $5),
+                        updated_at = now()
+                    WHERE id = $1 AND workspace_id = $2 AND status='replying'
+                    "#,
+                )
+                .bind(id)
+                .bind(self.workspace_id)
+                .bind(attempts + 1)
+                .bind(MAX_ATTEMPTS)
+                .bind(RETRY_BACKOFF_MINUTES)
+                .execute(&self.pool)
+                .await?;
+                Ok(0)
+            }
             Ok(response) if response.status().is_client_error() => {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 sqlx::query(
-                    "UPDATE community_comments SET status = 'failed', hold_reason = $3, updated_at = now() WHERE id = $1 AND workspace_id = $2",
+                    "UPDATE community_comments
+                     SET status = 'failed', hold_reason = $3, updated_at = now()
+                     WHERE id = $1 AND workspace_id = $2 AND status='replying'",
                 )
                 .bind(id)
                 .bind(self.workspace_id)
@@ -555,36 +615,54 @@ impl YoutubeRepliesWorker {
                 .await?;
                 Ok(0)
             }
-            other => {
-                match other {
-                    Ok(response) => {
-                        tracing::warn!(status = %response.status(), "youtube reply deferred")
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error.without_url(), "youtube reply deferred")
-                    }
-                }
+            Ok(response) => {
+                let status = response.status();
+                tracing::warn!(
+                    %status,
+                    "YouTube reply outcome ambiguous; automation will not resend"
+                );
                 sqlx::query(
-                    r#"
-                    UPDATE community_comments
-                    SET status = CASE WHEN $3 >= $4 THEN 'failed' ELSE 'approved' END,
-                        hold_reason = CASE WHEN $3 >= $4 THEN 'gave up: youtube kept failing' ELSE hold_reason END,
-                        not_before = now() + make_interval(mins => $5),
-                        updated_at = now()
-                    WHERE id = $1 AND workspace_id = $2
-                    "#,
+                    "UPDATE community_comments
+                     SET status='unknown',
+                         hold_reason=$3,
+                         updated_at=now()
+                     WHERE id=$1 AND workspace_id=$2 AND status='replying'",
                 )
                 .bind(id)
                 .bind(self.workspace_id)
-                .bind(attempts + 1)
-                .bind(MAX_ATTEMPTS)
-                .bind(RETRY_BACKOFF_MINUTES)
+                .bind(
+                    format!(
+                        "provider confirmation lost after YouTube reply attempt (HTTP {status}); do not resend automatically"
+                    )
+                    .chars()
+                    .take(500)
+                    .collect::<String>(),
+                )
+                .execute(&self.pool)
+                .await?;
+                Ok(0)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error.without_url(),
+                    "YouTube reply outcome ambiguous; automation will not resend"
+                );
+                sqlx::query(
+                    "UPDATE community_comments
+                     SET status='unknown',
+                         hold_reason='provider confirmation lost after YouTube reply attempt; do not resend automatically',
+                         updated_at=now()
+                     WHERE id=$1 AND workspace_id=$2 AND status='replying'",
+                )
+                .bind(id)
+                .bind(self.workspace_id)
                 .execute(&self.pool)
                 .await?;
                 Ok(0)
             }
         }
     }
+}    }
 }
 
 #[cfg(test)]
