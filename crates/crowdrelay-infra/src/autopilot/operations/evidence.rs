@@ -253,6 +253,7 @@ pub(in crate::autopilot) async fn load_resolved_evidence_counts(
           -- improvement is evidence that unattended work deserves more room.
           AND outcome.effect_assessment = 'improved'
           AND outcome.observed_value > 0
+          AND outcome.observed_value > 0
         "#,
     )
     .bind(workspace_id.into_uuid())
