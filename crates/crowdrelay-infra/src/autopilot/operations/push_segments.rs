@@ -90,11 +90,8 @@ impl SegmentFilter {
         if let Some(min_refs) = self.min_qualified_referrals {
             let b = bind_idx;
             conditions.push(format!(
-                "AND (
-                    SELECT count(*)::bigint FROM referral_attributions ref
-                    WHERE ref.workspace_id = fan.workspace_id
-                      AND ref.referrer_fan_id = fan.id
-                      AND ref.status = 'qualified'
+                "AND canonical_qualified_referral_count(
+                    fan.workspace_id, fan.id, NULL
                 ) >= ${b}"
             ));
             binds.push(SegmentBind::MinReferrals(min_refs));
