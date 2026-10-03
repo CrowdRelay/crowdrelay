@@ -320,10 +320,47 @@ async fn load_fan_acquisition_proof(
 
     let (action_fans, action_signal_fans) = sqlx::query_as::<_, (i64, i64)>(
         r#"
-        WITH action_conversions AS (
+        WITH provider_actions AS (
+            SELECT action_id, posted_at
+            FROM social_posts
+            WHERE workspace_id=$1
+              AND status='posted'
+              AND posted_at IS NOT NULL
+              AND COALESCE(
+                    NULLIF(btrim(platform_post_id),''),
+                    NULLIF(btrim(platform_post_url),'')
+                  ) IS NOT NULL
+            UNION ALL
+            SELECT action_id, posted_at
+            FROM community_posts
+            WHERE workspace_id=$1
+              AND status='posted'
+              AND posted_at IS NOT NULL
+              AND COALESCE(
+                    NULLIF(btrim(reddit_post_id),''),
+                    NULLIF(btrim(reddit_post_url),'')
+                  ) IS NOT NULL
+            UNION ALL
+            SELECT action_id, posted_at
+            FROM telegram_posts
+            WHERE workspace_id=$1
+              AND status='posted'
+              AND posted_at IS NOT NULL
+              AND message_id IS NOT NULL
+            UNION ALL
+            SELECT action_id, posted_at
+            FROM discord_posts
+            WHERE workspace_id=$1
+              AND status='posted'
+              AND posted_at IS NOT NULL
+              AND NULLIF(btrim(message_id),'') IS NOT NULL
+        ), action_conversions AS (
             SELECT canonical_fan_id($1, conversion.fan_id) AS fan_id,
                    MIN(conversion.occurred_at) AS converted_at
             FROM fan_provenance_events AS conversion
+            JOIN provider_actions AS publication
+              ON publication.action_id = conversion.action_id
+             AND publication.posted_at <= conversion.occurred_at
             WHERE conversion.workspace_id=$1
               AND conversion.event_kind='conversion'
               AND conversion.attribution_method='last_tracked_click'
@@ -378,7 +415,7 @@ async fn load_fan_acquisition_proof(
         "actions": {
             "exact_canonical_fans": action_fans,
             "exact_signal_fans": action_signal_fans,
-            "evidence_class": "action_last_tracked_click_fan_exact",
+            "evidence_class": "provider_publication_action_last_tracked_click_fan_exact",
         },
         "external_social": {
             "evidence_class": "provider_series_only_not_person_identity",
