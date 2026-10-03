@@ -10,13 +10,51 @@ pub async fn redirect_smart_link(
             .private()
             .into_response();
     };
-    // The snapshot Arc is held for the whole handler, so the redirect reads one
-    // consistent view without copying the smart-link on every request.
+    // Cache hits stay allocation-free and database-free. A freshly published
+    // link can legitimately miss this periodically refreshed snapshot for one
+    // refresh interval, though, and returning 404 in that window loses the
+    // first human who clicks the post. On a miss do one tenant-scoped indexed
+    // read before deciding the slug does not exist.
     let snapshot = state.acquisition.redirect_cache.snapshot();
-    let Some(link) = snapshot.resolve(state.acquisition.workspace_id, &slug) else {
-        return Problem::not_found(request_id(&headers))
-            .private()
-            .into_response();
+    let link = match snapshot
+        .resolve(state.acquisition.workspace_id, &slug)
+        .cloned()
+    {
+        Some(link) => link,
+        None => match state
+            .acquisition
+            .acquisition_repository
+            .load_active_smart_link(state.acquisition.workspace_id, &slug)
+            .await
+        {
+            Ok(Some(link)) => {
+                tracing::debug!(
+                    smart_link_id = %link.id(),
+                    slug = %slug.as_str(),
+                    "resolved fresh smart link from database after redirect-cache miss"
+                );
+                link
+            }
+            Ok(None) => {
+                return Problem::not_found(request_id(&headers))
+                    .private()
+                    .into_response();
+            }
+            Err(error) => {
+                // A cache miss plus an unavailable repository is ambiguous:
+                // the link may have been minted after the last snapshot.
+                // 503 is retryable and truthful; a 404 would permanently tell
+                // a real first visitor that a valid fresh link does not exist.
+                tracing::warn!(
+                    %error,
+                    slug = %slug.as_str(),
+                    "smart-link cache miss could not be resolved from repository"
+                );
+                return Problem::service_unavailable(request_id(&headers))
+                    .private()
+                    .into_response();
+            }
+        },
     };
 
     // Previews, crawlers, HEAD probes and prefetches get the redirect but are
@@ -31,7 +69,7 @@ pub async fn redirect_smart_link(
     } else {
         let referrer_host = referrer_host(&headers);
         match ClickEvent::from_link(
-            link,
+            &link,
             Some(visitor_id),
             referrer_host,
             OffsetDateTime::now_utc(),
