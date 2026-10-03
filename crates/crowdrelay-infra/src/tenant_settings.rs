@@ -41,7 +41,7 @@ pub const DEFAULT_CREW_LOCALE: &str = "en";
 
 /// The keys an operator may edit. Anything else stays internal even if a row
 /// somehow appears, so the HTTP surface cannot be used to smuggle state.
-pub const EDITABLE_KEYS: [&str; 23] = [
+pub const EDITABLE_KEYS: [&str; 24] = [
     KEY_MEMBER_SITE_BASE_URL,
     KEY_MEMBER_AREA_PATH,
     KEY_LIVE_PAGE_PATH,
@@ -65,6 +65,7 @@ pub const EDITABLE_KEYS: [&str; 23] = [
     KEY_JOIN_ASK_CAPTURE_CONTEXT,
     KEY_BRAND_WORDMARK,
     KEY_SOCIAL_AUTOPOST_PLATFORMS,
+    KEY_YOUTUBE_CAPTURE_AUTO_POST,
 ];
 
 const KEY_MEMBER_SITE_BASE_URL: &str = "member_site_base_url";
@@ -80,6 +81,13 @@ pub const KEY_SOCIAL_AUTO_POST: &str = "social_auto_post";
 /// a platform outside is held for a person. Absent means every platform
 /// the executor can post — see `domain::social_autopost`.
 pub const KEY_SOCIAL_AUTOPOST_PLATFORMS: &str = "social_autopost_platforms";
+/// Standing authority for exactly one thing: a comment carrying the tenant's
+/// own tracked join link, under the tenant's own fresh YouTube video, in the
+/// tenant's own join-ask words. Deliberately its own key and not a platform in
+/// `social_autopost_platforms`: the owner who is happy to let a join link sit
+/// under their own video has not thereby let anything post to a Page or an
+/// Instagram feed, and turning one on must never carry the other with it.
+pub const KEY_YOUTUBE_CAPTURE_AUTO_POST: &str = "youtube_capture_comment_auto_post";
 pub const KEY_GROWTH_CADENCE_MOMENTS_PER_MONTH: &str = "growth_cadence_moments_per_month";
 pub const KEY_GROWTH_CADENCE_FILLERS_ENABLED: &str = "growth_cadence_fillers_enabled";
 /// The language the crew reads task briefings in.
@@ -181,6 +189,10 @@ pub struct TenantBrandSettings {
     /// instead, so removing a platform moves it to the human queue without
     /// touching the master switch. Default: everything the executor can post.
     pub social_autopost_platforms: Vec<String>,
+    /// The narrow YouTube grant: the join-link comment under the tenant's own
+    /// fresh videos may be posted without asking. Default false, and unrelated
+    /// to `social_auto_post` (see [`KEY_YOUTUBE_CAPTURE_AUTO_POST`]).
+    pub youtube_capture_comment_auto_post: bool,
     /// First-party ticket checkout opt-in. Default false: a tenant that never
     /// asked for ticket sales gets a refusal at the reserve, not a silent
     /// order row. Migration 0343 seeded the tenants who were already selling.
@@ -203,6 +215,7 @@ impl Default for TenantBrandSettings {
             synesthesia_enabled: false,
             north_star_metric: DEFAULT_NORTH_STAR_METRIC.to_owned(),
             social_auto_post: false,
+            youtube_capture_comment_auto_post: false,
             ticketing_enabled: false,
         }
     }
@@ -390,7 +403,7 @@ impl TenantSettingsRepository {
             r#"
             SELECT key, value FROM tenant_settings
             WHERE workspace_id = $1
-              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+              AND key IN ($2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(workspace_id)
@@ -404,6 +417,7 @@ impl TenantSettingsRepository {
         .bind(KEY_TICKETING_ENABLED)
         .bind(KEY_LIVE_PAGE_PATH)
         .bind(KEY_SOCIAL_AUTOPOST_PLATFORMS)
+        .bind(KEY_YOUTUBE_CAPTURE_AUTO_POST)
         .fetch_all(&self.pool)
         .await?;
         let mut settings = TenantBrandSettings::default();
@@ -417,6 +431,9 @@ impl TenantSettingsRepository {
                 KEY_SYNESTHESIA_ENABLED => settings.synesthesia_enabled = value == "true",
                 KEY_NORTH_STAR_METRIC => settings.north_star_metric = value,
                 KEY_SOCIAL_AUTO_POST => settings.social_auto_post = value == "true",
+                KEY_YOUTUBE_CAPTURE_AUTO_POST => {
+                    settings.youtube_capture_comment_auto_post = value == "true";
+                }
                 KEY_SOCIAL_AUTOPOST_PLATFORMS => {
                     if let Some(platforms) =
                         crowdrelay_domain::social_autopost::parse_autopost_platforms(&value)
