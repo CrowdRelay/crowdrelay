@@ -487,6 +487,30 @@ pub async fn record_verified_social_publication_evidence(
     workspace_id: Uuid,
     social_post_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    let verified = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM social_posts
+            WHERE workspace_id = $1
+              AND id = $2
+              AND status = 'posted'
+              AND posted_at IS NOT NULL
+              AND COALESCE(
+                    NULLIF(btrim(platform_post_id), ''),
+                    NULLIF(btrim(platform_post_url), '')
+                  ) IS NOT NULL
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(social_post_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !verified {
+        return Ok(());
+    }
+
     schedule_link_click_measurement(transaction, workspace_id, "social_posts", social_post_id)
         .await?;
 
