@@ -231,8 +231,10 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
 }
 
 /// A tenant shaped like production on 2026-10-03: Facebook syncing, Instagram
-/// whose latest read failed, a fresh and a stale video, join-ask words. Settings
-/// are cached per workspace for a minute, so each stage gets its own tenant.
+/// whose latest read failed, and a fresh and a stale video. Some cases add
+/// explicit join-ask words; others prove the same source can safely seed Day-0
+/// copy. Settings are cached per workspace for a minute, so each stage gets its
+/// own tenant.
 async fn dayzero_tenant(
     pool: &sqlx::PgPool,
     label: &str,
@@ -311,6 +313,41 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
         "the 3-day-old video counts, the 200-day one does not"
     );
     assert!(facts.join_copy && !facts.social_auto_post);
+    let explicit_snapshot =
+        crowdrelay_infra::join_ask::load_join_ask_snapshot(&pool, prod).await?;
+    assert_eq!(
+        explicit_snapshot.variants,
+        vec!["Want the next show first?".to_owned()],
+        "explicit tenant wording must win over the source-derived fallback"
+    );
+
+    // No copywriter required: the same fresh tenant-owned video title seeds
+    // one bounded starter variant. Day-0 can therefore progress to the real
+    // owner handoff instead of stopping at NoVariants.
+    let grounded = dayzero_tenant(
+        &pool,
+        "dz-grounded",
+        &[SITE, ("social_autopost_platforms", "telegram")],
+    )
+    .await?;
+    let grounded_snapshot =
+        crowdrelay_infra::join_ask::load_join_ask_snapshot(&pool, grounded).await?;
+    assert_eq!(
+        grounded_snapshot.variants,
+        vec!["Fresh\n\nJoin for updates.".to_owned()]
+    );
+    let grounded_facts =
+        crowdrelay_infra::lane_ledger::day_zero_facts(&pool, grounded).await?;
+    assert!(grounded_facts.join_copy);
+    assert!(
+        grounded_facts.facebook_authority_grantable(),
+        "fresh grounded source text satisfies the copy prerequisite without granting authority"
+    );
+    assert_eq!(
+        grounded_facts.assess().smallest_missing.map(|m| m.code),
+        Some("standing_authority_not_granted")
+    );
+
     let working = |p: &str| {
         facts
             .connections
