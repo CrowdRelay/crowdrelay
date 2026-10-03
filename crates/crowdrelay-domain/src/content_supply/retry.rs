@@ -28,6 +28,56 @@ pub struct FailedArtifact {
     pub last_failed_at: OffsetDateTime,
 }
 
+/// A whole delivery lane that has stopped answering for one artifact kind.
+///
+/// `FailedArtifact` remembers failures per source version, so a lane that is
+/// down is rediscovered by every source and every new version: on 2026-10-02
+/// the live artifact workflow began answering `artifact_surface_unavailable`
+/// and the chain minted 10–20 requests an hour into it, each failing the same
+/// way, for 16 hours — and every failure was one the brain could not learn
+/// from, because nothing about the artifact was wrong. The lane's streak is
+/// the fact; this carries it so the chain stops asking until one probe gets
+/// through.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ArtifactLaneOutage {
+    pub artifact: ContentArtifactKind,
+    /// Terminal lane-level failures in a row with no success between them.
+    pub consecutive_failures: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_failed_at: OffsetDateTime,
+}
+
+/// Failures in a row before a lane counts as down. Three is one source's
+/// whole attempt budget, so a single unlucky source never trips it.
+pub const LANE_OUTAGE_THRESHOLD: u32 = 4;
+/// The longest the chain waits between probes of a down lane.
+const LANE_PROBE_CAP_MINUTES: i64 = 6 * 60;
+
+impl ArtifactLaneOutage {
+    /// When one request may be sent to find out whether the lane is back:
+    /// an hour after the failure that tripped it, doubling per further
+    /// failure, never more than six hours.
+    #[must_use]
+    pub fn next_probe_at(&self) -> OffsetDateTime {
+        let doublings = self
+            .consecutive_failures
+            .saturating_sub(LANE_OUTAGE_THRESHOLD)
+            .min(4);
+        let minutes = (60_i64 << doublings).min(LANE_PROBE_CAP_MINUTES);
+        self.last_failed_at + Duration::minutes(minutes)
+    }
+}
+
+/// Whether an executor `error_kind` says the lane failed rather than this
+/// artifact: the destination could not take anything, whatever was sent.
+#[must_use]
+pub fn is_lane_failure(error_kind: &str) -> bool {
+    matches!(
+        error_kind,
+        "artifact_surface_unavailable" | "artifact_delivery_missing" | "provider_rejected"
+    )
+}
+
 /// Requests per artifact and source version, the first included.
 pub const MAX_ARTIFACT_ATTEMPTS: u32 = 3;
 

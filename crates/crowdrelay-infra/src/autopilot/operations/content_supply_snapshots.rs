@@ -2,7 +2,10 @@
 //! has in flight, and has failed to get.
 
 use super::*;
-use crowdrelay_domain::content_supply::{DropSurgeLaneFailure, FailedArtifact, PostResonance};
+use crowdrelay_domain::content_supply::{
+    ArtifactLaneOutage, DropSurgeLaneFailure, FailedArtifact, LANE_OUTAGE_THRESHOLD,
+    MAX_ARTIFACT_ATTEMPTS, PostResonance, is_lane_failure,
+};
 
 #[derive(Debug, FromRow)]
 struct ContentRow {
@@ -100,6 +103,101 @@ async fn load_failed_drop_surge_tasks(
             });
     }
     Ok(failures)
+}
+
+/// Each artifact kind's current streak of lane-level failures, for kinds that
+/// crossed [`LANE_OUTAGE_THRESHOLD`]. The newest terminal outcome first; the
+/// streak ends at the first success or the first failure that is not the
+/// lane's (a stale source, a missing subject) — those say nothing about the
+/// destination. Two days back is far enough to see an outage and short enough
+/// that a lane fixed last week is not held by its own history.
+async fn load_artifact_lane_outages(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    now: OffsetDateTime,
+) -> Result<Vec<ArtifactLaneOutage>, RepositoryError> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, OffsetDateTime)>(
+        r#"
+        SELECT payload->>'artifact', status, last_error_kind,
+               COALESCE(finished_at, updated_at)
+        FROM autopilot_actions
+        WHERE workspace_id = $1
+          AND action_kind = 'content.artifact.request'
+          AND status IN ('succeeded', 'failed')
+          AND payload->>'artifact' IS NOT NULL
+          AND COALESCE(finished_at, updated_at) > $2 - interval '48 hours'
+        ORDER BY COALESCE(finished_at, updated_at) DESC
+        LIMIT 2000
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(now)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(lane_outages_from(rows))
+}
+
+/// The streak rule over terminal outcomes, newest first.
+fn lane_outages_from(
+    rows: Vec<(String, String, Option<String>, OffsetDateTime)>,
+) -> Vec<ArtifactLaneOutage> {
+    let mut streaks: Vec<(String, u32, OffsetDateTime)> = Vec::new();
+    let mut closed: Vec<String> = Vec::new();
+    for (artifact, status, kind, at) in rows {
+        if closed.contains(&artifact) {
+            continue;
+        }
+        let lane_failure = status == "failed" && kind.as_deref().is_some_and(is_lane_failure);
+        if !lane_failure {
+            closed.push(artifact);
+            continue;
+        }
+        match streaks.iter_mut().find(|(name, _, _)| *name == artifact) {
+            Some((_, count, _)) => *count += 1,
+            None => streaks.push((artifact, 1, at)),
+        }
+    }
+    streaks
+        .into_iter()
+        .filter(|(_, count, _)| *count >= LANE_OUTAGE_THRESHOLD)
+        .filter_map(|(name, count, at)| {
+            Some(ArtifactLaneOutage {
+                artifact: parse_artifact(&name).ok()?,
+                consecutive_failures: count,
+                last_failed_at: at,
+            })
+        })
+        .collect()
+}
+
+/// A down lane is held for every source except the one elected to probe it,
+/// and only once its backoff has passed: one request finds out whether the
+/// lane is back, instead of every source finding out at once.
+fn hold_down_lanes(
+    snapshots: &mut [ContentSupplySnapshot],
+    outages: &[ArtifactLaneOutage],
+    now: OffsetDateTime,
+) {
+    for outage in outages {
+        let mut probe_open = now >= outage.next_probe_at();
+        for snapshot in snapshots.iter_mut() {
+            let could_request = !snapshot.completed_artifacts.contains(&outage.artifact)
+                && !snapshot.in_flight_artifacts.contains(&outage.artifact)
+                && snapshot
+                    .failed_artifacts
+                    .iter()
+                    .all(|failed: &FailedArtifact| {
+                        failed.artifact != outage.artifact
+                            || failed.failures < MAX_ARTIFACT_ATTEMPTS
+                    });
+            if probe_open && could_request {
+                probe_open = false;
+                continue;
+            }
+            snapshot.lane_outages.push(*outage);
+        }
+    }
 }
 
 pub(in crate::autopilot) async fn load_content_supply_snapshots(
@@ -474,7 +572,8 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
     .map_err(map_sqlx)?;
 
     let mut task_failures = load_failed_drop_surge_tasks(repo, workspace_id).await?;
-    rows.into_iter()
+    let mut snapshots = rows
+        .into_iter()
         .map(|row| {
             let source_kind = parse_content_source_kind(&row.source_kind)?;
             let mut drop_surge_failures: Vec<DropSurgeLaneFailure> = row
@@ -541,6 +640,7 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                         })
                     })
                     .collect::<Result<_, RepositoryError>>()?,
+                lane_outages: Vec::new(),
                 drop_surge_failures,
                 surge_requested_at: row.surge_requested_at,
                 promotion_excluded_platforms:
@@ -578,5 +678,123 @@ pub(in crate::autopilot) async fn load_content_supply_snapshots(
                 },
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, RepositoryError>>()?;
+    let outages = load_artifact_lane_outages(repo, workspace_id, now).await?;
+    hold_down_lanes(&mut snapshots, &outages, now);
+    Ok(snapshots)
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use crowdrelay_domain::content_supply::{ContentArtifactKind, ContentSourceKind};
+    use time::Duration;
+
+    fn at(minutes_ago: i64) -> OffsetDateTime {
+        OffsetDateTime::UNIX_EPOCH + Duration::days(20_000) - Duration::minutes(minutes_ago)
+    }
+    fn row(
+        artifact: &str,
+        status: &str,
+        kind: Option<&str>,
+        minutes_ago: i64,
+    ) -> (String, String, Option<String>, OffsetDateTime) {
+        (
+            artifact.into(),
+            status.into(),
+            kind.map(Into::into),
+            at(minutes_ago),
+        )
+    }
+    fn failing(artifact: &str, n: i64) -> Vec<(String, String, Option<String>, OffsetDateTime)> {
+        (0..n)
+            .map(|i| {
+                row(
+                    artifact,
+                    "failed",
+                    Some("artifact_surface_unavailable"),
+                    10 + i,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_streak_at_the_threshold_is_an_outage() {
+        let outages = lane_outages_from(failing("signal_push", 4));
+        assert_eq!(outages.len(), 1);
+        assert_eq!(outages[0].consecutive_failures, 4);
+        assert_eq!(
+            outages[0].last_failed_at,
+            at(10),
+            "newest failure anchors the backoff"
+        );
+        assert!(lane_outages_from(failing("signal_push", 3)).is_empty());
+    }
+
+    #[test]
+    fn a_success_or_an_artifacts_own_failure_ends_the_streak() {
+        let mut rows = vec![row("signal_push", "succeeded", None, 5)];
+        rows.extend(failing("signal_push", 6));
+        assert!(lane_outages_from(rows).is_empty(), "newest outcome worked");
+
+        let mut rows = vec![row("signal_push", "failed", Some("state_changed"), 5)];
+        rows.extend(failing("signal_push", 6));
+        assert!(lane_outages_from(rows).is_empty(), "not the lane's failure");
+    }
+
+    #[test]
+    fn artifact_kinds_are_judged_separately() {
+        let mut rows = failing("signal_push", 5);
+        rows.push(row("social_feed", "succeeded", None, 3));
+        rows.extend(failing("social_feed", 5));
+        let outages = lane_outages_from(rows);
+        assert_eq!(outages.len(), 1, "social_feed works, signal_push does not");
+    }
+
+    fn snapshot(version: i64) -> ContentSupplySnapshot {
+        ContentSupplySnapshot {
+            promotion_excluded_platforms: Vec::new(),
+            source_id: ContentSourceId::new(),
+            source_kind: ContentSourceKind::Event,
+            source_version: version,
+            occurred_at: at(60),
+            expires_at: at(-600),
+            communication_enabled: None,
+            press_enabled: None,
+            release_tier: None,
+            completed_artifacts: Vec::new(),
+            in_flight_artifacts: Vec::new(),
+            failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
+            social_post: None,
+            source_key: String::new(),
+            title: String::new(),
+            source_url: None,
+            source_body: None,
+            source_thumbnail_url: None,
+            site_origin: None,
+            drop_surge_failures: Vec::new(),
+            surge_requested_at: None,
+        }
+    }
+
+    #[test]
+    fn a_down_lane_is_held_except_for_one_probe_once_due() {
+        let now = at(0);
+        let outage = |minutes_ago| ArtifactLaneOutage {
+            artifact: ContentArtifactKind::SignalPush,
+            consecutive_failures: LANE_OUTAGE_THRESHOLD,
+            last_failed_at: at(minutes_ago),
+        };
+        // Backoff not over (failed 10 min ago, probe at +60): all held.
+        let mut all = vec![snapshot(1), snapshot(2), snapshot(3)];
+        hold_down_lanes(&mut all, &[outage(10)], now);
+        assert!(all.iter().all(|s| s.lane_outages.len() == 1));
+        // Backoff over: exactly one source is left free to probe.
+        let mut all = vec![snapshot(1), snapshot(2), snapshot(3)];
+        hold_down_lanes(&mut all, &[outage(90)], now);
+        let free = all.iter().filter(|s| s.lane_outages.is_empty()).count();
+        assert_eq!(free, 1);
+    }
 }
