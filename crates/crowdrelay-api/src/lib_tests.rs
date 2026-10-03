@@ -348,7 +348,8 @@ mod tests {
                 click_capture
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(event)
+                    .push(event);
+            Box::pin(async { ClickSubmission::Accepted })
             }),
         )?)?;
 
