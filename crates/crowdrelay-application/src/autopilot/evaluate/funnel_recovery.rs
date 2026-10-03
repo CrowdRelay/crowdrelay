@@ -30,7 +30,7 @@ fn funnel_context_rank(
                 10
             }
         }
-        OrganicFunnelDirective::ExpandReach => 10,
+        OrganicFunnelDirective::ExpandReach | OrganicFunnelDirective::MultiplyReferrals => 10,
     }
 }
 
@@ -107,6 +107,12 @@ fn funnel_allows_content_supply(
             // holding new public fan-out behind the measured downstream leak.
             OrganicFunnelDirective::ActivateFans
             | OrganicFunnelDirective::RetainFans => !net_new_reach,
+            // Referral multiplication is its own first-party carrier loop.
+            // Generic content fan-out waits so we measure that mechanism
+            // instead of muddying it with another acquisition intervention.
+            OrganicFunnelDirective::MultiplyReferrals => {
+                !net_new_reach && !owned_fan_delivery
+            }
         }
     })
 }
@@ -208,7 +214,9 @@ fn lifecycle_recovery_rank(
                 10
             }
         }
-        OrganicFunnelDirective::ExpandReach | OrganicFunnelDirective::RepairConversion => 10,
+        OrganicFunnelDirective::ExpandReach
+        | OrganicFunnelDirective::RepairConversion
+        | OrganicFunnelDirective::MultiplyReferrals => 10,
     }
 }
 
@@ -349,6 +357,7 @@ mod funnel_recovery_tests {
             activated_mature: 0,
             retention_mature: 0,
             retained: 0,
+            qualified_referrals: 0,
         }
     }
 
@@ -358,6 +367,7 @@ mod funnel_recovery_tests {
             OrganicFunnelDirective::RepairConfirmation,
             OrganicFunnelDirective::ActivateFans,
             OrganicFunnelDirective::RetainFans,
+            OrganicFunnelDirective::MultiplyReferrals,
         ] {
             let c = control(directive);
             assert_eq!(
@@ -493,11 +503,12 @@ mod funnel_recovery_tests {
             assert!(funnel_allows_content_supply(&owned_discord, downstream));
         }
 
-        // Conversion and confirmation have dedicated recovery paths. Neither
-        // generic reach nor a fresh-drop blast to existing fans fixes them.
+        // Conversion, confirmation and referral multiplication have dedicated
+        // recovery paths. Generic fan-out would make their causal read noisy.
         for directive in [
             OrganicFunnelDirective::RepairConversion,
             OrganicFunnelDirective::RepairConfirmation,
+            OrganicFunnelDirective::MultiplyReferrals,
         ] {
             let repair = Some(control(directive));
             assert!(!funnel_allows_content_supply(&public, repair));
