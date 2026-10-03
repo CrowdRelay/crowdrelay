@@ -167,6 +167,19 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         operations::load_relay_community_targets(self, workspace_id).await
     }
 
+    async fn load_delivery_lane_verdicts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<crowdrelay_application::autopilot::DeliveryLaneVerdict>, RepositoryError> {
+        crate::lane_ledger::lane_verdicts(
+            &self.pool,
+            workspace_id.into_uuid(),
+            crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS,
+        )
+        .await
+        .map_err(map_sqlx)
+    }
+
     async fn load_signal_push_audience(
         &self,
         workspace_id: WorkspaceId,
@@ -180,36 +193,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
         since: OffsetDateTime,
     ) -> Result<Vec<crowdrelay_domain::content_supply::RecentRelayPush>, RepositoryError> {
-        // Every relay push carries the `action:relay:{source}:signal_push`
-        // key `relay_candidates` gives it; a push raised anywhere else is
-        // not a relay and is paced by its own rules. A push still awaiting
-        // approval counts: it will reach the same phones.
-        let rows = sqlx::query_as::<_, (OffsetDateTime, Option<String>, Option<String>)>(
-            r#"
-            SELECT created_at, payload->>'title', payload->>'body'
-            FROM autopilot_actions
-            WHERE workspace_id = $1
-              AND action_kind = 'signal.push.request'
-              AND idempotency_key LIKE 'action:relay:%:signal_push'
-              AND status <> 'cancelled'
-              AND created_at >= $2
-            "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(since)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx)?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(at, title, body)| crowdrelay_domain::content_supply::RecentRelayPush {
-                    at,
-                    title: title.unwrap_or_default(),
-                    body: body.unwrap_or_default(),
-                },
-            )
-            .collect())
+        operations::load_recent_relay_pushes(self, workspace_id, since).await
     }
 
     async fn load_show_growth_failures(

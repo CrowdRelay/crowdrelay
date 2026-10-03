@@ -46,6 +46,15 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         } else {
             Vec::new()
         };
+        let mut lane_gate = DeliveryLaneGate::new(
+            if has_relay_material {
+                self.repository
+                    .load_delivery_lane_verdicts(self.workspace_id)
+                    .await?
+            } else {
+                Vec::new()
+            },
+        );
         let push_audience = if has_relay_material {
             Some(
                 self.repository
@@ -89,6 +98,13 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 ) {
                     continue;
                 }
+                // Funnel control answers *which stage* needs work. Lane health
+                // answers whether this concrete delivery route can take more
+                // work right now. Keep them in that order so a downstream
+                // funnel hold does not consume a quiet lane's one probe.
+                if !lane_gate.allows_candidate(&candidate, &communities) {
+                    continue;
+                }
                 let relay_push = match &candidate.action {
                     AutopilotActionPayload::RequestSignalPush {
                         title, body, ..
@@ -120,8 +136,12 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                 }
             }
         }
-        report.supply_wait_reason =
-            supply_quiet_reason(&snapshots, policy, produced, now);
+        let ordinary_wait = supply_quiet_reason(&snapshots, policy, produced, now);
+        report.supply_wait_reason = if produced == 0 {
+            lane_gate.wait_reason().or(ordinary_wait)
+        } else {
+            ordinary_wait
+        };
         Ok(())
     }
 }

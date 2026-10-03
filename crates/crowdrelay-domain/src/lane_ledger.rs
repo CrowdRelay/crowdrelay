@@ -21,6 +21,32 @@
 
 use serde::Serialize;
 
+/// Default recent-delivery window shared by ops readout and autonomous routing.
+/// A screen and the Brain must not disagree about whether a lane is alive.
+pub const DEFAULT_WINDOW_DAYS: i32 = 14;
+
+/// Which authority surface produced the lane row.
+///
+/// The platform name alone is not enough: a joined Telegram community and
+/// the band's owned Telegram channel both say `telegram`, but one being held
+/// must never suppress the other. Scope is therefore part of the routing key.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneScope {
+    Community,
+    Owned,
+}
+
+impl LaneScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Community => "community",
+            Self::Owned => "owned",
+        }
+    }
+}
+
 /// What became of one request to a lane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,7 +145,34 @@ pub enum Verdict {
     Queued,
 }
 
+/// How planning may use a lane's measured state.
+///
+/// Quiet is deliberately not "healthy": it receives one bounded probe so a
+/// new lane can ever become measured. Queued work is busy, not broken, but it
+/// still must drain before more is piled behind it. Any stuck state blocks new
+/// acquisition work until the lane changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanningAvailability {
+    Open,
+    Probe,
+    Busy,
+    Blocked,
+}
+
 impl Verdict {
+    #[must_use]
+    pub const fn planning_availability(self) -> PlanningAvailability {
+        match self {
+            Self::Delivering => PlanningAvailability::Open,
+            Self::Quiet => PlanningAvailability::Probe,
+            Self::Queued => PlanningAvailability::Busy,
+            Self::DeliveringPartly
+            | Self::HeldForPerson
+            | Self::RateLimited
+            | Self::Failing => PlanningAvailability::Blocked,
+        }
+    }
+
     /// Whether the operator needs to do (or look at) something for this lane to
     /// deliver. `Quiet` and `Queued` are not problems yet; `Delivering` is not.
     #[must_use]
@@ -225,6 +278,21 @@ mod tests {
             Verdict::Delivering,
             "a queue is not stuck"
         );
+    }
+
+    #[test]
+    fn planning_opens_only_proven_delivery_and_probes_quiet_once_upstream() {
+        assert_eq!(Verdict::Delivering.planning_availability(), PlanningAvailability::Open);
+        assert_eq!(Verdict::Quiet.planning_availability(), PlanningAvailability::Probe);
+        assert_eq!(Verdict::Queued.planning_availability(), PlanningAvailability::Busy);
+        for verdict in [
+            Verdict::DeliveringPartly,
+            Verdict::HeldForPerson,
+            Verdict::RateLimited,
+            Verdict::Failing,
+        ] {
+            assert_eq!(verdict.planning_availability(), PlanningAvailability::Blocked);
+        }
     }
 
     #[test]

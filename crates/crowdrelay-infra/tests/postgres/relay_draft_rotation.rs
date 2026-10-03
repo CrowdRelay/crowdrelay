@@ -60,26 +60,29 @@ async fn dispatched_drafts_rotate_before_any_community_post_exists()
         seed_community(&pool, ws, name, None).await?;
     }
     let first = repo.load_relay_community_targets(ws).await?;
-    assert_eq!(first.len(), 3);
-    for target in &first {
-        seed_draft_request(
-            &pool,
-            ws,
-            source,
-            target.target_id.into_uuid(),
-            "",
-            "succeeded",
-        )
-        .await?;
-    }
-    let next = repo.load_relay_community_targets(ws).await?;
-    assert_eq!(next.len(), 3);
     assert_eq!(
-        next.iter()
-            .filter(|target| !first.iter().any(|old| old.target_id == target.target_id))
-            .count(),
-        2,
-        "both untouched communities get a turn while the first drafts have no post rows"
+        first.len(),
+        1,
+        "an unmeasured Reddit lane gets one probe, not three speculative drafts"
+    );
+    seed_draft_request(
+        &pool,
+        ws,
+        source,
+        first[0].target_id.into_uuid(),
+        "",
+        "succeeded",
+    )
+    .await?;
+
+    // The dispatch has not materialized a post yet, so the platform remains
+    // quiet. Rotation still moves the single probe to a different room
+    // instead of stacking another draft onto the same target.
+    let next = repo.load_relay_community_targets(ws).await?;
+    assert_eq!(next.len(), 1);
+    assert_ne!(
+        next[0].target_id, first[0].target_id,
+        "the quiet-lane probe rotates while no delivery receipt exists"
     );
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM community_posts WHERE workspace_id=$1")
@@ -180,7 +183,7 @@ async fn fresh_drop_selection_exploits_real_yield_but_keeps_one_exploration_slot
     seed_community_conversion(&pool, ws, "convertedroom").await?;
     seed_community_clicks(&pool, ws, "strongclicks", 3).await?;
     seed_community_clicks(&pool, ws, "weakclick", 1).await?;
-    seed_post(&pool, ws, measured_zero, "measuredzero", "posted", 20).await?;
+    seed_post(&pool, ws, measured_zero, "measuredzero", "posted", 5).await?;
 
     let targets = repo.load_relay_community_targets(ws).await?;
     let picked: std::collections::BTreeSet<Uuid> =
@@ -233,6 +236,10 @@ async fn relay_quality_never_leaks_across_tenants()
 
     seed_community_clicks(&pool, ws, "localstrong", 3).await?;
     seed_community_clicks(&pool, ws, "localsecond", 1).await?;
+    // Keep lane-health out of this test's subject: one recent delivery proves
+    // Reddit is an executable route, while ranking still comes only from this
+    // workspace's provenance.
+    seed_post(&pool, ws, local_second, "localsecond", "posted", 1).await?;
 
     // Same public community label, but all of this outcome evidence belongs to
     // another workspace. It must be invisible to ws's quality ranking.
