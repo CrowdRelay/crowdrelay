@@ -14,7 +14,11 @@ CREATE TABLE fan_prospect_identity_exclusions (
     platform text NOT NULL CHECK (
         btrim(platform) <> '' AND platform=lower(btrim(platform)) AND char_length(platform) <= 64
     ),
-    value text NOT NULL CHECK (btrim(value) <> '' AND char_length(value) <= 256),
+    value text NOT NULL CHECK (
+        btrim(value) <> '' AND char_length(value) <= 256
+        AND value=btrim(value)
+        AND (kind <> 'platform_handle' OR value=lower(value))
+    ),
     reason text NOT NULL CHECK (reason IN ('staff','own_account','test')),
     recorded_by text NOT NULL CHECK (char_length(btrim(recorded_by)) BETWEEN 1 AND 120),
     recorded_at timestamptz NOT NULL DEFAULT now(),
