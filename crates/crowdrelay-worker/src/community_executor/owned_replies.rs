@@ -222,9 +222,14 @@ impl CommunityExecutorWorker {
                     r#"
                     INSERT INTO community_comments
                         (workspace_id, platform, content_source_id, platform_comment_id,
-                         parent_id, author, body, parent_body, parent_by_band)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT (workspace_id, platform, platform_comment_id) DO NOTHING
+                         parent_id, author, body, parent_body, parent_by_band,
+                         provider_observed_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                    ON CONFLICT (workspace_id, platform, platform_comment_id) DO UPDATE
+                    SET provider_observed_at = GREATEST(
+                        community_comments.provider_observed_at,
+                        EXCLUDED.provider_observed_at
+                    )
                     "#,
                 )
                 .bind(ws)
