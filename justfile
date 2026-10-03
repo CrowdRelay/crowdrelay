@@ -188,7 +188,8 @@ test-postgres-env:
       autopilot_relay_loader \
       a_content_artifact_receipt_writes_the_envelope_and_growth_measurements \
       a_failed_artifact_is_retried_under_a_new_key \
-      tenant_setting_values_fit_what_the_settings_api_accepts
+      tenant_setting_values_fit_what_the_settings_api_accepts \
+      a_defer_holds_the_pair_out_of_the_due_set_until_it_lapses
     {{CARGO}} test --locked --all-features --package crowdrelay-worker --test postgres -- --ignored --test-threads=1 \
       the_outcome_appears_in_the_timeline_it_caused \
       the_drip_claims_one_post_per_batch_per_interval \
@@ -199,7 +200,9 @@ test-postgres-env:
       sheet_intake \
       video_promotion_links \
       community_tracked_links \
-      source_refresh_preserves_promotion_policy_campaign_and_request
+      source_refresh_preserves_promotion_policy_campaign_and_request \
+      a_model_cannot_substitute_the_measured_social_winner \
+      the_measured_social_winner_flows_through_normally
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test peer_act_seed_postgres -- --ignored --test-threads=1 \
       a_band_sheet_lands_as_attributed_peer_facts
     {{CARGO}} test --locked --all-features --package crowdrelay-infra --test team_reminder_drain_postgres -- --ignored --test-threads=1 \
