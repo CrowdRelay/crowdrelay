@@ -100,6 +100,47 @@ if [ "${owned:-0}" = "0" ]; then zero "no signup has come through an owned-link 
 drafts="$(sql "select count(*) from content_sources cs where cs.source_kind='video' and cs.metadata ? 'fan_capture_draft_at' and not (cs.metadata ? 'fan_capture_comment_posted_unix') and cs.occurred_at > now() - interval '30 days'")"
 if [ "${drafts:-0}" -gt 0 ] 2>/dev/null; then info "$drafts YouTube capture comment(s) prepared for a person to paste (see ops/attention unpublished_drafts.youtube)"; else info "no YouTube capture comment prepared yet"; fi
 
+echo "== strict FAN_100 proof"
+receiptless="$(sql "select
+  'social='||(select count(*) from social_posts where status='posted' and posted_at>now()-interval '30 days' and coalesce(nullif(btrim(platform_post_id),''),nullif(btrim(platform_post_url),'')) is null)
+  ||', telegram='||(select count(*) from telegram_posts where status='posted' and posted_at>now()-interval '30 days' and message_id is null)
+  ||', discord='||(select count(*) from discord_posts where status='posted' and posted_at>now()-interval '30 days' and nullif(btrim(message_id),'') is null)
+  ||', community='||(select count(*) from community_posts where status='posted' and posted_at>now()-interval '30 days' and coalesce(nullif(btrim(reddit_post_id),''),nullif(btrim(reddit_post_url),'')) is null)")"
+if [ "$receiptless" = "social=0, telegram=0, discord=0, community=0" ]; then
+  ok "no receiptless external publication in the last 30d"
+else
+  warn "receiptless external publications in the last 30d: $receiptless (they must not count toward FAN_100)"
+fi
+strict="$(sql "with g as (
+  select g.*
+  from organic_fan_goals g
+  join workspaces w on w.id=g.workspace_id
+  where w.slug='virya' and g.period_start<=now()
+  order by g.period_start desc limit 1
+), c as (
+  select cohort.*
+  from g cross join lateral organic_fan_cohort(
+    g.workspace_id,g.baseline_at,least(g.deadline,now()+interval '1 microsecond'),now()
+  ) cohort
+)
+select coalesce((
+  select
+    count(*) filter(where verified and contactable and not excluded)
+    ||' confirmed / target='||g.target
+    ||', verified_signups='||count(*) filter(where verified and not excluded)
+    ||', awaiting_confirmation='||count(*) filter(where verified and not contactable and not excluded)
+    ||', excluded='||count(*) filter(where excluded)
+    ||', unverified='||count(*) filter(where not verified and not excluded)
+  from g left join c on true
+  group by g.target
+),'goal_not_declared')")"
+case "$strict" in
+  goal_not_declared) warn "strict organic goal is not declared for workspace virya" ;;
+  "0 confirmed"*) zero "strict FAN_100 cohort: $strict" ;;
+  "?") ;;
+  *) ok "strict FAN_100 cohort: $strict" ;;
+esac
+
 echo "== the funnel, as it stands"
 info "clicks 24h / visitors: $(sql "select count(*)||' / '||count(distinct anonymous_visitor_id) from click_events where occurred_at > now() - interval '24 hours'")"
 newest="$(sql "select coalesce(max(created_at)::date::text,'never') from fans where deleted_at is null and merged_into_fan_id is null")"
