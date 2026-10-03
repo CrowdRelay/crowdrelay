@@ -186,6 +186,47 @@ mod lane_routing_tests {
         }
     }
 
+    fn direct_post_candidate(platform: &str) -> DecisionCandidate {
+        DecisionCandidate {
+            context: AutopilotContext::ContentSupply,
+            subject: ActionSubject::DropSurgeLane(Uuid::now_v7()),
+            decision_kind: "drop_surge_fanout",
+            confidence: crowdrelay_domain::autonomy::Confidence::saturating_from_basis_points(9_500),
+            disposition: crowdrelay_domain::autonomy::PolicyDisposition::RequireApproval,
+            reason: "test",
+            input_snapshot: serde_json::json!({}),
+            policy_snapshot: serde_json::json!({}),
+            action: AutopilotActionPayload::RequestAgentContent {
+                template_id: None,
+                task_id: Uuid::now_v7(),
+                draft: serde_json::json!({"platform": platform}),
+                recipient_email: None,
+                recipient_name: None,
+                recipient_target_id: None,
+            },
+            decision_key: "test-decision".to_owned(),
+            action_idempotency_key: "test-action".to_owned(),
+        }
+    }
+
+    #[test]
+    fn owned_discord_uses_discord_channel_and_not_the_community_discord_lane() {
+        let candidate = direct_post_candidate("discord");
+        let mut owned_blocked =
+            gate(LaneScope::Owned, "discord_channel", Verdict::HeldForPerson);
+        assert!(
+            !owned_blocked.allows_candidate(&candidate, &[]),
+            "owned Discord backlog must stop another owned Discord post"
+        );
+
+        let mut community_blocked =
+            gate(LaneScope::Community, "discord", Verdict::HeldForPerson);
+        assert!(
+            community_blocked.allows_candidate(&candidate, &[]),
+            "a community Discord hold must not poison the band's owned Discord channel"
+        );
+    }
+
     #[test]
     fn owned_and_community_telegram_are_different_keys() {
         let owned = DeliveryLaneKey {
