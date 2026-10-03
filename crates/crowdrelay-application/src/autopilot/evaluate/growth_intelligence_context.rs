@@ -14,7 +14,6 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         evidence: &EvidenceLedger,
         loaded_model: &LoadedCausalModel,
         now: OffsetDateTime,
-        _limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
         organic_funnel_control: Option<OrganicFunnelControl>,
     ) -> Result<(), AutopilotError> {

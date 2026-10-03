@@ -463,11 +463,7 @@ async fn content_link_clicks_reads_telegram_and_discord_link_ids() {
         )
         .await;
         let link_id = insert_smart_link(&f, &format!("{table}-link")).await;
-        let receipt_sql = if table == "telegram_posts" {
-            ", message_id"
-        } else {
-            ", message_id"
-        };
+        let receipt_sql = ", message_id";
         let receipt_value = if table == "telegram_posts" {
             "42"
         } else {

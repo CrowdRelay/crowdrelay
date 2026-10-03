@@ -61,7 +61,7 @@
         assert_eq!(clicks.len(), 1);
         assert_eq!(clicks[0].smart_link_id(), link.id());
         assert_eq!(clicks[0].campaign_id(), Some(campaign_id));
-        assert_eq!(clicks[0].visitor_id().is_some(), true);
+        assert!(clicks[0].visitor_id().is_some());
         Ok(())
     }
 

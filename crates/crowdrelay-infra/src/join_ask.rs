@@ -74,10 +74,10 @@ pub async fn load_join_ask_snapshot(
         .join_ask_config(workspace_id)
         .await?
         .unwrap_or_else(JoinAskConfig::unconfigured);
-    if config.variants.is_empty() {
-        if let Some(starter) = load_grounded_starter_variant(pool, workspace_id).await? {
-            config.variants.push(starter);
-        }
+    if config.variants.is_empty()
+        && let Some(starter) = load_grounded_starter_variant(pool, workspace_id).await?
+    {
+        config.variants.push(starter);
     }
 
     // The site URL and the standing publish approval ride the brand seam, not

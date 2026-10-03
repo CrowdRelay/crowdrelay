@@ -6,16 +6,27 @@
 
 use super::*;
 
+/// The per-message inputs of `RequestFanLifecycleMessage`, carried together
+/// because they arrive together: the action payload owns all three.
+pub(super) struct LifecycleMessageRequest<'a> {
+    pub fan_id: FanId,
+    pub template_key: &'a str,
+    pub show: Option<&'a crowdrelay_application::autopilot::LifecycleShowContext>,
+}
+
 pub(super) async fn execute(
     repo: &PostgresAutopilotRepository,
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
     action: &ClaimedAutopilotAction,
-    fan_id: FanId,
-    template_key: &str,
-    show: Option<&crowdrelay_application::autopilot::LifecycleShowContext>,
+    request: LifecycleMessageRequest<'_>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
+    let LifecycleMessageRequest {
+        fan_id,
+        template_key,
+        show,
+    } = request;
     ensure_marketing_eligible(transaction, workspace_id, fan_id).await?;
     let fan = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
         "SELECT normalized_email, display_name, locale FROM fans WHERE workspace_id=$1 AND id=$2 AND status='active' FOR SHARE",

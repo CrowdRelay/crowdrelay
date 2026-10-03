@@ -68,9 +68,11 @@ impl PostgresAutopilotRepository {
                             &mut transaction,
                             workspace_id,
                             action,
-                            *fan_id,
-                            template_key,
-                            show.as_ref(),
+                            lifecycle_execution::LifecycleMessageRequest {
+                                fan_id: *fan_id,
+                                template_key,
+                                show: show.as_ref(),
+                            },
                             now,
                         )
                         .await?;

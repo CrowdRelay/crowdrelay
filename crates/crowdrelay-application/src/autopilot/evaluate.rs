@@ -766,7 +766,6 @@ where
                         &evidence,
                         loaded_model,
                         now,
-                        &mut limits,
                         &mut report,
                         organic_funnel_control,
                     )
