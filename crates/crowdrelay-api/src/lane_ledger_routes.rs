@@ -61,6 +61,7 @@ async fn list(
         .map(|lane| {
             let lane_verdict = verdict(&lane.counts);
             json!({
+                "scope": lane.scope,
                 "lane": lane.lane,
                 "verdict": lane_verdict,
                 "needs_attention": lane_verdict.needs_attention(),
