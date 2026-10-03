@@ -511,10 +511,8 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         &self,
         workspace_id: WorkspaceId,
         now: OffsetDateTime,
-    ) -> Result<
-        Vec<crowdrelay_application::autopilot::ConfirmationRecoverySnapshot>,
-        RepositoryError,
-    > {
+    ) -> Result<Vec<crowdrelay_application::autopilot::ConfirmationRecoverySnapshot>, RepositoryError>
+    {
         crate::organic_funnel::confirmation_recovery_snapshots(
             &self.pool,
             workspace_id.into_uuid(),
