@@ -249,14 +249,16 @@ mod goal_postgres_tests {
         let now = OffsetDateTime::now_utc();
         let since = now - time::Duration::days(7);
 
-        async fn prospect(
+        async fn provider_prospect(
             pool: &PgPool,
             ws: Uuid,
             handle: &str,
             now: OffsetDateTime,
-        ) -> Uuid {
+        ) -> (Uuid, Uuid) {
             let person = Uuid::now_v7();
-            let id = Uuid::now_v7();
+            let prospect = Uuid::now_v7();
+            let comment = Uuid::now_v7();
+            let observed_at = now - time::Duration::days(1);
             sqlx::query("INSERT INTO persons(id,workspace_id) VALUES($1,$2)")
                 .bind(person)
                 .bind(ws)
@@ -266,7 +268,7 @@ mod goal_postgres_tests {
             sqlx::query(
                 "INSERT INTO person_identities(
                      workspace_id,person_id,kind,platform,value,source
-                 ) VALUES($1,$2,'platform_handle','instagram',$3,'test')",
+                 ) VALUES($1,$2,'platform_handle','instagram',$3,'own_comments')",
             )
             .bind(ws)
             .bind(person)
@@ -280,56 +282,176 @@ mod goal_postgres_tests {
                      expires_at,first_seen_at,last_seen_at,created_at
                  ) VALUES($1,$2,$3,'instagram',$4,$5,$6,$6,$6)",
             )
-            .bind(id)
+            .bind(prospect)
             .bind(ws)
             .bind(person)
             .bind(handle)
             .bind(now + time::Duration::days(30))
-            .bind(now - time::Duration::days(1))
+            .bind(observed_at)
             .execute(pool)
             .await
             .expect("prospect");
-            id
+            sqlx::query(
+                "INSERT INTO community_comments(
+                     id,workspace_id,platform,platform_comment_id,parent_id,
+                     author,body,status,provider_observed_at,created_at
+                 ) VALUES(
+                     $1,$2,'instagram',$3,'17841400000000000',$4,
+                     'Kiedy koncert?','unanswered',$5,$5
+                 )",
+            )
+            .bind(comment)
+            .bind(ws)
+            .bind(format!("provider-{}", comment.simple()))
+            .bind(handle)
+            .bind(observed_at)
+            .execute(pool)
+            .await
+            .expect("provider comment");
+            sqlx::query(
+                "INSERT INTO fan_prospect_observations(
+                     workspace_id,prospect_id,observation_kind,source,source_ref,
+                     observed_at,evidence,confidence_basis_points
+                 ) VALUES(
+                     $1,$2,'asked_about_show','own_comments',$3,$4,
+                     'Kiedy koncert?',8000
+                 )",
+            )
+            .bind(ws)
+            .bind(prospect)
+            .bind(comment.to_string())
+            .bind(observed_at)
+            .execute(pool)
+            .await
+            .expect("provider observation");
+            (prospect, comment)
         }
 
-        let converted_prospect = prospect(&pool, ws, "proof_person", now).await;
-        let click_only_prospect = prospect(&pool, ws, "click_only", now).await;
+        let (converted_prospect, converted_comment) =
+            provider_prospect(&pool, ws, "proof_person", now).await;
+        let (click_only_prospect, click_only_comment) =
+            provider_prospect(&pool, ws, "click_only", now).await;
+
         let link_good = Uuid::now_v7();
         let link_click_only = Uuid::now_v7();
-        for (id, slug) in [
-            (link_good, "proof-good"),
-            (link_click_only, "proof-click-only"),
+        for (id, comment) in [
+            (link_good, converted_comment),
+            (link_click_only, click_only_comment),
         ] {
+            let slug = format!("reply-capture-{}", comment.simple());
             sqlx::query(
-                "INSERT INTO smart_links(id,workspace_id,slug,destination_url,active)
-                 VALUES($1,$2,$3,'https://example.test/signal',true)",
+                "INSERT INTO smart_links(
+                     id,workspace_id,slug,destination_url,active
+                 ) VALUES($1,$2,$3,'https://example.test/signal',true)",
             )
             .bind(id)
             .bind(ws)
-            .bind(slug)
+            .bind(&slug)
             .execute(&pool)
             .await
             .expect("link");
         }
+
         let touched_at = now - time::Duration::hours(20);
-        for (prospect_id, link_id, source_ref) in [
-            (converted_prospect, link_good, "reply-good"),
-            (click_only_prospect, link_click_only, "reply-click-only"),
+        for (prospect_id, comment_id, link_id) in [
+            (converted_prospect, converted_comment, link_good),
+            (click_only_prospect, click_only_comment, link_click_only),
         ] {
+            let slug = format!("reply-capture-{}", comment_id.simple());
+            sqlx::query(
+                "UPDATE community_comments
+                 SET status='replied',
+                     replied_at=$3,
+                     reply_comment_id=$4,
+                     draft='Jasne — wpadaj! /l/' || $5
+                 WHERE workspace_id=$1 AND id=$2",
+            )
+            .bind(ws)
+            .bind(comment_id)
+            .bind(touched_at)
+            .bind(format!("provider-reply-{}", comment_id.simple()))
+            .bind(&slug)
+            .execute(&pool)
+            .await
+            .expect("provider reply receipt");
             sqlx::query(
                 "INSERT INTO fan_prospect_touches(
-                     workspace_id,prospect_id,kind,source,source_ref,smart_link_id,touched_at
+                     workspace_id,prospect_id,kind,source,source_ref,
+                     smart_link_id,touched_at
                  ) VALUES($1,$2,'invite','owned_reply',$3,$4,$5)",
             )
             .bind(ws)
             .bind(prospect_id)
-            .bind(source_ref)
+            .bind(comment_id.to_string())
             .bind(link_id)
             .bind(touched_at)
             .execute(&pool)
             .await
             .expect("touch");
         }
+
+        // Hostile noise: a perfectly plausible prospect + invite touch without
+        // a provider-observed inbound comment or provider-confirmed outbound
+        // reply. Raw table presence must prove nothing.
+        let fake_person = Uuid::now_v7();
+        let fake_prospect = Uuid::now_v7();
+        sqlx::query("INSERT INTO persons(id,workspace_id) VALUES($1,$2)")
+            .bind(fake_person)
+            .bind(ws)
+            .execute(&pool)
+            .await
+            .expect("fake person");
+        sqlx::query(
+            "INSERT INTO person_identities(
+                 workspace_id,person_id,kind,platform,value,source
+             ) VALUES($1,$2,'platform_handle','instagram','synthetic_person','fixture')",
+        )
+        .bind(ws)
+        .bind(fake_person)
+        .execute(&pool)
+        .await
+        .expect("fake identity");
+        sqlx::query(
+            "INSERT INTO fan_prospects(
+                 id,workspace_id,person_id,platform,external_identity,
+                 expires_at,first_seen_at,last_seen_at,created_at
+             ) VALUES(
+                 $1,$2,$3,'instagram','synthetic_person',$4,$5,$5,$5
+             )",
+        )
+        .bind(fake_prospect)
+        .bind(ws)
+        .bind(fake_person)
+        .bind(now + time::Duration::days(30))
+        .bind(now - time::Duration::hours(10))
+        .execute(&pool)
+        .await
+        .expect("fake prospect");
+        let fake_link = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO smart_links(
+                 id,workspace_id,slug,destination_url,active
+             ) VALUES($1,$2,$3,'https://example.test/signal',true)",
+        )
+        .bind(fake_link)
+        .bind(ws)
+        .bind(format!("reply-capture-{}", Uuid::now_v7().simple()))
+        .execute(&pool)
+        .await
+        .expect("fake link");
+        sqlx::query(
+            "INSERT INTO fan_prospect_touches(
+                 workspace_id,prospect_id,kind,source,source_ref,smart_link_id,touched_at
+             ) VALUES($1,$2,'invite','owned_reply',$3,$4,$5)",
+        )
+        .bind(ws)
+        .bind(fake_prospect)
+        .bind(Uuid::now_v7().to_string())
+        .bind(fake_link)
+        .bind(now - time::Duration::hours(9))
+        .execute(&pool)
+        .await
+        .expect("fake touch");
 
         let visitor = Uuid::now_v7();
         let click_only_visitor = Uuid::now_v7();
