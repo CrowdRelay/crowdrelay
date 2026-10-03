@@ -563,6 +563,29 @@ async fn tenant_settings_default_to_the_shipped_constants_then_follow_overrides(
 
 #[tokio::test]
 #[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn tenant_setting_values_fit_what_the_settings_api_accepts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = pool().await;
+    crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
+    let repo = TenantSettingsRepository::new(pool.clone());
+    let workspace = seed_workspace(&pool, "tslimit").await;
+
+    // The API accepts `join_ask_variants` up to 4096 characters; the database
+    // used to stop at 512 and fail the write after validation had passed.
+    repo.set_setting(workspace, "join_ask_variants", &"a".repeat(4096))
+        .await?;
+    assert!(
+        repo.set_setting(workspace, "join_ask_variants", &"a".repeat(4097))
+            .await
+            .is_err(),
+        "the database still has a ceiling"
+    );
+    cleanup(&pool, &[workspace]).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
 async fn fanbase_ingestion_is_consent_safe_idempotent_and_attributed()
 -> Result<(), Box<dyn std::error::Error>> {
     use crowdrelay_infra::fanbase::{FanbaseEntry, PostgresFanbaseRepository};
