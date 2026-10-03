@@ -20,12 +20,16 @@
 //!    moderators. Either holds every draft for a person until the window
 //!    passes.
 //! 4. **The daily ceiling is earned.** One post a day until posts have
-//!    demonstrably survived: each block of posts that stayed up for a week —
-//!    seen live by a removal-aware read, not merely unreported — earns one
-//!    more, to a hard ceiling. Any removal in the window drops it back.
+//!    demonstrably survived *and somebody in the community responded*: each
+//!    block of such posts earns one more, to a hard ceiling. Staying up while
+//!    being ignored is not evidence that the machine understands the room.
+//! 5. **One current moderation verdict revokes unattended posting.** The
+//!    stronger account halt still needs the site filter or repeated removals,
+//!    but after one moderator/AutoModerator "no", only a person may decide
+//!    whether posting elsewhere is appropriate until the 30-day window ages out.
 //!
-//! Fail closed: a post whose removal state was never read has not survived.
-//! It earns nothing and proves nothing.
+//! Fail closed: a post whose removal state or audience response was never read
+//! earns nothing and proves nothing.
 
 use time::{Duration, OffsetDateTime};
 
@@ -102,11 +106,12 @@ pub const SURVIVAL_AGE: Duration = Duration::days(7);
 pub const SURVIVAL_OBSERVED_AFTER: Duration = Duration::hours(48);
 /// A fresh automation does not get to experiment on the band's public
 /// identity. At least this many posts must have been published and then
-/// observed alive past the moderation window before unattended posting is
-/// earned. Those seed posts may be published manually; the point is that a
-/// person proves the room/copy fit before the machine is trusted with it.
+/// observed alive past the moderation window *and* received a real community
+/// response before unattended posting is earned. Those seed posts may be
+/// published manually; the point is that people prove the room/copy fit
+/// before the machine is trusted with it.
 pub const MIN_SURVIVED_POSTS_FOR_AUTONOMY: usize = 3;
-/// Survived posts that earn one more post per day.
+/// Survived, audience-responded posts that earn one more post per day.
 pub const SURVIVED_POSTS_PER_STEP: usize = 5;
 /// The floor: one post a day, which reads as somebody who posts occasionally.
 pub const BASE_DAILY_CAP: u32 = 1;
