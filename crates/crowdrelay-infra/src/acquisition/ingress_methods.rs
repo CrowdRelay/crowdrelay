@@ -363,9 +363,30 @@ impl PostgresAcquisitionRepository {
                              post.created_at DESC, post.action_id
                     LIMIT 1
                 ) AS post ON true
-                -- All-or-nothing: if any click in the batch is invalid the
-                -- whole statement rolls back before a single row lands.
-                WHERE (SELECT count(*) FROM valid_candidates)
+                -- A post-owned link becomes publication evidence only after
+                -- the provider receipt exists at/before this click. The raw
+                -- click still lands below; only provenance is withheld.
+                WHERE (
+                    post.action_id IS NOT NULL
+                    OR NOT EXISTS (
+                        SELECT 1 FROM community_posts p
+                        WHERE p.workspace_id=click.workspace_id
+                          AND p.smart_link='/l/'||link.slug
+                        UNION ALL
+                        SELECT 1 FROM social_posts p
+                        WHERE p.workspace_id=click.workspace_id
+                          AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                        UNION ALL
+                        SELECT 1 FROM telegram_posts p
+                        WHERE p.workspace_id=click.workspace_id
+                          AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                        UNION ALL
+                        SELECT 1 FROM discord_posts p
+                        WHERE p.workspace_id=click.workspace_id
+                          AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                    )
+                )
+                  AND (SELECT count(*) FROM valid_candidates)
                     = (SELECT count(*) FROM candidates)
             )
             INSERT INTO click_events (
@@ -455,7 +476,10 @@ impl PostgresAcquisitionRepository {
                        link.slug AS source_target,
                        link.channel_community AS community,
                        click.campaign_id,
-                       COALESCE(link.action_id, post.action_id) AS action_id,
+                       CASE
+                           WHEN post.action_id IS NOT NULL THEN post.action_id
+                           ELSE link.action_id
+                       END AS action_id,
                        arrival.created_at AS occurred_at,
                        post.format_key
                 FROM arrivals AS arrival
@@ -472,29 +496,43 @@ impl PostgresAcquisitionRepository {
                         FROM community_posts
                         WHERE workspace_id = $1
                           AND smart_link = '/l/' || link.slug
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND COALESCE(
+                                NULLIF(btrim(reddit_post_id), ''),
+                                NULLIF(btrim(reddit_post_url), '')
+                              ) IS NOT NULL
                         UNION ALL
                         SELECT action_id, posted_at, created_at
                         FROM social_posts
                         WHERE workspace_id = $1
                           AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND COALESCE(
+                                NULLIF(btrim(platform_post_id), ''),
+                                NULLIF(btrim(platform_post_url), '')
+                              ) IS NOT NULL
                         UNION ALL
                         SELECT action_id, posted_at, created_at
                         FROM telegram_posts
                         WHERE workspace_id = $1
                           AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND message_id IS NOT NULL
                         UNION ALL
                         SELECT action_id, posted_at, created_at
                         FROM discord_posts
                         WHERE workspace_id = $1
                           AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND NULLIF(btrim(message_id), '') IS NOT NULL
                     ) AS post
                     LEFT JOIN autopilot_actions AS act
                       ON act.workspace_id = $1
@@ -513,6 +551,26 @@ impl PostgresAcquisitionRepository {
                     LIMIT 1
                 ) AS post ON true
                 WHERE link.channel_source IS NOT NULL
+                  AND (
+                      post.action_id IS NOT NULL
+                      OR NOT EXISTS (
+                          SELECT 1 FROM community_posts p
+                          WHERE p.workspace_id=$1
+                            AND p.smart_link='/l/'||link.slug
+                          UNION ALL
+                          SELECT 1 FROM social_posts p
+                          WHERE p.workspace_id=$1
+                            AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                          UNION ALL
+                          SELECT 1 FROM telegram_posts p
+                          WHERE p.workspace_id=$1
+                            AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                          UNION ALL
+                          SELECT 1 FROM discord_posts p
+                          WHERE p.workspace_id=$1
+                            AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                      )
+                  )
                   AND click.occurred_at >= arrival.created_at - INTERVAL '30 days'
                   AND click.occurred_at <= arrival.created_at
                 ORDER BY arrival.fan_id, click.occurred_at DESC, click.id DESC
