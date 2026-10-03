@@ -317,7 +317,13 @@ pub async fn confirmation_recovery_snapshots(
 }
 
 const FUNNEL_SQL: &str = r#"
-WITH publications AS (
+WITH RECURSIVE family(root_id, member_id) AS (
+ SELECT fan.id,fan.id FROM fans fan
+ WHERE fan.workspace_id=$1 AND fan.merged_into_fan_id IS NULL
+ UNION ALL
+ SELECT family.root_id,child.id FROM family JOIN fans child
+   ON child.workspace_id=$1 AND child.merged_into_fan_id=family.member_id
+), publications AS (
  SELECT smart_link_id AS link_id,action_id,posted_at FROM social_posts
  WHERE workspace_id=$1
    AND smart_link_id IS NOT NULL
@@ -380,9 +386,15 @@ WITH publications AS (
      AND occurred_at >= $6-make_interval(days=>$4) AND occurred_at <= $6
      AND (link.published_at IS NULL OR occurred_at >= link.published_at)) AS unique_visitors,
    cohort.*,
-   (SELECT COUNT(DISTINCT referral.referred_fan_id) FROM cohorts c JOIN referral_attributions referral
-     ON referral.workspace_id=$1 AND referral.referrer_fan_id=c.fan_id WHERE c.link_id=link.id AND referral.status='qualified'
-     AND referral.qualified_at>c.acquired_at AND referral.qualified_at <= $6) AS qualified_referrals
+   (SELECT COUNT(DISTINCT referred.root_id)
+    FROM cohorts c
+    JOIN family referrer ON referrer.root_id=c.fan_id
+    JOIN referral_attributions referral
+      ON referral.workspace_id=$1 AND referral.referrer_fan_id=referrer.member_id
+    JOIN family referred ON referred.member_id=referral.referred_fan_id
+    WHERE c.link_id=link.id AND referral.status='qualified'
+      AND referral.qualified_at>c.acquired_at AND referral.qualified_at <= $6
+      AND referred.root_id<>referrer.root_id) AS qualified_referrals
  FROM links link CROSS JOIN LATERAL (
    SELECT COUNT(DISTINCT fan_id) AS signups,
      COUNT(DISTINCT fan_id) FILTER(WHERE contactable) AS confirmed,
