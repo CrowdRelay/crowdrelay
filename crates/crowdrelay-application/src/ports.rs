@@ -219,6 +219,23 @@ pub trait AcquisitionRepository: Send + Sync {
     /// return only its configured trusted workspace.
     async fn load_active_smart_links(&self) -> Result<Vec<ResolvedSmartLink>, RepositoryError>;
 
+    /// Resolves one active link on the redirect cache-miss path.
+    ///
+    /// The default keeps test/fake repositories source-compatible; production
+    /// overrides it with an indexed single-row query so an invalid public slug
+    /// never forces a full smart-link snapshot load.
+    async fn load_active_smart_link(
+        &self,
+        workspace_id: WorkspaceId,
+        slug: &SmartLinkSlug,
+    ) -> Result<Option<ResolvedSmartLink>, RepositoryError> {
+        Ok(self
+            .load_active_smart_links()
+            .await?
+            .into_iter()
+            .find(|link| link.workspace_id() == workspace_id && link.slug() == slug))
+    }
+
     /// Loads the redirect-time landing context — the workspace's owned video
     /// ids and the subreddits whose verified rules allow an off-site landing.
     /// Refreshed on the same cadence as the links so the cache snapshot stays
