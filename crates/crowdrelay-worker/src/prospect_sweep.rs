@@ -341,6 +341,10 @@ impl ProspectSweep {
              LEFT JOIN smart_links link
                ON link.workspace_id = c.workspace_id
               AND link.slug = 'reply-capture-' || replace(c.id::text, '-', '')
+              -- A prepared link is not evidence it was sent. Approval can
+              -- edit the draft; only the provider-confirmed sent draft may
+              -- make this touch an invitation.
+              AND position('/l/' || link.slug in COALESCE(c.draft,'')) > 0
              WHERE c.workspace_id = $1
                AND c.status = 'replied'
                AND c.replied_at IS NOT NULL
