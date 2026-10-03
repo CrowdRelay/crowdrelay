@@ -6,6 +6,61 @@
 // it exists only after the canonical delivery ledger proves the original
 // double-opt-in route failed.
 
+fn funnel_context_rank(
+    context: AutopilotContext,
+    control: Option<OrganicFunnelControl>,
+) -> u8 {
+    let Some(control) = control else {
+        return 10;
+    };
+    match control.directive {
+        OrganicFunnelDirective::RepairConfirmation
+        | OrganicFunnelDirective::ActivateFans
+        | OrganicFunnelDirective::RetainFans => {
+            if context == AutopilotContext::FanLifecycle { 0 } else { 10 }
+        }
+        OrganicFunnelDirective::RepairConversion => {
+            if context == AutopilotContext::ContentStrategy { 0 } else { 10 }
+        }
+        OrganicFunnelDirective::ExpandReach => 10,
+    }
+}
+
+fn content_supply_public_reach(candidate: &DecisionCandidate) -> bool {
+    if !matches!(
+        candidate.decision_kind,
+        "relay_owned_post" | "drop_surge_fanout"
+    ) {
+        return false;
+    }
+    match &candidate.action {
+        AutopilotActionPayload::RequestAgentRun { template_id, .. } => matches!(
+            template_id.as_str(),
+            "community-engager" | "community-repost"
+        ),
+        AutopilotActionPayload::RequestAgentContent { template_id, .. } => template_id
+            .as_deref()
+            .is_some_and(|template| {
+                matches!(
+                    template,
+                    "social-post" | "telegram-poster" | "discord-poster"
+                )
+            }),
+        AutopilotActionPayload::RequestCommunityEngagement { .. } => true,
+        _ => false,
+    }
+}
+
+fn funnel_allows_content_supply(
+    candidate: &DecisionCandidate,
+    control: Option<OrganicFunnelControl>,
+) -> bool {
+    control.is_none_or(|control| {
+        control.directive == OrganicFunnelDirective::ExpandReach
+            || !content_supply_public_reach(candidate)
+    })
+}
+
 fn attach_organic_funnel_control(
     candidate: &mut DecisionCandidate,
     control: OrganicFunnelControl,
@@ -117,12 +172,8 @@ where
         now: OffsetDateTime,
         limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
+        control: Option<OrganicFunnelControl>,
     ) -> Result<(), AutopilotError> {
-        let control = self
-            .repository
-            .load_organic_funnel_control(self.workspace_id, now)
-            .await?;
-
         let mut candidates = Vec::new();
 
         if let Some(control) = control
@@ -215,6 +266,63 @@ mod funnel_recovery_tests {
             retention_mature: 0,
             retained: 0,
         }
+    }
+
+    #[test]
+    fn downstream_recovery_context_runs_before_other_contexts() {
+        for directive in [
+            OrganicFunnelDirective::RepairConfirmation,
+            OrganicFunnelDirective::ActivateFans,
+            OrganicFunnelDirective::RetainFans,
+        ] {
+            let c = control(directive);
+            assert_eq!(funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)), 0);
+            assert_eq!(funnel_context_rank(AutopilotContext::ContentSupply, Some(c)), 10);
+        }
+        let c = control(OrganicFunnelDirective::RepairConversion);
+        assert_eq!(funnel_context_rank(AutopilotContext::ContentStrategy, Some(c)), 0);
+        assert_eq!(funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)), 10);
+    }
+
+    #[test]
+    fn downstream_leak_holds_public_content_reach_but_not_owned_fan_delivery() {
+        let public = candidate("crowdrelay.fan.welcome.v2");
+        let mut public = DecisionCandidate {
+            decision_kind: "drop_surge_fanout",
+            action: AutopilotActionPayload::RequestAgentContent {
+                template_id: Some("social-post".to_owned()),
+                task_id: uuid::Uuid::now_v7(),
+                draft: serde_json::json!({}),
+                recipient_email: None,
+                recipient_name: None,
+                recipient_target_id: None,
+            },
+            ..public
+        };
+        let owned = DecisionCandidate {
+            decision_kind: "drop_surge_fanout",
+            action: AutopilotActionPayload::RequestSignalPush {
+                task_id: uuid::Uuid::now_v7(),
+                title: "new".to_owned(),
+                body: "new".to_owned(),
+                target_path: Some("/l/x".to_owned()),
+                event_id: None,
+                segment: None,
+                audience_size: Some(1),
+                audience_basis: "consented fans".to_owned(),
+                drop_surge_lane: Some("signal_push".to_owned()),
+            },
+            ..candidate("crowdrelay.fan.welcome.v2")
+        };
+        let downstream = Some(control(OrganicFunnelDirective::ActivateFans));
+        assert!(!funnel_allows_content_supply(&public, downstream));
+        assert!(funnel_allows_content_supply(&owned, downstream));
+        assert!(funnel_allows_content_supply(
+            &public,
+            Some(control(OrganicFunnelDirective::ExpandReach))
+        ));
+        attach_organic_funnel_control(&mut public, control(OrganicFunnelDirective::ExpandReach));
+        assert!(public.input_snapshot.get("organic_funnel_control").is_some());
     }
 
     #[test]
