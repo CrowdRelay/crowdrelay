@@ -70,7 +70,7 @@ impl PostgresAutopilotRepository {
                             action,
                             *fan_id,
                             template_key,
-                            show,
+                            show.as_ref(),
                             now,
                         )
                         .await?;
