@@ -523,26 +523,18 @@ pub(super) async fn observe_with_metrics(
                 attributed_fans::observe_attributed_fans(pool, workspace_id, measurement, now)
                     .await?
             }
-            // Signal install growth after an agent dispatch: count new
-            // active push endpoints in the 7-day window. A push endpoint
-            // is a fan who installed Signal and opted in for push.
+            // Exact Signal acquisition after a direct-action dispatch.
+            // Count canonical people, not endpoint rows, and only when this
+            // action's lineage owns their tracked conversion. An install from
+            // another simultaneous campaign is invisible here.
             AutopilotMeasurementKind::AgentRunSignalInstalls7d => {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision
-                    FROM fan_push_endpoints
-                    WHERE workspace_id = $1
-                      AND active = true
-                      AND invalidated_at IS NULL
-                      AND created_at >= $2
-                      AND created_at < $2 + INTERVAL '7 days'
-                    "#,
+                action_attributed_signal_installs(
+                    pool,
+                    workspace_id,
+                    measurement,
+                    7,
                 )
-                .bind(workspace_id.into_uuid())
-                .bind(measurement.action_finished_at)
-                .fetch_one(pool)
-                .await
-                .map_err(map_sqlx)?
+                .await?
             }
             // Community engagement after a community.engage dispatch:
             // aggregate the latest metrics for posts to this target.
@@ -842,25 +834,15 @@ pub(super) async fn observe_with_metrics(
                 .await
                 .map_err(map_sqlx)?
             }
-            // Fast checkpoint: signal installs in 1 day. Same query as
-            // the 7-day measurement but with a 1-day window.
+            // Fast checkpoint over the same exact action-owned chain.
             AutopilotMeasurementKind::SignalInstalls1d => {
-                sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COUNT(*)::double precision
-                    FROM fan_push_endpoints
-                    WHERE workspace_id = $1
-                      AND active = true
-                      AND invalidated_at IS NULL
-                      AND created_at >= $2
-                      AND created_at < $2 + INTERVAL '1 day'
-                    "#,
+                action_attributed_signal_installs(
+                    pool,
+                    workspace_id,
+                    measurement,
+                    1,
                 )
-                .bind(workspace_id.into_uuid())
-                .bind(measurement.action_finished_at)
-                .fetch_one(pool)
-                .await
-                .map_err(map_sqlx)?
+                .await?
             }
         };
     if observed.is_finite() {
@@ -868,6 +850,110 @@ pub(super) async fn observe_with_metrics(
     } else {
         Err(RepositoryError::Unexpected)
     }
+}
+
+/// Canonical Signal installs attributable to one action lineage.
+///
+/// The exact proof is:
+/// action (or its trace/task child)
+///   -> fan_provenance_events.last_tracked_click.action_id
+///   -> canonical fan identity
+///   -> active fan push endpoint created after conversion in this window.
+///
+/// Multiple devices for one fan count once. A workspace-wide install with no
+/// conversion owned by this action contributes nothing.
+async fn action_attributed_signal_installs(
+    pool: &sqlx::PgPool,
+    workspace_id: WorkspaceId,
+    measurement: &ClaimedAutopilotMeasurement,
+    window_days: i32,
+) -> Result<f64, RepositoryError> {
+    let with_tasks = agent_tasks_table_exists(pool).await?;
+    let sql = if with_tasks {
+        r#"
+        WITH lineage AS (
+            SELECT $2::uuid AS action_id
+            UNION
+            SELECT child.id
+            FROM autopilot_actions root
+            JOIN autopilot_actions child
+              ON child.workspace_id=root.workspace_id
+             AND child.trace_id=root.trace_id
+            WHERE root.workspace_id=$1 AND root.id=$2
+            UNION
+            SELECT outcome.processed_action_id
+            FROM agent_outcomes outcome
+            JOIN agent_service_tasks task ON task.id=outcome.task_id
+            WHERE outcome.workspace_id=$1
+              AND outcome.processed_action_id IS NOT NULL
+              AND task.workspace_id=$1
+              AND task.metadata->>'action_id'=$2::text
+        ), conversions AS (
+            SELECT DISTINCT canonical_fan_id($1, conversion.fan_id) AS fan_id,
+                            conversion.occurred_at
+            FROM fan_provenance_events conversion
+            WHERE conversion.workspace_id=$1
+              AND conversion.event_kind='conversion'
+              AND conversion.attribution_method='last_tracked_click'
+              AND conversion.action_id IN (SELECT action_id FROM lineage)
+              AND conversion.occurred_at >= $3
+              AND conversion.occurred_at < $3 + make_interval(days=>$4)
+        )
+        SELECT COUNT(DISTINCT conversion.fan_id)::double precision
+        FROM conversions conversion
+        JOIN fan_push_endpoints endpoint
+          ON endpoint.workspace_id=$1
+         AND endpoint.audience_kind='fan'
+         AND canonical_fan_id($1,endpoint.fan_id)=conversion.fan_id
+         AND endpoint.active
+         AND endpoint.invalidated_at IS NULL
+         AND endpoint.created_at >= conversion.occurred_at
+         AND endpoint.created_at >= $3
+         AND endpoint.created_at < $3 + make_interval(days=>$4)
+        "#
+    } else {
+        r#"
+        WITH lineage AS (
+            SELECT $2::uuid AS action_id
+            UNION
+            SELECT child.id
+            FROM autopilot_actions root
+            JOIN autopilot_actions child
+              ON child.workspace_id=root.workspace_id
+             AND child.trace_id=root.trace_id
+            WHERE root.workspace_id=$1 AND root.id=$2
+        ), conversions AS (
+            SELECT DISTINCT canonical_fan_id($1, conversion.fan_id) AS fan_id,
+                            conversion.occurred_at
+            FROM fan_provenance_events conversion
+            WHERE conversion.workspace_id=$1
+              AND conversion.event_kind='conversion'
+              AND conversion.attribution_method='last_tracked_click'
+              AND conversion.action_id IN (SELECT action_id FROM lineage)
+              AND conversion.occurred_at >= $3
+              AND conversion.occurred_at < $3 + make_interval(days=>$4)
+        )
+        SELECT COUNT(DISTINCT conversion.fan_id)::double precision
+        FROM conversions conversion
+        JOIN fan_push_endpoints endpoint
+          ON endpoint.workspace_id=$1
+         AND endpoint.audience_kind='fan'
+         AND canonical_fan_id($1,endpoint.fan_id)=conversion.fan_id
+         AND endpoint.active
+         AND endpoint.invalidated_at IS NULL
+         AND endpoint.created_at >= conversion.occurred_at
+         AND endpoint.created_at >= $3
+         AND endpoint.created_at < $3 + make_interval(days=>$4)
+        "#
+    };
+    sqlx::query_scalar::<_, f64>(sql)
+        .bind(workspace_id.into_uuid())
+        .bind(measurement.action_id.into_uuid())
+        .bind(measurement.action_finished_at)
+        .bind(window_days)
+        .fetch_one(pool)
+        .await
+        .map_err(map_sqlx)
 }
 
 /// Whether the agent service's task table exists on this deployment — the
