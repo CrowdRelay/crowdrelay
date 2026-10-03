@@ -133,16 +133,8 @@ where
         &self,
         now: OffsetDateTime,
     ) -> Result<AutopilotCycleReport, AutopilotError> {
-        let mut policies = self.repository.load_policies(self.workspace_id).await?;
-        // One bottleneck snapshot governs the whole cycle. Without this,
-        // FanLifecycle and acquisition contexts can observe different funnel
-        // stages a few milliseconds apart and spend the same cycle in opposite
-        // directions.
-        let organic_funnel_control = self
-            .repository
-            .load_organic_funnel_control(self.workspace_id, now)
-            .await?;
-        policies.sort_by_key(|policy| funnel_context_rank(policy.context, organic_funnel_control));
+        // One bottleneck snapshot governs the whole cycle, including context order.
+        let (policies, organic_funnel_control) = self.cycle_policies_and_funnel(now).await?;
         // Loaded once per cycle rather than per candidate: the ceiling is an
         // operator setting that does not change mid-cycle, and re-reading it
         // for every decision would be a query per finding.
@@ -562,20 +554,11 @@ where
                             evidence.for_context(policy.context),
                             now,
                         )? {
-                            if let Some(control) = organic_funnel_control {
-                                attach_organic_funnel_control(&mut candidate, control);
-                            }
-                            if !funnel_allows_content_supply(
-                                &candidate,
+                            if !Self::prepare_content_candidate_for_funnel(
+                                &mut candidate,
                                 organic_funnel_control,
+                                &mut report,
                             ) {
-                                if let Some(control) = organic_funnel_control {
-                                    report.gi_dispatch_log.push(format!(
-                                        "organic funnel control: held content-supply public reach decision={} while directive={}",
-                                        candidate.decision_kind,
-                                        control.directive.as_str()
-                                    ));
-                                }
                                 continue;
                             }
                             let relay_push = match &candidate.action {
