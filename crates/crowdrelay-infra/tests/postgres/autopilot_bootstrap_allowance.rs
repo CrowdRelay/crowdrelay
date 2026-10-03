@@ -340,7 +340,10 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
     // to widen unattended authority. A few upvotes/comments or a channel-lift
     // spike can be algorithmic, botted or otherwise weak evidence of safe,
     // reputation-preserving action.
-    for kind in ["agent_run_community_engagement_7d", "release_channel_lift_14d"] {
+    for kind in [
+        "agent_run_community_engagement_7d",
+        "release_channel_lift_14d",
+    ] {
         resolved_evidence_action(
             &pool,
             workspace_id,
