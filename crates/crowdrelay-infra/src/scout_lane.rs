@@ -9,9 +9,11 @@
 //! the lane does are one answer, not two that can drift.
 //!
 //! A halt is not a verdict on any person: it stops the lane from adding more
-//! touches until the cause is gone. Each fact is windowed (the oldest touch it
-//! can see is 30 days), so a breach that was investigated and fixed clears
-//! itself rather than needing a flag to be reset by hand.
+//! touches until a person has looked. Each fact is windowed (the oldest touch it
+//! can see is 30 days), and `acknowledge` is how a person says "reviewed": only
+//! touches made *after* the newest acknowledgement of that kind can breach again,
+//! so the same fault recurring halts the lane at once. Nothing else clears it
+//! early — not the machine, and not a flag the code can set for itself.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -45,6 +47,17 @@ impl Breach {
         Self::InviteWithoutRoute,
         Self::UntrackedLink,
     ];
+
+    /// The acknowledgement key (the condition key without its `scout.` prefix).
+    #[must_use]
+    pub const fn ack_key(self) -> &'static str {
+        match self {
+            Self::ContactedAfterNo => "contacted_suppressed",
+            Self::OverRate => "over_rate",
+            Self::InviteWithoutRoute => "invite_without_route",
+            Self::UntrackedLink => "untracked_link",
+        }
+    }
 
     /// The watchdog condition key.
     #[must_use]
@@ -83,11 +96,13 @@ pub async fn breaches(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Breach>, 
               -- A refusal stops accepting writes, so its own timestamp is the
               -- moment of the no: a touch after it spoke to someone who said it.
               AND t.touched_at > p.updated_at
+              AND t.touched_at > COALESCE((SELECT max(ack.acknowledged_at) FROM scout_breach_acknowledgements ack WHERE ack.workspace_id = $1 AND ack.breach = 'contacted_suppressed'), '-infinity'::timestamptz)
           ),
           (
             (SELECT count(*) FROM fan_prospect_touches t
               WHERE t.workspace_id = $1
-                AND t.touched_at > now() - interval '24 hours') > $2
+                AND t.touched_at > now() - interval '24 hours'
+                AND t.touched_at > COALESCE((SELECT max(ack.acknowledged_at) FROM scout_breach_acknowledgements ack WHERE ack.workspace_id = $1 AND ack.breach = 'over_rate'), '-infinity'::timestamptz)) > $2
             OR EXISTS (
               SELECT 1 FROM fan_prospect_touches a
               JOIN fan_prospect_touches b
@@ -98,6 +113,7 @@ pub async fn breaches(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Breach>, 
                AND b.touched_at < a.touched_at + make_interval(hours => $3)
               WHERE a.workspace_id = $1
                 AND b.touched_at > now() - interval '7 days'
+                AND b.touched_at > COALESCE((SELECT max(ack.acknowledged_at) FROM scout_breach_acknowledgements ack WHERE ack.workspace_id = $1 AND ack.breach = 'over_rate'), '-infinity'::timestamptz)
             )
           ),
           EXISTS (
@@ -105,6 +121,7 @@ pub async fn breaches(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Breach>, 
             WHERE t.workspace_id = $1
               AND t.kind = 'invite'
               AND t.touched_at > now() - interval '30 days'
+              AND t.touched_at > COALESCE((SELECT max(ack.acknowledged_at) FROM scout_breach_acknowledgements ack WHERE ack.workspace_id = $1 AND ack.breach = 'invite_without_route'), '-infinity'::timestamptz)
               AND NOT EXISTS (
                 SELECT 1 FROM fan_prospect_observations o
                 WHERE o.workspace_id = t.workspace_id
@@ -118,6 +135,7 @@ pub async fn breaches(pool: &PgPool, workspace_id: Uuid) -> Result<Vec<Breach>, 
             WHERE t.workspace_id = $1
               AND t.kind = 'invite'
               AND t.touched_at > now() - interval '30 days'
+              AND t.touched_at > COALESCE((SELECT max(ack.acknowledged_at) FROM scout_breach_acknowledgements ack WHERE ack.workspace_id = $1 AND ack.breach = 'untracked_link'), '-infinity'::timestamptz)
               AND NOT l.active
           )
         "#,
@@ -152,4 +170,32 @@ pub async fn halted(pool: &PgPool, workspace_id: Uuid) -> Option<Vec<Breach>> {
             Some(Vec::new())
         }
     }
+}
+
+/// Records a person's decision that this kind of breach has been reviewed, so the
+/// touches made so far no longer halt the lane. A note is required: it is the
+/// reason resuming is safe, kept beside the decision.
+///
+/// # Errors
+///
+/// Propagates the database error. An empty note is refused by the schema.
+pub async fn acknowledge(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    breach: Breach,
+    acknowledged_by: &str,
+    note: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO scout_breach_acknowledgements
+             (workspace_id, breach, acknowledged_by, note)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(workspace_id)
+    .bind(breach.ack_key())
+    .bind(acknowledged_by)
+    .bind(note)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

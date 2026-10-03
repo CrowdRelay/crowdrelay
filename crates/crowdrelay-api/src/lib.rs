@@ -125,6 +125,7 @@ mod roster_release_calendar;
 mod roster_source_roi;
 mod roster_weekly_brief;
 mod routing;
+mod scout_lane_routes;
 mod security;
 mod signal_installations;
 mod viral_coefficient_routes;
