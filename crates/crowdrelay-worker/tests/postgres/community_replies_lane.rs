@@ -206,6 +206,65 @@ fn worker(
     .context("build community executor")
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn stale_inflight_reply_becomes_unknown_and_is_never_requeued() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .context("connect to the migrated suite database")?;
+    let ws = workspace(&pool).await?;
+    let post_id = community_post(&pool, ws).await?;
+    let comment_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO community_comments
+            (id, workspace_id, platform, community_post_id, platform_comment_id,
+             parent_id, author, body, status, draft, attempts, updated_at)
+        VALUES ($1,$2,'reddit',$3,'t1_unknown','t3_parent','fan','hello',
+                'replying','thanks!',1,now()-interval '20 minutes')
+        "#,
+    )
+    .bind(comment_id)
+    .bind(ws.into_uuid())
+    .bind(post_id)
+    .execute(&pool)
+    .await?;
+
+    let worker = worker(&pool, ws, true, "http://127.0.0.1:1")?;
+    worker.run_reply_lane().await?;
+
+    let first: (String, i32, Option<String>) = sqlx::query_as(
+        "SELECT status,attempts,hold_reason
+         FROM community_comments
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(comment_id)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(first.0 == "unknown", "confirmation loss must be UNKNOWN: {first:?}");
+    ensure!(first.1 == 1, "recovery must not spend a resend attempt: {first:?}");
+    ensure!(
+        first.2.as_deref().is_some_and(|reason| reason.contains("will not resend")),
+        "UNKNOWN needs an operator-readable reason: {first:?}"
+    );
+
+    worker.run_reply_lane().await?;
+    let second: (String, i32) = sqlx::query_as(
+        "SELECT status,attempts FROM community_comments
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(comment_id)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        second == ("unknown".to_owned(), 1),
+        "a later autonomous cycle must not turn UNKNOWN into a duplicate send: {second:?}"
+    );
+    Ok(())
+}
+
 /// A draft the agents service can never serve must count its attempts and
 /// give up — not retry every backoff interval forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
