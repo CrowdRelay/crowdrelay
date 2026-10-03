@@ -169,8 +169,9 @@ async fn main() -> Result<()> {
         let click_buffer = click_buffer.clone();
         Box::pin(async move {
             match click_buffer.submit(event).await {
-                ClickSubmissionOutcome::Queued
-                | ClickSubmissionOutcome::OverflowPersisted => ClickSubmission::Accepted,
+                ClickSubmissionOutcome::Queued | ClickSubmissionOutcome::OverflowPersisted => {
+                    ClickSubmission::Accepted
+                }
                 ClickSubmissionOutcome::Unavailable => ClickSubmission::Unavailable,
             }
         })

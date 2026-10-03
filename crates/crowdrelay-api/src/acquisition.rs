@@ -72,12 +72,10 @@ pub enum ClickSubmission {
 /// Future returned by the click submitter. Healthy-buffer submissions resolve
 /// immediately; only the exceptional overflow path waits for one bounded
 /// repository write.
-pub type ClickSubmissionFuture =
-    Pin<Box<dyn Future<Output = ClickSubmission> + Send + 'static>>;
+pub type ClickSubmissionFuture = Pin<Box<dyn Future<Output = ClickSubmission> + Send + 'static>>;
 /// Closure that accepts one human click without adding database latency to the
 /// healthy redirect path.
-pub type ClickSubmitter =
-    Arc<dyn Fn(ClickEvent) -> ClickSubmissionFuture + Send + Sync>;
+pub type ClickSubmitter = Arc<dyn Fn(ClickEvent) -> ClickSubmissionFuture + Send + Sync>;
 /// Closure that returns a point-in-time snapshot of click ingestion counters.
 pub type ClickMetricsReader = Arc<dyn Fn() -> ClickMetricsSnapshot + Send + Sync>;
 
