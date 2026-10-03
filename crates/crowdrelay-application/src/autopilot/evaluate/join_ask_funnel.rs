@@ -16,14 +16,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         now: OffsetDateTime,
         limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
+        funnel_control: Option<OrganicFunnelControl>,
     ) -> Result<(), AutopilotError> {
         let snapshot = self
             .repository
             .load_join_ask_snapshot(self.workspace_id, now)
-            .await?;
-        let funnel_control = self
-            .repository
-            .load_organic_funnel_control(self.workspace_id, now)
             .await?;
         if funnel_control.is_none_or(|control| control.directive.permits_join_ask()) {
             let mut evaluation =
