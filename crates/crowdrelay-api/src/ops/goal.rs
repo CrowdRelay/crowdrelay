@@ -323,7 +323,15 @@ async fn load_reddit_standing(
         r#"
         SELECT normalize_subreddit(post.subreddit), post.posted_at,
                post.removed_by_category, post.removal_seen_at, post.last_seen_live_at,
-               COALESCE(latest.score > 1 OR latest.num_comments > 0, false)
+               (
+                   COALESCE(latest.score > 1, false)
+                   OR EXISTS (
+                       SELECT 1
+                       FROM community_comments AS human_comment
+                       WHERE human_comment.workspace_id = post.workspace_id
+                         AND human_comment.community_post_id = post.id
+                   )
+               )
         FROM community_posts AS post
         LEFT JOIN LATERAL (
             SELECT metric.score, metric.num_comments
