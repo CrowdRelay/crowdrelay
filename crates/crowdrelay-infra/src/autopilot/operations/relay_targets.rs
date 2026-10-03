@@ -53,6 +53,39 @@ async fn load_failed_relay_tasks(
     Ok(failures)
 }
 
+pub(in crate::autopilot) async fn load_recent_relay_pushes(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    since: OffsetDateTime,
+) -> Result<Vec<crowdrelay_domain::content_supply::RecentRelayPush>, RepositoryError> {
+    // Only relay-owned pushes participate in relay pacing. Pending approval
+    // already counts because it would reach the same phones once approved.
+    let rows = sqlx::query_as::<_, (OffsetDateTime, Option<String>, Option<String>)>(
+        r#"
+        SELECT created_at, payload->>'title', payload->>'body'
+        FROM autopilot_actions
+        WHERE workspace_id = $1
+          AND action_kind = 'signal.push.request'
+          AND idempotency_key LIKE 'action:relay:%:signal_push'
+          AND status <> 'cancelled'
+          AND created_at >= $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(since)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|(at, title, body)| crowdrelay_domain::content_supply::RecentRelayPush {
+            at,
+            title: title.unwrap_or_default(),
+            body: body.unwrap_or_default(),
+        })
+        .collect())
+}
+
 pub(in crate::autopilot) async fn load_relay_community_targets(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
