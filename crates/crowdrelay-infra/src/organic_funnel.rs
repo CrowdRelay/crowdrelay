@@ -241,9 +241,10 @@ pub async fn confirmation_recovery_snapshots(
                       AND COALESCE(delivery.dead, 0) + COALESCE(delivery.cancelled, 0) > 0
                   )
               )
-              -- If another cycle already created a recovery action for this
-              -- exact failed event, the action's own retry/reconciliation
-              -- machinery owns it. Never mint a second confirmation.
+              -- Exactly one autonomous retry per attributable acquisition
+              -- episode. If the retry itself fails, the fan can explicitly
+              -- request another access email; the Brain never turns a broken
+              -- mail route into a retry loop.
               AND NOT EXISTS (
                   SELECT 1
                   FROM autopilot_actions AS action
@@ -252,10 +253,7 @@ pub async fn confirmation_recovery_snapshots(
                     AND action.action_kind = 'fan.lifecycle.message.request'
                     AND action.payload->>'template_key' =
                         'crowdrelay.fan.confirmation_recovery.v1'
-                    AND action.idempotency_key =
-                        'action:confirmation-recovery:'
-                        || confirmation.fan_id::text || ':'
-                        || confirmation.outbox_event_id::text
+                    AND action.created_at >= confirmation.acquired_at
               )
             ORDER BY confirmation.event_created_at, confirmation.fan_id
             LIMIT $5
