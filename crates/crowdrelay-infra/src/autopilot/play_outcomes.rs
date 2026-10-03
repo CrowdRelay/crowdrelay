@@ -429,21 +429,18 @@ impl PostgresAutopilotRepository {
             if updated.rows_affected() != 1 {
                 return Err(RepositoryError::Conflict);
             }
-            // The record moves with the outcome or not at all. Two writes would
-            // let a crash leave a play scored and unlearned from, and the
-            // difference is invisible afterwards.
-            if outcome.claim == PlayClaim::Correlational {
-                record_play_outcome(
-                    &mut transaction,
-                    workspace_id,
-                    outcome.kind,
-                    match verdict {
-                        PlayOutcomeVerdict::Measured { assessment, .. } => assessment,
-                        PlayOutcomeVerdict::Insufficient { .. } => None,
-                    },
-                )
-                .await?;
-            }
+            // Provider-series movement is explicitly correlational: it may be
+            // shown to an operator, but it is not causal authority for the
+            // autonomous play standing. An unrelated release, press hit or
+            // organic spike inside the same window can move the same follower
+            // counter. Feeding that verdict into play_learning would teach the
+            // machine a cause it never observed.
+            //
+            // The attributed claim currently measures exact action-owned
+            // traffic as a count and deliberately carries no effect verdict,
+            // so it also cannot weight/retire a play. play_learning remains
+            // untouched until a future claim supplies genuine incremental
+            // treatment/control evidence or equivalent provider attribution.
             transaction.commit().await.map_err(map_sqlx)?;
             Ok(())
         })
@@ -772,12 +769,14 @@ impl AutopilotWaveOutcomeRepository for PostgresAutopilotRepository {
     }
 }
 
-/// Folds one play's measured verdict into the record for its kind.
+/// Folds an *authoritative causal* play verdict into the record for its kind.
 ///
-/// `None` is an outcome nobody could measure. It is counted so the record is
-/// complete and left out of every calculation, because being unable to see
-/// whether a play worked is a reason to fix the measurement rather than to stop
-/// running the play.
+/// Do not call this for `PlayClaim::Correlational`. Provider-series movement
+/// in the same time window is useful reporting evidence, not a causal result.
+/// A caller must already hold incremental treatment/control evidence or an
+/// equally strong provider attribution before this function may steer autonomy.
+///
+/// `None` means the authoritative measurement itself was unavailable.
 pub(super) async fn record_play_outcome(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: WorkspaceId,
