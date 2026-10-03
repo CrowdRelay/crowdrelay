@@ -149,7 +149,8 @@ async fn erasure_scrubs_the_entire_merged_identity_family() -> Result<()> {
     let privacy = PostgresFanPrivacyRepository::new(pool.clone());
     let receipt = privacy
         .erase_account(w, &token, Some("privacy-family-erasure"))
-        .await?;
+        .await
+        .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
     assert_eq!(receipt.fan_id, survivor);
 
     let rows: Vec<(Uuid, String, String, Option<time::OffsetDateTime>)> = sqlx::query_as(
