@@ -522,8 +522,8 @@ impl PostgresAcquisitionRepository {
             SELECT code
             FROM referral_codes
             WHERE workspace_id = $1
-                AND fan_id = $2
-                AND active
+              AND fan_id IN (SELECT fan_id FROM canonical_fan_family($1,$2))
+              AND active
             ORDER BY created_at, id
             LIMIT 1
             "#,
@@ -564,8 +564,8 @@ impl PostgresAcquisitionRepository {
                 SELECT code
                 FROM referral_codes
                 WHERE workspace_id = $1
-                    AND fan_id = $2
-                    AND active
+                  AND fan_id IN (SELECT fan_id FROM canonical_fan_family($1,$2))
+                  AND active
                 ORDER BY created_at, id
                 LIMIT 1
                 "#,
@@ -595,25 +595,31 @@ impl PostgresAcquisitionRepository {
         };
         let referral = sqlx::query_as::<_, ReferralOwnerRow>(
             r#"
-            SELECT id, fan_id
-            FROM referral_codes
-            WHERE workspace_id = $1
-                AND code = $2
-                AND active
-            FOR SHARE
+            SELECT code.id, code.fan_id
+            FROM referral_codes AS code
+            JOIN fans AS owner
+              ON owner.workspace_id = code.workspace_id
+             AND owner.id = canonical_fan_id(code.workspace_id, code.fan_id)
+            WHERE code.workspace_id = $1
+              AND code.code = $2
+              AND code.active
+              AND owner.status = 'active'
+              AND owner.deleted_at IS NULL
+              AND owner.merged_into_fan_id IS NULL
+              AND canonical_fan_id($1,code.fan_id)
+                    IS DISTINCT FROM canonical_fan_id($1,$3)
+            FOR SHARE OF code, owner
             "#,
         )
         .bind(workspace_id.into_uuid())
         .bind(code.as_str())
+        .bind(referred_fan_id.into_uuid())
         .fetch_optional(&mut **transaction)
         .await
         .map_err(StoreError::from_sqlx)?;
         let Some(referral) = referral else {
             return Ok(None);
         };
-        if referral.fan_id == referred_fan_id.into_uuid() {
-            return Ok(None);
-        }
         Ok(Some(referral))
     }
 
