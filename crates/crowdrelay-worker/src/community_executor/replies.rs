@@ -972,9 +972,13 @@ impl CommunityExecutorWorker {
                 Ok(1)
             }
             Err(CommunityExecutorError::RedditApi(message)) => {
-                // Reddit (or the route) refused this reply — terminal for it.
+                // The agents route returned a definitive non-success response.
+                // That is evidence the requested reply was refused, not an
+                // ambiguous loss of confirmation.
                 sqlx::query(
-                    "UPDATE community_comments SET status = 'failed', hold_reason = $3, updated_at = now() WHERE id = $1 AND workspace_id = $2",
+                    "UPDATE community_comments
+                     SET status = 'failed', hold_reason = $3, updated_at = now()
+                     WHERE id = $1 AND workspace_id = $2 AND status = 'replying'",
                 )
                 .bind(row.id)
                 .bind(ws)
@@ -983,9 +987,34 @@ impl CommunityExecutorWorker {
                 .await?;
                 Ok(0)
             }
-            Err(error) => {
-                tracing::warn!(comment = %row.id, error = %error, "reply send deferred");
+            Err(CommunityExecutorError::RateLimited | CommunityExecutorError::NoAgentsService) => {
+                // These fail before a provider submission can be accepted:
+                // 429 is an explicit refusal from the dispatch service, and
+                // NoAgentsService means no request was possible at all.
                 self.back_off(row.id, row.attempts + 1, "approved").await?;
+                Ok(0)
+            }
+            Err(error) => {
+                // A timeout, connection loss after request dispatch, malformed
+                // 2xx receipt, or agents-service 5xx cannot prove Reddit did
+                // not accept the reply. Retrying could duplicate an external
+                // side effect, so fail closed as UNKNOWN.
+                tracing::warn!(
+                    comment = %row.id,
+                    error = %error,
+                    "Reddit reply outcome ambiguous; automation will not resend"
+                );
+                sqlx::query(
+                    "UPDATE community_comments
+                     SET status='unknown',
+                         hold_reason='provider confirmation lost after reply attempt; do not resend automatically',
+                         updated_at=now()
+                     WHERE id=$1 AND workspace_id=$2 AND status='replying'",
+                )
+                .bind(row.id)
+                .bind(ws)
+                .execute(&self.pool)
+                .await?;
                 Ok(0)
             }
         }
