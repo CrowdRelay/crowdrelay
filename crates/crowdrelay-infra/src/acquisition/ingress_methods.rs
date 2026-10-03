@@ -206,7 +206,10 @@ impl PostgresAcquisitionRepository {
             return Err(StoreError::Conflict);
         }
 
-        let workspace_id = self.trusted_workspace_id_inner().await?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::from_sqlx)?;
+        let workspace_id = self
+            .trusted_workspace_id_in_transaction(&mut transaction)
+            .await?;
         if clicks
             .iter()
             .any(|click| click.workspace_id() != workspace_id)
@@ -227,6 +230,7 @@ impl PostgresAcquisitionRepository {
             .iter()
             .map(|click| click.visitor_id().map(Into::into))
             .collect();
+        let late_visitor_ids: Vec<Uuid> = visitor_ids.iter().flatten().copied().collect();
         let referrer_hosts: Vec<Option<String>> = clicks
             .iter()
             .map(|click| click.referrer_host().map(str::to_owned))
@@ -371,7 +375,7 @@ impl PostgresAcquisitionRepository {
         .bind(&visitor_ids)
         .bind(&referrer_hosts)
         .bind(&occurred_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(StoreError::from_sqlx)?;
 
@@ -379,6 +383,152 @@ impl PostgresAcquisitionRepository {
             return Err(StoreError::Conflict);
         }
 
+        // Redirects deliberately enqueue click analytics without waiting for
+        // PostgreSQL. A fast human can therefore finish signup before this
+        // batch lands. The signup transaction keeps the visitor id in
+        // fan_acquisition_events, so once the delayed click is durable we have
+        // enough first-party evidence to recover the exact same
+        // last-tracked-click conversion the synchronous ordering would have
+        // produced. Do it in the click transaction so "click persisted" and
+        // "late attribution reconciled" cannot split.
+        if !late_visitor_ids.is_empty() {
+            self.reconcile_late_click_conversions(
+                &mut transaction,
+                workspace_id,
+                &late_visitor_ids,
+            )
+            .await?;
+        }
+
+        transaction.commit().await.map_err(StoreError::from_sqlx)?;
+        Ok(())
+    }
+
+    async fn reconcile_late_click_conversions(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        workspace_id: WorkspaceId,
+        visitor_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            WITH arrivals AS (
+                SELECT DISTINCT ON (arrival.fan_id)
+                       arrival.fan_id,
+                       arrival.anonymous_visitor_id,
+                       fan.created_at
+                FROM fan_acquisition_events AS arrival
+                JOIN fans AS fan
+                  ON fan.workspace_id = arrival.workspace_id
+                 AND fan.id = arrival.fan_id
+                WHERE arrival.workspace_id = $1
+                  AND arrival.anonymous_visitor_id = ANY($2)
+                  AND arrival.anonymous_visitor_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM fan_provenance_events AS prior
+                      WHERE prior.workspace_id = arrival.workspace_id
+                        AND prior.fan_id = arrival.fan_id
+                        AND prior.event_kind = 'conversion'
+                        AND prior.attribution_method = 'last_tracked_click'
+                  )
+                ORDER BY arrival.fan_id, arrival.occurred_at, arrival.request_id
+            ),
+            winners AS (
+                SELECT DISTINCT ON (arrival.fan_id)
+                       arrival.fan_id,
+                       link.channel_source AS channel,
+                       link.slug AS source_target,
+                       link.channel_community AS community,
+                       click.campaign_id,
+                       COALESCE(link.action_id, post.action_id) AS action_id,
+                       arrival.created_at AS occurred_at,
+                       post.format_key
+                FROM arrivals AS arrival
+                JOIN click_events AS click
+                  ON click.workspace_id = $1
+                 AND click.anonymous_visitor_id = arrival.anonymous_visitor_id
+                JOIN smart_links AS link
+                  ON link.workspace_id = click.workspace_id
+                 AND link.id = click.smart_link_id
+                LEFT JOIN LATERAL (
+                    SELECT post.action_id, source.format_key
+                    FROM (
+                        SELECT action_id, posted_at, created_at
+                        FROM community_posts
+                        WHERE workspace_id = $1
+                          AND smart_link = '/l/' || link.slug
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM social_posts
+                        WHERE workspace_id = $1
+                          AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM telegram_posts
+                        WHERE workspace_id = $1
+                          AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                        UNION ALL
+                        SELECT action_id, posted_at, created_at
+                        FROM discord_posts
+                        WHERE workspace_id = $1
+                          AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND posted_at IS NOT NULL
+                          AND posted_at <= click.occurred_at
+                    ) AS post
+                    LEFT JOIN autopilot_actions AS act
+                      ON act.workspace_id = $1
+                     AND act.id = post.action_id
+                    LEFT JOIN content_sources AS source
+                      ON source.workspace_id = $1
+                     AND source.id::text = lower(
+                         COALESCE(
+                             act.payload->>'source_id',
+                             act.payload->'draft'->>'source_id'
+                         )
+                     )
+                    ORDER BY post.posted_at DESC NULLS LAST,
+                             post.created_at DESC,
+                             post.action_id
+                    LIMIT 1
+                ) AS post ON true
+                WHERE link.channel_source IS NOT NULL
+                  AND click.occurred_at >= arrival.created_at - INTERVAL '30 days'
+                  AND click.occurred_at <= arrival.created_at
+                ORDER BY arrival.fan_id, click.occurred_at DESC, click.id DESC
+            )
+            INSERT INTO fan_provenance_events (
+                workspace_id, fan_id, event_kind, channel, source_target,
+                community, campaign_id, action_id, attribution_method,
+                attribution_confidence, occurred_at, format_key
+            )
+            SELECT $1, winner.fan_id, 'conversion', winner.channel,
+                   winner.source_target, winner.community, winner.campaign_id,
+                   winner.action_id, 'last_tracked_click', 1.0,
+                   winner.occurred_at, winner.format_key
+            FROM winners AS winner
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM fan_provenance_events AS prior
+                WHERE prior.workspace_id = $1
+                  AND prior.fan_id = winner.fan_id
+                  AND prior.event_kind = 'conversion'
+                  AND prior.attribution_method = 'last_tracked_click'
+            )
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(visitor_ids)
+        .execute(&mut **transaction)
+        .await
+        .map_err(StoreError::from_sqlx)?;
         Ok(())
     }
 
