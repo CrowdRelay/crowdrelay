@@ -355,6 +355,26 @@ pub fn transition(from: ActionState, to: ActionState) -> Result<ActionState, Ill
 /// The canonical resolver (`resolve_observation` + `legal_transition`)
 /// consumes it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Whether a provider/outbox error proves the external side effect did not happen.
+///
+/// Ambiguous transport failures are deliberately excluded: a timeout or lost
+/// acknowledgement can happen after the provider accepted the message. Any
+/// retry mechanism that rotates credentials/tokens must use this same
+/// classifier, otherwise "confirmation lost" becomes a destructive retry.
+#[must_use]
+pub fn provider_delivery_failure_is_definitive(kind: &str) -> bool {
+    kind.starts_with("http_permanent")
+        || kind == "recipient_ineligible"
+        || kind.starts_with("secret_")
+        || kind.starts_with("endpoint_")
+        || kind == "invalid_signing_secret"
+        || kind == "event_serialization"
+        || kind == "invalid_endpoint_url"
+        || kind == "invalid_event_timestamp"
+        || kind == "materialization_timeout"
+        || kind == "materialization_database"
+}
+
 pub enum ProviderDeliveryState {
     /// Delivery confirmed — the external side effect happened.
     /// (e.g. `community_posts.status = 'posted'`, outbox `delivered`.)
