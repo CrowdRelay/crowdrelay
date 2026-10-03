@@ -527,47 +527,22 @@ pub(super) async fn schedule_effect_measurement(
                 ));
             }
         }
-        // A produced artifact is content the brain asked for and an audience
-        // now sees — the request half of the loop closed at the receipt, and
-        // the answer half is whether fans moved afterward. It sat in the
-        // do-nothing arm below: a shipped video left no measurement behind,
-        // so `suggestion_outcomes.results` carried operator-reported reach
-        // that nothing reads back into a belief.
+        // Producing an artifact is not publishing it.
         //
-        // The window anchors at the executor-confirmed production time — the
-        // receipt's occurred_at — which is the same convention every other
-        // executor-backed action uses: producing the artifact and putting it
-        // in front of people is the executor's one job. Anchoring at request
-        // time would open the observation window before anyone could have
-        // seen the thing. The subject is the content source the artifact was
-        // made from, which is also the entity read models can point at.
+        // This action answers one proximal question only: did the produced
+        // asset reach a real audience through a downstream publication inside
+        // the week? The publication/send action owns clicks and fan-growth
+        // measurements because only it has a concrete delivery receipt and,
+        // where applicable, an action-owned tracked link.
+        //
+        // The previous version scheduled 3d/14d/30d fan-growth here as soon as
+        // an executor said "artifact produced". Newsletter blocks, press hooks,
+        // listings and social drafts then matured into `no_tracked_link`
+        // failures even when nothing had ever been published. Worse, a later
+        // tracked child publication could teach both the artifact request and
+        // the actual delivery action from the same fan. That made production
+        // look busier without making the causal loop more truthful.
         AutopilotActionPayload::RequestContentArtifact { source_id, .. } => {
-            // The fan kinds count fans traced to the action; their
-            // counterfactual is zero by construction, so no pre-period rate
-            // is read (`counts_attributed_fans`).
-            plans.push((
-                AutopilotMeasurementKind::IncrementalFanGrowth14d,
-                source_id.into_uuid(),
-                0.0,
-                now + time::Duration::days(14),
-            ));
-            plans.push((
-                AutopilotMeasurementKind::IncrementalFanGrowth3d,
-                source_id.into_uuid(),
-                0.0,
-                now + time::Duration::days(3),
-            ));
-            plans.push((
-                AutopilotMeasurementKind::DurableFanGrowth30d,
-                source_id.into_uuid(),
-                0.0,
-                now + time::Duration::days(44),
-            ));
-            // Did the produced artifact reach an audience — posts filed
-            // against this source inside the week after production. The
-            // request was executor-gated, so this measurement only exists
-            // once the receipt confirmed the artifact exists; its zero then
-            // means produced-and-never-posted, which is the real verdict.
             plans.push((
                 AutopilotMeasurementKind::ArtifactOutcome7d,
                 source_id.into_uuid(),
