@@ -374,6 +374,33 @@ pub fn provider_delivery_failure_is_definitive(kind: &str) -> bool {
         || kind == "materialization_database"
 }
 
+
+/// Returns true only when the full delivery picture proves the external side
+/// effect did not happen and an automated retry is therefore safe.
+///
+/// A terminal-looking row is not enough: an ambiguous timeout may sit in a
+/// `dead` or later `cancelled` row after its acknowledgement was lost.
+/// Delivered/in-flight evidence always blocks destructive retry.
+#[must_use]
+pub fn provider_delivery_set_is_definitive_failure(
+    event_status: &str,
+    event_error_kind: Option<&str>,
+    delivered: i64,
+    in_flight: i64,
+    terminal_error_kinds: &[String],
+) -> bool {
+    if delivered > 0 || in_flight > 0 {
+        return false;
+    }
+    let event_failure = event_status == "dead"
+        && event_error_kind.is_some_and(provider_delivery_failure_is_definitive);
+    let terminal_deliveries = !terminal_error_kinds.is_empty()
+        && terminal_error_kinds
+            .iter()
+            .all(|kind| provider_delivery_failure_is_definitive(kind));
+    event_failure || terminal_deliveries
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderDeliveryState {
     /// Delivery confirmed — the external side effect happened.
@@ -684,6 +711,48 @@ pub fn legal_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmation_loss_is_never_safe_to_retry_destructively() {
+        let ambiguous = vec!["transport_timeout".to_owned()];
+        assert!(!provider_delivery_set_is_definitive_failure(
+            "dead",
+            Some("transport_timeout"),
+            0,
+            0,
+            &[],
+        ));
+        assert!(!provider_delivery_set_is_definitive_failure(
+            "delivered",
+            None,
+            0,
+            0,
+            &ambiguous,
+        ));
+
+        let permanent = vec!["http_permanent_status".to_owned()];
+        assert!(provider_delivery_set_is_definitive_failure(
+            "dead",
+            Some("http_permanent_status"),
+            0,
+            0,
+            &[],
+        ));
+        assert!(provider_delivery_set_is_definitive_failure(
+            "delivered",
+            None,
+            0,
+            0,
+            &permanent,
+        ));
+        assert!(!provider_delivery_set_is_definitive_failure(
+            "dead",
+            Some("http_permanent_status"),
+            1,
+            0,
+            &permanent,
+        ));
+    }
 
     #[test]
     fn terminal_states_have_no_outgoing_transitions() {
