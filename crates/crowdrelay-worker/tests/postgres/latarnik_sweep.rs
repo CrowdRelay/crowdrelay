@@ -782,9 +782,7 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
     .fetch_one(&pool)
     .await?;
     ensure!(
-        cohort.1 == Some(mission_action)
-            && cohort.2 == Some(mission_link)
-            && cohort.3,
+        cohort.1 == Some(mission_action) && cohort.2 == Some(mission_link) && cohort.3,
         "a confirmed Latarnik referral must enter the canonical FAN_100 cohort: {cohort:?}"
     );
     let (done, _) = settle(&pool, w, now + Span::hours(3)).await?;

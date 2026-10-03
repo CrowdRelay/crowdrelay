@@ -321,14 +321,11 @@ pub async fn offer(
     .fetch_optional(&mut *tx)
     .await?
     .map(|value| value.trim().trim_end_matches('/').to_owned())
-    .filter(|value| !value.is_empty())
-    else {
+    .filter(|value| !value.is_empty()) else {
         tx.rollback().await?;
         return Ok(None);
     };
-    if !plan
-        .destination_url
-        .starts_with(&format!("{site_root}/r/"))
+    if !plan.destination_url.starts_with(&format!("{site_root}/r/"))
         || !plan.share_text.contains(&plan.destination_url)
     {
         tx.rollback().await?;
@@ -337,10 +334,7 @@ pub async fn offer(
 
     // One fact is one durable intervention forever. The chooser also keeps
     // history, but the action key is the race-safe backstop across workers.
-    let anchor = plan
-        .event_id
-        .or(plan.content_source_id)
-        .unwrap_or(role_id);
+    let anchor = plan.event_id.or(plan.content_source_id).unwrap_or(role_id);
     let decision_key = format!(
         "latarnik.mission:{}:{}:{}",
         role_id,
@@ -433,14 +427,16 @@ pub async fn offer(
     .await?
     {
         Some(id) => id,
-        None => sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM autopilot_decisions
+        None => {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM autopilot_decisions
              WHERE workspace_id = $1 AND decision_key = $2",
-        )
-        .bind(workspace_id)
-        .bind(&decision_key)
-        .fetch_one(&mut *tx)
-        .await?,
+            )
+            .bind(workspace_id)
+            .bind(&decision_key)
+            .fetch_one(&mut *tx)
+            .await?
+        }
     };
 
     let action_trace = TraceContext::for_action(

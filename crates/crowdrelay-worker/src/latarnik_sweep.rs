@@ -155,16 +155,9 @@ impl LatarnikSweep {
                 report.missions_held_by_funnel += 1;
                 continue;
             }
-            if offer(
-                &self.pool,
-                ws,
-                carrier.role_id,
-                carrier.fan_id,
-                &plan,
-                now,
-            )
-            .await?
-            .is_some()
+            if offer(&self.pool, ws, carrier.role_id, carrier.fan_id, &plan, now)
+                .await?
+                .is_some()
             {
                 report.missions_offered += 1;
             }
@@ -172,7 +165,6 @@ impl LatarnikSweep {
         Ok(report)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
