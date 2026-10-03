@@ -173,6 +173,15 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<Vec<DeliveryLaneVerdict>, RepositoryError>;
 
+    /// Owned public-social rails that are executable *now*: worker runtime
+    /// capability, connected+working credential, and tenant standing authority
+    /// all agree. The evaluator uses this during cold-start acquisition so a
+    /// Facebook-only grant does not manufacture Instagram/X approval work.
+    async fn load_executable_owned_social_platforms(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<String>, RepositoryError>;
+
     /// How many fans a Signal push to `segment` would reach right now — the
     /// same eligibility the send path applies (active fan, newest marketing
     /// consent granted, the segment's predicates, at least one live push

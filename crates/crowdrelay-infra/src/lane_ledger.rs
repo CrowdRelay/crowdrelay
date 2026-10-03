@@ -232,6 +232,23 @@ pub struct DayZeroFacts {
 }
 
 impl DayZeroFacts {
+    /// Public-social platforms that can genuinely publish without another
+    /// person right now. Derived from the same readiness facts the control
+    /// plane shows; no second interpretation of authority is allowed.
+    #[must_use]
+    pub fn executable_owned_social_platforms(&self) -> Vec<String> {
+        let readiness = self.assess();
+        if !readiness.ready {
+            return Vec::new();
+        }
+        readiness
+            .rails
+            .into_iter()
+            .filter(|rail| rail.state == crowdrelay_domain::day_zero::RailState::Executable)
+            .map(|rail| rail.platform.to_owned())
+            .collect()
+    }
+
     /// Whether the narrow Facebook standing-authority handoff may be accepted.
     ///
     /// The deployment gate is deliberately part of this check: storing tenant

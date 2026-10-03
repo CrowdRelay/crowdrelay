@@ -177,6 +177,67 @@ fn a_fresh_video_fans_out_to_every_surge_lane_at_once() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn expand_reach_routes_owned_social_only_to_executable_rails()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_domain::content_supply::SignalPushAudience;
+    let now = OffsetDateTime::now_utc();
+    let candidates = content_candidates(
+        &fresh_video_snapshot(now),
+        &surge_policy(),
+        &[surge_community()],
+        Some(SignalPushAudience {
+            eligible: 12,
+            reached: 12,
+        }),
+        ContextEvidence::UNPROVEN,
+        now,
+    )?;
+    let control = OrganicFunnelControl {
+        directive: OrganicFunnelDirective::ExpandReach,
+        mature_links: 0,
+        unique_visitors: 0,
+        signups: 0,
+        confirmed: 0,
+        activation_mature: 0,
+        activated_mature: 0,
+        retention_mature: 0,
+        retained: 0,
+    };
+    let executable = vec!["facebook".to_owned()];
+
+    let social: Vec<(&str, bool)> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            cold_start_social_platform(candidate).map(|platform| {
+                (
+                    platform,
+                    cold_start_social_is_executable(candidate, Some(control), &executable),
+                )
+            })
+        })
+        .collect();
+    assert!(social.contains(&("facebook", true)), "{social:?}");
+    assert!(social.contains(&("instagram", false)), "{social:?}");
+    assert!(social.contains(&("x", false)), "{social:?}");
+
+    let community = candidates
+        .iter()
+        .find(|candidate| {
+            matches!(
+                &candidate.action,
+                AutopilotActionPayload::RequestAgentRun { template_id, .. }
+                    if template_id == "community-engager"
+            )
+        })
+        .expect("community candidate");
+    assert!(
+        cold_start_social_is_executable(community, Some(control), &executable),
+        "community standing is a separate rail and must not be filtered by Facebook authority"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_fresh_release_reaches_read_admitted_communities_too()
 -> Result<(), Box<dyn std::error::Error>> {
     use crowdrelay_domain::content_supply::{DROP_SURGE_LANES, SignalPushAudience};

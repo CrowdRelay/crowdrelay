@@ -108,12 +108,34 @@ async fn set_facebook_authority(
         return Problem::service_unavailable(rid).private().into_response();
     }
 
+    // The explicit grant is the last human step. Wake the *existing* Autopilot
+    // loop immediately instead of inventing a second execution path or waiting
+    // for the next scheduled tick. If NOTIFY is unavailable the durable grant
+    // is still valid and the scheduler remains the fallback.
+    let cycle_wake = if request.enabled {
+        match crowdrelay_infra::autopilot::request_autopilot_cycle(
+            &state.database,
+            crowdrelay_domain::WorkspaceId::from_uuid(workspace_id),
+        )
+        .await
+        {
+            Ok(()) => "requested",
+            Err(error) => {
+                tracing::warn!(%error, "facebook authority granted but immediate cycle wake failed");
+                "scheduled_fallback"
+            }
+        }
+    } else {
+        "not_requested"
+    };
+
     match crowdrelay_infra::lane_ledger::day_zero_facts(&state.database, workspace_id).await {
         Ok(facts) => (
             StatusCode::OK,
             [(CACHE_CONTROL, PRIVATE_NO_STORE)],
             Json(json!({
                 "facebook_authority": if request.enabled { "granted" } else { "revoked" },
+                "cycle_wake": cycle_wake,
                 "readiness": facts.assess(),
             })),
         )
