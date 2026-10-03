@@ -316,3 +316,125 @@ async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
         "one real qualified referral closes the multiplication zero"
     );
 }
+
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn organic_monthly_cohort_refuses_social_post_without_provider_receipt() {
+    let f = setup().await.expect("fixture");
+    let posted = f.now - time::Duration::days(3);
+    let action = insert_dispatch(&f, "cohort-provider-receipt", posted).await;
+    let link = uuid::Uuid::now_v7();
+    let slug = format!("cohort-provider-{}", link.simple());
+
+    sqlx::query(
+        "INSERT INTO smart_links(id,workspace_id,slug,destination_url,channel_source,action_id,active)
+         VALUES($1,$2,$3,'https://example.test/join','instagram',$4,true)",
+    )
+    .bind(link)
+    .bind(f.workspace_id.into_uuid())
+    .bind(&slug)
+    .bind(action)
+    .execute(&f.pool)
+    .await
+    .expect("smart link");
+
+    // Deliberately malformed publication evidence: an internal/status write
+    // claims posted_at, but there is no durable provider id or URL.
+    sqlx::query(
+        "INSERT INTO social_posts(
+             workspace_id,action_id,platform,content,smart_link,smart_link_id,status,posted_at
+         ) VALUES($1,$2,'instagram','{}'::jsonb,$3,$4,'posted',$5)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .bind(format!("/l/{slug}"))
+    .bind(link)
+    .bind(posted)
+    .execute(&f.pool)
+    .await
+    .expect("social row");
+
+    let visitor = uuid::Uuid::now_v7();
+    let clicked = posted + time::Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO click_events(
+             workspace_id,smart_link_id,anonymous_visitor_id,occurred_at
+         ) VALUES($1,$2,$3,$4)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(link)
+    .bind(visitor)
+    .bind(clicked)
+    .execute(&f.pool)
+    .await
+    .expect("click");
+
+    let acquired = clicked + time::Duration::hours(1);
+    let fan = converted_fan(&f, action, acquired, acquired, "active").await;
+    marketing_consent(&f, fan, true, acquired).await;
+    sqlx::query(
+        "UPDATE fan_provenance_events
+         SET source_target=$3
+         WHERE workspace_id=$1 AND fan_id=$2
+           AND event_kind='conversion'
+           AND attribution_method='last_tracked_click'",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan)
+    .bind(&slug)
+    .execute(&f.pool)
+    .await
+    .expect("credit slug");
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events(
+             workspace_id,fan_id,anonymous_visitor_id,source,request_id,occurred_at
+         ) VALUES($1,$2,$3,'public_signup',$4,$5)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan)
+    .bind(visitor)
+    .bind(format!("provider-proof-{fan}"))
+    .bind(acquired)
+    .execute(&f.pool)
+    .await
+    .expect("arrival");
+
+    let verified = || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT verified
+             FROM organic_fan_cohort($1,$2,$3,$4)
+             WHERE fan_id=$5",
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(f.now - time::Duration::days(30))
+        .bind(f.now + time::Duration::days(1))
+        .bind(f.now)
+        .bind(fan)
+        .fetch_one(&f.pool)
+        .await
+        .expect("cohort row")
+    };
+
+    assert!(
+        !verified().await,
+        "posted_at without provider id/url must never become a verified North-Star fan"
+    );
+
+    sqlx::query(
+        "UPDATE social_posts
+         SET platform_post_id='ig-provider-123',
+             platform_post_url='https://instagram.com/p/provider-123'
+         WHERE workspace_id=$1 AND action_id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .execute(&f.pool)
+    .await
+    .expect("provider receipt");
+
+    assert!(
+        verified().await,
+        "the same causal chain becomes verified only after durable provider proof exists"
+    );
+}
