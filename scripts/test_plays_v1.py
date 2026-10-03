@@ -65,7 +65,7 @@ class PlaysContract(unittest.TestCase):
         self.migration = read(MIGRATION)
         self.sql = strip_sql_comments(self.migration)
         self.domain = read(DOMAIN)
-        self.infra = read(INFRA)
+        self.infra = read(INFRA) + read(INFRA.with_name("plays") / "statements.rs")
 
     def _skip_if_private(self, path: Path) -> None:
         if not path.exists():

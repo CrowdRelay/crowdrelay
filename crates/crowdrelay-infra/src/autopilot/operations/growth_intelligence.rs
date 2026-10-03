@@ -198,7 +198,7 @@ async fn load_agent_execution_health(
             FROM agent_service_tasks
             WHERE workspace_id = $1
               AND created_at > $2
-              AND status IN ('completed', 'failed')
+              AND agent_service_tasks.status IN ('completed', 'failed')
         ),
         task_outcome_summary AS (
             SELECT task_id,

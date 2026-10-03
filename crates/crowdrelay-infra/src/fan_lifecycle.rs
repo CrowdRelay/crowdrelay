@@ -155,10 +155,7 @@ impl PostgresFanLifecycleRepository {
         let confirms_merged_alias_session = row.purpose == "confirm"
             && row.token_fan_id != row.fan_id
             && previous_status == FanStatus::Active;
-        if !confirms_pending_signup
-            && !recovers_active_session
-            && !confirms_merged_alias_session
-        {
+        if !confirms_pending_signup && !recovers_active_session && !confirms_merged_alias_session {
             return Err(LifecycleStoreError::Conflict);
         }
 

@@ -583,7 +583,8 @@ async fn hung_dependency_scenario(pool: &PgPool, env: &Env, workspace: Uuid) -> 
         "a timed-out join crossed the dispatch boundary and must stay UNKNOWN, found {state}"
     );
     ensure!(
-        note.as_deref().is_some_and(|n| n.contains("lost after dispatch boundary")),
+        note.as_deref()
+            .is_some_and(|n| n.contains("lost after dispatch boundary")),
         "the note must preserve the ambiguous transport fact, found: {note:?}"
     );
 

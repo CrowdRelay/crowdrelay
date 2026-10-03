@@ -661,13 +661,8 @@ impl AgentOutcomeWorker {
             }
             OutcomeKind::OutreachTargets => {
                 if let Some(item) = &outcome.payload.item {
-                    outreach_target_auto_promoted =
-                        self.insert_outreach_target(
-                            &mut tx,
-                            outcome,
-                            item,
-                            producing_task.as_ref(),
-                        )
+                    outreach_target_auto_promoted = self
+                        .insert_outreach_target(&mut tx, outcome, item, producing_task.as_ref())
                         .await?
                         .0;
                 }

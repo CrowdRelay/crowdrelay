@@ -41,6 +41,7 @@ mod autopilot_harm;
 mod autopilot_import_proposals;
 mod autopilot_insight_routing;
 mod autopilot_learning_proof;
+mod autopilot_measurement_canonical;
 mod autopilot_measurement_spine;
 mod autopilot_metric_learning;
 mod autopilot_no_executor_ask;

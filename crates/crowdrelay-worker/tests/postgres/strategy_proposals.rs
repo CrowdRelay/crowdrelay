@@ -21,7 +21,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
+pub(crate) async fn workspace(pool: &PgPool) -> Result<WorkspaceId> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, $2, $3)")
         .bind(id)
@@ -109,12 +109,14 @@ async fn insert_outcome_with_task_evidence(
     };
     let evidence = evidence_urls
         .iter()
-        .map(|url| json!({
-            "url": url,
-            "snippet": "fixture evidence",
-            "tool": "test",
-            "fetched_at": time::OffsetDateTime::now_utc().to_string(),
-        }))
+        .map(|url| {
+            json!({
+                "url": url,
+                "snippet": "fixture evidence",
+                "tool": "test",
+                "fetched_at": time::OffsetDateTime::now_utc().to_string(),
+            })
+        })
         .collect::<Vec<_>>();
     sqlx::query(
         "INSERT INTO agent_service_tasks(
@@ -162,7 +164,7 @@ async fn insert_outcome_with_task_evidence(
 
 /// Inserts an outcome row directly, as the agents service would — with the
 /// provenance block `require_approval` kinds need to pass admission.
-async fn insert_outcome(
+pub(crate) async fn insert_outcome(
     pool: &PgPool,
     workspace_id: WorkspaceId,
     kind: &str,
@@ -171,7 +173,7 @@ async fn insert_outcome(
     insert_outcome_with_task_evidence(pool, workspace_id, kind, payload, None).await
 }
 
-fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
+pub(crate) fn worker(pool: &PgPool, workspace_id: WorkspaceId) -> AgentOutcomeWorker {
     AgentOutcomeWorker::new(
         pool.clone(),
         workspace_id,
@@ -380,10 +382,7 @@ async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()>
         .await
         .expect("connect to the migrated suite database");
     let ws = workspace(&pool).await?;
-    let fake_url = format!(
-        "https://discord.gg/fabricated-{}",
-        Uuid::now_v7().simple()
-    );
+    let fake_url = format!("https://discord.gg/fabricated-{}", Uuid::now_v7().simple());
 
     let hostile = insert_outcome_with_task_evidence(
         &pool,
@@ -408,12 +407,11 @@ async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()>
 
     worker(&pool, ws).run_once().await?;
 
-    let rejected: (String, Option<String>) = sqlx::query_as(
-        "SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1",
-    )
-    .bind(hostile)
-    .fetch_one(&pool)
-    .await?;
+    let rejected: (String, Option<String>) =
+        sqlx::query_as("SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1")
+            .bind(hostile)
+            .fetch_one(&pool)
+            .await?;
     ensure!(
         rejected.0 == "rejected"
             && rejected
@@ -436,10 +434,7 @@ async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()>
         "an ungrounded community must create no place and no target: {leaked:?}"
     );
 
-    let grounded_url = format!(
-        "https://discord.gg/grounded-{}",
-        Uuid::now_v7().simple()
-    );
+    let grounded_url = format!("https://discord.gg/grounded-{}", Uuid::now_v7().simple());
     let grounded = insert_outcome_with_task_evidence(
         &pool,
         ws,
@@ -1152,60 +1147,6 @@ async fn adjudicated_outcomes_release_their_content_hash() -> Result<()> {
     ensure!(
         status == "processed" && !is_consumed,
         "an insight must stay processed-and-unconsumed for the brain's read-back, got {status} consumed={is_consumed}"
-    );
-    Ok(())
-}
-
-/// A whitespace-only `subreddit` on a non-community item used to violate the
-/// column's `btrim(subreddit) <> ''` CHECK and sink the whole outcome. It now
-/// normalizes to NULL — a blank string is not a subreddit.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_whitespace_subreddit_normalizes_to_null() -> Result<()> {
-    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
-        .await
-        .expect("connect to the migrated suite database");
-    let ws = workspace(&pool).await?;
-
-    let outcome_id = insert_outcome(
-        &pool,
-        ws,
-        "outreach_targets",
-        json!({
-            "item": {
-                "type": "outreach_target",
-                "target_kind": "press",
-                "display_name": "Metal Zine Weekly",
-                "subreddit": "   ",
-                "contact_email": "tips@metalzine.example",
-                "evidence_urls": ["https://metalzine.example/about"],
-            },
-            "rationale": "a press contact",
-        }),
-    )
-    .await?;
-
-    worker(&pool, ws).run_once().await?;
-
-    let (status, rejection): (String, Option<String>) =
-        sqlx::query_as("SELECT status, rejection_reason FROM agent_outcomes WHERE id = $1")
-            .bind(outcome_id)
-            .fetch_one(&pool)
-            .await?;
-    ensure!(
-        status == "processed",
-        "a blank subreddit must not sink the outcome — {status} {rejection:?}"
-    );
-    let stored: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT subreddit FROM agent_outreach_targets \
-         WHERE workspace_id = $1 AND display_name = 'Metal Zine Weekly'",
-    )
-    .bind(ws.into_uuid())
-    .fetch_optional(&pool)
-    .await?;
-    ensure!(
-        stored.clone().flatten().is_none(),
-        "a whitespace subreddit must store NULL, got {stored:?}"
     );
     Ok(())
 }

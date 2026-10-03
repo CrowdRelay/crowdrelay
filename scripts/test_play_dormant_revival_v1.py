@@ -42,7 +42,7 @@ class DormantRevivalContract(unittest.TestCase):
     def setUp(self) -> None:
         self.sql = strip_sql_comments(read(MIGRATION))
         self.domain = read(DOMAIN)
-        self.infra = read(INFRA)
+        self.infra = read(INFRA) + read(INFRA.with_name("plays") / "statements.rs")
         self.anchors = self.infra.split("const PLAY_DORMANT_ANCHORS_SQL", 1)[1].split('"#;', 1)[0]
 
     # --- dormant means was here and stopped ------------------------------
@@ -120,7 +120,9 @@ class DormantRevivalContract(unittest.TestCase):
         # date itself.
         dispatch = self.infra.split("let follow_link = match play_kind", 1)[1].split(";", 1)[0]
         self.assertIn("PlayKind::DormantRevival", dispatch.split("=> {", 1)[0] + dispatch)
-        self.assertIn("PlayKind::FollowAskLadder => Some(", dispatch)
+        # rustfmt wraps this arm as `=> { Some(..) }`; the invariant is that
+        # only the follow-ask ladder gets a link, not the arm's whitespace.
+        self.assertRegex(dispatch, r"PlayKind::FollowAskLadder\s*=>\s*(\{\s*)?Some\(")
 
     # --- the metric has to resolve ---------------------------------------
 
