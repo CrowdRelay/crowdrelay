@@ -50,6 +50,57 @@ async fn community(
     Ok(place)
 }
 
+/// One delivered community post is the delivery receipt that proves the
+/// platform lane is executable. Without it the loaders treat the lane as
+/// unmeasured and probe a single room at a time, holding every other room
+/// back — lane routing this file's window assertions are not about.
+async fn prove_delivery_lane(
+    pool: &sqlx::PgPool,
+    ws: WorkspaceId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let decision_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO autopilot_decisions
+             (id, workspace_id, decision_key, context, subject_kind, subject_id,
+              decision_kind, confidence_basis_points, disposition, reason,
+              input_snapshot, policy_snapshot, recommendation, evaluated_at, trace_id)
+         VALUES ($1,$2,$3,'content_supply','target_community',$4,
+                 'seed.post',9000,'auto_execute','seeded delivery receipt',
+                 '{}','{}','{}',now(),$5) RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws.into_uuid())
+    .bind(format!("seed-lane-decision-{}", Uuid::now_v7()))
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .fetch_one(pool)
+    .await?;
+    let action_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO autopilot_actions
+             (id, workspace_id, decision_id, context, action_kind, subject_kind,
+              subject_id, idempotency_key, payload, status, finished_at)
+         VALUES ($1,$2,$3,'content_supply','community.engage.request','target_community',
+                 $4,$5,'{}','succeeded', now()) RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws.into_uuid())
+    .bind(decision_id)
+    .bind(Uuid::now_v7())
+    .bind(format!("seed-lane-{}", Uuid::now_v7()))
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO community_posts
+             (id, workspace_id, action_id, target_id, subreddit, title, body, status, created_at, posted_at)
+         VALUES ($1,$2,$3,NULL,'laneproof','lane proof','body','posted',now(),now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ws.into_uuid())
+    .bind(action_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn observe(
     pool: &sqlx::PgPool,
     ws: WorkspaceId,
@@ -91,6 +142,7 @@ async fn both_loaders_carry_the_threads_a_room_is_discussing_now()
     let busy = community(&pool, ws, "busyroom").await?;
     let other = community(&pool, ws, "otherroom").await?;
     community(&pool, ws, "emptyroom").await?;
+    prove_delivery_lane(&pool, ws).await?;
 
     let window = i32::try_from(READ_MAX_AGE_DAYS)?;
     // Eight recent threads (more than the prompt shows), plus everything that
@@ -262,6 +314,7 @@ async fn the_window_is_fourteen_days_inclusive_in_sql_and_in_the_evaluator()
     let window = i32::try_from(READ_MAX_AGE_DAYS)?;
     let on_the_edge = community(&pool, ws, "edgeroom").await?;
     let just_past = community(&pool, ws, "pastroom").await?;
+    prove_delivery_lane(&pool, ws).await?;
     for n in 0..3 {
         observe(
             &pool,
