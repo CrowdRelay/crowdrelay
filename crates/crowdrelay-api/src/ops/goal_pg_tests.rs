@@ -574,6 +574,21 @@ mod goal_postgres_tests {
         .execute(&pool)
         .await
         .expect("action");
+        sqlx::query(
+            "INSERT INTO social_posts(
+                 workspace_id,action_id,platform,content,status,posted_at,
+                 platform_post_id,platform_post_url
+             ) VALUES(
+                 $1,$2,'instagram','proof post','posted',$3,
+                 'provider-post-proof','https://instagram.com/p/provider-post-proof/'
+             )",
+        )
+        .bind(ws)
+        .bind(action)
+        .bind(now - time::Duration::hours(15) - time::Duration::minutes(30))
+        .execute(&pool)
+        .await
+        .expect("provider publication receipt");
 
         let action_fan = Uuid::now_v7();
         sqlx::query(
@@ -613,6 +628,84 @@ mod goal_postgres_tests {
         .execute(&pool)
         .await
         .expect("action endpoint");
+
+        // An exact action_id on provenance is still not hard publication
+        // proof. Without an external provider receipt this fan must stay out
+        // of the hard action rail.
+        let receiptless_decision = Uuid::now_v7();
+        let receiptless_action = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO autopilot_decisions(
+                 id,workspace_id,decision_key,context,subject_kind,subject_id,
+                 decision_kind,confidence_basis_points,disposition,reason,
+                 input_snapshot,policy_snapshot,recommendation,trace_id
+             ) VALUES($1,$2,$3,'growth_metrics','target_community',$4,
+                      'auto_execute',9000,'auto_execute','receiptless proof noise',
+                      '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,gen_random_uuid())",
+        )
+        .bind(receiptless_decision)
+        .bind(ws)
+        .bind(format!("receiptless-{receiptless_decision}"))
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .expect("receiptless decision");
+        sqlx::query(
+            "INSERT INTO autopilot_actions(
+                 id,workspace_id,decision_id,context,action_kind,subject_kind,subject_id,
+                 idempotency_key,payload,status,action_class,finished_at
+             ) VALUES($1,$2,$3,'growth_metrics','agent.run.request','target_community',
+                      $4,$5,'{}'::jsonb,'succeeded','third_party',$6)",
+        )
+        .bind(receiptless_action)
+        .bind(ws)
+        .bind(receiptless_decision)
+        .bind(Uuid::now_v7())
+        .bind(format!("receiptless-action-{receiptless_action}"))
+        .bind(now - time::Duration::hours(13))
+        .execute(&pool)
+        .await
+        .expect("receiptless action");
+        let receiptless_fan = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans(id,workspace_id,normalized_email,status,created_at)
+             VALUES($1,$2,'receiptless-action-fan@example.test','active',$3)",
+        )
+        .bind(receiptless_fan)
+        .bind(ws)
+        .bind(now - time::Duration::hours(12))
+        .execute(&pool)
+        .await
+        .expect("receiptless fan");
+        sqlx::query(
+            "INSERT INTO fan_provenance_events(
+                 workspace_id,fan_id,event_kind,channel,source_target,action_id,
+                 attribution_method,attribution_confidence,occurred_at
+             ) VALUES($1,$2,'conversion','instagram','receiptless',$3,
+                      'last_tracked_click',1.0,$4)",
+        )
+        .bind(ws)
+        .bind(receiptless_fan)
+        .bind(receiptless_action)
+        .bind(now - time::Duration::hours(12))
+        .execute(&pool)
+        .await
+        .expect("receiptless provenance");
+        sqlx::query(
+            "INSERT INTO fan_push_endpoints(
+                 workspace_id,fan_id,installation_id,transport,endpoint_address,
+                 active,created_at,last_seen_at
+             ) VALUES(
+                 $1,$2,'receiptless-install','android_fcm',
+                 'receiptless-endpoint',true,$3,$3
+             )",
+        )
+        .bind(ws)
+        .bind(receiptless_fan)
+        .bind(now - time::Duration::hours(11))
+        .execute(&pool)
+        .await
+        .expect("receiptless endpoint");
 
         // A completely unrelated Signal fan must not leak into either proof rail.
         let unrelated = Uuid::now_v7();
