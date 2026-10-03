@@ -10,7 +10,7 @@ pub const CONFIRMATION_RECOVERY_TEMPLATE: &str = "crowdrelay.fan.confirmation_re
 //! source-size ratchet; re-exported as `ports::organic_funnel::*` like
 //! `booking_discovery`.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrganicFunnelDirective {
     ExpandReach,
@@ -38,7 +38,7 @@ impl OrganicFunnelDirective {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct OrganicFunnelControl {
     pub directive: OrganicFunnelDirective,
     pub mature_links: u32,
