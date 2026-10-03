@@ -91,6 +91,10 @@ pub enum OutcomeRejection {
     /// bad event identity, unsupported kind, or a URL/contact the source data
     /// never contained.
     UngroundedBeaconCandidate { reason: String },
+    /// A community target named a URL/subreddit that was not in the bounded
+    /// evidence set recorded on the producing task. Public URLs are cheap to
+    /// invent; syntax and a non-empty evidence_urls array are not grounding.
+    UngroundedCommunityTarget { reason: String },
     /// A researched fact CrowdRelay could not check against what the model was
     /// shown: wrong person, a source it never saw, a date that is not the one
     /// recorded for that page, or text outside the band's register.
@@ -176,6 +180,10 @@ impl std::fmt::Display for OutcomeRejection {
             Self::UngroundedBeaconCandidate { reason } => write!(
                 f,
                 "UNGROUNDED_BEACON_CANDIDATE: {reason}"
+            ),
+            Self::UngroundedCommunityTarget { reason } => write!(
+                f,
+                "UNGROUNDED_COMMUNITY_TARGET: {reason}"
             ),
             Self::UngroundedContactResearch { reason } => write!(
                 f,
