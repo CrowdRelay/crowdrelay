@@ -783,13 +783,18 @@ async fn load_or_create_referral_code(
         WITH existing AS (
             SELECT code
             FROM referral_codes
-            WHERE workspace_id = $1 AND fan_id = $2 AND active
+            WHERE workspace_id = $1
+              AND fan_id IN (
+                  SELECT fan_id FROM canonical_fan_family($1,$2)
+              )
+              AND active
             ORDER BY created_at, id
             LIMIT 1
         ), inserted AS (
             INSERT INTO referral_codes (workspace_id, fan_id, code)
-            SELECT $1, $2, encode(gen_random_bytes(18), 'hex')
+            SELECT $1, canonical_fan_id($1,$2), encode(gen_random_bytes(18), 'hex')
             WHERE NOT EXISTS (SELECT 1 FROM existing)
+              AND canonical_fan_id($1,$2) IS NOT NULL
             ON CONFLICT DO NOTHING
             RETURNING code
         )
