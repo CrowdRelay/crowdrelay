@@ -136,9 +136,11 @@ async fn merge_moves_rows_tombstones_and_unmerge_restores() -> Result<()> {
     let merged_checkin = checkin(&pool, ws, event_id, campaign_id, merged).await?;
     sqlx::query(
         "INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at) \
-         VALUES ($1,$2,'marketing',true,'v1','test', now())",
+         VALUES ($1,$2,'marketing',true,'v1','test', now() - interval '2 hours'), \
+                ($1,$3,'marketing',false,'v2','test', now() - interval '1 hour')",
     )
     .bind(ws)
+    .bind(survivor)
     .bind(merged)
     .execute(&pool)
     .await?;
@@ -151,10 +153,22 @@ async fn merge_moves_rows_tombstones_and_unmerge_restores() -> Result<()> {
     // The checkin moved; the merged fan's email identifier followed.
     assert_eq!(view.moved_counts["concert_checkins"], 1);
     assert_eq!(view.moved_counts["fan_identifiers"], 1);
-    // The survivor had no marketing consent — the merged fan's latest
-    // decision was mirrored, not overwritten onto existing rows.
+    // The merged identity carries a newer revoke. Canonicalization must not
+    // let the survivor's stale grant turn that person contactable again.
     assert_eq!(view.consents_mirrored, 1);
-    // History stayed: the consent row itself is append-only.
+    let consent = sqlx::query_as::<_, (bool, String, Option<String>)>(
+        "SELECT granted, source, request_id FROM fan_consents \
+         WHERE workspace_id=$1 AND fan_id=$2 AND purpose='marketing' \
+         ORDER BY recorded_at DESC, id DESC LIMIT 1",
+    )
+    .bind(ws)
+    .bind(survivor)
+    .fetch_one(&pool)
+    .await?;
+    assert!(!consent.0);
+    assert_eq!(consent.1, "fan_merge");
+    assert!(consent.2.as_deref().is_some_and(|id| id.starts_with("fan_merge:")));
+    // History stayed: the loser's consent row itself is append-only.
     assert_eq!(view.retained_counts["fan_consents"], 1);
 
     let (status, merged_into) = fan_status(&pool, ws, merged).await?;
@@ -197,6 +211,17 @@ async fn merge_moves_rows_tombstones_and_unmerge_restores() -> Result<()> {
     .fetch_one(&pool)
     .await?;
     assert_eq!(id_owner, merged);
+    let consent = sqlx::query_as::<_, (bool, String)>(
+        "SELECT granted, source FROM fan_consents \
+         WHERE workspace_id=$1 AND fan_id=$2 AND purpose='marketing' \
+         ORDER BY recorded_at DESC, id DESC LIMIT 1",
+    )
+    .bind(ws)
+    .bind(survivor)
+    .fetch_one(&pool)
+    .await?;
+    assert!(consent.0, "unmerge must restore the survivor's pre-merge grant");
+    assert_eq!(consent.1, "fan_unmerge");
     Ok(())
 }
 
