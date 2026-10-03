@@ -101,7 +101,15 @@ yt_grant="$(sql "select coalesce((select value from tenant_settings where key='y
 yt_conn="$(sql "select coalesce(health,'?')||', scope has force-ssl='||coalesce(position('youtube.force-ssl' in coalesce(token_scope,''))>0,false)::text from fanbase_connections where platform='youtube_account' limit 1")"
 info "YouTube capture comment: grant youtube_capture_comment_auto_post=$yt_grant (own key; unrelated to social_auto_post); youtube_account: ${yt_conn:-no connection}"
 drafts="$(sql "select count(*) from content_sources cs where cs.source_kind='video' and cs.metadata ? 'fan_capture_draft_at' and not (cs.metadata ? 'fan_capture_comment_posted_unix') and cs.occurred_at > now() - interval '30 days'")"
-if [ "${drafts:-0}" -gt 0 ] 2>/dev/null; then info "$drafts YouTube capture comment(s) prepared for a person to paste (see ops/attention unpublished_drafts.youtube)"; else info "no YouTube capture comment prepared yet"; fi
+if [ "${drafts:-0}" -gt 0 ] 2>/dev/null; then info "$drafts YouTube capture comment(s) prepared for a person to paste (see ops/attention unpublished_drafts.youtube)"; else info "no YouTube capture comment prepared for a person"; fi
+# A comment the machine posted leaves `fan_capture_comment_id` + `_posted_unix`, not a draft marker;
+# without this line a posted comment read as "nothing happened".
+posted="$(sql "select count(*)||' posted by the machine, newest '||coalesce(max(to_timestamp((metadata->>'fan_capture_comment_posted_unix')::bigint))::text,'never')||'; clicks on their links: '||coalesce((select count(*) from click_events c join smart_links s on s.id=c.smart_link_id where s.slug like 'capture-youtube-%'),0) from content_sources where source_kind='video' and metadata ? 'fan_capture_comment_posted_unix' and metadata->>'fan_capture_comment_posted_unix' ~ '^[0-9]+$'")"
+case "$posted" in
+  "0 posted"*) zero "YouTube capture comments: $posted" ;;
+  "?") ;;
+  *) ok "YouTube capture comments: $posted" ;;
+esac
 
 echo "== strict FAN_100 proof"
 receiptless="$(sql "select
