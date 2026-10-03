@@ -847,6 +847,7 @@ mod tests {
     #[derive(Default)]
     struct FakeRepository {
         persisted: Mutex<Vec<Vec<ClickEvent>>>,
+        fail_clicks: bool,
     }
 
     #[async_trait]
@@ -867,6 +868,9 @@ mod tests {
         }
 
         async fn persist_click_batch(&self, clicks: &[ClickEvent]) -> Result<(), RepositoryError> {
+            if self.fail_clicks {
+                return Err(RepositoryError::Unavailable);
+            }
             self.persisted
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1008,6 +1012,45 @@ mod tests {
                 overflow_recovered: 1,
                 dropped: 0,
                 persistence_failed: 0,
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn overflow_failure_is_explicit_and_counts_as_real_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = Arc::new(FakeRepository {
+            persisted: Mutex::new(Vec::new()),
+            fail_clicks: true,
+        });
+        let (buffer, _worker) = ClickBuffer::new(
+            repository,
+            crate::config::ClickBufferConfig {
+                capacity: 1,
+                batch_size: 1,
+                flush_interval: Duration::from_secs(60),
+            },
+        )?;
+
+        assert_eq!(
+            buffer.submit(click_event()?).await,
+            ClickSubmissionOutcome::Queued
+        );
+        assert_eq!(
+            buffer.submit(click_event()?).await,
+            ClickSubmissionOutcome::Unavailable,
+            "overflow plus unavailable durable storage must be visible to the HTTP boundary"
+        );
+        assert_eq!(
+            buffer.metrics().snapshot(),
+            ClickBufferSnapshot {
+                queued: 1,
+                persisted: 0,
+                overflowed: 1,
+                overflow_recovered: 0,
+                dropped: 1,
+                persistence_failed: 1,
             }
         );
         Ok(())
