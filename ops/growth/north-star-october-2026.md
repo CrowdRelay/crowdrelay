@@ -1,5 +1,11 @@
 # October outcome: 100 new people acquired by CrowdRelay
 
+> Canonical implementation contract: [FAN_100_PLAN.md](./FAN_100_PLAN.md).
+> The Day-0 cold-start contract in that plan is a product requirement: after a tenant
+> completes minimum setup and grants standing authority, the system must reach a
+> provider-confirmed net-new publication without per-post babysitting. Until that is
+> proven, cold-start distribution remains the highest-priority FAN_100 gap.
+
 Operator statement on 2026-10-02: there are 20 fans; some are band members, and every remaining Signal fan was invited personally. This is a seeded audience, not evidence of organic acquisition by CrowdRelay.
 
 ## Target and counting contract
