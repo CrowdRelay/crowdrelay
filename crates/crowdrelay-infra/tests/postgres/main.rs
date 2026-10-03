@@ -124,6 +124,7 @@ mod outward_link_gate;
 mod peer_acts;
 mod place_url_canonical;
 mod referrals_rewards;
+mod retention_identity;
 mod retired_opportunity_letters;
 mod roster_act_report;
 mod roster_catalogue_rotation;
