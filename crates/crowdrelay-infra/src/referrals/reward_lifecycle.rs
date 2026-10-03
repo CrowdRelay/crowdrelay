@@ -488,22 +488,38 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
     referred_fan_id: FanId,
     request_id: &str,
 ) -> Result<(), ReferralStoreError> {
-    let attribution = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let canonical_referred_fan_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT canonical_fan_id($1,$2)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(referred_fan_id.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(ReferralStoreError::from_sqlx)?;
+    let Some(canonical_referred_fan_id) = canonical_referred_fan_id else {
+        return Ok(());
+    };
+
+    let attribution = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>)>(
         r#"
-        SELECT id, referrer_fan_id
+        SELECT id, referrer_fan_id, canonical_fan_id($1, referrer_fan_id)
         FROM referral_attributions
         WHERE workspace_id = $1
-            AND referred_fan_id = $2
-            AND status = 'qualified'
+          AND referred_fan_id IN (
+              SELECT fan_id FROM canonical_fan_family($1,$2)
+          )
+          AND status = 'qualified'
+        ORDER BY qualified_at, id
+        LIMIT 1
         FOR UPDATE
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referred_fan_id.into_uuid())
+    .bind(canonical_referred_fan_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
-    let Some((attribution_id, referrer_fan_id)) = attribution else {
+    let Some((attribution_id, referrer_fan_id, Some(canonical_referrer_fan_id))) = attribution else {
         return Ok(());
     };
 
@@ -515,7 +531,7 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .execute(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
@@ -543,15 +559,18 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
 
     let qualified_count = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT count(*)::bigint
-        FROM referral_attributions
-        WHERE workspace_id = $1
-            AND referrer_fan_id = $2
-            AND status = 'qualified'
+        SELECT count(DISTINCT canonical_fan_id($1, attribution.referred_fan_id))::bigint
+        FROM referral_attributions attribution
+        WHERE attribution.workspace_id = $1
+          AND attribution.referrer_fan_id IN (
+              SELECT fan_id FROM canonical_fan_family($1,$2)
+          )
+          AND attribution.status = 'qualified'
+          AND canonical_fan_id($1, attribution.referred_fan_id) IS DISTINCT FROM $2
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .fetch_one(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
@@ -575,7 +594,7 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .bind(qualified_count)
     .execute(&mut **transaction)
     .await
@@ -598,7 +617,7 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .bind(qualified_count)
     .execute(&mut **transaction)
     .await
@@ -614,7 +633,9 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
             "workspace_id": workspace_id,
             "attribution_id": attribution_id,
             "referrer_fan_id": referrer_fan_id,
+            "canonical_referrer_fan_id": canonical_referrer_fan_id,
             "referred_fan_id": referred_fan_id,
+            "canonical_referred_fan_id": canonical_referred_fan_id,
             "qualified_referral_count": qualified_count,
             "revoked_grant_count": revoked_grants,
             "revoked_coupon_count": revoked_coupons,
