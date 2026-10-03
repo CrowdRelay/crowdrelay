@@ -143,13 +143,13 @@ pub async fn delete_identity_exclusion(
     workspace_id: Uuid,
     id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    Ok(sqlx::query(
-        "DELETE FROM fan_prospect_identity_exclusions WHERE workspace_id=$1 AND id=$2",
+    Ok(
+        sqlx::query("DELETE FROM fan_prospect_identity_exclusions WHERE workspace_id=$1 AND id=$2")
+            .bind(workspace_id)
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected()
+            == 1,
     )
-    .bind(workspace_id)
-    .bind(id)
-    .execute(pool)
-    .await?
-    .rows_affected()
-        == 1)
 }

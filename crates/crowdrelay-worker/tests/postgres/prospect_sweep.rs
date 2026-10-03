@@ -308,12 +308,11 @@ async fn staff_self_and_test_identities_never_enter_the_prospect_lane() -> Resul
 
     // A later explicit test exclusion suppresses a prospect that already
     // exists, but leaves its observation history intact for audit.
-    let before_observations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM fan_prospect_observations WHERE workspace_id=$1",
-    )
-    .bind(ws.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let before_observations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fan_prospect_observations WHERE workspace_id=$1")
+            .bind(ws.into_uuid())
+            .fetch_one(&pool)
+            .await?;
     crowdrelay_infra::fan_prospect_exclusions::exclude_identity(
         &pool,
         ws.into_uuid(),
@@ -336,12 +335,11 @@ async fn staff_self_and_test_identities_never_enter_the_prospect_lane() -> Resul
         status == "suppressed" && reason.as_deref() == Some("identity_exclusion:test"),
         "{status} {reason:?}"
     );
-    let after_observations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM fan_prospect_observations WHERE workspace_id=$1",
-    )
-    .bind(ws.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let after_observations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fan_prospect_observations WHERE workspace_id=$1")
+            .bind(ws.into_uuid())
+            .fetch_one(&pool)
+            .await?;
     ensure!(
         after_observations == before_observations,
         "suppression keeps history; it must not invent or delete evidence"

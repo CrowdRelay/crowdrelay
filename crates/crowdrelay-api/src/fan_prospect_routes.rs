@@ -49,10 +49,7 @@ struct IdentityExclusionRequest {
     recorded_by: String,
 }
 
-async fn identity_exclusions(
-    State(state): State<crate::AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn identity_exclusions(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
     let workspace_id = state.ticketing.workspace_id().into_uuid();
     match crowdrelay_infra::fan_prospect_exclusions::list_identity_exclusions(
         &state.database,

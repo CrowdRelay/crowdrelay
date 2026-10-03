@@ -3,7 +3,7 @@
   "maxLines": {
     "crates/crowdrelay-api/src/events.rs": 1218,
     "crates/crowdrelay-api/src/lib.rs": 1227,
-    "crates/crowdrelay-api/src/lib_tests.rs": 1278,
+    "crates/crowdrelay-api/src/lib_tests.rs": 1225,
     "crates/crowdrelay-api/src/routing.rs": 1245,
     "crates/crowdrelay-application/src/autopilot/evaluate/growth_intelligence_context.rs": 1208,
     "crates/crowdrelay-application/src/autopilot/model.rs": 2154,
@@ -16,7 +16,7 @@
     "crates/crowdrelay-domain/src/plays.rs": 1727,
     "crates/crowdrelay-domain/src/roster_plan.rs": 1707,
     "crates/crowdrelay-domain/src/show_growth.rs": 1228,
-    "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1530,
+    "crates/crowdrelay-infra/src/autopilot/actions_execution.rs": 1385,
     "crates/crowdrelay-infra/src/autopilot/control.rs": 1215,
     "crates/crowdrelay-infra/src/autopilot/control_mutations.rs": 1208,
     "crates/crowdrelay-infra/src/autopilot/operations/growth_intelligence.rs": 1667,
