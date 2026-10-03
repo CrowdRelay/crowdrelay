@@ -687,3 +687,150 @@ async fn a_replayed_signup_writes_one_last_click_conversion()
 
     Ok(())
 }
+
+
+// ── Redirect/signup race: delayed click persistence still attributes ──
+
+/// The public redirect is intentionally non-blocking: it sets the visitor
+/// cookie immediately and queues the click for a batch writer. A fast human
+/// can submit the signup before that batch reaches PostgreSQL. The durable
+/// acquisition row still carries the same visitor id, so persisting the
+/// delayed click must reconcile the missing canonical conversion instead of
+/// leaving a real CrowdRelay-acquired fan classified as direct forever.
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn a_click_persisted_after_signup_recovers_the_canonical_conversion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_config) = attribution_pool().await?;
+    let suffix = Uuid::now_v7().simple().to_string();
+    let (workspace_id, workspace_slug, city_slug, campaign_id, link_a, _) =
+        seed_attribution_scope(&pool, &suffix).await?;
+    let slug = format!("link-a-{suffix}");
+    let action = seed_action_and_post(&pool, workspace_id, link_a, &slug, true).await?;
+
+    let visitor_id = VisitorId::new();
+    // This is when GET /l/{slug} happened. Keep the event in memory to model
+    // the real click buffer; do not persist it yet.
+    let clicked_at = OffsetDateTime::now_utc();
+    let resolved = ResolvedSmartLink::new(
+        link_a,
+        workspace_id,
+        Some(campaign_id),
+        SmartLinkSlug::parse(&slug)?,
+        DestinationUrl::parse("https://example.test")?,
+        1,
+        Some("reddit".to_owned()),
+        Some("r/attrtest".to_owned()),
+    )?;
+    let delayed_click = ClickEvent::from_link(
+        &resolved,
+        Some(visitor_id),
+        Some("example.test".to_owned()),
+        clicked_at,
+    )?;
+
+    // The human beats the batch worker to PostgreSQL.
+    let fan_id = signup_fan(
+        &pool,
+        &database_config,
+        workspace_id,
+        &workspace_slug,
+        &city_slug,
+        campaign_id,
+        visitor_id,
+        &suffix,
+    )
+    .await?;
+
+    let before: (i64, i64) = sqlx::query_as(
+        r#"SELECT
+             count(*) FILTER (WHERE attribution_method='direct_arrival')::bigint,
+             count(*) FILTER (WHERE attribution_method='last_tracked_click')::bigint
+           FROM fan_provenance_events
+           WHERE workspace_id=$1 AND fan_id=$2 AND event_kind='conversion'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        before,
+        (1, 0),
+        "before the delayed batch lands the signup honestly has no click to credit"
+    );
+
+    let repository = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug,
+        CountryCode::parse("PL")?,
+        &database_config,
+        false,
+        test_sensitive_response_codec(),
+    );
+    repository
+        .persist_click_batch(std::slice::from_ref(&delayed_click))
+        .await?;
+
+    let fan_created_at: OffsetDateTime = sqlx::query_scalar(
+        "SELECT created_at FROM fans WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let recovered: (Option<Uuid>, String, OffsetDateTime) = sqlx::query_as(
+        r#"SELECT action_id, source_target, occurred_at
+           FROM fan_provenance_events
+           WHERE workspace_id=$1 AND fan_id=$2
+             AND event_kind='conversion'
+             AND attribution_method='last_tracked_click'"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(recovered.0, Some(action));
+    assert_eq!(recovered.1, slug);
+    assert_eq!(
+        recovered.2, fan_created_at,
+        "the recovered conversion belongs to signup time, not batch flush time"
+    );
+
+    let interaction_fan: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT fan_id
+           FROM fan_provenance_events
+           WHERE workspace_id=$1 AND anonymous_visitor_id=$2
+             AND event_kind='interaction'
+             AND attribution_method='tracked_click'
+           ORDER BY occurred_at DESC
+           LIMIT 1"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(Into::<Uuid>::into(visitor_id))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        interaction_fan,
+        Some(fan_id.into_uuid()),
+        "late click history must resolve to the fan the visitor became"
+    );
+
+    let verified: bool = sqlx::query_scalar(
+        r#"SELECT verified
+           FROM organic_fan_cohort($1,$2,$3,$4)
+           WHERE fan_id=$5"#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_created_at - time::Duration::days(1))
+    .bind(fan_created_at + time::Duration::days(1))
+    .bind(OffsetDateTime::now_utc())
+    .bind(fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        verified,
+        "the race-recovered chain must satisfy the same strict North-Star cohort as an in-order click"
+    );
+
+    Ok(())
+}
