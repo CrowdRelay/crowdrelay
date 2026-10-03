@@ -221,7 +221,7 @@ pub(super) async fn load_growth_evidence_on(
 /// A row counts only when:
 /// - the action's evidence resolved;
 /// - a measurement produced a durable `autopilot_outcomes` row classified
-///   `improved`; and
+///   `improved` with a positive observed external signal; and
 /// - that measurement kind is classified as earning unattended authority.
 ///
 /// Multiple qualifying measurements for one action count once. The floor asks
@@ -252,6 +252,7 @@ pub(in crate::autopilot) async fn load_resolved_evidence_counts(
           -- Worsened outcomes have their own authority guardrail; only an
           -- improvement is evidence that unattended work deserves more room.
           AND outcome.effect_assessment = 'improved'
+          AND outcome.observed_value > 0
         "#,
     )
     .bind(workspace_id.into_uuid())
