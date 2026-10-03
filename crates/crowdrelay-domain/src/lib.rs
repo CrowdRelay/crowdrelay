@@ -83,6 +83,7 @@ pub mod contact_research;
 pub mod content_engine;
 pub mod content_supply;
 pub mod creative;
+pub mod day_zero;
 pub mod deliverability;
 pub mod draft_revision;
 pub mod drive_contacts;

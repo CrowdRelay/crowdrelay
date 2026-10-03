@@ -24,7 +24,28 @@ use crate::{Problem, request_id};
 const PRIVATE_NO_STORE: &str = "private, no-store";
 
 pub(super) fn control_plane_routes() -> axum::Router<crate::AppState> {
-    axum::Router::new().route("/v1/control-plane/growth/lanes", get(list))
+    axum::Router::new()
+        .route("/v1/control-plane/growth/lanes", get(list))
+        .route("/v1/control-plane/growth/readiness", get(readiness))
+}
+
+/// Can this tenant acquire fans on its own, and if not, what is the one
+/// smallest thing in the way? The Day-0 contract's "name the smallest missing
+/// prerequisite", in one read. Read-only; grants and changes nothing.
+async fn readiness(State(state): State<crate::AppState>, headers: HeaderMap) -> Response {
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::lane_ledger::day_zero_facts(&state.database, workspace_id).await {
+        Ok(facts) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(facts.assess()),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "day-zero readiness read failed");
+            Problem::service_unavailable(request_id(&headers)).into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]

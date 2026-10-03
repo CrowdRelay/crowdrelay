@@ -152,3 +152,86 @@ pub async fn autopost_settings(
     .fetch_one(pool)
     .await
 }
+
+/// The facts `crowdrelay_domain::day_zero::assess` reads, from first-party rows.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn day_zero_facts(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<DayZeroFacts, sqlx::Error> {
+    let settings = crate::tenant_settings::TenantSettingsRepository::new(pool.clone());
+    let brand = settings.brand_settings(workspace_id).await?;
+    let join_copy = settings.join_ask_config(workspace_id).await?.is_some();
+    let fresh_asset: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM content_sources
+            WHERE workspace_id = $1 AND active
+              AND source_kind IN ('video', 'release', 'event')
+              AND expires_at > now()
+              AND occurred_at > now() - interval '30 days'
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT platform, status, COALESCE(health, 'unverified')
+        FROM fanbase_connections
+        WHERE workspace_id = $1 AND platform IN ('facebook', 'instagram')
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+    let connections = rows
+        .into_iter()
+        .map(
+            |(platform, status, health)| crowdrelay_domain::day_zero::ConnectionFact {
+                platform,
+                connected: status == "connected",
+                working: health == "working",
+            },
+        )
+        .collect();
+    Ok(DayZeroFacts {
+        site_root: brand.site_root().map(str::to_owned),
+        join_copy,
+        fresh_asset,
+        social_auto_post: brand.social_auto_post,
+        autopost_platforms: brand.social_autopost_platforms.clone(),
+        connections,
+    })
+}
+
+/// Owned form of the readiness inputs, so the caller can hold it while the pure
+/// decision borrows from it.
+#[derive(Debug)]
+pub struct DayZeroFacts {
+    pub site_root: Option<String>,
+    pub join_copy: bool,
+    pub fresh_asset: bool,
+    pub social_auto_post: bool,
+    pub autopost_platforms: Vec<String>,
+    pub connections: Vec<crowdrelay_domain::day_zero::ConnectionFact>,
+}
+
+impl DayZeroFacts {
+    /// The decision over these facts.
+    #[must_use]
+    pub fn assess(&self) -> crowdrelay_domain::day_zero::Readiness {
+        crowdrelay_domain::day_zero::assess(&crowdrelay_domain::day_zero::ReadinessFacts {
+            site_root: self.site_root.as_deref(),
+            join_copy: self.join_copy,
+            fresh_asset: self.fresh_asset,
+            social_auto_post: self.social_auto_post,
+            autopost_platforms: &self.autopost_platforms,
+            connections: &self.connections,
+        })
+    }
+}

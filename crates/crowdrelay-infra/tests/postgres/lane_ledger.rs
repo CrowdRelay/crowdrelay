@@ -229,3 +229,132 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
     );
     Ok(())
 }
+
+/// A tenant shaped like production on 2026-10-03: Facebook syncing, Instagram
+/// whose latest read failed, a fresh and a stale video, join-ask words. Settings
+/// are cached per workspace for a minute, so each stage gets its own tenant.
+async fn dayzero_tenant(
+    pool: &sqlx::PgPool,
+    label: &str,
+    settings: &[(&str, &str)],
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let ws = workspace(pool, label).await?;
+    sqlx::query(
+        "INSERT INTO content_sources (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+         VALUES ($1,'video','youtube:aaaaaaaaaaa','Fresh', now() - interval '3 days', now() + interval '60 days', '{}'::jsonb),
+                ($1,'video','youtube:bbbbbbbbbbb','Stale', now() - interval '200 days', now() + interval '60 days', '{}'::jsonb)",
+    )
+    .bind(ws)
+    .execute(pool)
+    .await?;
+    for (platform, label, failed) in [("facebook", "Page", false), ("instagram", "IG", true)] {
+        sqlx::query(
+            "INSERT INTO fanbase_connections
+                 (workspace_id, platform, external_account_ref, credential_ref, status, label,
+                  last_sync_at, last_sync_failed_at)
+             VALUES ($1,$2,$3,'c','connected',$4, now() - interval '1 hour',
+                     CASE WHEN $5 THEN now() ELSE NULL END)",
+        )
+        .bind(ws)
+        .bind(platform)
+        .bind(format!("ref-{platform}"))
+        .bind(label)
+        .bind(failed)
+        .execute(pool)
+        .await?;
+    }
+    for (key, value) in settings {
+        sqlx::query("INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1,$2,$3)")
+            .bind(ws)
+            .bind(key)
+            .bind(value)
+            .execute(pool)
+            .await?;
+    }
+    Ok(ws)
+}
+
+const JOIN_WORDS: (&str, &str) = ("join_ask_variants", "[\"Want the next show first?\"]");
+const SITE: (&str, &str) = ("member_site_base_url", "https://band.example");
+
+/// Day-0 readiness against real rows: the prod shape (pages connected and
+/// syncing, fresh content, join-ask words, auto-post off with the list set to
+/// telegram) is one owner decision from ready, and the read says which one. A
+/// failing connection and a stale video are not mistaken for working.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_rail()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+
+    // Prod shape: everything works except the owner's standing authority.
+    let prod = dayzero_tenant(
+        &pool,
+        "dz-prod",
+        &[SITE, JOIN_WORDS, ("social_autopost_platforms", "telegram")],
+    )
+    .await?;
+    let facts = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, prod).await?;
+    assert!(
+        facts.fresh_asset,
+        "the 3-day-old video counts, the 200-day one does not"
+    );
+    assert!(facts.join_copy && !facts.social_auto_post);
+    let working = |p: &str| {
+        facts
+            .connections
+            .iter()
+            .find(|c| c.platform == p)
+            .map(|c| c.working)
+    };
+    assert_eq!(working("facebook"), Some(true));
+    assert_eq!(
+        working("instagram"),
+        Some(false),
+        "a connection whose latest read failed is not known to work"
+    );
+    let readiness = facts.assess();
+    assert!(!readiness.ready);
+    let missing = readiness.smallest_missing.expect("a blocker is named");
+    assert_eq!(missing.code, "standing_authority_not_granted");
+    assert!(missing.what.starts_with("facebook"), "{}", missing.what);
+
+    // No site root: named before any rail, whatever the rails look like.
+    let no_site = dayzero_tenant(&pool, "dz-nosite", &[JOIN_WORDS]).await?;
+    let no_site = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, no_site)
+        .await?
+        .assess();
+    assert_eq!(
+        no_site.smallest_missing.map(|m| m.code),
+        Some("no_signup_destination")
+    );
+
+    // The owner grants it once; the same facts now say ready.
+    let granted = dayzero_tenant(
+        &pool,
+        "dz-granted",
+        &[
+            SITE,
+            JOIN_WORDS,
+            ("social_auto_post", "true"),
+            ("social_autopost_platforms", "telegram,facebook"),
+        ],
+    )
+    .await?;
+    let granted = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, granted)
+        .await?
+        .assess();
+    assert!(granted.ready, "{granted:?}");
+
+    // A tenant with nothing connected is never told it is one switch away.
+    let bare = workspace(&pool, "dz-bare").await?;
+    let bare = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, bare)
+        .await?
+        .assess();
+    assert!(!bare.ready);
+    assert_ne!(
+        bare.smallest_missing.map(|m| m.code),
+        Some("standing_authority_not_granted")
+    );
+    Ok(())
+}
