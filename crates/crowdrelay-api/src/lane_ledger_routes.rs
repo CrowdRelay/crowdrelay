@@ -22,7 +22,6 @@ use serde_json::json;
 use crate::{Problem, request_id};
 
 const PRIVATE_NO_STORE: &str = "private, no-store";
-const DEFAULT_DAYS: i32 = 14;
 
 pub(super) fn control_plane_routes() -> axum::Router<crate::AppState> {
     axum::Router::new().route("/v1/control-plane/growth/lanes", get(list))
@@ -39,7 +38,7 @@ async fn list(
     Query(query): Query<ListQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let days = query.days.unwrap_or(DEFAULT_DAYS);
+    let days = query.days.unwrap_or(crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS);
     if !(1..=90).contains(&days) {
         return Problem::bad_request(request_id(&headers))
             .private()
