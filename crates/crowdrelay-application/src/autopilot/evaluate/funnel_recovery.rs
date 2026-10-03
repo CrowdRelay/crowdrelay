@@ -442,14 +442,41 @@ mod funnel_recovery_tests {
             },
             ..candidate("crowdrelay.fan.welcome.v2")
         };
+        let owned_telegram = DecisionCandidate {
+            decision_kind: "drop_surge_fanout",
+            action: AutopilotActionPayload::RequestAgentContent {
+                template_id: Some("telegram-poster".to_owned()),
+                task_id: uuid::Uuid::now_v7(),
+                draft: serde_json::json!({"platform": "telegram"}),
+                recipient_email: None,
+                recipient_name: None,
+                recipient_target_id: None,
+            },
+            ..candidate("crowdrelay.fan.welcome.v2")
+        };
+        let owned_discord = DecisionCandidate {
+            decision_kind: "drop_surge_fanout",
+            action: AutopilotActionPayload::RequestAgentContent {
+                template_id: Some("discord-poster".to_owned()),
+                task_id: uuid::Uuid::now_v7(),
+                draft: serde_json::json!({"platform": "discord"}),
+                recipient_email: None,
+                recipient_name: None,
+                recipient_target_id: None,
+            },
+            ..candidate("crowdrelay.fan.welcome.v2")
+        };
 
-        // No visitors means acquisition reach is the job. Existing-fan pushes
-        // and emails cannot directly add a new audience, so they must not spend
-        // scarce touches while public social/community reach is executable.
+        // No visitors means acquisition reach is the job. Existing-fan pushes,
+        // email and owned Telegram/Discord cannot directly add a new audience,
+        // so they must not spend scarce touches while public social/community
+        // reach is executable.
         let expand = Some(control(OrganicFunnelDirective::ExpandReach));
         assert!(funnel_allows_content_supply(&public, expand));
         assert!(!funnel_allows_content_supply(&owned_push, expand));
         assert!(!funnel_allows_content_supply(&owned_email, expand));
+        assert!(!funnel_allows_content_supply(&owned_telegram, expand));
+        assert!(!funnel_allows_content_supply(&owned_discord, expand));
 
         // Activation/retention are the inverse: talk to the already-consented
         // audience, and stop buying more public reach until the downstream
@@ -462,6 +489,8 @@ mod funnel_recovery_tests {
             assert!(!funnel_allows_content_supply(&public, downstream));
             assert!(funnel_allows_content_supply(&owned_push, downstream));
             assert!(funnel_allows_content_supply(&owned_email, downstream));
+            assert!(funnel_allows_content_supply(&owned_telegram, downstream));
+            assert!(funnel_allows_content_supply(&owned_discord, downstream));
         }
 
         // Conversion and confirmation have dedicated recovery paths. Neither
@@ -474,6 +503,8 @@ mod funnel_recovery_tests {
             assert!(!funnel_allows_content_supply(&public, repair));
             assert!(!funnel_allows_content_supply(&owned_push, repair));
             assert!(!funnel_allows_content_supply(&owned_email, repair));
+            assert!(!funnel_allows_content_supply(&owned_telegram, repair));
+            assert!(!funnel_allows_content_supply(&owned_discord, repair));
         }
 
         attach_organic_funnel_control(
