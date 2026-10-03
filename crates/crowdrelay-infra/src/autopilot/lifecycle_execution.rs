@@ -26,60 +26,64 @@ pub(super) async fn execute(
     .await
     .map_err(map_sqlx)?
     .ok_or(RepositoryError::Conflict)?;
-    let wordmark = sqlx::query_scalar::<_, String>(
-        "SELECT crowdrelay_workspace_wordmark($1)",
-    )
-    .bind(workspace_id.into_uuid())
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(map_sqlx)?;
+    let wordmark = sqlx::query_scalar::<_, String>("SELECT crowdrelay_workspace_wordmark($1)")
+        .bind(workspace_id.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?;
     let activation = if template_key == WELCOME_V2_TEMPLATE {
         if !executor_capability_available(transaction, workspace_id, WELCOME_V2_CAPABILITY).await? {
             return Err(RepositoryError::Unavailable);
         }
         let brand = crate::tenant_settings::TenantSettingsRepository::new(repo.pool.clone())
-            .brand_settings(workspace_id.into_uuid()).await.map_err(map_sqlx)?;
+            .brand_settings(workspace_id.into_uuid())
+            .await
+            .map_err(map_sqlx)?;
         lifecycle_activation::prepare(
-            transaction, &brand,
+            transaction,
+            &brand,
             lifecycle_activation::WelcomeRequest {
-                workspace_id, action_id: action.id, fan_id,
-                locale: fan.2.as_deref().unwrap_or_default(), now,
+                workspace_id,
+                action_id: action.id,
+                fan_id,
+                locale: fan.2.as_deref().unwrap_or_default(),
+                now,
             },
-        ).await?
-    } else { None };
+        )
+        .await?
+    } else {
+        None
+    };
     // The referral invite is the fan→fan growth loop: the
     // executor receives a complete first-party URL rather
     // than reconstructing one from the code, and a missing
     // code or site is terminal for this message.
-    let (referral_code, referral_url) =
-        if template_key == "crowdrelay.fan.referral_invite.v1" {
-            let code = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
-            )
-            .bind(workspace_id.into_uuid())
-            .bind(fan_id.into_uuid())
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(map_sqlx)?
-            .flatten()
-            .ok_or(RepositoryError::ConflictBecause(
-                "referral invite refused: fan has no active referral code",
-            ))?;
-            let brand = crate::tenant_settings::TenantSettingsRepository::new(
-                repo.pool.clone(),
-            )
+    let (referral_code, referral_url) = if template_key == "crowdrelay.fan.referral_invite.v1" {
+        let code = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(fan_id.into_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx)?
+        .flatten()
+        .ok_or(RepositoryError::ConflictBecause(
+            "referral invite refused: fan has no active referral code",
+        ))?;
+        let brand = crate::tenant_settings::TenantSettingsRepository::new(repo.pool.clone())
             .brand_settings(workspace_id.into_uuid())
             .await
             .map_err(map_sqlx)?;
-            let url = brand.referral_url(&code).ok_or(
-                RepositoryError::ConflictBecause(
-                    "referral invite refused: tenant has no member site URL",
-                ),
-            )?;
-            (Some(code), Some(url))
-        } else {
-            (None, None)
-        };
+        let url = brand
+            .referral_url(&code)
+            .ok_or(RepositoryError::ConflictBecause(
+                "referral invite refused: tenant has no member site URL",
+            ))?;
+        (Some(code), Some(url))
+    } else {
+        (None, None)
+    };
     // The install ask carries a tracked link to the Signal
     // page — the click is the only measurement the ask has.
     // A linkless ask is refused rather than sent, for the same
@@ -88,8 +92,7 @@ pub(super) async fn execute(
     // as install-less: for somebody whose only footprint is
     // a door scan, "you were there" and "open Signal" are one
     // ask, not two.
-    let wants_install_url = template_key
-        == "crowdrelay.fan.signal_install_ask.v1"
+    let wants_install_url = template_key == "crowdrelay.fan.signal_install_ask.v1"
         || (template_key == "crowdrelay.fan.show_recall.v1"
             && show.is_some_and(|show| show.wants_install_url));
     let install_url =
@@ -145,18 +148,14 @@ pub(super) async fn execute(
     // attributing them to the message that carried the link.
     // Historical redirects are left untouched.
     let show_url = if let Some(show) = show {
-        let brand = crate::tenant_settings::TenantSettingsRepository::new(
-            repo.pool.clone(),
-        )
-        .brand_settings(workspace_id.into_uuid())
-        .await
-        .map_err(map_sqlx)?;
+        let brand = crate::tenant_settings::TenantSettingsRepository::new(repo.pool.clone())
+            .brand_settings(workspace_id.into_uuid())
+            .await
+            .map_err(map_sqlx)?;
         let locale = fan.2.as_deref().unwrap_or_default();
-        let destination = brand
-            .event_page_url(locale, &show.event_slug)
-            .ok_or(RepositoryError::ConflictBecause(
-                "show recall refused: tenant has no member site URL",
-            ))?;
+        let destination = brand.event_page_url(locale, &show.event_slug).ok_or(
+            RepositoryError::ConflictBecause("show recall refused: tenant has no member site URL"),
+        )?;
         let slug = format!("show-recall-{}", action.id.into_uuid().simple());
         let link = crate::tracked_links::ensure_smart_link_in_tx(
             transaction,
