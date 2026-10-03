@@ -45,6 +45,7 @@ mod sheet_intake;
 mod sheet_intake_scout;
 mod standing_approvals;
 mod strategy_proposals;
+mod strategy_proposals_blank_subreddit;
 mod ticketmaster_sweep;
 mod video_promotion_links;
 mod video_release_plan;
