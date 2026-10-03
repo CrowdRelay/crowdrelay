@@ -143,10 +143,16 @@ fn executor_capability_for_emission(event_type: &str, payload: &Value) -> &'stat
 /// a terminal execution receipt. Public for the worker's receipt
 /// reconciliation sweep, which flags dispatched actions whose receipts
 /// never arrived.
+pub(super) fn is_confirmation_recovery(payload: &AutopilotActionPayload) -> bool {
+    matches!(
+        payload,
+        AutopilotActionPayload::RequestFanLifecycleMessage { template_key, .. }
+            if template_key == CONFIRMATION_RECOVERY_TEMPLATE
+    )
+}
+
 pub fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
-    if let AutopilotActionPayload::RequestFanLifecycleMessage { template_key, .. } = payload
-        && template_key == CONFIRMATION_RECOVERY_TEMPLATE
-    {
+    if is_confirmation_recovery(payload) {
         return false;
     }
     match payload {
