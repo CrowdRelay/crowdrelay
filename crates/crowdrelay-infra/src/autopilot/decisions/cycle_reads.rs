@@ -251,6 +251,11 @@ macro_rules! decision_cycle_reads {
                 WHERE workspace_id = $1
                   AND action_class IN ('owned_audience', 'third_party')
                   AND status <> 'cancelled'
+                  AND NOT (
+                      action_kind = 'fan.lifecycle.message.request'
+                      AND payload->>'template_key' =
+                          'crowdrelay.fan.confirmation_recovery.v1'
+                  )
                   AND created_at >= $2 - INTERVAL '365 days'
                 GROUP BY subject_id
                 "#,
