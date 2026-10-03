@@ -468,7 +468,11 @@ async fn content_link_clicks_reads_telegram_and_discord_link_ids() {
         } else {
             ", message_id"
         };
-        let receipt_value = if table == "telegram_posts" { "42" } else { "'discord-proof'" };
+        let receipt_value = if table == "telegram_posts" {
+            "42"
+        } else {
+            "'discord-proof'"
+        };
         sqlx::query(&format!(
             "INSERT INTO {table}
              (workspace_id, action_id, {extra}, smart_link, smart_link_id,
