@@ -713,11 +713,50 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
         .await?;
     assert!(matches!(peer, PeerOutcome::Applied(_)));
 
+    // Model the operator-visible bad task that already exists before this fix:
+    // a raised collaboration promise names Misscore's audience even though no
+    // distribution authority exists. Refresh must heal the queue as well as
+    // preventing new bad suggestions.
+    let stale_task = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO content_suggestions (
+             id, workspace_id, format_key, concept, reason, evidence,
+             distribution_promise, status, expires_at
+         ) VALUES (
+             $1,$2,'peer_cover','Promote Misscore Short on YouTube',
+             'legacy peer-is-reach shortcut','{}',
+             '{\"peer_audience\":[\"Misscore\"]}'::jsonb,
+             'raised',now()+interval '7 days'
+         )",
+    )
+    .bind(stale_task)
+    .bind(beneficiary.into_uuid())
+    .execute(&pool)
+    .await?;
+
     let today = time::OffsetDateTime::now_utc().date();
     let without_consent = repo.refresh_suggestions(beneficiary, today).await?;
     assert!(
         without_consent.is_empty(),
         "a confirmed peer alone must not manufacture a distribution promise: {without_consent:?}"
+    );
+    let (stale_status, stale_reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT suggestion.status, outcome.reason
+         FROM content_suggestions AS suggestion
+         LEFT JOIN suggestion_outcomes AS outcome
+           ON outcome.workspace_id=suggestion.workspace_id
+          AND outcome.suggestion_id=suggestion.id
+         WHERE suggestion.workspace_id=$1 AND suggestion.id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_task)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stale_status, "expired");
+    assert_eq!(
+        stale_reason.as_deref(),
+        Some("peer audience is no longer an executable consented route"),
+        "the existing nonsense task must self-retire instead of staying in the operator queue"
     );
 
     // A co-bill consent is event-scoped. It must not silently become standing
