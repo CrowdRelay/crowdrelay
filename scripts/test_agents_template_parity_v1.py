@@ -39,12 +39,10 @@ WORKER_TEMPLATE = ROOT / "crates/crowdrelay-domain/src/worker_template.rs"
 #
 # telegram-scanner and metal-archives-scanner left the list when the agent
 # service gained `web_fetch` — their catalogs are fixed endpoints the
-# prefetch dataScope can load. bandcamp-scanner stays: its contract needs a
-# second fetch chosen mid-reasoning (search → album page → collectors),
-# which prefetch-only tools cannot express.
-KNOWN_DISABLED = {
-    "bandcamp-scanner",
-}
+# prefetch dataScope can load. bandcamp-scanner left it when the agents repo
+# shipped `discover_bandcamp_collectors`, which moves the search → album page →
+# collectors chain into a deterministic tool the prefetch dataScope can load.
+KNOWN_DISABLED: set[str] = set()
 
 
 def crowdrelay_slugs() -> set[str]:
