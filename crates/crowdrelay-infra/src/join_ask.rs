@@ -190,6 +190,7 @@ pub async fn load_join_ask_snapshot(
         image_url: config.image_url,
         member_site_base_url,
         social_auto_post: brand.social_auto_post,
+        social_autopost_platforms: brand.social_autopost_platforms.clone(),
         connected_platforms,
         posts,
         instagram_photo_count: u32::try_from(instagram_photo_count).unwrap_or(u32::MAX),
