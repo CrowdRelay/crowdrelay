@@ -1,3 +1,7 @@
+use crowdrelay_domain::FanId;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
 //! The organic funnel's control vocabulary — the mature verified-organic
 //! funnel's current limiting stage, read per cycle so the brain does not
 //! add signups ahead of a downstream leak. Split out of `ports.rs` under the
@@ -43,4 +47,26 @@ pub struct OrganicFunnelControl {
     pub activated_mature: u32,
     pub retention_mature: u32,
     pub retained: u32,
+}
+
+
+/// One pending fan whose original double-opt-in email did not reach a live
+/// delivery path. This is not "they did not click": the snapshot exists only
+/// after the latest confirmation event has no delivered/in-flight webhook
+/// delivery and has terminal dead/cancelled evidence.
+///
+/// The source action/link fields keep the recovery tied to an attributable
+/// CrowdRelay acquisition instead of turning arbitrary pending imports into
+/// autonomous contact.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ConfirmationRecoverySnapshot {
+    pub fan_id: FanId,
+    pub source_action_id: Uuid,
+    pub source_target: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub acquired_at: OffsetDateTime,
+    pub failed_outbox_event_id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
+    pub failed_event_created_at: OffsetDateTime,
+    pub failure_kind: String,
 }
