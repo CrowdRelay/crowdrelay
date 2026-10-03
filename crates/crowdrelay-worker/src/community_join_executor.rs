@@ -412,13 +412,9 @@ impl CommunityJoinExecutorWorker {
                         %reason,
                         "community join outcome is unknown; automatic retry is blocked"
                     );
-                    self.set_membership(
-                        place.place_id,
-                        "join_unknown",
-                        Some(&reason),
-                    )
-                    .await
-                    .ok();
+                    self.set_membership(place.place_id, "join_unknown", Some(&reason))
+                        .await
+                        .ok();
                 }
                 Err(error) => {
                     // `rejected` is terminal. It is written only when Reddit
@@ -705,8 +701,12 @@ impl CommunityJoinExecutorWorker {
 
         let status = response.status();
         if status.as_u16() == 429 {
-            self.set_membership(place.place_id, "not_joined", Some("provider rate limited join"))
-                .await?;
+            self.set_membership(
+                place.place_id,
+                "not_joined",
+                Some("provider rate limited join"),
+            )
+            .await?;
             return Err(CommunityJoinError::RateLimited);
         }
         if !status.is_success() {

@@ -246,7 +246,10 @@ async fn signal_install_measurement_counts_only_canonical_fans_from_its_action()
     )
     .bind(unrelated)
     .bind(f.workspace_id.into_uuid())
-    .bind(format!("unrelated-{}@signal-proof.test", unrelated.simple()))
+    .bind(format!(
+        "unrelated-{}@signal-proof.test",
+        unrelated.simple()
+    ))
     .bind(f.now - time::Duration::hours(14))
     .execute(&f.pool)
     .await?;
@@ -320,7 +323,10 @@ async fn attributed_fan_growth_counts_a_merged_person_once_even_when_durable()
     let root = uuid::Uuid::now_v7();
     let duplicate = uuid::Uuid::now_v7();
     for (fan_id, email) in [
-        (root, format!("canonical-root-{}@example.test", root.simple())),
+        (
+            root,
+            format!("canonical-root-{}@example.test", root.simple()),
+        ),
         (
             duplicate,
             format!("canonical-duplicate-{}@example.test", duplicate.simple()),

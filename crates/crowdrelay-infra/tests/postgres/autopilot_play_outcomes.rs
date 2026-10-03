@@ -325,7 +325,12 @@ async fn attributed_play_clicks_require_exact_action_owned_links()
     seed_series(&fixture, series_id, -14, 10, 500, 1).await?;
 
     let start = play_start(&fixture, 10);
-    assert!(fixture.repository.start_play(fixture.workspace_id, &start).await?);
+    assert!(
+        fixture
+            .repository
+            .start_play(fixture.workspace_id, &start)
+            .await?
+    );
     let play_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM plays WHERE workspace_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1",
     )
@@ -428,11 +433,31 @@ async fn attributed_play_clicks_require_exact_action_owned_links()
     let visitor_a = Uuid::now_v7();
     let visitor_b = Uuid::now_v7();
     for (link, visitor, occurred_at) in [
-        (action_link, visitor_a, delivered_at - time::Duration::seconds(1)),
-        (action_link, visitor_a, delivered_at + time::Duration::minutes(1)),
-        (action_link, visitor_a, delivered_at + time::Duration::minutes(2)),
-        (action_link, visitor_b, delivered_at + time::Duration::minutes(3)),
-        (shared_link, Uuid::now_v7(), delivered_at + time::Duration::minutes(4)),
+        (
+            action_link,
+            visitor_a,
+            delivered_at - time::Duration::seconds(1),
+        ),
+        (
+            action_link,
+            visitor_a,
+            delivered_at + time::Duration::minutes(1),
+        ),
+        (
+            action_link,
+            visitor_a,
+            delivered_at + time::Duration::minutes(2),
+        ),
+        (
+            action_link,
+            visitor_b,
+            delivered_at + time::Duration::minutes(3),
+        ),
+        (
+            shared_link,
+            Uuid::now_v7(),
+            delivered_at + time::Duration::minutes(4),
+        ),
     ] {
         sqlx::query(
             "INSERT INTO click_events(
@@ -466,11 +491,7 @@ async fn attributed_play_clicks_require_exact_action_owned_links()
         Some(2),
         "distinct post-delivery visitors on this play's exact action link only"
     );
-    let verdict = assess_play_claim(
-        attributed,
-        &observation,
-        PlayMeasurementPolicy::default(),
-    );
+    let verdict = assess_play_claim(attributed, &observation, PlayMeasurementPolicy::default());
     assert!(matches!(
         verdict,
         crowdrelay_domain::play_measurement::PlayOutcomeVerdict::Measured {

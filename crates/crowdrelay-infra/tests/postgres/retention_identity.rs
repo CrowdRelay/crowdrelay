@@ -9,7 +9,12 @@ use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-async fn fan(pool: &PgPool, workspace_id: Uuid, email: &str, created_at: OffsetDateTime) -> Result<Uuid> {
+async fn fan(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    email: &str,
+    created_at: OffsetDateTime,
+) -> Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO fans(id,workspace_id,normalized_email,status,created_at)
@@ -37,20 +42,8 @@ async fn retention_and_engagement_follow_exact_canonical_identity_after_merge() 
         .await?;
 
     let acquired_at = OffsetDateTime::now_utc() - Duration::days(40);
-    let survivor = fan(
-        &pool,
-        w,
-        "retention-survivor@example.test",
-        acquired_at,
-    )
-    .await?;
-    let historical = fan(
-        &pool,
-        w,
-        "retention-historical@example.test",
-        acquired_at,
-    )
-    .await?;
+    let survivor = fan(&pool, w, "retention-survivor@example.test", acquired_at).await?;
+    let historical = fan(&pool, w, "retention-historical@example.test", acquired_at).await?;
     let referred = fan(
         &pool,
         w,
@@ -108,30 +101,28 @@ async fn retention_and_engagement_follow_exact_canonical_identity_after_merge() 
         .await?;
 
     let observed_at = OffsetDateTime::now_utc();
-    let retained_from_historical: bool = sqlx::query_scalar(
-        "SELECT fan_is_meaningfully_retained($1,$2,$3,$4)",
-    )
-    .bind(w)
-    .bind(historical)
-    .bind(acquired_at)
-    .bind(observed_at)
-    .fetch_one(&pool)
-    .await?;
+    let retained_from_historical: bool =
+        sqlx::query_scalar("SELECT fan_is_meaningfully_retained($1,$2,$3,$4)")
+            .bind(w)
+            .bind(historical)
+            .bind(acquired_at)
+            .bind(observed_at)
+            .fetch_one(&pool)
+            .await?;
     assert!(
         retained_from_historical,
         "a pinned historical fan id must resolve to the live canonical person"
     );
 
-    let engagement_from_survivor: bool = sqlx::query_scalar(
-        "SELECT fan_has_engagement_between($1,$2,$3,$4,$5)",
-    )
-    .bind(w)
-    .bind(survivor)
-    .bind("retention-survivor@example.test")
-    .bind(observed_at - Duration::days(10))
-    .bind(observed_at + Duration::microseconds(1))
-    .fetch_one(&pool)
-    .await?;
+    let engagement_from_survivor: bool =
+        sqlx::query_scalar("SELECT fan_has_engagement_between($1,$2,$3,$4,$5)")
+            .bind(w)
+            .bind(survivor)
+            .bind("retention-survivor@example.test")
+            .bind(observed_at - Duration::days(10))
+            .bind(observed_at + Duration::microseconds(1))
+            .fetch_one(&pool)
+            .await?;
     assert!(
         engagement_from_survivor,
         "deliberate referral evidence pinned to the historical row must be visible from the survivor"
@@ -140,13 +131,7 @@ async fn retention_and_engagement_follow_exact_canonical_identity_after_merge() 
     // A valid session touch is evidence that the person opened the product, but
     // it is deliberately not sufficient for the funnel's stronger engagement
     // proof. This prevents a session heartbeat from masquerading as activation.
-    let session_only = fan(
-        &pool,
-        w,
-        "retention-session-only@example.test",
-        acquired_at,
-    )
-    .await?;
+    let session_only = fan(&pool, w, "retention-session-only@example.test", acquired_at).await?;
     let mut token_hash = session_only.as_bytes().to_vec();
     token_hash.extend_from_slice(session_only.as_bytes());
     sqlx::query(
@@ -163,16 +148,15 @@ async fn retention_and_engagement_follow_exact_canonical_identity_after_merge() 
     .execute(&pool)
     .await?;
 
-    let session_is_engagement: bool = sqlx::query_scalar(
-        "SELECT fan_has_engagement_between($1,$2,$3,$4,$5)",
-    )
-    .bind(w)
-    .bind(session_only)
-    .bind("retention-session-only@example.test")
-    .bind(observed_at - Duration::days(10))
-    .bind(observed_at + Duration::microseconds(1))
-    .fetch_one(&pool)
-    .await?;
+    let session_is_engagement: bool =
+        sqlx::query_scalar("SELECT fan_has_engagement_between($1,$2,$3,$4,$5)")
+            .bind(w)
+            .bind(session_only)
+            .bind("retention-session-only@example.test")
+            .bind(observed_at - Duration::days(10))
+            .bind(observed_at + Duration::microseconds(1))
+            .fetch_one(&pool)
+            .await?;
     assert!(
         !session_is_engagement,
         "session activity alone must never become deliberate funnel engagement"

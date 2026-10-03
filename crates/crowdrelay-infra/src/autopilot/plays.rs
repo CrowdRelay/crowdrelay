@@ -1094,9 +1094,9 @@ pub(super) async fn execute_play_step(
     // rather than invented, and its absence voids this send the same way a
     // withdrawn consent does: the world changed after the decision.
     let follow_link = match play_kind {
-        PlayKind::FollowAskLadder => Some(
-            follow_ask_link(transaction, workspace_id, action_id).await?
-        ),
+        PlayKind::FollowAskLadder => {
+            Some(follow_ask_link(transaction, workspace_id, action_id).await?)
+        }
         PlayKind::TrackUsAsk
         | PlayKind::ListingCompletenessSweep
         | PlayKind::DormantRevival

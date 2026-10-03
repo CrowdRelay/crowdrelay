@@ -571,13 +571,12 @@ async fn merging_duplicate_referred_people_revokes_ambiguous_double_credit_and_u
         })
         .await?;
 
-    let owner: Option<Uuid> = sqlx::query_scalar(
-        "SELECT canonical_qualified_referral_owner_id($1,$2)",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(duplicate_a.fan_id.into_uuid())
-    .fetch_one(&pool)
-    .await?;
+    let owner: Option<Uuid> =
+        sqlx::query_scalar("SELECT canonical_qualified_referral_owner_id($1,$2)")
+            .bind(workspace_id.into_uuid())
+            .bind(duplicate_a.fan_id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(
         owner, None,
         "two distinct canonical referrers for one human are ambiguous, never timestamp-resolved"
@@ -602,7 +601,10 @@ async fn merging_duplicate_referred_people_revokes_ambiguous_double_credit_and_u
         .bind(referrer.fan_id.into_uuid())
         .fetch_one(&pool)
         .await?;
-        assert_eq!(issued, 0, "merge reconciliation must revoke unearned issued reward");
+        assert_eq!(
+            issued, 0,
+            "merge reconciliation must revoke unearned issued reward"
+        );
         let revoked_coupon: i64 = sqlx::query_scalar(
             "SELECT count(*)
              FROM merch_coupons coupon

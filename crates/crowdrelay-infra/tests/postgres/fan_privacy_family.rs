@@ -3,8 +3,7 @@ use crate::common;
 use crowdrelay_application::{FanIdentityRepository, MergeFansCommand};
 use crowdrelay_domain::WorkspaceId;
 use crowdrelay_infra::{
-    fan_identity::PgFanIdentityRepository,
-    fan_privacy::PostgresFanPrivacyRepository,
+    fan_identity::PgFanIdentityRepository, fan_privacy::PostgresFanPrivacyRepository,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -175,13 +174,12 @@ async fn erasure_scrubs_the_entire_merged_identity_family() -> Result<()> {
         }
     }
 
-    let code_active: bool = sqlx::query_scalar(
-        "SELECT active FROM referral_codes WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(w)
-    .bind(code)
-    .fetch_one(&pool)
-    .await?;
+    let code_active: bool =
+        sqlx::query_scalar("SELECT active FROM referral_codes WHERE workspace_id=$1 AND id=$2")
+            .bind(w)
+            .bind(code)
+            .fetch_one(&pool)
+            .await?;
     assert!(!code_active);
 
     let graph: (i64, i64, i64) = sqlx::query_as(

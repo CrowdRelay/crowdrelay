@@ -109,12 +109,14 @@ async fn insert_outcome_with_task_evidence(
     };
     let evidence = evidence_urls
         .iter()
-        .map(|url| json!({
-            "url": url,
-            "snippet": "fixture evidence",
-            "tool": "test",
-            "fetched_at": time::OffsetDateTime::now_utc().to_string(),
-        }))
+        .map(|url| {
+            json!({
+                "url": url,
+                "snippet": "fixture evidence",
+                "tool": "test",
+                "fetched_at": time::OffsetDateTime::now_utc().to_string(),
+            })
+        })
         .collect::<Vec<_>>();
     sqlx::query(
         "INSERT INTO agent_service_tasks(
@@ -380,10 +382,7 @@ async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()>
         .await
         .expect("connect to the migrated suite database");
     let ws = workspace(&pool).await?;
-    let fake_url = format!(
-        "https://discord.gg/fabricated-{}",
-        Uuid::now_v7().simple()
-    );
+    let fake_url = format!("https://discord.gg/fabricated-{}", Uuid::now_v7().simple());
 
     let hostile = insert_outcome_with_task_evidence(
         &pool,
@@ -408,12 +407,11 @@ async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()>
 
     worker(&pool, ws).run_once().await?;
 
-    let rejected: (String, Option<String>) = sqlx::query_as(
-        "SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1",
-    )
-    .bind(hostile)
-    .fetch_one(&pool)
-    .await?;
+    let rejected: (String, Option<String>) =
+        sqlx::query_as("SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1")
+            .bind(hostile)
+            .fetch_one(&pool)
+            .await?;
     ensure!(
         rejected.0 == "rejected"
             && rejected
@@ -436,10 +434,7 @@ async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()>
         "an ungrounded community must create no place and no target: {leaked:?}"
     );
 
-    let grounded_url = format!(
-        "https://discord.gg/grounded-{}",
-        Uuid::now_v7().simple()
-    );
+    let grounded_url = format!("https://discord.gg/grounded-{}", Uuid::now_v7().simple());
     let grounded = insert_outcome_with_task_evidence(
         &pool,
         ws,
