@@ -670,6 +670,70 @@ impl PostgresContentEngineRepository {
         .bind(ws)
         .execute(&mut *tx)
         .await?;
+        // Reach authority is revocable. If a raised collaboration promise
+        // names a peer audience that is no longer in the live reach snapshot,
+        // the ask is no longer executable. Heal the whole active chain here:
+        // suggestion -> awaiting approval action -> crew handoff/reminder.
+        //
+        // Decisions remain immutable audit evidence, and approved suggestions
+        // are not touched: once a person committed to the beat, withdrawing it
+        // is another human decision rather than silent system cleanup.
+        sqlx::query(
+            r#"
+            WITH stale_peer_reach AS (
+                UPDATE content_suggestions AS suggestion
+                SET status = 'expired', updated_at = now()
+                WHERE suggestion.workspace_id = $1
+                  AND suggestion.status = 'raised'
+                  AND jsonb_typeof(suggestion.distribution_promise->'peer_audience') = 'array'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements_text(
+                          suggestion.distribution_promise->'peer_audience'
+                      ) AS promised(peer_name)
+                      WHERE NOT (promised.peer_name = ANY($2::text[]))
+                  )
+                RETURNING suggestion.workspace_id, suggestion.id
+            ),
+            cancelled_actions AS (
+                UPDATE autopilot_actions AS action
+                SET status = 'cancelled',
+                    finished_at = now(),
+                    last_error_kind = 'peer_reach_unavailable',
+                    idempotency_key =
+                        action.idempotency_key || ':peer-reach:' || action.id::text
+                FROM stale_peer_reach AS stale
+                WHERE action.workspace_id = stale.workspace_id
+                  AND action.subject_kind = 'content_suggestion'
+                  AND action.subject_id = stale.id
+                  AND action.status = 'awaiting_approval'
+                RETURNING action.workspace_id, action.id
+            ),
+            cancelled_assignments AS (
+                UPDATE team_assignments AS assignment
+                SET status = 'cancelled',
+                    completed_at = NULL,
+                    next_reminder_at = NULL,
+                    updated_at = now()
+                FROM cancelled_actions AS action
+                WHERE assignment.workspace_id = action.workspace_id
+                  AND assignment.action_id = action.id
+                  AND assignment.status = 'open'
+                RETURNING assignment.id
+            )
+            INSERT INTO suggestion_outcomes (
+                workspace_id, suggestion_id, outcome, decided_by, reason
+            )
+            SELECT stale_peer_reach.workspace_id, stale_peer_reach.id,
+                   'expired', 'system',
+                   'peer audience is no longer an executable consented route'
+            FROM stale_peer_reach
+            "#,
+        )
+        .bind(ws)
+        .bind(&reach.peers)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             r#"
             WITH unreported AS (
