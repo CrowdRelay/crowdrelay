@@ -72,7 +72,11 @@ pub(super) async fn execute(
     // already live; the extra hop only makes the invitation attributable.
     let (referral_code, referral_url) = if template_key == "crowdrelay.fan.referral_invite.v1" {
         let code = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
+            "SELECT code FROM referral_codes
+             WHERE workspace_id=$1
+               AND fan_id IN (SELECT fan_id FROM canonical_fan_family($1,$2))
+               AND active
+             ORDER BY created_at,id LIMIT 1",
         )
         .bind(workspace_id.into_uuid())
         .bind(fan_id.into_uuid())
