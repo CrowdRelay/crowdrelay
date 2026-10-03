@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use crate::common;
 use crowdrelay_application::{
-    AcquisitionRepository, ConfirmFanCommand, FanLifecycleRepository, IdempotencyKey,
-    RepositoryError, RequestId, SignupFanCommand,
+    AcquisitionRepository, ConfirmFanCommand, FanIdentityRepository, FanLifecycleRepository,
+    IdempotencyKey, MergeFansCommand, RepositoryError, RequestId, SignupFanCommand,
 };
 use crowdrelay_domain::{
     CitySlug, CountryCode, FanActionToken, FanSignup, FanSignupInput, FanStatus, MarketingConsent,
@@ -12,6 +12,7 @@ use crowdrelay_domain::{
 use crowdrelay_infra::{
     acquisition::PostgresAcquisitionRepository,
     config::DatabaseConfig,
+    fan_identity::PgFanIdentityRepository,
     fan_lifecycle::PostgresFanLifecycleRepository,
     sensitive_response::{SensitiveResponseCodec, SensitiveResponseKey},
 };
