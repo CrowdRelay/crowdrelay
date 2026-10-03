@@ -63,13 +63,46 @@ fn content_supply_public_reach(candidate: &DecisionCandidate) -> bool {
     }
 }
 
+fn content_supply_owned_fan_delivery(candidate: &DecisionCandidate) -> bool {
+    if !matches!(
+        candidate.decision_kind,
+        "relay_owned_post" | "drop_surge_fanout"
+    ) {
+        return false;
+    }
+    matches!(
+        &candidate.action,
+        AutopilotActionPayload::RequestSignalPush { .. }
+            | AutopilotActionPayload::RequestSourceCampaign { .. }
+    )
+}
+
 fn funnel_allows_content_supply(
     candidate: &DecisionCandidate,
     control: Option<OrganicFunnelControl>,
 ) -> bool {
     control.is_none_or(|control| {
-        control.directive == OrganicFunnelDirective::ExpandReach
-            || !content_supply_public_reach(candidate)
+        let public_reach = content_supply_public_reach(candidate);
+        let owned_fan_delivery = content_supply_owned_fan_delivery(candidate);
+        match control.directive {
+            // The measured problem is no new audience. Spend fan-out on lanes
+            // that can reach people who are not fans yet, not another touch to
+            // the already-consented audience. Internal precursor work stays
+            // allowed because it reaches nobody and may prepare a later lane.
+            OrganicFunnelDirective::ExpandReach => !owned_fan_delivery,
+            // Neither more reach nor another message to existing fans repairs a
+            // visitor who did not join, or a pending signup whose confirmation
+            // transport is broken. Those stages have dedicated recovery paths.
+            OrganicFunnelDirective::RepairConversion
+            | OrganicFunnelDirective::RepairConfirmation => {
+                !public_reach && !owned_fan_delivery
+            }
+            // Once acquisition itself is no longer the limiting stage, preserve
+            // consented owned-audience delivery for activation/retention while
+            // holding new public fan-out behind the measured downstream leak.
+            OrganicFunnelDirective::ActivateFans
+            | OrganicFunnelDirective::RetainFans => !public_reach,
+        }
     })
 }
 
@@ -362,8 +395,7 @@ mod funnel_recovery_tests {
     }
 
     #[test]
-    fn downstream_leak_holds_public_content_reach_but_not_owned_fan_delivery() {
-        let public = candidate("crowdrelay.fan.welcome.v2");
+    fn content_supply_spends_each_funnel_stage_on_work_that_can_move_it() {
         let mut public = DecisionCandidate {
             decision_kind: "drop_surge_fanout",
             action: AutopilotActionPayload::RequestAgentContent {
@@ -374,9 +406,9 @@ mod funnel_recovery_tests {
                 recipient_name: None,
                 recipient_target_id: None,
             },
-            ..public
+            ..candidate("crowdrelay.fan.welcome.v2")
         };
-        let owned = DecisionCandidate {
+        let owned_push = DecisionCandidate {
             decision_kind: "drop_surge_fanout",
             action: AutopilotActionPayload::RequestSignalPush {
                 task_id: uuid::Uuid::now_v7(),
@@ -391,13 +423,54 @@ mod funnel_recovery_tests {
             },
             ..candidate("crowdrelay.fan.welcome.v2")
         };
-        let downstream = Some(control(OrganicFunnelDirective::ActivateFans));
-        assert!(!funnel_allows_content_supply(&public, downstream));
-        assert!(funnel_allows_content_supply(&owned, downstream));
-        assert!(funnel_allows_content_supply(
-            &public,
-            Some(control(OrganicFunnelDirective::ExpandReach))
-        ));
+        let owned_email = DecisionCandidate {
+            decision_kind: "drop_surge_fanout",
+            action: AutopilotActionPayload::RequestSourceCampaign {
+                source_id: crowdrelay_domain::ContentSourceId::new(),
+                template_key: "content.drop_surge.v1".to_owned(),
+                draft: crowdrelay_domain::campaign_lifecycle::EventCampaignCopy {
+                    subject: "new".to_owned(),
+                    body: "new".to_owned(),
+                },
+                audience_size: Some(1),
+                audience_basis: "consented fans".to_owned(),
+            },
+            ..candidate("crowdrelay.fan.welcome.v2")
+        };
+
+        // No visitors means acquisition reach is the job. Existing-fan pushes
+        // and emails cannot directly add a new audience, so they must not spend
+        // scarce touches while public social/community reach is executable.
+        let expand = Some(control(OrganicFunnelDirective::ExpandReach));
+        assert!(funnel_allows_content_supply(&public, expand));
+        assert!(!funnel_allows_content_supply(&owned_push, expand));
+        assert!(!funnel_allows_content_supply(&owned_email, expand));
+
+        // Activation/retention are the inverse: talk to the already-consented
+        // audience, and stop buying more public reach until the downstream
+        // leak is repaired.
+        for directive in [
+            OrganicFunnelDirective::ActivateFans,
+            OrganicFunnelDirective::RetainFans,
+        ] {
+            let downstream = Some(control(directive));
+            assert!(!funnel_allows_content_supply(&public, downstream));
+            assert!(funnel_allows_content_supply(&owned_push, downstream));
+            assert!(funnel_allows_content_supply(&owned_email, downstream));
+        }
+
+        // Conversion and confirmation have dedicated recovery paths. Neither
+        // generic reach nor a fresh-drop blast to existing fans fixes them.
+        for directive in [
+            OrganicFunnelDirective::RepairConversion,
+            OrganicFunnelDirective::RepairConfirmation,
+        ] {
+            let repair = Some(control(directive));
+            assert!(!funnel_allows_content_supply(&public, repair));
+            assert!(!funnel_allows_content_supply(&owned_push, repair));
+            assert!(!funnel_allows_content_supply(&owned_email, repair));
+        }
+
         attach_organic_funnel_control(
             &mut public,
             control(OrganicFunnelDirective::ExpandReach),
