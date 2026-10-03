@@ -4,7 +4,10 @@ use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crowdrelay_application::autopilot::{OrganicFunnelControl, OrganicFunnelDirective};
+use crowdrelay_application::autopilot::{
+    ConfirmationRecoverySnapshot, OrganicFunnelControl, OrganicFunnelDirective,
+};
+use crowdrelay_domain::FanId;
 
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]
 pub struct OrganicFunnelRow {
@@ -119,6 +122,175 @@ fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<Orga
         retention_mature,
         retained,
     })
+}
+
+
+const CONFIRMATION_RECOVERY_MIN_AGE_HOURS: i64 = 1;
+const CONFIRMATION_RECOVERY_LOOKBACK_DAYS: i64 = 30;
+const CONFIRMATION_RECOVERY_LIMIT: i64 = 50;
+
+/// Pending, CrowdRelay-attributed signups whose latest double-opt-in delivery
+/// definitively failed.
+///
+/// A missing confirmation is not enough. The latest confirmation event must
+/// be old enough to have left the normal delivery window and either the event
+/// itself must be dead, or every materialized webhook delivery must be
+/// terminal with none delivered. A delivered route means "the mail system
+/// accepted the event" and is never auto-retried just because the person did
+/// not click.
+pub async fn confirmation_recovery_snapshots(
+    pool: &PgPool,
+    workspace: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<ConfirmationRecoverySnapshot>, sqlx::Error> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(Uuid, Uuid, String, OffsetDateTime, Uuid, OffsetDateTime, String)> =
+        sqlx::query_as(
+            r#"
+            WITH attributed AS (
+                SELECT DISTINCT ON (conversion.fan_id)
+                    conversion.fan_id,
+                    conversion.action_id AS source_action_id,
+                    conversion.source_target,
+                    conversion.occurred_at AS acquired_at
+                FROM fan_provenance_events AS conversion
+                JOIN fans AS fan
+                  ON fan.workspace_id = conversion.workspace_id
+                 AND fan.id = conversion.fan_id
+                WHERE conversion.workspace_id = $1
+                  AND conversion.event_kind = 'conversion'
+                  AND conversion.attribution_method = 'last_tracked_click'
+                  AND conversion.action_id IS NOT NULL
+                  AND conversion.source_target IS NOT NULL
+                  AND btrim(conversion.source_target) <> ''
+                  AND conversion.occurred_at >= $2 - make_interval(days => $3::int)
+                  AND conversion.occurred_at <= $2
+                  AND fan.status = 'pending'
+                  AND fan.deleted_at IS NULL
+                  AND COALESCE((
+                      SELECT consent.granted
+                      FROM fan_consents AS consent
+                      WHERE consent.workspace_id = fan.workspace_id
+                        AND consent.fan_id = fan.id
+                        AND consent.purpose = 'marketing'
+                        AND consent.recorded_at <= $2
+                      ORDER BY consent.recorded_at DESC, consent.id DESC
+                      LIMIT 1
+                  ), false)
+                ORDER BY conversion.fan_id, conversion.occurred_at DESC, conversion.id DESC
+            ),
+            latest_confirmation AS (
+                SELECT attributed.*,
+                       confirmation.id AS outbox_event_id,
+                       confirmation.created_at AS event_created_at,
+                       confirmation.status AS event_status,
+                       confirmation.last_error_kind AS event_error_kind
+                FROM attributed
+                JOIN LATERAL (
+                    SELECT event.id, event.created_at, event.status, event.last_error_kind
+                    FROM outbox_events AS event
+                    WHERE event.workspace_id = $1
+                      AND event.event_type = 'fan.confirmation_requested'
+                      AND event.payload->>'fan_id' = attributed.fan_id::text
+                      AND event.created_at >= attributed.acquired_at
+                      AND event.created_at <= $2
+                    ORDER BY event.created_at DESC, event.id DESC
+                    LIMIT 1
+                ) AS confirmation ON true
+            )
+            SELECT confirmation.fan_id,
+                   confirmation.source_action_id,
+                   confirmation.source_target,
+                   confirmation.acquired_at,
+                   confirmation.outbox_event_id,
+                   confirmation.event_created_at,
+                   CASE
+                       WHEN confirmation.event_status = 'dead'
+                           THEN COALESCE(NULLIF(confirmation.event_error_kind, ''), 'outbox_dead')
+                       WHEN delivery.cancelled > 0
+                           THEN COALESCE(delivery.last_terminal_error, 'delivery_cancelled')
+                       ELSE COALESCE(delivery.last_terminal_error, 'delivery_dead')
+                   END AS failure_kind
+            FROM latest_confirmation AS confirmation
+            LEFT JOIN LATERAL (
+                SELECT
+                    count(*) FILTER (WHERE d.status = 'delivered')::bigint AS delivered,
+                    count(*) FILTER (WHERE d.status IN ('pending','processing'))::bigint AS in_flight,
+                    count(*) FILTER (WHERE d.status = 'dead')::bigint AS dead,
+                    count(*) FILTER (WHERE d.status = 'cancelled')::bigint AS cancelled,
+                    (
+                        SELECT NULLIF(d2.last_error_kind, '')
+                        FROM webhook_deliveries AS d2
+                        WHERE d2.workspace_id = $1
+                          AND d2.outbox_event_id = confirmation.outbox_event_id
+                          AND d2.status IN ('dead','cancelled')
+                        ORDER BY d2.updated_at DESC, d2.id DESC
+                        LIMIT 1
+                    ) AS last_terminal_error
+                FROM webhook_deliveries AS d
+                WHERE d.workspace_id = $1
+                  AND d.outbox_event_id = confirmation.outbox_event_id
+            ) AS delivery ON true
+            WHERE confirmation.event_created_at <=
+                      $2 - make_interval(hours => $4::int)
+              AND (
+                  confirmation.event_status = 'dead'
+                  OR (
+                      COALESCE(delivery.delivered, 0) = 0
+                      AND COALESCE(delivery.in_flight, 0) = 0
+                      AND COALESCE(delivery.dead, 0) + COALESCE(delivery.cancelled, 0) > 0
+                  )
+              )
+              -- If another cycle already created a recovery action for this
+              -- exact failed event, the action's own retry/reconciliation
+              -- machinery owns it. Never mint a second confirmation.
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM autopilot_actions AS action
+                  WHERE action.workspace_id = $1
+                    AND action.subject_id = confirmation.fan_id
+                    AND action.action_kind = 'fan.lifecycle.message.request'
+                    AND action.payload->>'template_key' =
+                        'crowdrelay.fan.confirmation_recovery.v1'
+                    AND action.idempotency_key =
+                        'action:confirmation-recovery:'
+                        || confirmation.fan_id::text || ':'
+                        || confirmation.outbox_event_id::text
+              )
+            ORDER BY confirmation.event_created_at, confirmation.fan_id
+            LIMIT $5
+            "#,
+        )
+        .bind(workspace)
+        .bind(now)
+        .bind(CONFIRMATION_RECOVERY_LOOKBACK_DAYS)
+        .bind(CONFIRMATION_RECOVERY_MIN_AGE_HOURS)
+        .bind(CONFIRMATION_RECOVERY_LIMIT)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                fan_id,
+                source_action_id,
+                source_target,
+                acquired_at,
+                failed_outbox_event_id,
+                failed_event_created_at,
+                failure_kind,
+            )| ConfirmationRecoverySnapshot {
+                fan_id: FanId::from_uuid(fan_id),
+                source_action_id,
+                source_target,
+                acquired_at,
+                failed_outbox_event_id,
+                failed_event_created_at,
+                failure_kind,
+            },
+        )
+        .collect())
 }
 
 const FUNNEL_SQL: &str = r#"
