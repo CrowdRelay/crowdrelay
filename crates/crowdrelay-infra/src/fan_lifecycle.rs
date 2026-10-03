@@ -104,22 +104,23 @@ impl PostgresFanLifecycleRepository {
         let row = sqlx::query_as::<_, LifecycleTokenRow>(
             r#"
             SELECT
-                fan_action_tokens.id AS token_id,
-                fan_action_tokens.fan_id,
-                fan_action_tokens.purpose,
-                fan_action_tokens.expires_at,
-                fan_action_tokens.consumed_at,
-                fan_action_tokens.reusable,
-                fans.status,
-                fans.normalized_email,
-                fans.display_name
-            FROM fan_action_tokens
-            INNER JOIN fans
-                ON fans.workspace_id = fan_action_tokens.workspace_id
-                AND fans.id = fan_action_tokens.fan_id
-            WHERE fan_action_tokens.workspace_id = $1
-                AND fan_action_tokens.token_hash = $2
-            FOR UPDATE OF fan_action_tokens, fans
+                token.id AS token_id,
+                token.fan_id AS token_fan_id,
+                canonical.id AS fan_id,
+                token.purpose,
+                token.expires_at,
+                token.consumed_at,
+                token.reusable,
+                canonical.status,
+                canonical.normalized_email,
+                canonical.display_name
+            FROM fan_action_tokens AS token
+            JOIN fans AS canonical
+              ON canonical.workspace_id = token.workspace_id
+             AND canonical.id = canonical_fan_id(token.workspace_id, token.fan_id)
+            WHERE token.workspace_id = $1
+              AND token.token_hash = $2
+            FOR UPDATE OF token, canonical
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -144,10 +145,20 @@ impl PostgresFanLifecycleRepository {
             row.purpose == "confirm" && previous_status == FanStatus::Pending;
         let recovers_active_session =
             row.purpose == "session" && previous_status == FanStatus::Active;
-        // Each action token is bound to one exact lifecycle state. A stale
-        // confirmation must never reactivate an unsubscribed fan, and a
-        // recovery token must never create a session after consent withdrawal.
-        if !confirms_pending_signup && !recovers_active_session {
+        // When two pending duplicate records each had a live confirmation
+        // token, merge can move only one token to the survivor; the other stays
+        // pinned to the tombstone because the live-purpose uniqueness guard is
+        // intentional. That retained token still proves ownership of an email
+        // already merged into this exact canonical person. It may open a
+        // session for an already-active survivor, but it must never reactivate
+        // an unsubscribed/suppressed canonical account.
+        let confirms_merged_alias_session = row.purpose == "confirm"
+            && row.token_fan_id != row.fan_id
+            && previous_status == FanStatus::Active;
+        if !confirms_pending_signup
+            && !recovers_active_session
+            && !confirms_merged_alias_session
+        {
             return Err(LifecycleStoreError::Conflict);
         }
 
@@ -167,7 +178,7 @@ impl PostgresFanLifecycleRepository {
         .await
         .map_err(LifecycleStoreError::from_sqlx)?;
 
-        if recovers_active_session {
+        if recovers_active_session || confirms_merged_alias_session {
             let referral_code =
                 load_or_create_referral_code(&mut transaction, workspace_id, fan_id).await?;
             let fan_session_token = issue_fan_session(&mut transaction, workspace_id, fan_id)
@@ -225,8 +236,21 @@ impl PostgresFanLifecycleRepository {
             WITH latest_acquisition AS (
                 SELECT referral_code_id, referrer_fan_id, request_id
                 FROM fan_acquisition_events
-                WHERE workspace_id = $1 AND fan_id = $2
+                WHERE workspace_id = $1
+                  AND fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
                 ORDER BY occurred_at DESC, id DESC
+                LIMIT 1
+            ), pending_attribution AS (
+                SELECT referral_code_id, referrer_fan_id
+                FROM referral_attributions
+                WHERE workspace_id = $1
+                  AND referred_fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
+                  AND status = 'pending'
+                ORDER BY accepted_at DESC, id DESC
                 LIMIT 1
             )
             SELECT
@@ -236,10 +260,7 @@ impl PostgresFanLifecycleRepository {
                     AS referrer_fan_id,
                 acquisition.request_id
             FROM latest_acquisition AS acquisition
-            LEFT JOIN referral_attributions AS attribution
-                ON attribution.workspace_id = $1
-                AND attribution.referred_fan_id = $2
-                AND attribution.status = 'pending'
+            LEFT JOIN pending_attribution AS attribution ON true
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -466,22 +487,23 @@ impl PostgresFanLifecycleRepository {
         let row = sqlx::query_as::<_, LifecycleTokenRow>(
             r#"
             SELECT
-                fan_action_tokens.id AS token_id,
-                fan_action_tokens.fan_id,
-                fan_action_tokens.purpose,
-                fan_action_tokens.expires_at,
-                fan_action_tokens.consumed_at,
-                fan_action_tokens.reusable,
-                fans.status,
-                fans.normalized_email,
-                fans.display_name
-            FROM fan_action_tokens
-            INNER JOIN fans
-                ON fans.workspace_id = fan_action_tokens.workspace_id
-                AND fans.id = fan_action_tokens.fan_id
-            WHERE fan_action_tokens.workspace_id = $1
-                AND fan_action_tokens.token_hash = $2
-            FOR UPDATE OF fan_action_tokens, fans
+                token.id AS token_id,
+                token.fan_id AS token_fan_id,
+                canonical.id AS fan_id,
+                token.purpose,
+                token.expires_at,
+                token.consumed_at,
+                token.reusable,
+                canonical.status,
+                canonical.normalized_email,
+                canonical.display_name
+            FROM fan_action_tokens AS token
+            JOIN fans AS canonical
+              ON canonical.workspace_id = token.workspace_id
+             AND canonical.id = canonical_fan_id(token.workspace_id, token.fan_id)
+            WHERE token.workspace_id = $1
+              AND token.token_hash = $2
+            FOR UPDATE OF token, canonical
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -534,7 +556,11 @@ impl PostgresFanLifecycleRepository {
                 r#"
                 UPDATE fan_sessions
                 SET revoked_at = COALESCE(revoked_at, now())
-                WHERE workspace_id = $1 AND fan_id = $2 AND revoked_at IS NULL
+                WHERE workspace_id = $1
+                  AND fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
+                  AND revoked_at IS NULL
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -547,8 +573,10 @@ impl PostgresFanLifecycleRepository {
                 UPDATE event_reminder_jobs
                 SET status = 'cancelled', cancelled_at = now()
                 WHERE workspace_id = $1
-                    AND fan_id = $2
-                    AND status = 'pending'
+                  AND fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
+                  AND status = 'pending'
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -569,9 +597,16 @@ impl PostgresFanLifecycleRepository {
                 UPDATE fan_action_tokens
                 SET consumed_at = COALESCE(consumed_at, now())
                 WHERE workspace_id = $1
-                    AND fan_id = $2
-                    AND consumed_at IS NULL
-                    AND (id = $3 OR purpose IN ('confirm', 'session'))
+                  AND consumed_at IS NULL
+                  AND (
+                      id = $3
+                      OR (
+                          fan_id IN (
+                              SELECT fan_id FROM canonical_fan_family($1,$2)
+                          )
+                          AND purpose IN ('confirm', 'session')
+                      )
+                  )
                 "#,
             )
             .bind(workspace_id.into_uuid())
@@ -885,6 +920,7 @@ fn map_referral_error(error: crate::referrals::ReferralStoreError) -> LifecycleS
 #[derive(Debug, FromRow)]
 struct LifecycleTokenRow {
     token_id: Uuid,
+    token_fan_id: Uuid,
     fan_id: Uuid,
     purpose: String,
     expires_at: OffsetDateTime,
