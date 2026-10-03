@@ -125,16 +125,16 @@ where
 
         let mut candidates = Vec::new();
 
-        if control.is_some_and(|value| {
-            value.directive == OrganicFunnelDirective::RepairConfirmation
-        }) {
+        if let Some(control) = control
+            && control.directive == OrganicFunnelDirective::RepairConfirmation
+        {
             for snapshot in self
                 .repository
                 .load_confirmation_recovery_snapshots(self.workspace_id, now)
                 .await?
             {
                 if let Some(candidate) =
-                    confirmation_recovery_candidate(snapshot, policy, control.expect("checked"))?
+                    confirmation_recovery_candidate(snapshot, policy, control)?
                 {
                     candidates.push(candidate);
                 }
