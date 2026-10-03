@@ -166,6 +166,40 @@ impl<'a, R> EvaluateAutopilot<'a, R>
 where
     R: AutopilotDecisionRepository,
 {
+    async fn cycle_policies_and_funnel(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<(Vec<AutopilotPolicy>, Option<OrganicFunnelControl>), AutopilotError> {
+        let mut policies = self.repository.load_policies(self.workspace_id).await?;
+        let control = self
+            .repository
+            .load_organic_funnel_control(self.workspace_id, now)
+            .await?;
+        policies.sort_by_key(|policy| funnel_context_rank(policy.context, control));
+        Ok((policies, control))
+    }
+
+    fn prepare_content_candidate_for_funnel(
+        candidate: &mut DecisionCandidate,
+        control: Option<OrganicFunnelControl>,
+        report: &mut AutopilotCycleReport,
+    ) -> bool {
+        if let Some(control) = control {
+            attach_organic_funnel_control(candidate, control);
+        }
+        if funnel_allows_content_supply(candidate, control) {
+            return true;
+        }
+        if let Some(control) = control {
+            report.gi_dispatch_log.push(format!(
+                "organic funnel control: held content-supply public reach decision={} while directive={}",
+                candidate.decision_kind,
+                control.directive.as_str()
+            ));
+        }
+        false
+    }
+
     async fn evaluate_fan_lifecycle_with_funnel(
         &self,
         policy: &AutopilotPolicy,
