@@ -237,7 +237,11 @@ impl DayZeroFacts {
     /// plane shows; no second interpretation of authority is allowed.
     #[must_use]
     pub fn executable_owned_social_platforms(&self) -> Vec<String> {
-        self.assess()
+        let readiness = self.assess();
+        if !readiness.ready {
+            return Vec::new();
+        }
+        readiness
             .rails
             .into_iter()
             .filter(|rail| rail.state == crowdrelay_domain::day_zero::RailState::Executable)
