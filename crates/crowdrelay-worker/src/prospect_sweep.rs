@@ -95,6 +95,7 @@ struct CommentRow {
     body: String,
     created_at: OffsetDateTime,
     provider_observed_at: Option<OffsetDateTime>,
+    provider_author_id: Option<String>,
     source_url: Option<String>,
 }
 
@@ -151,7 +152,7 @@ impl ProspectSweep {
         let mut report = SweepReport::default();
         let comments = sqlx::query_as::<_, CommentRow>(
             "SELECT c.id, c.platform, c.author, c.body, c.created_at,
-                    c.provider_observed_at,
+                    c.provider_observed_at, c.provider_author_id,
                     CASE WHEN cs.metadata->>'url' ~ '^https?://'
                          THEN cs.metadata->>'url' END AS source_url
              FROM community_comments c
@@ -182,6 +183,18 @@ impl ProspectSweep {
                 report.own_accounts += 1;
                 continue;
             }
+            // Graph and YouTube expose a stable provider identity. Refuse
+            // to fall back to a mutable/non-unique display handle when that
+            // provider omitted it; "someone" or "John Smith" is not a person
+            // key. Reddit's current adapter exposes an immutable username
+            // rather than a separate user id, so its handle remains valid.
+            let stable_id_surface =
+                matches!(comment.platform.as_str(), "instagram" | "facebook" | "youtube");
+            let handle = if stable_id_surface && comment.provider_author_id.is_none() {
+                None
+            } else {
+                Some(comment.author.as_str())
+            };
             let id = comment.id.to_string();
             let kind = classify_comment(&comment.body);
             let confidence = if kind == ObservationKind::ActiveUnderOurPost {
@@ -195,8 +208,8 @@ impl ProspectSweep {
                 &ObservedPerson {
                     source: ProspectSource::OwnComments,
                     platform: &comment.platform,
-                    platform_user_id: None,
-                    handle: Some(&comment.author),
+                    platform_user_id: comment.provider_author_id.as_deref(),
+                    handle,
                     display_identity: &comment.author,
                     display_name: None,
                     profile_url: None,
