@@ -126,6 +126,8 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 not_collected: 0,
                 excluded_identity: 0,
                 not_an_identity: 1,
+                own_accounts: 0,
+                own_retracted: 0,
                 touched: 0,
                 converted: 0,
                 expired: 0,
@@ -142,6 +144,8 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 not_collected: 0,
                 excluded_identity: 0,
                 not_an_identity: 1,
+                own_accounts: 0,
+                own_retracted: 0,
                 touched: 0,
                 converted: 0,
                 expired: 0,
@@ -541,5 +545,68 @@ async fn a_reply_that_carried_the_join_link_becomes_a_touch_and_then_a_fan() -> 
         !trace.is_nil(),
         "the touch carries the trace the conversion joins"
     );
+    Ok(())
+}
+
+/// The band's own accounts are not its audience. An owner who tests the reply
+/// lane from a personal account was collected as a prospect, replied to twice,
+/// and tripped the one-voice tripwire that halts every reply sender for a week.
+/// Naming the account retracts the prospect and its touches, and the sweep stops
+/// collecting it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn the_tenants_own_accounts_are_retracted_and_not_collected() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let source = video(&pool, ws).await?;
+    comment(&pool, ws, source, "instagram", "wojciech_bator", "test", 1).await?;
+    comment(
+        &pool,
+        ws,
+        source,
+        "instagram",
+        "real_fan",
+        "Kiedy koncert?",
+        1,
+    )
+    .await?;
+    let sweep = ProspectSweep::new(pool.clone(), ws, Duration::from_secs(10));
+    let now = OffsetDateTime::now_utc();
+    let first = sweep.run_once(now).await?;
+    ensure!(
+        first.created == 2,
+        "nothing names the account yet: {first:?}"
+    );
+
+    sqlx::query(
+        "INSERT INTO tenant_settings (workspace_id, key, value)
+         VALUES ($1, 'scout_own_handles', '@Wojciech_Bator, someone_else')",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fanbase_connections (workspace_id, platform, external_account_ref, credential_ref, label)
+         VALUES ($1, 'instagram', '17841455886865962', 'x', 'Band Instagram (@band.official)')",
+    )
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    comment(&pool, ws, source, "instagram", "band.official", "dzięki", 0).await?;
+
+    let second = sweep.run_once(now).await?;
+    ensure!(
+        second.own_retracted == 1 && second.own_accounts == 2,
+        "one retracted, the owner's and the brand's comments skipped: {second:?}"
+    );
+    let left: Vec<(String,)> = sqlx::query_as(
+        "SELECT ltrim(lower(external_identity), '@') FROM fan_prospects WHERE workspace_id = $1",
+    )
+    .bind(ws.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    ensure!(left == [("real_fan".to_owned(),)], "{left:?}");
+    let third = sweep.run_once(now).await?;
+    ensure!(third.own_retracted == 0, "idempotent: {third:?}");
     Ok(())
 }

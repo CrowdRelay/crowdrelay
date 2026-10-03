@@ -20,11 +20,11 @@
 //!    moved first, so a person still talking to the band is never expired out
 //!    from under a conversation.
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use crowdrelay_domain::{
     WorkspaceId,
-    fan_prospect::{ObservationKind, ProspectSource, classify_comment},
+    fan_prospect::{ObservationKind, ProspectSource, classify_comment, normalize_handle},
 };
 use crowdrelay_infra::fan_prospects::{
     ObserveOutcome, ObservedPerson, ProspectError, TouchKind, TouchReceipt, attribute_conversions,
@@ -71,6 +71,12 @@ pub struct SweepReport {
     /// Comments belonging to explicit staff/own-account/test identities.
     pub excluded_identity: u64,
     pub not_an_identity: u64,
+    /// Comments by the tenant's own accounts (brand, owner, team): the band
+    /// talking under its own post is not an audience member.
+    pub own_accounts: u64,
+    /// Prospects (with their evidence and touches) retracted because they turned
+    /// out to be one of those accounts.
+    pub own_retracted: u64,
     /// Replies the band sent that were recorded as touches this pass.
     pub touched: u64,
     /// Prospects linked to the fan their touch brought in this pass.
@@ -158,7 +164,12 @@ impl ProspectSweep {
         .bind(OBSERVE_PER_PASS)
         .fetch_all(&self.pool)
         .await?;
+        let own = self.own_handles(ws).await?;
         for comment in &comments {
+            if normalize_handle(&comment.author).is_some_and(|h| own.contains(&h)) {
+                report.own_accounts += 1;
+                continue;
+            }
             let id = comment.id.to_string();
             let kind = classify_comment(&comment.body);
             let confidence = if kind == ObservationKind::ActiveUnderOurPost {
@@ -223,10 +234,88 @@ impl ProspectSweep {
                 }
             }
         }
+        report.own_retracted = self.retract_own_accounts(ws, &own).await?;
         self.record_replies_as_touches(ws, &mut report).await?;
         report.converted = attribute_conversions(&self.pool, ws, now, EXPIRE_PER_PASS).await?;
         report.expired = expire(&self.pool, ws, now, EXPIRE_PER_PASS).await?;
         Ok(report)
+    }
+
+    /// Handles that are the tenant, not its audience: the `scout_own_handles`
+    /// tenant setting (comma/space/newline separated — owner and team
+    /// accounts the platform connections cannot know) plus the handle a
+    /// connection names in its label (`Virya Instagram (@virya.official)`) or
+    /// uses as its account ref (`viryaofficial`). Normalised exactly as
+    /// prospect handles are, so the comparison cannot drift.
+    async fn own_handles(&self, ws: Uuid) -> Result<HashSet<String>, SweepError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT value FROM tenant_settings
+              WHERE workspace_id = $1 AND key = 'scout_own_handles'
+             UNION ALL
+             SELECT external_account_ref FROM fanbase_connections
+              WHERE workspace_id = $1 AND platform IN
+                    ('instagram','youtube','tiktok','bluesky','soundcloud','bandcamp','facebook','reddit','twitter','x')
+                AND external_account_ref !~ '^[0-9-]+$' AND external_account_ref !~ '^r/'
+             UNION ALL
+             SELECT m[1] FROM fanbase_connections c,
+                    LATERAL regexp_matches(c.label, '\\(@?([^)\\s]+)\\)', 'g') AS m
+              WHERE c.workspace_id = $1 AND c.platform <> 'reddit'",
+        )
+        .bind(ws)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .flat_map(|(value,)| value.split(|c: char| c == ',' || c.is_whitespace()))
+            .filter_map(normalize_handle)
+            .collect())
+    }
+
+    /// A prospect that is one of the tenant's own accounts is deleted with its
+    /// evidence and touches. Its touches are the band replying to the band;
+    /// left in place they trip the one-voice and rate tripwires and halt the
+    /// reply lane for a week over a conversation with nobody.
+    async fn retract_own_accounts(
+        &self,
+        ws: Uuid,
+        own: &HashSet<String>,
+    ) -> Result<u64, SweepError> {
+        if own.is_empty() {
+            return Ok(0);
+        }
+        let handles: Vec<String> = own.iter().cloned().collect();
+        let mut tx = self.pool.begin().await?;
+        let gone: Vec<(Uuid,)> = sqlx::query_as(
+            "DELETE FROM fan_prospects p
+              WHERE p.workspace_id = $1
+                AND p.status NOT IN ('converted')
+                AND EXISTS (SELECT 1 FROM person_identities i
+                             WHERE i.workspace_id = p.workspace_id
+                               AND i.person_id = p.person_id
+                               AND i.kind = 'platform_handle'
+                               AND i.value = ANY($2))
+          RETURNING p.person_id",
+        )
+        .bind(ws)
+        .bind(&handles)
+        .fetch_all(&mut *tx)
+        .await?;
+        let people: Vec<Uuid> = gone.into_iter().map(|(p,)| p).collect();
+        if !people.is_empty() {
+            sqlx::query(
+                "DELETE FROM persons
+                  WHERE workspace_id = $1 AND id = ANY($2)
+                    AND NOT EXISTS (SELECT 1 FROM fan_prospects p
+                                     WHERE p.workspace_id = persons.workspace_id
+                                       AND p.person_id = persons.id)",
+            )
+            .bind(ws)
+            .bind(&people)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(u64::try_from(people.len()).unwrap_or(u64::MAX))
     }
 
     /// The reply lane's sends, recorded as what they are: the band speaking to
