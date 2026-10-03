@@ -202,6 +202,7 @@ fn expand_reach_routes_owned_social_only_to_executable_rails()
         activated_mature: 0,
         retention_mature: 0,
         retained: 0,
+        qualified_referrals: 0,
     };
     let executable = vec!["facebook".to_owned()];
 
