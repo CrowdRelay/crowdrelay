@@ -69,6 +69,30 @@ pub(super) async fn observe_attributed_fans(
     let Some((window_days, durable)) = window_for(measurement.kind) else {
         return Err(RepositoryError::Unexpected);
     };
+
+    // Historical content-artifact actions used to own fan-growth windows.
+    // That was a category error: the executor receipt proves a file/draft
+    // exists, not that a human saw it. A later child publication can carry a
+    // tracked link, so merely waiting for FIRST_TRACKED_POST would let the
+    // same conversion teach both the artifact producer and the publication.
+    //
+    // Keep the old rows for audit, but make them permanently ineligible for
+    // fan credit. The actual post/send action owns the human outcome.
+    let action_kind: Option<String> = sqlx::query_scalar(
+        "SELECT action_kind FROM autopilot_actions
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(measurement.action_id.into_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx)?;
+    if action_kind.as_deref() == Some("content.artifact.request") {
+        return Err(RepositoryError::ConflictBecause(
+            AutopilotMeasurementKind::ARTIFACT_NOT_PUBLICATION,
+        ));
+    }
+
     let with_tasks = agent_tasks_table_exists(pool).await?;
     let first_live = sqlx::query_scalar::<_, Option<OffsetDateTime>>(if with_tasks {
         FIRST_TRACKED_POST_WITH_TASKS
