@@ -92,17 +92,28 @@ class ReferralConversionContract(unittest.TestCase):
             self.assertIn(field, self.audience)
             self.assertIn(field, self.models)
 
-    def test_latarnik_clicks_are_real_and_mission_bounded(self) -> None:
+    def test_latarnik_clicks_are_exact_action_owned_and_mission_bounded(self) -> None:
         section = self.audience[
             self.audience.find("pub async fn referral_conversion"):
             self.audience.find("pub async fn city_funnel")
         ]
-        self.assertIn("attribution_method = 'referral_click'", section)
-        self.assertIn("anonymous_visitor_id IS NOT NULL", section)
-        self.assertIn("mission.tapped_at IS NOT NULL", section)
-        self.assertIn("provenance.occurred_at >= mission.tapped_at", section)
-        self.assertIn("mission.expires_at + INTERVAL '7 days'", section)
-        self.assertIn("referral.accepted_at >= mission.tapped_at", section)
+        canonical = read(MIGRATIONS / "0417_exact_latarnik_mission_funnel.sql")
+        self.assertIn("latarnik_mission_funnel", section)
+        self.assertNotIn("attribution_method = 'referral_click'", section)
+        self.assertIn("mission.smart_link_id", canonical)
+        self.assertIn("link.action_id = mission.action_id", canonical)
+        self.assertIn("click.anonymous_visitor_id", canonical)
+        self.assertIn(
+            "acquisition.anonymous_visitor_id = click.anonymous_visitor_id",
+            canonical,
+        )
+        self.assertIn(
+            "acquisition.referrer_fan_id = click.referrer_fan_id",
+            canonical,
+        )
+        self.assertIn("referral.referred_fan_id = arrival.fan_id", canonical)
+        self.assertIn("referral.referral_code_id = arrival.referral_code_id", canonical)
+        self.assertIn("outcome_deadline", section)
 
     def test_endpoint_uses_real_activation(self) -> None:
         self.assertIn("fan_last_meaningful_action", self.audience)
