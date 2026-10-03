@@ -93,6 +93,188 @@ async fn organic_funnel_requires_deliberate_action_current_consent_and_unambiguo
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn posted_at_without_provider_receipt_cannot_verify_a_fan() {
+    let f = setup().await.expect("fixture");
+    let posted = f.now - time::Duration::days(3);
+    let action = insert_dispatch(&f, "receipt-truth", posted).await;
+    let link = uuid::Uuid::now_v7();
+    let slug = "receipt-truth";
+    sqlx::query(
+        "INSERT INTO smart_links
+           (id,workspace_id,slug,destination_url,channel_source,action_id,created_at)
+         VALUES($1,$2,$3,'https://example.test/signal','reddit',$4,$5)",
+    )
+    .bind(link)
+    .bind(f.workspace_id.into_uuid())
+    .bind(slug)
+    .bind(action)
+    .bind(posted)
+    .execute(&f.pool)
+    .await
+    .expect("link");
+
+    // Deliberately corrupted legacy shape: internal state says "posted", but
+    // there is no provider id or URL proving an external publication exists.
+    let post_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO community_posts
+           (id,workspace_id,action_id,subreddit,title,body,status,posted_at,smart_link)
+         VALUES($1,$2,$3,'r/receipttruth','t','b','posted',$4,$5)",
+    )
+    .bind(post_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .bind(posted)
+    .bind(format!("/l/{slug}"))
+    .execute(&f.pool)
+    .await
+    .expect("receiptless post");
+
+    let visitor = uuid::Uuid::now_v7();
+    let acquired = posted + time::Duration::hours(2);
+    sqlx::query(
+        "INSERT INTO click_events
+           (workspace_id,smart_link_id,anonymous_visitor_id,occurred_at)
+         VALUES($1,$2,$3,$4)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(link)
+    .bind(visitor)
+    .bind(posted + time::Duration::hours(1))
+    .execute(&f.pool)
+    .await
+    .expect("click");
+
+    let fan = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans(id,workspace_id,normalized_email,status,created_at)
+         VALUES($1,$2,$3,'active',$4)",
+    )
+    .bind(fan)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("{fan}@example.test"))
+    .bind(acquired)
+    .execute(&f.pool)
+    .await
+    .expect("fan");
+    sqlx::query(
+        "INSERT INTO fan_consents
+           (workspace_id,fan_id,purpose,granted,policy_version,source,recorded_at)
+         VALUES($1,$2,'marketing',true,'v1','public_signup',$3)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan)
+    .bind(acquired)
+    .execute(&f.pool)
+    .await
+    .expect("consent");
+    sqlx::query(
+        "INSERT INTO fan_acquisition_events
+           (workspace_id,fan_id,anonymous_visitor_id,source,request_id,occurred_at)
+         VALUES($1,$2,$3,'public_signup',$4,$5)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan)
+    .bind(visitor)
+    .bind(format!("receipt-truth-{fan}"))
+    .bind(acquired)
+    .execute(&f.pool)
+    .await
+    .expect("acquisition");
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+           (workspace_id,fan_id,event_kind,channel,source_target,action_id,
+            attribution_method,attribution_confidence,occurred_at)
+         VALUES($1,$2,'conversion','reddit',$3,$4,'last_tracked_click',1.0,$5)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan)
+    .bind(slug)
+    .bind(action)
+    .bind(acquired)
+    .execute(&f.pool)
+    .await
+    .expect("provenance");
+
+    let before: (bool,) = sqlx::query_as(
+        "SELECT verified
+         FROM organic_fan_cohort($1,$2,$3,$4)
+         WHERE fan_id=$5",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(posted)
+    .bind(f.now)
+    .bind(f.now)
+    .bind(fan)
+    .fetch_one(&f.pool)
+    .await
+    .expect("cohort row");
+    assert!(
+        !before.0,
+        "internal posted_at without a provider receipt must not verify FAN_100"
+    );
+    let before_funnel = crowdrelay_infra::organic_funnel::read(
+        &f.pool,
+        f.workspace_id.into_uuid(),
+        Some(action),
+        None,
+        30,
+        10,
+        f.now,
+    )
+    .await
+    .expect("funnel before receipt");
+    assert_eq!(before_funnel.len(), 1);
+    assert_eq!(before_funnel[0].diagnosis, "publication_unverified");
+    assert!(before_funnel[0].published_at.is_none());
+
+    // The provider receipt is the only changed fact.
+    sqlx::query(
+        "UPDATE community_posts
+         SET reddit_post_id='provider-abc',
+             reddit_post_url='https://www.reddit.com/r/receipttruth/comments/providerabc/proof/'
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(post_id)
+    .execute(&f.pool)
+    .await
+    .expect("provider receipt");
+
+    let after: (bool,) = sqlx::query_as(
+        "SELECT verified
+         FROM organic_fan_cohort($1,$2,$3,$4)
+         WHERE fan_id=$5",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(posted)
+    .bind(f.now)
+    .bind(f.now)
+    .bind(fan)
+    .fetch_one(&f.pool)
+    .await
+    .expect("verified cohort row");
+    assert!(
+        after.0,
+        "the same fully-attributed fan becomes verifiable only after provider proof"
+    );
+    let after_funnel = crowdrelay_infra::organic_funnel::read(
+        &f.pool,
+        f.workspace_id.into_uuid(),
+        Some(action),
+        None,
+        30,
+        10,
+        f.now,
+    )
+    .await
+    .expect("funnel after receipt");
+    assert_eq!(after_funnel.len(), 1);
+    assert_eq!(after_funnel[0].published_at, Some(posted));
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
 async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
     use crowdrelay_application::autopilot::OrganicFunnelDirective;
 
