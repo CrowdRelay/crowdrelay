@@ -932,7 +932,12 @@ async fn run(database: PgPool, config: &Config, standby: bool) -> Result<()> {
     // And in Postgres, so it is readable without a shell on the deploy host.
     // Never fatal: recording what the worker will do is worth less than doing it.
     if let Err(error) = growth_readiness
-        .record(&database, workspace_id, posture.reddit.missing_switch())
+        .record(
+            &database,
+            workspace_id,
+            posture.reddit.missing_switch(),
+            (!posture.platforms.social).then_some("CROWDRELAY_SOCIAL_AUTO_POST"),
+        )
         .await
     {
         tracing::warn!(error = %error, "could not record growth component state");
