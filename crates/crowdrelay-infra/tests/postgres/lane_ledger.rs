@@ -564,3 +564,136 @@ async fn a_recorded_publish_scope_check_decides_whether_the_rail_is_ready()
     );
     Ok(())
 }
+
+/// Where joins came from: tagged vs untagged, behaviour next to the tag, and
+/// only action-linked conversions counted as system-attributed. Old joins fall
+/// out of the window, closed accounts and other tenants never appear.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn signup_channels_split_joins_by_tag_and_never_guess_a_channel()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_infra::signup_channels::signup_channels;
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool, "channels").await?;
+    let other = workspace(&pool, "channels-other").await?;
+
+    async fn fan(
+        pool: &sqlx::PgPool,
+        ws: Uuid,
+        email: &str,
+        days_old: i32,
+        status: &str,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO fans (id, workspace_id, normalized_email, status, created_at)
+             VALUES ($1,$2,$3,$4, now() - make_interval(days => $5))",
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(email)
+        .bind(status)
+        .bind(days_old)
+        .execute(pool)
+        .await?;
+        Ok(id)
+    }
+    async fn tag(
+        pool: &sqlx::PgPool,
+        ws: Uuid,
+        fan: Uuid,
+        source: &str,
+        medium: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "INSERT INTO fan_ad_attribution (workspace_id, fan_id, utm_source, utm_medium)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(ws)
+        .bind(fan)
+        .bind(source)
+        .bind(medium)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    // Two joined through the owned-link landing, one of whom came back.
+    let a = fan(&pool, ws, "a@x.test", 3, "active").await?;
+    let b = fan(&pool, ws, "b@x.test", 5, "active").await?;
+    tag(&pool, ws, a, "owned", "watch").await?;
+    tag(&pool, ws, b, "owned", "watch").await?;
+    sqlx::query(
+        "INSERT INTO fan_sessions (id, workspace_id, fan_id, session_token_hash, created_at, expires_at, last_seen_at)
+         SELECT gen_random_uuid(), $1, $2, gen_random_bytes(32), now() - interval '3 days', now() + interval '30 days', now() - interval '2 days'",
+    )
+    .bind(ws)
+    .bind(a)
+    .execute(&pool)
+    .await?;
+    // One untagged join that a CrowdRelay action's tracked link converted.
+    let c = fan(&pool, ws, "c@x.test", 4, "active").await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events
+             (workspace_id, fan_id, event_kind, channel, action_id, attribution_method, occurred_at)
+         VALUES ($1,$2,'conversion','reddit',gen_random_uuid(),'last_tracked_click', now())",
+    )
+    .bind(ws)
+    .bind(c)
+    .execute(&pool)
+    .await?;
+    // A conversion with no action is not the system's, and neither is a join
+    // before the window, a closed account, or another tenant's fan.
+    let d = fan(&pool, ws, "d@x.test", 2, "active").await?;
+    sqlx::query(
+        "INSERT INTO fan_provenance_events (workspace_id, fan_id, event_kind, channel, attribution_method, occurred_at)
+         VALUES ($1,$2,'conversion','smart_link','direct_arrival', now())",
+    )
+    .bind(ws)
+    .bind(d)
+    .execute(&pool)
+    .await?;
+    fan(&pool, ws, "old@x.test", 200, "active").await?;
+    fan(&pool, ws, "closed@x.test", 2, "suppressed").await?;
+    let stranger = fan(&pool, other, "s@y.test", 2, "active").await?;
+    tag(&pool, other, stranger, "instagram", "bio").await?;
+
+    let rows = signup_channels(&pool, ws, 90).await?;
+    let find = |source: &str| rows.iter().find(|r| r.source == source);
+    let owned = find("owned").expect("the owned-link joins are their own channel");
+    assert_eq!(
+        (
+            owned.medium.as_str(),
+            owned.joined,
+            owned.opened_signal_30d,
+            owned.system_attributed
+        ),
+        ("watch", 2, 1, 0),
+        "two joined, one opened Signal, neither is the system's"
+    );
+    let untagged = find("(untagged)").expect("untagged joins are reported as untagged");
+    assert_eq!(
+        (untagged.joined, untagged.system_attributed),
+        (2, 1),
+        "c and d are untagged; only c's conversion carries an action"
+    );
+    assert!(
+        find("instagram").is_none(),
+        "another tenant's tag never appears"
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.joined).sum::<i64>(),
+        4,
+        "old and closed excluded"
+    );
+
+    // A wider window brings the old join in as one more untagged fan.
+    let wide = signup_channels(&pool, ws, 365).await?;
+    assert_eq!(
+        wide.iter()
+            .find(|r| r.source == "(untagged)")
+            .map(|r| r.joined),
+        Some(3)
+    );
+    Ok(())
+}
