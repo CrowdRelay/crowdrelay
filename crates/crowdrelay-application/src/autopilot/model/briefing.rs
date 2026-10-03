@@ -876,6 +876,20 @@ impl AutopilotActionPayload {
                 ],
                 deadline_note: String::new(),
             },
+            Self::OfferLatarnikMission { fan_id, mission_kind, prompt, share_text, .. } => ActionBriefing {
+                summary: "Offer one-person Latarnik mission".into(),
+                why_it_matters: "This gives an active Latarnik one small, attributable referral ask inside their own Signal session. Nothing is sent for them.".into(),
+                steps: vec![
+                    BriefingStep { what_to_do: "Open the mission in Signal".into(), why_it_matters: "The Latarnik chooses whether to share it; a tap is never counted as a fan".into() },
+                ],
+                content: vec![
+                    BriefingField { label: "Fan".into(), value: short_ref(fan_id) },
+                    BriefingField { label: "Mission".into(), value: mission_kind.clone() },
+                    BriefingField { label: "Question".into(), value: prompt.clone() },
+                    BriefingField { label: "Share text".into(), value: share_text.clone() },
+                ],
+                deadline_note: String::new(),
+            },
             Self::RaiseGrowthDebt { debt_kind, recommended_action, overdue_basis_points, outstanding_items, tracked_items, .. } => ActionBriefing {
                 summary: format!("Growth debt: {}", friendly_enum(debt_kind)),
                 why_it_matters: "This is work that was committed to and never done. The longer it waits, the harder it is to catch up.".into(),
