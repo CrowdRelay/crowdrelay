@@ -9,7 +9,7 @@ use crowdrelay_application::autopilot::{
 };
 use crowdrelay_domain::{
     FanId,
-    action_ledger::provider_delivery_failure_is_definitive,
+    action_ledger::provider_delivery_set_is_definitive_failure,
 };
 
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]
@@ -139,11 +139,10 @@ const CONFIRMATION_RECOVERY_LIMIT: i64 = 50;
 /// definitively failed.
 ///
 /// A missing confirmation is not enough. The latest confirmation event must
-/// be old enough to have left the normal delivery window and either the event
-/// itself must be dead, or every materialized webhook delivery must be
-/// terminal with none delivered. A delivered route means "the mail system
-/// accepted the event" and is never auto-retried just because the person did
-/// not click.
+/// be old enough to have left the normal delivery window and the provider
+/// evidence must prove a definitive failure. Ambiguous transport loss is never
+/// enough to rotate a token: the provider may already have accepted the mail.
+/// A delivered or still-in-flight route always blocks autonomous recovery.
 pub async fn confirmation_recovery_snapshots(
     pool: &PgPool,
     workspace: Uuid,
@@ -284,25 +283,27 @@ pub async fn confirmation_recovery_snapshots(
                 if delivered > 0 || in_flight > 0 {
                     return None;
                 }
-                let event_failure_is_definitive = event_status == "dead"
-                    && event_error_kind
-                        .as_deref()
-                        .is_some_and(provider_delivery_failure_is_definitive);
-                let deliveries_are_definitive = !terminal_error_kinds.is_empty()
-                    && terminal_error_kinds
-                        .iter()
-                        .all(|kind| provider_delivery_failure_is_definitive(kind));
-                if !event_failure_is_definitive && !deliveries_are_definitive {
+                if !provider_delivery_set_is_definitive_failure(
+                    &event_status,
+                    event_error_kind.as_deref(),
+                    delivered,
+                    in_flight,
+                    &terminal_error_kinds,
+                ) {
                     return None;
                 }
-                let failure_kind = if event_failure_is_definitive {
-                    event_error_kind.unwrap_or_else(|| "outbox_dead".to_owned())
-                } else {
-                    terminal_error_kinds
-                        .last()
-                        .cloned()
-                        .unwrap_or_else(|| "delivery_dead".to_owned())
-                };
+                let failure_kind = event_error_kind
+                    .filter(|kind| {
+                        provider_delivery_set_is_definitive_failure(
+                            &event_status,
+                            Some(kind),
+                            delivered,
+                            in_flight,
+                            &[],
+                        )
+                    })
+                    .or_else(|| terminal_error_kinds.last().cloned())
+                    .unwrap_or_else(|| "delivery_definitive_failure".to_owned());
                 Some(ConfirmationRecoverySnapshot {
                     fan_id: FanId::from_uuid(fan_id),
                     source_action_id,
