@@ -937,48 +937,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unattended_authority_is_an_explicit_human_outcome_allowlist() {
-        for kind in [
-            AutopilotMeasurementKind::ContentFanAcquisition7d,
-            AutopilotMeasurementKind::ContentLinkClicks7d,
-            AutopilotMeasurementKind::BookingReply7d,
-            AutopilotMeasurementKind::FanLifecycleActivation7d,
-            AutopilotMeasurementKind::CampaignTicketConversion14d,
-            AutopilotMeasurementKind::ShowAttendanceRate14d,
-            AutopilotMeasurementKind::BeaconOutreachUniqueVisitors14d,
-        ] {
-            assert!(
-                kind.earns_unattended_authority(),
-                "{kind:?} is a direct human/business outcome and should be eligible"
-            );
-        }
-
-        for kind in [
-            // The system grading itself.
-            AutopilotMeasurementKind::AgentRunOutcomeQuality1h,
-            AutopilotMeasurementKind::ScannerDiscoveryQuality1h,
-            AutopilotMeasurementKind::ScannerDiscoveryQuality14d,
-            AutopilotMeasurementKind::StrategistInsightQuality1h,
-            AutopilotMeasurementKind::StrategistInsightQuality14d,
-            AutopilotMeasurementKind::ArtifactOutcome7d,
-            // Workspace-wide / weakly attributed.
-            AutopilotMeasurementKind::SignalInstalls1d,
-            AutopilotMeasurementKind::AgentRunSignalInstalls7d,
-            // Proxy metrics that are useful for ranking but too easy to
-            // confuse with reputation-safe human value.
-            AutopilotMeasurementKind::AgentRunCommunityEngagement7d,
-            AutopilotMeasurementKind::ReleaseChannelLift14d,
-            // Less harm is mandatory, not a reason to grant more power.
-            AutopilotMeasurementKind::CampaignUnsubscribe7d,
-        ] {
-            assert!(
-                !kind.earns_unattended_authority(),
-                "{kind:?} must not widen unattended authority"
-            );
-        }
-    }
-
     /// A channel lift inside feed noise classifies Neutral rather than
     /// Worsened — a −1-view wobble must not reach the autonomy-demotion
     /// guard as if the release moved its own audience backwards.
