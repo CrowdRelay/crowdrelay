@@ -777,19 +777,19 @@ impl AgentOutcomeWorker {
 
                 // Source gate: the post must name the trusted content source
                 // its facts come from — and which kinds it may name depends
-                // on which worker produced the draft. The engager shares
-                // release videos; the repost worker carries the band's own
-                // synced social posts. Events, releases and stories are real
-                // material too, but they belong to other channels.
+                // on which worker produced the draft. The community engager
+                // is the first-touch lane for fresh videos *and releases*;
+                // the repost worker is narrower and may carry only the band's
+                // own synced social posts. Events and stories remain outside
+                // this path.
                 //
                 // The row is fetched rather than existence-checked because
-                // its media fields are what the action payload carries —
-                // the model writes the words; the source's own media and
-                // permalink are attached here, where the model cannot
-                // substitute a URL it invented.
-                let allowed_source_kind = match producing_template {
+                // its media fields and canonical public destination are what
+                // the action payload carries — the model writes the words;
+                // it never gets to substitute the source or URL.
+                let source_gate = match producing_template {
                     Some("community-repost") => "social_post",
-                    _ => "video",
+                    _ => "community_engager",
                 };
                 let source_id_raw = outcome
                     .payload
@@ -820,18 +820,31 @@ impl AgentOutcomeWorker {
                                metadata->>'media_id' AS media_id,
                                metadata->>'media_type' AS media_type,
                                metadata->>'thumbnail_url' AS thumbnail_url,
-                               metadata->>'url' AS source_url
+                               CASE
+                                   WHEN source_kind = 'release'
+                                       THEN COALESCE(
+                                           NULLIF(btrim(metadata->>'url'), ''),
+                                           NULLIF(btrim(metadata->>'listen_url'), '')
+                                       )
+                                   ELSE metadata->>'url'
+                               END AS source_url
                         FROM content_sources
                         WHERE workspace_id = $1
                           AND id = $2
-                          AND source_kind = $3
+                          AND (
+                              ($3 = 'social_post' AND source_kind = 'social_post')
+                              OR (
+                                  $3 = 'community_engager'
+                                  AND source_kind IN ('video', 'release')
+                              )
+                          )
                           AND active
                           AND expires_at > now()
                         "#,
                         )
                         .bind(outcome.workspace_id)
                         .bind(source_id)
-                        .bind(allowed_source_kind)
+                        .bind(source_gate)
                         .fetch_optional(&mut *tx)
                         .await?
                     }

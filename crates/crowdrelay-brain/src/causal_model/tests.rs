@@ -1206,3 +1206,41 @@ fn an_unmeasured_fan_count_does_not_teach_zero() {
         "a measured zero is a real observation"
     );
 }
+
+#[test]
+fn a_tenants_record_of_zero_replaces_the_optimistic_prior() {
+    // Production, 2026-10-03: 13 published tracked dispatches, 0 active fans
+    // traced to any of them.
+    let model = CausalModel::with_realized_yield(13, 0);
+    let mean = model.fans.global.mean();
+    assert!(
+        mean > 0.0,
+        "positive, or min_dispatches can no longer break the cold start"
+    );
+    assert!(
+        mean < 0.1,
+        "13 dispatches and no fans cannot still predict ~2 each: {mean}"
+    );
+    assert!((mean - 1.0 / 13.5).abs() < 1e-9, "{mean}");
+    assert_eq!(model.evidence_basis_version, EVIDENCE_BASIS_VERSION);
+}
+
+#[test]
+fn too_few_deliveries_say_nothing_and_the_default_stands() {
+    let mean = CausalModel::with_realized_yield(2, 0).fans.global.mean();
+    assert!((mean - DEFAULT_EXPECTED_FANS).abs() < 1e-9, "{mean}");
+}
+
+#[test]
+fn a_record_that_did_produce_fans_moves_the_prior_up_but_never_past_the_default() {
+    let some = CausalModel::with_realized_yield(10, 8).fans.global.mean();
+    assert!((some - 9.0 / 10.5).abs() < 1e-9, "{some}");
+    let lots = CausalModel::with_realized_yield(3, 40).fans.global.mean();
+    assert!((lots - DEFAULT_EXPECTED_FANS).abs() < 1e-9, "{lots}");
+}
+
+#[test]
+fn the_delivery_count_is_capped_so_the_prior_stays_a_prior() {
+    let capped = CausalModel::with_realized_yield(500, 0).fans.global.mean();
+    assert!((capped - 1.0 / 25.5).abs() < 1e-9, "{capped}");
+}

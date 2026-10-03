@@ -527,22 +527,23 @@ pub(super) async fn schedule_effect_measurement(
                 ));
             }
         }
-        // Producing an artifact is not publishing it.
+        // Producing an artifact is not distribution. The executor receipt proves
+        // only that the requested asset exists; it cannot honestly claim that
+        // anyone saw it, clicked it, or became a fan. The one useful outcome at
+        // this boundary is whether the produced asset reached a publication
+        // surface later. Fan-growth belongs to that later, attributable delivery
+        // action and its tracked link, never to the production request itself.
         //
-        // This action answers one proximal question only: did the produced
-        // asset reach a real audience through a downstream publication inside
-        // the week? The publication/send action owns clicks and fan-growth
-        // measurements because only it has a concrete delivery receipt and,
-        // where applicable, an action-owned tracked link.
-        //
-        // The previous version scheduled 3d/14d/30d fan-growth here as soon as
-        // an executor said "artifact produced". Newsletter blocks, press hooks,
-        // listings and social drafts then matured into `no_tracked_link`
-        // failures even when nothing had ever been published. Worse, a later
-        // tracked child publication could teach both the artifact request and
-        // the actual delivery action from the same fan. That made production
-        // look busier without making the causal loop more truthful.
+        // Anchor the publication-outcome window at executor-confirmed production
+        // time so a zero means produced-but-never-published, not "requested too
+        // early". The content source remains the subject because publication
+        // read models already file downstream posts against that source.
         AutopilotActionPayload::RequestContentArtifact { source_id, .. } => {
+            // Asset production is an internal precursor, not a fan-facing
+            // treatment. Measuring Y3/Y14/Y30 here falsely teaches the causal
+            // model that creating a draft acquired (or failed to acquire) fans
+            // even when nothing was ever published. Publication/delivery actions
+            // own fan-growth measurement once they have a real attributable rail.
             plans.push((
                 AutopilotMeasurementKind::ArtifactOutcome7d,
                 source_id.into_uuid(),

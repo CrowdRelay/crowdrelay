@@ -100,10 +100,10 @@ pub const REPEATED_REMOVALS_HALT: usize = 2;
 pub const SUBREDDIT_MEMORY: Duration = Duration::days(180);
 /// A post must be at least this old to count as survived.
 pub const SURVIVAL_AGE: Duration = Duration::days(7);
-/// …and must have been seen live at least this long after posting. Automod
-/// acts at once and moderators within a day or two; a post last checked an
-/// hour after going up has not survived anything.
-pub const SURVIVAL_OBSERVED_AFTER: Duration = Duration::hours(48);
+/// …and must have been seen live at least this long after posting. The metrics
+/// poller carries a low-frequency tail past this boundary; a post last checked
+/// on day two has not proved that it survived the week.
+pub const SURVIVAL_OBSERVED_AFTER: Duration = Duration::days(7);
 /// A fresh automation does not get to experiment on the band's public
 /// identity. At least this many posts must have been published and then
 /// observed alive past the moderation window *and* received a real community
@@ -281,7 +281,7 @@ mod tests {
             posted_at,
             removal: None,
             removal_seen_at: None,
-            last_seen_live_at: Some(posted_at + Duration::hours(60)),
+            last_seen_live_at: Some(posted_at + Duration::days(8)),
             community_responded: true,
         }
     }

@@ -97,8 +97,8 @@ pub use calibration::{
 };
 pub use causal_model::{
     CausalModel, DEFAULT_EXPECTED_FANS, DEFAULT_EXPECTED_SIGNAL, DispatchContext,
-    DispatchPrediction, EVIDENCE_BASIS_VERSION, MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE,
-    PredictionOutcome, TreatmentAwareStats,
+    DispatchPrediction, EVIDENCE_BASIS_VERSION, MAX_REALIZED_DELIVERIES, MIN_REALIZED_DELIVERIES,
+    MIN_TREATMENT_CONFIDENCE, PRIOR_VARIANCE, PredictionOutcome, TreatmentAwareStats,
 };
 pub use context_effect::ContextGLM;
 pub use credit_ledger::{

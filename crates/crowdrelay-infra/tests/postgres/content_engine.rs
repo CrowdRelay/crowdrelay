@@ -658,6 +658,433 @@ async fn capability_profile_reads_roster_and_material() -> Result<(), Box<dyn st
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (repo, pool) = repository().await?;
+    let beneficiary = WorkspaceId::new();
+    seed_workspace(&pool, beneficiary).await?;
+    sqlx::query("UPDATE workspaces SET name='VIRYA test' WHERE id=$1")
+        .bind(beneficiary.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    // Enough capability to make the catalogue's peer_cover. No communities,
+    // press or local fan audience: peer reach is the only possible promise in
+    // this fixture.
+    let member_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspace_members (workspace_id, normalized_email, role, status)
+         VALUES ($1, $2, 'staff', 'active') RETURNING id",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(format!(
+        "peer-authority-{}@example.test",
+        beneficiary.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO team_profiles
+             (workspace_id, member_id, member_key, active, skills)
+         VALUES ($1,$2,'video-person',true,ARRAY['video']::text[])",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(member_id)
+    .execute(&pool)
+    .await?;
+
+    // Misscore-shaped peer: confirmed and observable, with a YouTube handle.
+    // This is useful trend evidence. It is NOT consent to use their audience.
+    let peer_name = format!("Misscore {}", beneficiary.into_uuid().simple());
+    let peer = repo
+        .create_operator_peer(
+            beneficiary,
+            &NewPeer {
+                name: peer_name.clone(),
+                handles: json!({"youtube":"@misscore"}),
+                tier: PeerTier::NearPeer,
+                watch_for: vec!["format".to_owned()],
+                why: "good comparable band".to_owned(),
+                proposed_by: "operator".to_owned(),
+                confirmed: true,
+            },
+            &key("misscore-peer"),
+            None,
+        )
+        .await?;
+    assert!(matches!(peer, PeerOutcome::Applied(_)));
+
+    // Model the operator-visible bad task that already exists before this fix:
+    // a raised collaboration promise names Misscore's audience even though no
+    // distribution authority exists. Refresh must heal the queue as well as
+    // preventing new bad suggestions.
+    let stale_task = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO content_suggestions (
+             id, workspace_id, format_key, concept, reason, evidence,
+             distribution_promise, status, expires_at
+         ) VALUES (
+             $1,$2,'peer_cover','Promote Misscore Short on YouTube',
+             'legacy peer-is-reach shortcut','{}',
+             '{\"peer_audience\":[\"Misscore\"]}'::jsonb,
+             'raised',now()+interval '7 days'
+         )",
+    )
+    .bind(stale_task)
+    .bind(beneficiary.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // The visible task is not only the suggestion row: Autopilot already
+    // materialised its approval action and handed it to a crew member. The
+    // self-heal must retract that whole active chain while keeping the
+    // immutable decision for audit.
+    let stale_decision = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation, trace_id
+         ) VALUES (
+             $1,$2,$3,'content_strategy','content_suggestion',$4,
+             'raise_content_suggestion',9000,'require_approval',
+             'legacy peer-is-reach shortcut','{}','{}','{}',$1
+         )",
+    )
+    .bind(stale_decision)
+    .bind(beneficiary.into_uuid())
+    .bind(format!("legacy-peer-task-{stale_task}"))
+    .bind(stale_task)
+    .execute(&pool)
+    .await?;
+    let stale_action = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind,
+             subject_kind, subject_id, idempotency_key, payload, status,
+             approval_expires_at
+         ) VALUES (
+             $1,$2,$3,'content_strategy','content.suggestion.raise',
+             'content_suggestion',$4,$5,$6,'awaiting_approval',
+             now()+interval '7 days'
+         )",
+    )
+    .bind(stale_action)
+    .bind(beneficiary.into_uuid())
+    .bind(stale_decision)
+    .bind(stale_task)
+    .bind(format!("legacy-peer-action-{stale_action}"))
+    .bind(json!({
+        "kind": "raise_content_suggestion",
+        "suggestion_id": stale_task,
+        "format_key": "peer_cover",
+        "concept": "Promote Misscore Short on YouTube",
+        "reason": "legacy peer-is-reach shortcut",
+        "distribution_promise": {"peer_audience": ["Misscore"]}
+    }))
+    .execute(&pool)
+    .await?;
+    let stale_assignment = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO team_assignments (
+             id, workspace_id, action_id, source_kind, source_id, source_ref,
+             assignee_member_id, required_skill, status, due_at,
+             next_reminder_at
+         ) VALUES (
+             $1,$2,$3,'autopilot_action',$4,NULL,$5,'video','open',
+             now()+interval '7 days',now()+interval '1 day'
+         )",
+    )
+    .bind(stale_assignment)
+    .bind(beneficiary.into_uuid())
+    .bind(stale_action)
+    .bind(stale_task)
+    .bind(member_id)
+    .execute(&pool)
+    .await?;
+
+    let today = time::OffsetDateTime::now_utc().date();
+    let without_consent = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        without_consent.is_empty(),
+        "a confirmed peer alone must not manufacture a distribution promise: {without_consent:?}"
+    );
+    let (stale_status, stale_reason): (String, Option<String>) = sqlx::query_as(
+        "SELECT suggestion.status, outcome.reason
+         FROM content_suggestions AS suggestion
+         LEFT JOIN suggestion_outcomes AS outcome
+           ON outcome.workspace_id=suggestion.workspace_id
+          AND outcome.suggestion_id=suggestion.id
+         WHERE suggestion.workspace_id=$1 AND suggestion.id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_task)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stale_status, "expired");
+    assert_eq!(
+        stale_reason.as_deref(),
+        Some("peer audience is no longer an executable consented route"),
+        "the existing nonsense task must self-retire instead of staying in the operator queue"
+    );
+    let (action_status, action_error): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, last_error_kind
+         FROM autopilot_actions
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_action)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (action_status.as_str(), action_error.as_deref()),
+        ("cancelled", Some("peer_reach_unavailable")),
+        "the already-materialised approval task must disappear with its invalid subject"
+    );
+    let assignment_state: (String, Option<time::OffsetDateTime>) = sqlx::query_as(
+        "SELECT status, next_reminder_at
+         FROM team_assignments
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_assignment)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(assignment_state.0, "cancelled");
+    assert!(
+        assignment_state.1.is_none(),
+        "a cancelled nonsense task must not keep reminding a crew member"
+    );
+    let decision_still_there: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM autopilot_decisions
+             WHERE workspace_id=$1 AND id=$2
+         )",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_decision)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        decision_still_there,
+        "the bad decision stays as audit evidence; only active work is retracted"
+    );
+
+    // A co-bill consent is event-scoped. It must not silently become standing
+    // authority for generic peer-content promotion.
+    let audience_owner = WorkspaceId::new();
+    seed_workspace(&pool, audience_owner).await?;
+    sqlx::query("UPDATE workspaces SET name='Misscore' WHERE id=$1")
+        .bind(audience_owner.into_uuid())
+        .execute(&pool)
+        .await?;
+    let organization_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO organizations (slug,name) VALUES ($1,'Test label') RETURNING id",
+    )
+    .bind(format!(
+        "peer-authority-{}",
+        beneficiary.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE workspaces SET organization_id=$3 WHERE id IN ($1,$2)",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(audience_owner.into_uuid())
+    .bind(organization_id)
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO amplification_consents
+             (organization_id, from_workspace_id, to_workspace_id, purpose,
+              scope, status, max_campaigns_per_month, cooldown_days,
+              approved_by, approved_at)
+         VALUES ($1,$2,$3,'event_crossbill','double_opt_in','active',2,21,
+                 'test',now())",
+    )
+    .bind(organization_id)
+    .bind(audience_owner.into_uuid())
+    .bind(beneficiary.into_uuid())
+    .execute(&pool)
+    .await?;
+    let crossbill_only = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        crossbill_only.is_empty(),
+        "event_crossbill must not authorize generic peer-audience content: {crossbill_only:?}"
+    );
+
+    // Direction matters. VIRYA consenting to carry Misscore does not mean
+    // Misscore's audience is available to VIRYA.
+    sqlx::query(
+        "DELETE FROM amplification_consents
+         WHERE from_workspace_id=$1 AND to_workspace_id=$2",
+    )
+    .bind(audience_owner.into_uuid())
+    .bind(beneficiary.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO amplification_consents
+             (organization_id, from_workspace_id, to_workspace_id, purpose,
+              scope, status, max_campaigns_per_month, cooldown_days,
+              approved_by, approved_at)
+         VALUES ($1,$2,$3,'cross_promote','double_opt_in','active',2,21,
+                 'test',now())",
+    )
+    .bind(organization_id)
+    .bind(beneficiary.into_uuid())
+    .bind(audience_owner.into_uuid())
+    .execute(&pool)
+    .await?;
+    let wrong_direction = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        wrong_direction.is_empty(),
+        "reverse consent must not manufacture access to the other act's audience: {wrong_direction:?}"
+    );
+    sqlx::query(
+        "DELETE FROM amplification_consents
+         WHERE from_workspace_id=$1 AND to_workspace_id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(audience_owner.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    // A correctly directed edge with nobody actually reachable is still zero
+    // reach. The consent is permission, not a made-up audience.
+    let edge_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO amplification_consents
+             (organization_id, from_workspace_id, to_workspace_id, purpose,
+              scope, status, max_campaigns_per_month, cooldown_days,
+              approved_by, approved_at)
+         VALUES ($1,$2,$3,'cross_promote','double_opt_in','active',2,21,
+                 'test',now())
+         RETURNING id",
+    )
+    .bind(organization_id)
+    .bind(audience_owner.into_uuid())
+    .bind(beneficiary.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let nobody_reachable = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        nobody_reachable.is_empty(),
+        "an active edge with zero reachable humans is measured zero reach: {nobody_reachable:?}"
+    );
+
+    let owner_fan: Uuid = sqlx::query_scalar(
+        "INSERT INTO fans (workspace_id, normalized_email, status)
+         VALUES ($1,$2,'active') RETURNING id",
+    )
+    .bind(audience_owner.into_uuid())
+    .bind(format!(
+        "misscore-fan-{}@example.test",
+        beneficiary.into_uuid().simple()
+    ))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_consents
+             (workspace_id, fan_id, purpose, granted, policy_version, source)
+         VALUES ($1,$2,'marketing',true,'v1','test')",
+    )
+    .bind(audience_owner.into_uuid())
+    .bind(owner_fan)
+    .execute(&pool)
+    .await?;
+
+    // Permission can exist while every reachable person is still cooling down.
+    sqlx::query(
+        "INSERT INTO amplification_deliveries
+             (consent_id, from_workspace_id, to_workspace_id, fan_id,
+              campaign_reference, delivered_at)
+         VALUES ($1,$2,$3,$4,'recent-campaign',now())",
+    )
+    .bind(edge_id)
+    .bind(audience_owner.into_uuid())
+    .bind(beneficiary.into_uuid())
+    .bind(owner_fan)
+    .execute(&pool)
+    .await?;
+    let cooling_down = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        cooling_down.is_empty(),
+        "a consent edge with nobody outside cooldown is not available reach: {cooling_down:?}"
+    );
+    sqlx::query("DELETE FROM amplification_deliveries WHERE consent_id=$1")
+        .bind(edge_id)
+        .execute(&pool)
+        .await?;
+
+    // The monthly campaign ceiling is also an availability gate. Two distinct
+    // campaigns spend this edge's cap even if the same fan received both.
+    for reference in ["spent-1", "spent-2"] {
+        sqlx::query(
+            "INSERT INTO amplification_deliveries
+                 (consent_id, from_workspace_id, to_workspace_id, fan_id,
+                  campaign_reference, delivered_at)
+             VALUES ($1,$2,$3,$4,$5,now())",
+        )
+        .bind(edge_id)
+        .bind(audience_owner.into_uuid())
+        .bind(beneficiary.into_uuid())
+        .bind(owner_fan)
+        .bind(reference)
+        .execute(&pool)
+        .await?;
+    }
+    let cap_spent = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        cap_spent.is_empty(),
+        "a fully spent consent edge must not be promised as current reach: {cap_spent:?}"
+    );
+    sqlx::query("DELETE FROM amplification_deliveries WHERE consent_id=$1")
+        .bind(edge_id)
+        .execute(&pool)
+        .await?;
+
+    // Only now do we have standing consent, the correct direction, monthly
+    // headroom and at least one eligible human.
+    let consented = repo.refresh_suggestions(beneficiary, today).await?;
+    assert!(
+        !consented.is_empty(),
+        "explicit cross-promotion consent with a reachable fan should unlock peer-audience formats"
+    );
+    let peer_promises: Vec<&serde_json::Value> = consented
+        .iter()
+        .filter_map(|suggestion| suggestion.distribution_promise.get("peer_audience"))
+        .collect();
+    assert!(
+        peer_promises.iter().any(|audience| {
+            audience
+                .as_array()
+                .is_some_and(|items| items.iter().any(|name| name.as_str() == Some("Misscore")))
+        }),
+        "the promise names only the consented audience owner: {consented:?}"
+    );
+    assert!(
+        consented.iter().all(|suggestion| {
+            suggestion
+                .distribution_promise
+                .get("peer_audience")
+                .is_none_or(|audience| {
+                    audience
+                        .as_array()
+                        .is_some_and(|items| {
+                            !items
+                                .iter()
+                                .any(|name| name.as_str() == Some(peer_name.as_str()))
+                        })
+                })
+        }),
+        "the research peer row itself must never become distribution authority"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and disposable PostgreSQL"]
 async fn suggestion_engine_raises_only_what_the_band_can_do()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
