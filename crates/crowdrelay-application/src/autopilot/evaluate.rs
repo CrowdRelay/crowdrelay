@@ -872,6 +872,27 @@ where
                     .await?;
                 }
                 AutopilotContext::ContentStrategy => {
+                    // A mature visitor→signup leak is not a request for more
+                    // editorial planning. Spend this context only on the
+                    // existing tracked join ask, which can move the broken
+                    // stage directly; ordinary arcs/suggestions wait until
+                    // the funnel stops saying conversion is the bottleneck.
+                    if conversion_recovery_only(organic_funnel_control) {
+                        self.evaluate_join_ask_week(
+                            &policy,
+                            now,
+                            &mut limits,
+                            &mut report,
+                            organic_funnel_control,
+                        )
+                        .await?;
+                        report.gi_dispatch_log.push(
+                            "organic funnel conversion recovery: held generic content strategy; only tracked join-ask recovery is eligible"
+                                .to_owned(),
+                        );
+                        continue;
+                    }
+
                     // The season's shape asks first: an arc the band has not
                     // answered outranks the beats that would fill it — until
                     // the shape is chosen, beats are noise.

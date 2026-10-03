@@ -34,6 +34,10 @@ fn funnel_context_rank(
     }
 }
 
+fn conversion_recovery_only(control: Option<OrganicFunnelControl>) -> bool {
+    control.is_some_and(|control| control.directive == OrganicFunnelDirective::RepairConversion)
+}
+
 fn content_supply_public_reach(candidate: &DecisionCandidate) -> bool {
     if !matches!(
         candidate.decision_kind,
@@ -336,6 +340,25 @@ mod funnel_recovery_tests {
             funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)),
             10
         );
+    }
+
+    #[test]
+    fn repair_conversion_is_an_exclusive_content_strategy_recovery() {
+        assert!(conversion_recovery_only(Some(control(
+            OrganicFunnelDirective::RepairConversion
+        ))));
+        for directive in [
+            OrganicFunnelDirective::ExpandReach,
+            OrganicFunnelDirective::RepairConfirmation,
+            OrganicFunnelDirective::ActivateFans,
+            OrganicFunnelDirective::RetainFans,
+        ] {
+            assert!(
+                !conversion_recovery_only(Some(control(directive))),
+                "{directive:?} must not suppress ordinary content strategy as conversion recovery"
+            );
+        }
+        assert!(!conversion_recovery_only(None));
     }
 
     #[test]
