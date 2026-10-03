@@ -60,7 +60,7 @@ pub struct OrganicFunnelControl {
 /// The source action/link fields keep the recovery tied to an attributable
 /// CrowdRelay acquisition instead of turning arbitrary pending imports into
 /// autonomous contact.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ConfirmationRecoverySnapshot {
     pub fan_id: FanId,
     pub source_action_id: Uuid,
