@@ -179,6 +179,14 @@ pub async fn day_zero_facts(
     .bind(workspace_id)
     .fetch_one(pool)
     .await?;
+    let social_publish_runtime: Option<bool> = sqlx::query_scalar(
+        "SELECT enabled FROM growth_component_state
+         WHERE workspace_id = $1 AND component = 'social_post_executor'",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         r#"
         SELECT platform, status, COALESCE(health, 'unverified')
@@ -203,6 +211,7 @@ pub async fn day_zero_facts(
         site_root: brand.site_root().map(str::to_owned),
         join_copy,
         fresh_asset,
+        social_publish_runtime,
         social_auto_post: brand.social_auto_post,
         autopost_platforms: brand.social_autopost_platforms.clone(),
         connections,
@@ -216,12 +225,31 @@ pub struct DayZeroFacts {
     pub site_root: Option<String>,
     pub join_copy: bool,
     pub fresh_asset: bool,
+    pub social_publish_runtime: Option<bool>,
     pub social_auto_post: bool,
     pub autopost_platforms: Vec<String>,
     pub connections: Vec<crowdrelay_domain::day_zero::ConnectionFact>,
 }
 
 impl DayZeroFacts {
+    /// Whether the narrow Facebook standing-authority handoff may be accepted.
+    ///
+    /// The deployment gate is deliberately part of this check: storing tenant
+    /// authority while the worker cannot publish would recreate the false-ready
+    /// state this Day-0 surface exists to eliminate.
+    #[must_use]
+    pub fn facebook_authority_grantable(&self) -> bool {
+        self.site_root.as_deref().is_some_and(|root| !root.trim().is_empty())
+            && self.join_copy
+            && self.fresh_asset
+            && self.social_publish_runtime == Some(true)
+            && self.connections.iter().any(|connection| {
+                connection.platform.eq_ignore_ascii_case("facebook")
+                    && connection.connected
+                    && connection.working
+            })
+    }
+
     /// The decision over these facts.
     #[must_use]
     pub fn assess(&self) -> crowdrelay_domain::day_zero::Readiness {
@@ -229,6 +257,7 @@ impl DayZeroFacts {
             site_root: self.site_root.as_deref(),
             join_copy: self.join_copy,
             fresh_asset: self.fresh_asset,
+            social_publish_runtime: self.social_publish_runtime,
             social_auto_post: self.social_auto_post,
             autopost_platforms: &self.autopost_platforms,
             connections: &self.connections,
