@@ -201,8 +201,8 @@ pub fn beacon_kind_for(raw: &str) -> Option<BeaconKind> {
         // short_form_clip, which turns "we observed another band" into a
         // nonsensical promo task. Sources that actually know the role must say
         // creator/influencer/streamer explicitly.
-        "creator" | "local_creator" | "instagram_creator" | "tiktok_creator"
-        | "influencer" | "streamer" => BeaconKind::Creator,
+        "creator" | "local_creator" | "instagram_creator" | "tiktok_creator" | "influencer"
+        | "streamer" => BeaconKind::Creator,
         "photographer" | "photo" => BeaconKind::Photographer,
         "promoter" | "gig_promoter" => BeaconKind::Promoter,
         "venue" | "room" => BeaconKind::Venue,
