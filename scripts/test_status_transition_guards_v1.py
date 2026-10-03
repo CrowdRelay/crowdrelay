@@ -146,7 +146,9 @@ def execution_status_edges() -> set[tuple[str, str]]:
 # Rust literal. Both raw (`r#"..."#`) and escaped (`"... \`) forms occur.
 def statement_pattern(table: str) -> re.Pattern[str]:
     return re.compile(
-        rf"UPDATE {table}\b.*?(?=\"#|\",\s*\n|\"\s*\n\s*\))",
+        rf"UPDATE {table}\b.*?"
+        rf"(?=\bUPDATE\s+\w+(?:\s+AS\s+\w+|\s+\w+)?\s+SET\b"
+        rf"|\"#|\",\s*\n|\"\s*\n\s*\))",
         re.DOTALL,
     )
 

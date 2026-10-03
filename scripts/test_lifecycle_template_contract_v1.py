@@ -137,7 +137,7 @@ class TheVocabularyIsPublished(unittest.TestCase):
         execution += LIFECYCLE_EXECUTION.read_text(encoding="utf-8")
         settings = TENANT_SETTINGS.read_text(encoding="utf-8")
         self.assertIn('"referral_url": referral_url', execution)
-        self.assertRegex(execution, r"brand\\s*\\.referral_url\\(&code\\)")
+        self.assertRegex(execution, r"brand\s*\.referral_url\(&code\)")
         self.assertIn("pub fn referral_url(&self, code: &str)", settings)
         self.assertNotIn("https://virya.music/r/", section)
         self.assertIn("never construct a hostname", section)
