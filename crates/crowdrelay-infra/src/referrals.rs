@@ -557,6 +557,17 @@ pub(crate) enum ReferralStoreError {
     Unexpected,
 }
 
+impl std::fmt::Display for ReferralStoreError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "referral store unavailable",
+            Self::NotFound => "referral record not found",
+            Self::Conflict => "referral record conflicts with existing facts",
+            Self::Unexpected => "referral store failed unexpectedly",
+        })
+    }
+}
+
 impl ReferralStoreError {
     fn from_sqlx(error: sqlx::Error) -> Self {
         match classify_sqlx_error(&error) {
