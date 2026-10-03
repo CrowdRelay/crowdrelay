@@ -33,6 +33,30 @@ pub(crate) async fn issue_fan_session(
     FanSessionToken::parse(token).map_err(|_| ReferralStoreError::Unexpected)
 }
 
+async fn canonical_fan_pair(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    referrer_fan_id: Uuid,
+    referred_fan_id: Uuid,
+) -> Result<Option<(Uuid, Uuid)>, ReferralStoreError> {
+    let (referrer, referred) = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>)>(
+        "SELECT canonical_fan_id($1,$2), canonical_fan_id($1,$3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(referrer_fan_id)
+    .bind(referred_fan_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(ReferralStoreError::from_sqlx)?;
+    let (Some(referrer), Some(referred)) = (referrer, referred) else {
+        return Ok(None);
+    };
+    if referrer == referred {
+        return Ok(None);
+    }
+    Ok(Some((referrer, referred)))
+}
+
 /// Records an attribution that will count only after inbox confirmation.
 pub(crate) async fn record_pending_signup_referral(
     transaction: &mut Transaction<'_, Postgres>,
@@ -45,9 +69,17 @@ pub(crate) async fn record_pending_signup_referral(
     else {
         return Ok(());
     };
-    if referrer_fan_id == referred_fan_id.into_uuid() {
+    let Some((canonical_referrer_fan_id, canonical_referred_fan_id)) =
+        canonical_fan_pair(
+            transaction,
+            workspace_id,
+            referrer_fan_id,
+            referred_fan_id.into_uuid(),
+        )
+        .await?
+    else {
         return Ok(());
-    }
+    };
 
     sqlx::query(
         r#"
@@ -64,11 +96,13 @@ pub(crate) async fn record_pending_signup_referral(
             $1, $2, $3, $4, now(), 'pending', 'awaiting_confirmation'
         WHERE EXISTS (
             SELECT 1 FROM fans
-            WHERE workspace_id = $1 AND id = $2 AND status = 'active'
+            WHERE workspace_id = $1 AND id = $5 AND status = 'active'
+              AND deleted_at IS NULL
         )
         AND EXISTS (
             SELECT 1 FROM fans
-            WHERE workspace_id = $1 AND id = $3 AND status = 'pending'
+            WHERE workspace_id = $1 AND id = $6 AND status = 'pending'
+              AND deleted_at IS NULL
         )
         ON CONFLICT (workspace_id, referred_fan_id) DO NOTHING
         "#,
@@ -77,6 +111,8 @@ pub(crate) async fn record_pending_signup_referral(
     .bind(referrer_fan_id)
     .bind(referred_fan_id.into_uuid())
     .bind(referral_code_id)
+    .bind(canonical_referrer_fan_id)
+    .bind(canonical_referred_fan_id)
     .execute(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
@@ -97,11 +133,19 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
     else {
         return Ok(());
     };
-    if referrer_fan_id == referred_fan_id.into_uuid() {
+    let Some((canonical_referrer_fan_id, canonical_referred_fan_id)) =
+        canonical_fan_pair(
+            transaction,
+            workspace_id,
+            referrer_fan_id,
+            referred_fan_id.into_uuid(),
+        )
+        .await?
+    else {
         return Ok(());
-    }
+    };
 
-    // Serialize qualification and threshold evaluation per referrer. Without
+    // Serialize qualification and threshold evaluation per canonical referrer. Without
     // this lock, two concurrent signups could both observe a count below the
     // threshold and commit without granting the reward. The next statement
     // receives a fresh READ COMMITTED snapshot after any previous holder exits.
@@ -113,49 +157,84 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .execute(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
 
     let qualified = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
         r#"
-        INSERT INTO referral_attributions (
-            workspace_id,
-            referrer_fan_id,
-            referred_fan_id,
-            referral_code_id,
-            accepted_at,
-            status,
-            qualification_reason,
-            qualified_at
+        WITH promoted AS (
+            UPDATE referral_attributions
+               SET status = 'qualified',
+                   qualification_reason = 'confirmed_fan_signup',
+                   qualified_at = now()
+             WHERE workspace_id = $1
+               AND referrer_fan_id = $2
+               AND referral_code_id = $4
+               AND status = 'pending'
+               AND referred_fan_id IN (
+                   SELECT fan_id FROM canonical_fan_family($1,$3)
+               )
+               AND EXISTS (
+                   SELECT 1 FROM fans
+                    WHERE workspace_id=$1 AND id=$5
+                      AND status='active' AND deleted_at IS NULL
+               )
+               AND EXISTS (
+                   SELECT 1 FROM fans
+                    WHERE workspace_id=$1 AND id=$6
+                      AND status='active' AND deleted_at IS NULL
+               )
+            RETURNING id, qualified_at
+        ), inserted AS (
+            INSERT INTO referral_attributions (
+                workspace_id,
+                referrer_fan_id,
+                referred_fan_id,
+                referral_code_id,
+                accepted_at,
+                status,
+                qualification_reason,
+                qualified_at
+            )
+            SELECT $1, $2, $3, $4, now(), 'qualified',
+                   'active_fan_signup', now()
+            WHERE NOT EXISTS (SELECT 1 FROM promoted)
+              AND EXISTS (
+                  SELECT 1 FROM fans
+                   WHERE workspace_id=$1 AND id=$5
+                     AND status='active' AND deleted_at IS NULL
+              )
+              AND EXISTS (
+                  SELECT 1 FROM fans
+                   WHERE workspace_id=$1 AND id=$6
+                     AND status='active' AND deleted_at IS NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                    FROM referral_attributions existing
+                   WHERE existing.workspace_id=$1
+                     AND existing.referred_fan_id IN (
+                         SELECT fan_id FROM canonical_fan_family($1,$3)
+                     )
+                     AND existing.status IN ('pending','qualified')
+              )
+            ON CONFLICT (workspace_id, referred_fan_id) DO NOTHING
+            RETURNING id, qualified_at
         )
-        SELECT
-            $1, $2, $3, $4, now(), 'qualified',
-            'active_fan_signup', now()
-        WHERE EXISTS (
-            SELECT 1 FROM fans
-            WHERE workspace_id = $1 AND id = $2 AND status = 'active'
-        )
-        AND EXISTS (
-            SELECT 1 FROM fans
-            WHERE workspace_id = $1 AND id = $3 AND status = 'active'
-        )
-        ON CONFLICT (workspace_id, referred_fan_id) DO UPDATE
-        SET
-            status = 'qualified',
-            qualification_reason = 'confirmed_fan_signup',
-            qualified_at = now()
-        WHERE referral_attributions.status = 'pending'
-            AND referral_attributions.referrer_fan_id = EXCLUDED.referrer_fan_id
-            AND referral_attributions.referral_code_id = EXCLUDED.referral_code_id
-        RETURNING id, qualified_at
+        SELECT id, qualified_at FROM promoted
+        UNION ALL
+        SELECT id, qualified_at FROM inserted
+        LIMIT 1
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(referrer_fan_id)
     .bind(referred_fan_id.into_uuid())
     .bind(referral_code_id)
+    .bind(canonical_referrer_fan_id)
+    .bind(canonical_referred_fan_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
@@ -181,15 +260,18 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
 
     let qualified_count = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT count(*)::bigint
-        FROM referral_attributions
-        WHERE workspace_id = $1
-            AND referrer_fan_id = $2
-            AND status = 'qualified'
+        SELECT count(DISTINCT canonical_fan_id($1, attribution.referred_fan_id))::bigint
+        FROM referral_attributions attribution
+        WHERE attribution.workspace_id = $1
+          AND attribution.referrer_fan_id IN (
+              SELECT fan_id FROM canonical_fan_family($1,$2)
+          )
+          AND attribution.status = 'qualified'
+          AND canonical_fan_id($1, attribution.referred_fan_id) IS DISTINCT FROM $2
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .fetch_one(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
@@ -226,7 +308,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(referrer_fan_id)
+    .bind(canonical_referrer_fan_id)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?
@@ -269,7 +351,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
             "#,
         )
         .bind(workspace_id.into_uuid())
-        .bind(referrer_fan_id)
+        .bind(canonical_referrer_fan_id)
         .bind(rule.id)
         .bind(&qualification_key)
         .bind(expires_at)
@@ -290,7 +372,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                 "workspace_id": workspace_id,
                 "reward_grant_id": grant_id,
                 "reward_rule_id": rule.id,
-                "fan_id": referrer_fan_id,
+                "fan_id": canonical_referrer_fan_id,
                 "qualified_referral_count": qualified_count,
                 "threshold": threshold,
                 "expires_at": crowdrelay_domain::wire_time::Wire(&expires_at),
@@ -354,7 +436,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                         "workspace_id": workspace_id,
                         "coupon_id": coupon.id,
                         "reward_grant_id": grant_id,
-                        "fan_id": referrer_fan_id,
+                        "fan_id": canonical_referrer_fan_id,
                         "email": &owner.normalized_email,
                         "display_name": &owner.display_name,
                         "coupon_code": &coupon.code_display,
@@ -379,7 +461,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                         "workspace_id": workspace_id,
                         "reward_grant_id": grant_id,
                         "reward_rule_id": rule.id,
-                        "fan_id": referrer_fan_id,
+                        "fan_id": canonical_referrer_fan_id,
                         "email": &owner.normalized_email,
                         "display_name": &owner.display_name,
                         "item_name": config.item_name,
