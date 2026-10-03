@@ -48,7 +48,7 @@ mod tests {
     use crate::{AdmissionStateArgs, acquisition};
 
     use super::{
-        AcquisitionState, AdmissionState, AppState, ClickSubmitter, ConcertQrState,
+        AcquisitionState, AdmissionState, AppState, ClickSubmission, ClickSubmitter, ConcertQrState,
         EventActionMetricsSnapshot, EventState, FanLifecycleState, HttpConfig, OpsState,
         ReferralState, TicketingState, X_REQUEST_ID, router,
     };
@@ -191,7 +191,7 @@ mod tests {
             repository,
             WorkspaceId::new(),
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )
     }
 
@@ -348,7 +348,8 @@ mod tests {
                 click_capture
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(event)
+                    .push(event);
+            Box::pin(async { ClickSubmission::Accepted })
             }),
         )?)?;
 
@@ -408,7 +409,7 @@ mod tests {
             repository,
             workspace_id,
             cache,
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
             event_state(workspace_id),
             Some(Url::parse("https://virya.music")?),
         )?)?;
@@ -440,7 +441,7 @@ mod tests {
             repository_port,
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
 
         let response = app
@@ -719,6 +720,7 @@ mod tests {
     include!("lib_tests_operator_surface.rs");
     include!("lib_tests_redirect_automated.rs");
     include!("lib_tests_redirect_cache_miss.rs");
+    include!("lib_tests_click_durability.rs");
     include!("lib_tests_referrals.rs");
 
     #[tokio::test]
@@ -731,7 +733,7 @@ mod tests {
             repository_port,
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
         let body = r#"{"email":"fan@example.com","city_slug":"wroclaw","consent":{"marketing":false,"policy_version":"privacy-v1"}}"#;
 
@@ -909,7 +911,7 @@ mod tests {
             repository,
             WorkspaceId::new(),
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
 
         let first = app
@@ -1107,7 +1109,7 @@ mod tests {
             Arc::new(TestRepository::unavailable()),
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
             events,
             None,
         )?)?;

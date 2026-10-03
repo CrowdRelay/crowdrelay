@@ -25,7 +25,7 @@ use axum::{
 };
 use crowdrelay_api::{
     AcquisitionState, AcquisitionStateArgs, AdmissionState, AdmissionStateArgs, AppState,
-    ClickMetricsSnapshot, ConcertQrState, EventActionMetricsSnapshot, EventState,
+    ClickMetricsSnapshot, ClickSubmission, ConcertQrState, EventActionMetricsSnapshot, EventState,
     FanLifecycleState, HttpConfig, OpsState, PushPublicState, ReferralState, TicketingState,
     tenant::{
         RegionalSource, TenantPalette, TenantProducts, TenantProfile, TenantRegionalProfile,
@@ -288,7 +288,7 @@ pub(crate) fn app_state(
         redirect_cache: Arc::new(RedirectCache::new()),
         signup_fan: SignupFan::new(Arc::clone(&acquisition_repository)),
         list_cities: ListCities::new(Arc::clone(&acquisition_repository)),
-        click_submitter: Arc::new(|_event| {}),
+        click_submitter: Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         click_metrics_reader: Arc::new(ClickMetricsSnapshot::default),
         public_site_base_url: Url::parse("http://localhost:4321")?,
         secure_cookies: false,

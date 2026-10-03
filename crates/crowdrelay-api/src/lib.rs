@@ -144,7 +144,7 @@ mod workspace_secrets_http;
 
 pub use acquisition::{
     AcquisitionState, AcquisitionStateArgs, ClickMetricsReader, ClickMetricsSnapshot,
-    ClickSubmitter,
+    ClickSubmission, ClickSubmitter,
 };
 pub use admission::{AdmissionState, AdmissionStateArgs};
 pub use concert_qr::ConcertQrState;
@@ -677,7 +677,13 @@ async fn metrics(State(state): State<AppState>) -> Response {
             "# HELP crowdrelay_click_events_persisted_total Click events durably written to PostgreSQL.\n",
             "# TYPE crowdrelay_click_events_persisted_total counter\n",
             "crowdrelay_click_events_persisted_total {}\n",
-            "# HELP crowdrelay_click_events_dropped_total Click events dropped under overload or shutdown.\n",
+            "# HELP crowdrelay_click_events_overflowed_total Click events that could not enter the bounded queue.\n",
+            "# TYPE crowdrelay_click_events_overflowed_total counter\n",
+            "crowdrelay_click_events_overflowed_total {}\n",
+            "# HELP crowdrelay_click_events_overflow_recovered_total Overflow clicks recovered by direct durable persistence.\n",
+            "# TYPE crowdrelay_click_events_overflow_recovered_total counter\n",
+            "crowdrelay_click_events_overflow_recovered_total {}\n",
+            "# HELP crowdrelay_click_events_dropped_total Click events actually lost after shutdown or persistence failure.\n",
             "# TYPE crowdrelay_click_events_dropped_total counter\n",
             "crowdrelay_click_events_dropped_total {}\n",
             "# HELP crowdrelay_click_events_persistence_failed_total Click events dropped after a bounded persistence failure.\n",
@@ -762,6 +768,8 @@ async fn metrics(State(state): State<AppState>) -> Response {
         http_snapshot.total,
         snapshot.queued,
         snapshot.persisted,
+        snapshot.overflowed,
+        snapshot.overflow_recovered,
         snapshot.dropped,
         snapshot.persistence_failed,
         event_snapshot.queued,

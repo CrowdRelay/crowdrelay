@@ -35,7 +35,8 @@
                 click_capture
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .push(event)
+                    .push(event);
+            Box::pin(async { ClickSubmission::Accepted })
             }),
         )?)?;
 
@@ -75,7 +76,7 @@
             healthy,
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
         let missing = healthy_app
             .oneshot(
@@ -95,7 +96,7 @@
             unavailable,
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
         let unknown = unavailable_app
             .oneshot(
