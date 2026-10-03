@@ -262,6 +262,7 @@ mod tests {
             removal: Some(cause),
             removal_seen_at: Some(posted_at + Duration::hours(3)),
             last_seen_live_at: None,
+            community_responded: false,
         }
     }
 
