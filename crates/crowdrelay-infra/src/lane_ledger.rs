@@ -107,6 +107,19 @@ pub async fn lane_rows(
     Ok(lanes)
 }
 
+/// The same ledger projected to the compact shape Autopilot routes on.
+pub async fn lane_verdicts(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    days: i32,
+) -> Result<Vec<(LaneScope, String, crowdrelay_domain::lane_ledger::Verdict)>, sqlx::Error> {
+    Ok(lane_rows(pool, workspace_id, days)
+        .await?
+        .into_iter()
+        .map(|row| (row.scope, row.lane, crowdrelay_domain::lane_ledger::verdict(&row.counts)))
+        .collect())
+}
+
 /// The tenant's own switches for publishing without asking, as stored. `None`
 /// means the row is absent (the domain default applies); it is not "off".
 #[derive(Debug, Default, FromRow)]
