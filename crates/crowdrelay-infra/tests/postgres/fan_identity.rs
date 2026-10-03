@@ -167,7 +167,12 @@ async fn merge_moves_rows_tombstones_and_unmerge_restores() -> Result<()> {
     .await?;
     assert!(!consent.0);
     assert_eq!(consent.1, "fan_merge");
-    assert!(consent.2.as_deref().is_some_and(|id| id.starts_with("fan_merge:")));
+    assert!(
+        consent
+            .2
+            .as_deref()
+            .is_some_and(|id| id.starts_with("fan_merge:"))
+    );
     // History stayed: the loser's consent row itself is append-only.
     assert_eq!(view.retained_counts["fan_consents"], 1);
 
@@ -220,7 +225,10 @@ async fn merge_moves_rows_tombstones_and_unmerge_restores() -> Result<()> {
     .bind(survivor)
     .fetch_one(&pool)
     .await?;
-    assert!(consent.0, "unmerge must restore the survivor's pre-merge grant");
+    assert!(
+        consent.0,
+        "unmerge must restore the survivor's pre-merge grant"
+    );
     assert_eq!(consent.1, "fan_unmerge");
     Ok(())
 }
