@@ -229,6 +229,45 @@ struct OperatorAttentionSnapshot {
     /// product touches, and it was invisible here until the board read the
     /// interaction log directly.
     unanswered_replies: Vec<UnansweredReply>,
+    /// Whether this tenant can acquire fans on its own, and if not, the one
+    /// smallest thing in the way.
+    ///
+    /// This view exists to answer "what needs me?", and until now it could not
+    /// answer the largest instance of it: the tenant's owned rails were one
+    /// decision from autonomous while every list here was about work the system
+    /// had already drafted. `blocker` is present only when something blocks;
+    /// `caveats` are things that do not block but are not known to be fine.
+    /// `None` means the readiness read failed — an unknown, not a yes.
+    growth_readiness: Option<GrowthReadiness>,
+}
+
+/// The Day-0 answer, shaped for an exception-first board.
+#[derive(Debug, PartialEq, Serialize)]
+struct GrowthReadiness {
+    ready: bool,
+    blocker: Option<GrowthBlocker>,
+    caveats: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct GrowthBlocker {
+    code: &'static str,
+    what: String,
+    /// The tenant owner can resolve it from the product. False means
+    /// deployment work; the board must not offer an owner button for it.
+    owner_action: bool,
+}
+
+fn growth_readiness_from(readiness: crowdrelay_domain::day_zero::Readiness) -> GrowthReadiness {
+    GrowthReadiness {
+        ready: readiness.ready,
+        blocker: readiness.smallest_missing.map(|missing| GrowthBlocker {
+            code: missing.code,
+            what: missing.what,
+            owner_action: missing.owner_action,
+        }),
+        caveats: readiness.caveats,
+    }
 }
 
 /// The brain's own verdict, and whether it is asking for a person.
@@ -441,6 +480,21 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
 
     let (needs_you, awaiting_approval) = needs_you;
 
+    // Best effort: an unreadable readiness must not take the whole board down,
+    // and it is reported as unknown (`null`), never as ready.
+    let growth_readiness = match crowdrelay_infra::lane_ledger::day_zero_facts(
+        state.ticketing.pool(),
+        state.ticketing.workspace_id().into_uuid(),
+    )
+    .await
+    {
+        Ok(facts) => Some(growth_readiness_from(facts.assess())),
+        Err(error) => {
+            tracing::warn!(%error, "attention could not read growth readiness");
+            None
+        }
+    };
+
     private_json(
         StatusCode::OK,
         OperatorAttentionSnapshot {
@@ -464,6 +518,7 @@ pub async fn attention(State(state): State<crate::AppState>, headers: HeaderMap)
             band_notices,
             rejected_agent_outcomes,
             unanswered_replies,
+            growth_readiness,
         },
     )
 }
@@ -1124,5 +1179,70 @@ mod calibration_readout_tests {
         // (10-4 + 8-6) / 2 = 4.0 — systematic over-prediction.
         assert_eq!(json["outcome_model"]["bias"], 4.0);
         assert!(json["y30_direct"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod growth_readiness_tests {
+    use super::{GrowthBlocker, growth_readiness_from};
+    use crowdrelay_domain::day_zero::{
+        ConnectionFact, PublishPermission, ReadinessFacts, assess,
+    };
+
+    fn facts_with<'a>(
+        connections: &'a [ConnectionFact],
+        platforms: &'a [String],
+        auto_post: bool,
+    ) -> ReadinessFacts<'a> {
+        ReadinessFacts {
+            site_root: Some("https://band.example"),
+            join_copy: true,
+            fresh_asset: true,
+            social_publish_runtime: Some(true),
+            social_auto_post: auto_post,
+            autopost_platforms: platforms,
+            connections,
+        }
+    }
+
+    fn facebook(publish: PublishPermission) -> ConnectionFact {
+        ConnectionFact {
+            platform: "facebook".to_owned(),
+            connected: true,
+            working: true,
+            publish,
+        }
+    }
+
+    #[test]
+    fn the_board_carries_the_one_blocker_with_who_can_fix_it() {
+        let connections = [facebook(PublishPermission::Verified)];
+        let platforms = vec!["telegram".to_owned()];
+        let board = growth_readiness_from(assess(&facts_with(&connections, &platforms, false)));
+        assert!(!board.ready);
+        let blocker = board.blocker.expect("a blocker");
+        assert_eq!(blocker.code, "standing_authority_not_granted");
+        assert!(blocker.owner_action);
+    }
+
+    #[test]
+    fn a_ready_rail_has_no_blocker_but_keeps_its_caveat() {
+        let connections = [facebook(PublishPermission::Unverified)];
+        let platforms = vec!["facebook".to_owned()];
+        let board = growth_readiness_from(assess(&facts_with(&connections, &platforms, true)));
+        assert!(board.ready);
+        assert_eq!(board.blocker, None::<GrowthBlocker>);
+        assert_eq!(board.caveats.len(), 1, "{:?}", board.caveats);
+    }
+
+    #[test]
+    fn deployment_work_is_not_offered_to_the_owner() {
+        let connections = [facebook(PublishPermission::Verified)];
+        let platforms = vec!["facebook".to_owned()];
+        let mut facts = facts_with(&connections, &platforms, true);
+        facts.social_publish_runtime = Some(false);
+        let blocker = growth_readiness_from(assess(&facts)).blocker.expect("blocker");
+        assert_eq!(blocker.code, "deployment_publish_gate_off");
+        assert!(!blocker.owner_action);
     }
 }
