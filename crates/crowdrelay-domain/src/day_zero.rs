@@ -10,10 +10,11 @@
 //! was one owner decision away from an autonomous rail and said nothing about
 //! it; the brain meanwhile ranked actions for lanes that could only draft.
 //!
-//! This is a pure function of facts. It decides nothing about publishing, grants
-//! nothing and never reads a credential: a connection is not consent, and the
-//! only prerequisite it can name as the owner's to give is the standing
-//! authority to publish.
+//! This is a pure function of facts. It decides nothing about publishing,
+ //! grants nothing and never reads a credential: a connection is not consent.
+ //! It distinguishes tenant-owner work (for example standing authority) from
+ //! deployment-operator work (for example a worker kill switch), so the UI
+ //! cannot offer an owner button for something only a deployment can repair.
 
 use serde::Serialize;
 
@@ -43,7 +44,10 @@ pub struct ReadinessFacts<'a> {
     pub join_copy: bool,
     /// A video, release or event inside the freshness window to promote.
     pub fresh_asset: bool,
-    /// The global publish-without-asking switch.
+    /// Whether the running worker reports the deployment-level social
+    /// publisher gate as enabled. None means no worker has reported it yet.
+    pub social_publish_runtime: Option<bool>,
+    /// The tenant's publish-without-asking switch.
     pub social_auto_post: bool,
     /// The platforms that switch is allowed to publish to.
     pub autopost_platforms: &'a [String],
@@ -56,8 +60,12 @@ pub struct ReadinessFacts<'a> {
 pub enum RailState {
     /// Connected, working, and the tenant granted standing authority.
     Executable,
-    /// Everything works; the owner has not granted standing authority.
+    /// Everything works at deployment level; the owner has not granted standing authority.
     NeedsAuthority,
+    /// The worker has not reported whether the deployment publisher exists.
+    RuntimeUnknown,
+    /// The worker explicitly reports the deployment-level social publisher off.
+    DeploymentGateOff,
     /// Connected, but its last read failed or never happened.
     CredentialNotWorking,
     NotConnected,
@@ -77,8 +85,9 @@ pub struct Rail {
 pub struct Missing {
     pub code: &'static str,
     pub what: String,
-    /// Only a person can do it: the system never grants itself authority,
-    /// credentials or consent.
+    /// Whether the tenant owner can resolve this from the product. False means
+    /// deployment/operator work; the system never grants itself authority or
+    /// pretends an environment switch is a tenant preference.
     pub owner_action: bool,
 }
 
@@ -101,8 +110,10 @@ fn rail(facts: &ReadinessFacts<'_>, platform: &'static str) -> Rail {
             .iter()
             .any(|p| p.eq_ignore_ascii_case(platform));
     let (state, missing_steps) = match connection {
-        None => (RailState::NotConnected, 3),
-        Some(c) if !c.working => (RailState::CredentialNotWorking, 2),
+        None => (RailState::NotConnected, 4),
+        Some(c) if !c.working => (RailState::CredentialNotWorking, 3),
+        Some(_) if facts.social_publish_runtime.is_none() => (RailState::RuntimeUnknown, 2),
+        Some(_) if facts.social_publish_runtime == Some(false) => (RailState::DeploymentGateOff, 2),
         Some(_) if !authority => (RailState::NeedsAuthority, 1),
         Some(_) => (RailState::Executable, 0),
     };
@@ -159,6 +170,16 @@ pub fn assess(facts: &ReadinessFacts<'_>) -> Readiness {
                     ),
                     owner_action: true,
                 },
+                RailState::RuntimeUnknown => Missing {
+                    code: "deployment_publish_state_unknown",
+                    what: "The worker has not reported the social publisher runtime state yet; tenant authority cannot make an unreported executor real.".to_owned(),
+                    owner_action: false,
+                },
+                RailState::DeploymentGateOff => Missing {
+                    code: "deployment_publish_gate_off",
+                    what: "The running worker reports CROWDRELAY_SOCIAL_AUTO_POST off; enable that deployment gate and restart the worker before granting tenant autopost authority.".to_owned(),
+                    owner_action: false,
+                },
                 RailState::CredentialNotWorking => Missing {
                     code: "rail_credential_not_working",
                     what: format!(
@@ -203,6 +224,7 @@ mod tests {
             site_root: Some("https://band.example"),
             join_copy: true,
             fresh_asset: true,
+            social_publish_runtime: Some(true),
             social_auto_post: auto_post,
             autopost_platforms: platforms,
             connections,
@@ -271,6 +293,33 @@ mod tests {
         let missing = readiness.smallest_missing.expect("blocker");
         assert_eq!(missing.code, "standing_authority_not_granted");
         assert!(missing.what.starts_with("instagram"), "{}", missing.what);
+    }
+
+    #[test]
+    fn tenant_authority_cannot_make_a_disabled_worker_ready() {
+        let connections = [conn("facebook", true)];
+        let platforms = vec!["facebook".to_owned()];
+        let mut f = facts(&connections, &platforms, true);
+        f.social_publish_runtime = Some(false);
+        let readiness = assess(&f);
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness.smallest_missing.map(|m| (m.code, m.owner_action)),
+            Some(("deployment_publish_gate_off", false))
+        );
+    }
+
+    #[test]
+    fn an_unreported_worker_fails_closed_instead_of_guessing_ready() {
+        let connections = [conn("facebook", true)];
+        let platforms = vec!["facebook".to_owned()];
+        let mut f = facts(&connections, &platforms, true);
+        f.social_publish_runtime = None;
+        let readiness = assess(&f);
+        assert_eq!(
+            readiness.smallest_missing.map(|m| m.code),
+            Some("deployment_publish_state_unknown")
+        );
     }
 
     #[test]
