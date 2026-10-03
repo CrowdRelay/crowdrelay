@@ -133,6 +133,10 @@ pub struct MissionPlan {
     pub content_source_id: Option<uuid::Uuid>,
     pub prompt: String,
     pub share_text: String,
+    /// The direct first-party referral destination. Persistence wraps this in
+    /// an action-owned Smart Link before the mission is shown, so the text a
+    /// Latarnik shares is attributable without changing referral semantics.
+    pub destination_url: String,
 }
 
 fn date_label(language: Language, date: Date) -> String {
@@ -180,6 +184,7 @@ fn show_plan(language: Language, show: &ShowFact, link: &str) -> MissionPlan {
         content_source_id: None,
         prompt,
         share_text: share,
+        destination_url: link,
     }
 }
 
@@ -205,6 +210,7 @@ fn release_plan(language: Language, release: &ReleaseFact, link: &str) -> Missio
         content_source_id: Some(release.content_source_id),
         prompt,
         share_text: share,
+        destination_url: link,
     }
 }
 
@@ -321,6 +327,10 @@ mod tests {
         assert!(
             plan.share_text
                 .ends_with("https://virya.music/r/abc123?event=virya-furydate-impala&lang=pl")
+        );
+        assert_eq!(
+            plan.destination_url,
+            "https://virya.music/r/abc123?event=virya-furydate-impala&lang=pl"
         );
         assert!(plan.event_id.is_some() && plan.content_source_id.is_none());
     }
