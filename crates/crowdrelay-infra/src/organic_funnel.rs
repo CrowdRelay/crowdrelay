@@ -124,7 +124,6 @@ fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<Orga
     })
 }
 
-
 const CONFIRMATION_RECOVERY_MIN_AGE_HOURS: i64 = 1;
 const CONFIRMATION_RECOVERY_LOOKBACK_DAYS: i64 = 30;
 const CONFIRMATION_RECOVERY_LIMIT: i64 = 50;
