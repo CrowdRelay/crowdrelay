@@ -629,8 +629,13 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     /// anything, and counting it would let a context earn unattended execution
     /// by acting rather than by learning.
     ///
-    /// A context with no measured outcome is absent from the ledger rather
-    /// than present with a zero.
+    /// Counts distinct actions with a resolved audience/business outcome that
+    /// is allowed to earn unattended authority. Internal worker/process
+    /// checks and proximal artifact-production facts are intentionally absent:
+    /// they can teach diagnostics without teaching "safe to act on people".
+    ///
+    /// A context with no qualifying measured outcome is absent from the ledger
+    /// rather than present with a zero.
     async fn load_resolved_evidence_counts(
         &self,
         workspace_id: WorkspaceId,
