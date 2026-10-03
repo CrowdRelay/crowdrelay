@@ -18,6 +18,7 @@ pub enum OrganicFunnelDirective {
     RepairConfirmation,
     ActivateFans,
     RetainFans,
+    MultiplyReferrals,
 }
 
 impl OrganicFunnelDirective {
@@ -29,6 +30,7 @@ impl OrganicFunnelDirective {
             Self::RepairConfirmation => "repair_confirmation",
             Self::ActivateFans => "activate_fans",
             Self::RetainFans => "retain_fans",
+            Self::MultiplyReferrals => "multiply_referrals",
         }
     }
 
@@ -54,6 +56,15 @@ impl OrganicFunnelDirective {
     pub const fn prioritizes_fan_recovery(self) -> bool {
         self.holds_new_audience_expansion()
     }
+
+    /// Referral missions can add genuinely new people without asking the band
+    /// to publish more. They are useful when reach is the bottleneck and again
+    /// after a healthy retained cohort exists but has not multiplied. They are
+    /// held while conversion/confirmation/activation/retention is leaking.
+    #[must_use]
+    pub const fn permits_latarnik_mission(self) -> bool {
+        matches!(self, Self::ExpandReach | Self::MultiplyReferrals)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -67,6 +78,7 @@ pub struct OrganicFunnelControl {
     pub activated_mature: u32,
     pub retention_mature: u32,
     pub retained: u32,
+    pub qualified_referrals: u32,
 }
 
 /// One pending fan whose original double-opt-in email did not reach a live
