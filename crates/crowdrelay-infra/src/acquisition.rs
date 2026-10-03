@@ -371,6 +371,7 @@ struct SmartLinkUpsertRow {
 #[derive(Clone, Debug)]
 pub struct ClickBuffer {
     sender: mpsc::Sender<ClickEvent>,
+    repository: Arc<dyn AcquisitionRepository>,
     metrics: Arc<ClickBufferMetrics>,
 }
 
@@ -394,6 +395,7 @@ impl ClickBuffer {
         Ok((
             Self {
                 sender,
+                repository: Arc::clone(&repository),
                 metrics: Arc::clone(&metrics),
             },
             ClickBatchWorker {
@@ -406,22 +408,47 @@ impl ClickBuffer {
         ))
     }
 
-    /// Attempts to queue a click without waiting or allocating an unbounded
-    /// retry. Overload and a stopped consumer both drop analytics only.
-    #[must_use]
-    pub fn try_send(&self, event: ClickEvent) -> ClickEnqueueOutcome {
+    /// Keeps the ordinary redirect path allocation-bounded and database-free:
+    /// a healthy buffer accepts the click immediately. If the buffer is full
+    /// or its consumer is restarting, fall back to one bounded repository
+    /// write before the caller is allowed to continue the acquisition flow.
+    ///
+    /// That exceptional write is the durability boundary: returning
+    /// `Unavailable` means no caller may set an attribution cookie and then
+    /// send the person onward as if the click had been proven.
+    pub async fn submit(&self, event: ClickEvent) -> ClickSubmissionOutcome {
         match self.sender.try_send(event) {
             Ok(()) => {
                 self.metrics.queued.fetch_add(1, Ordering::Relaxed);
-                ClickEnqueueOutcome::Queued
+                ClickSubmissionOutcome::Queued
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                ClickEnqueueOutcome::DroppedFull
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                ClickEnqueueOutcome::DroppedClosed
+            Err(mpsc::error::TrySendError::Full(event))
+            | Err(mpsc::error::TrySendError::Closed(event)) => {
+                self.metrics.overflowed.fetch_add(1, Ordering::Relaxed);
+                match self
+                    .repository
+                    .persist_click_batch(std::slice::from_ref(&event))
+                    .await
+                {
+                    Ok(()) => {
+                        self.metrics.persisted.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .overflow_recovered
+                            .fetch_add(1, Ordering::Relaxed);
+                        ClickSubmissionOutcome::OverflowPersisted
+                    }
+                    Err(error) => {
+                        self.metrics
+                            .persistence_failed
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            %error,
+                            "click buffer overflow fallback persistence failed"
+                        );
+                        ClickSubmissionOutcome::Unavailable
+                    }
+                }
             }
         }
     }
@@ -433,10 +460,10 @@ impl ClickBuffer {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClickEnqueueOutcome {
+pub enum ClickSubmissionOutcome {
     Queued,
-    DroppedFull,
-    DroppedClosed,
+    OverflowPersisted,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -447,6 +474,8 @@ pub struct ClickBufferBuildError;
 pub struct ClickBufferMetrics {
     queued: AtomicU64,
     persisted: AtomicU64,
+    overflowed: AtomicU64,
+    overflow_recovered: AtomicU64,
     dropped: AtomicU64,
     persistence_failed: AtomicU64,
 }
@@ -457,6 +486,8 @@ impl ClickBufferMetrics {
         ClickBufferSnapshot {
             queued: self.queued.load(Ordering::Relaxed),
             persisted: self.persisted.load(Ordering::Relaxed),
+            overflowed: self.overflowed.load(Ordering::Relaxed),
+            overflow_recovered: self.overflow_recovered.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             persistence_failed: self.persistence_failed.load(Ordering::Relaxed),
         }
@@ -467,6 +498,8 @@ impl ClickBufferMetrics {
 pub struct ClickBufferSnapshot {
     pub queued: u64,
     pub persisted: u64,
+    pub overflowed: u64,
+    pub overflow_recovered: u64,
     pub dropped: u64,
     pub persistence_failed: u64,
 }
@@ -936,11 +969,12 @@ mod tests {
         assert!(CitySignal::try_from(row).is_err());
     }
 
-    #[test]
-    fn full_click_channel_drops_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn full_click_channel_falls_back_to_durable_persistence()
+    -> Result<(), Box<dyn std::error::Error>> {
         let repository = Arc::new(FakeRepository::default());
         let (buffer, _worker) = ClickBuffer::new(
-            repository,
+            repository.clone(),
             crate::config::ClickBufferConfig {
                 capacity: 1,
                 batch_size: 1,
@@ -948,17 +982,31 @@ mod tests {
             },
         )?;
 
-        assert_eq!(buffer.try_send(click_event()?), ClickEnqueueOutcome::Queued);
         assert_eq!(
-            buffer.try_send(click_event()?),
-            ClickEnqueueOutcome::DroppedFull
+            buffer.submit(click_event()?).await,
+            ClickSubmissionOutcome::Queued
+        );
+        assert_eq!(
+            buffer.submit(click_event()?).await,
+            ClickSubmissionOutcome::OverflowPersisted
+        );
+        assert_eq!(
+            repository
+                .persisted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "the overflow click must already be durable before submit returns"
         );
         assert_eq!(
             buffer.metrics().snapshot(),
             ClickBufferSnapshot {
                 queued: 1,
-                persisted: 0,
-                dropped: 1,
+                persisted: 1,
+                overflowed: 1,
+                overflow_recovered: 1,
+                dropped: 0,
                 persistence_failed: 0,
             }
         );
@@ -977,7 +1025,10 @@ mod tests {
             },
         )?;
         for _ in 0..4 {
-            assert_eq!(buffer.try_send(click_event()?), ClickEnqueueOutcome::Queued);
+            assert_eq!(
+                buffer.submit(click_event()?).await,
+                ClickSubmissionOutcome::Queued
+            );
         }
         let (shutdown_sender, shutdown) = watch::channel(true);
         worker.run(shutdown).await;
@@ -986,6 +1037,8 @@ mod tests {
         let snapshot = buffer.metrics().snapshot();
         assert_eq!(snapshot.queued, 4);
         assert_eq!(snapshot.persisted, 2);
+        assert_eq!(snapshot.overflowed, 0);
+        assert_eq!(snapshot.overflow_recovered, 0);
         assert_eq!(snapshot.dropped, 2);
         assert_eq!(snapshot.persistence_failed, 0);
         Ok(())
