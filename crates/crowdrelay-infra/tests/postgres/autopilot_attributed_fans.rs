@@ -50,16 +50,22 @@ pub(crate) async fn live_post(
     .expect("smart link");
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, subreddit, title, body, status, posted_at, smart_link)
-           VALUES ($1,$2,'r/lineage','t','b','posted',$3,$4)"#,
+           (workspace_id, action_id, subreddit, title, body, status, posted_at, smart_link,
+            reddit_post_id, reddit_post_url)
+           VALUES ($1,$2,'r/lineage','t','b','posted',$3,$4,$5,$6)"#,
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
     .bind(posted_at)
     .bind(format!("/l/{slug}"))
+    .bind(format!("receipt-{}", action_id.simple()))
+    .bind(format!(
+        "https://www.reddit.com/r/lineage/comments/{}/proof/",
+        action_id.simple()
+    ))
     .execute(&f.pool)
     .await
-    .expect("post");
+    .expect("post with provider receipt");
 }
 
 /// A fan converted through `action_id`'s link at `at`, created at `created`.
