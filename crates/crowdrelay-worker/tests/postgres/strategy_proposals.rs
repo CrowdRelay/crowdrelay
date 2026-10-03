@@ -375,6 +375,115 @@ async fn a_proposals_outcome_with_no_proposals_is_rejected() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_model_cannot_self_certify_a_community_url_as_evidence() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let ws = workspace(&pool).await?;
+    let fake_url = format!(
+        "https://discord.gg/fabricated-{}",
+        Uuid::now_v7().simple()
+    );
+
+    let hostile = insert_outcome_with_task_evidence(
+        &pool,
+        ws,
+        "outreach_targets",
+        json!({
+            "item": {
+                "type": "outreach_target",
+                "target_kind": "community",
+                "display_name": "Fabricated Scene",
+                "platform": "discord",
+                "community_url": fake_url,
+                "why_fit": "model says this exists",
+                "evidence_urls": [fake_url],
+                "language": "en",
+            },
+            "rationale": "fanbase scout",
+        }),
+        Some(vec!["https://evidence.example/actually-seen".to_owned()]),
+    )
+    .await?;
+
+    worker(&pool, ws).run_once().await?;
+
+    let rejected: (String, Option<String>) = sqlx::query_as(
+        "SELECT status,rejection_reason FROM agent_outcomes WHERE id=$1",
+    )
+    .bind(hostile)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        rejected.0 == "rejected"
+            && rejected
+                .1
+                .as_deref()
+                .is_some_and(|reason| reason.contains("UNGROUNDED_COMMUNITY_TARGET")),
+        "payload-authored evidence must not ground itself: {rejected:?}"
+    );
+    let leaked: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM discovery_places WHERE workspace_id=$1)::bigint,
+           (SELECT count(*) FROM agent_outreach_targets
+             WHERE workspace_id=$1 AND target_kind='community')::bigint",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        leaked == (0, 0),
+        "an ungrounded community must create no place and no target: {leaked:?}"
+    );
+
+    let grounded_url = format!(
+        "https://discord.gg/grounded-{}",
+        Uuid::now_v7().simple()
+    );
+    let grounded = insert_outcome_with_task_evidence(
+        &pool,
+        ws,
+        "outreach_targets",
+        json!({
+            "item": {
+                "type": "outreach_target",
+                "target_kind": "community",
+                "display_name": "Grounded Scene",
+                "platform": "discord",
+                "community_url": grounded_url,
+                "why_fit": "task evidence actually saw this page",
+                "evidence_urls": [grounded_url],
+                "language": "en",
+            },
+            "rationale": "fanbase scout",
+        }),
+        Some(vec![grounded_url.clone()]),
+    )
+    .await?;
+    worker(&pool, ws).run_once().await?;
+
+    let grounded_status: String =
+        sqlx::query_scalar("SELECT status FROM agent_outcomes WHERE id=$1")
+            .bind(grounded)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(
+        grounded_status == "processed",
+        "recorded evidence should reach normal screening, got {grounded_status}"
+    );
+    let created: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM agent_outreach_targets
+         WHERE workspace_id=$1 AND community_url IS NOT NULL",
+    )
+    .bind(ws.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    ensure!(created == 1, "only the grounded community may land");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
 async fn a_proposed_community_lands_as_a_screened_place_and_target() -> Result<()> {
     let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
         .await
