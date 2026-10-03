@@ -1,4 +1,8 @@
 use super::*;
+use crowdrelay_application::autopilot::{
+    AutopilotActionPayload, AutopilotActionRepository, CONFIRMATION_RECOVERY_TEMPLATE,
+};
+use crowdrelay_domain::FanId;
 
 async fn seed_pending_attributed_fan(
     f: &Fixture,
@@ -269,4 +273,158 @@ async fn autonomous_confirmation_recovery_is_bounded_to_once_per_acquisition() {
         .is_empty(),
         "one autonomous retry owns the acquisition episode even if its delivery later fails"
     );
+}
+
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
+async fn recovery_execution_mints_one_action_owned_confirmation_without_fake_growth_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let acquired = f.now - time::Duration::days(3);
+    let ep = endpoint(&f, "execute").await;
+    let (fan, source_action) =
+        seed_pending_attributed_fan(&f, "execute-confirmation", acquired).await;
+    let failed = confirmation_event(&f, fan, acquired + time::Duration::hours(1)).await;
+    delivery(
+        &f,
+        failed,
+        ep,
+        "dead",
+        acquired + time::Duration::hours(2),
+    )
+    .await;
+
+    let snapshot = crowdrelay_infra::organic_funnel::confirmation_recovery_snapshots(
+        &f.pool,
+        f.workspace_id.into_uuid(),
+        f.now,
+    )
+    .await?
+    .into_iter()
+    .next()
+    .ok_or("recovery snapshot")?;
+    assert_eq!(snapshot.source_action_id, source_action);
+
+    let decision_id = uuid::Uuid::now_v7();
+    let action_id = uuid::Uuid::now_v7();
+    let payload = AutopilotActionPayload::RequestFanLifecycleMessage {
+        fan_id: FanId::from_uuid(fan),
+        template_key: CONFIRMATION_RECOVERY_TEMPLATE.to_owned(),
+        show: None,
+    };
+    sqlx::query(
+        r#"INSERT INTO autopilot_decisions
+           (id,workspace_id,decision_key,context,subject_kind,subject_id,
+            decision_kind,confidence_basis_points,disposition,reason,
+            input_snapshot,policy_snapshot,recommendation,evaluated_at,trace_id)
+           VALUES($1,$2,$3,'fan_lifecycle','fan',$4,
+                  'recover_failed_fan_confirmation',9900,'auto_execute',
+                  'terminal confirmation route failure',$5,'{}','{}',$6,$1)"#,
+    )
+    .bind(decision_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("decision-recovery-{decision_id}"))
+    .bind(fan)
+    .bind(serde_json::json!({
+        "confirmation_recovery": snapshot,
+        "organic_funnel_control": {
+            "directive": "repair_confirmation",
+            "mature_links": 1,
+            "unique_visitors": 2,
+            "signups": 1,
+            "confirmed": 0,
+            "activation_mature": 0,
+            "activated_mature": 0,
+            "retention_mature": 0,
+            "retained": 0
+        }
+    }))
+    .bind(f.now)
+    .execute(&f.pool)
+    .await?;
+
+    sqlx::query(
+        r#"INSERT INTO autopilot_actions
+           (id,workspace_id,decision_id,context,action_kind,subject_kind,
+            subject_id,idempotency_key,payload,status,action_class,
+            approved_at,approved_by,available_at)
+           VALUES($1,$2,$3,'fan_lifecycle','fan.lifecycle.message.request','fan',
+                  $4,$5,$6,'queued','owned_audience',$7,'policy:bounded_auto',$7)"#,
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .bind(decision_id)
+    .bind(fan)
+    .bind(format!("action:confirmation-recovery:{fan}:{failed}"))
+    .bind(serde_json::to_value(&payload)?)
+    .bind(f.now)
+    .execute(&f.pool)
+    .await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, f.now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|candidate| candidate.id.into_uuid() == action_id)
+        .ok_or("recovery action was not claimable")?;
+    f.repository
+        .execute_action(f.workspace_id, action, f.now)
+        .await?;
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id=$1")
+            .bind(action_id)
+            .fetch_one(&f.pool)
+            .await?;
+    assert_eq!(status, "succeeded");
+
+    let emitted: Vec<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
+        r#"SELECT id,payload
+           FROM outbox_events
+           WHERE workspace_id=$1
+             AND action_id=$2
+             AND event_type='fan.confirmation_requested'"#,
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_all(&f.pool)
+    .await?;
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(
+        emitted[0].1.pointer("/recovery/failed_outbox_event_id"),
+        Some(&serde_json::Value::String(failed.to_string()))
+    );
+
+    let token_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM fan_action_tokens
+         WHERE workspace_id=$1 AND fan_id=$2 AND purpose='confirm'
+           AND consumed_at IS NULL",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(fan)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(token_count, 1);
+
+    let fake_learning: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM dispatch_predictions WHERE action_id=$1)::bigint,
+           (SELECT count(*) FROM growth_evidence
+             WHERE workspace_id=$2 AND action_id=$1)::bigint,
+           (SELECT count(*) FROM autopilot_measurements
+             WHERE workspace_id=$2 AND action_id=$1)::bigint",
+    )
+    .bind(action_id)
+    .bind(f.workspace_id.into_uuid())
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        fake_learning,
+        (0, 0, 0),
+        "transactional auth recovery must not masquerade as a growth experiment"
+    );
+    Ok(())
 }
