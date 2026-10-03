@@ -451,3 +451,6 @@ async fn fans_credited_elsewhere_or_nowhere_are_not_counted() {
 mod funnel_tests;
 #[path = "autopilot_attributed_fans/recovery_tests.rs"]
 mod recovery_tests;
+
+#[path = "autopilot_attributed_fans/confirmation_recovery_tests.rs"]
+mod confirmation_recovery_tests;
