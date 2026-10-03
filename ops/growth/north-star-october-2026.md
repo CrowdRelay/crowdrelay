@@ -49,3 +49,36 @@ Behavior changes:
 This is a control-plane change, not a growth claim. Production acceptance is behavioral evidence that a mature downstream leak reduces new acquisition dispatches while the relevant downstream recovery lane proceeds, and that zero-visitor periods do the opposite.
 
 Next checkpoint: make the chosen downstream recovery visible as one operator-facing causal trace — funnel directive → action actually dispatched → provider receipt → next funnel movement — and close any stage that still has no executable recovery path.
+
+## Checkpoint — funnel recovery becomes executable and causal
+
+The autonomous funnel now owns the downstream repair loop instead of only suppressing more top-of-funnel work.
+
+One mature funnel snapshot governs the entire Autopilot cycle. During a downstream leak (`repair_confirmation`, `activate_fans`, `retain_fans`) Fan Lifecycle gets first access to the scarce owned-audience envelope; Growth Intelligence, join asks and Content Supply see the same directive, so one cycle cannot simultaneously decide "repair activation" and "expand acquisition" from different reads.
+
+Content Supply is narrowed rather than globally stopped:
+- existing consented-fan lanes such as source email and Signal push may still run when they are useful to activation/retention;
+- fresh public/community fan-out is held while confirmation, activation or retention is the measured limiting stage;
+- booking, promoter, representation and other relationship-sensitive work is not reclassified as fan acquisition and keeps its existing authority rules.
+
+`repair_confirmation` now has a bounded executable path:
+- only a CrowdRelay-attributed pending fan whose latest canonical double-opt-in delivery is terminally dead/cancelled can qualify;
+- delivered or still in-flight confirmation mail is never retried merely because the person did not click;
+- the latest consent state is rechecked at execution;
+- the public access resend and autonomous retry share one per-fan advisory lock, so the worker cannot invalidate a link the fan just requested;
+- execution revalidates that the exact failed event is still latest, rotates the token once, and emits one action-owned canonical `fan.confirmation_requested`;
+- at most one autonomous retry is allowed per attributable acquisition episode. A second failure does not become an email loop.
+
+Transactional confirmation recovery is not counted as marketing engagement, activation or a growth experiment. It creates no fake growth evidence/measurement rows and does not impose the ordinary marketing-touch cooldown that would delay the subsequent welcome.
+
+The existing learning-loop readout now carries one causal chain without a parallel metrics table:
+`decision-time organic funnel → action → executor receipt/webhook transport receipt → current organic funnel`.
+A webhook 2xx remains transport evidence, not a claim of inbox delivery or fan outcome.
+
+Production acceptance for this checkpoint is:
+1. a real terminally failed attributed confirmation is retried exactly once;
+2. a delivered-but-unconfirmed fan is not retried automatically;
+3. after confirmation, Fan Lifecycle can proceed to activation without the auth retry imposing a marketing cooldown;
+4. while activation/retention is the mature leak, new community/public acquisition work is observably held before it consumes the cycle ahead of recovery.
+
+Next highest-leverage step: prove this recovery loop against live production cohorts and then close the next measured non-executable stage. If `activate_fans` is the live limiter, verify that welcome/Signal/show-recall receipts create attributable activation; if `retain_fans` is the limiter, verify dormant reactivation is actually eligible and delivered before adding any new retention machinery.
