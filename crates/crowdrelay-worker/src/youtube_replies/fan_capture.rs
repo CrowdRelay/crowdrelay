@@ -24,11 +24,11 @@ const CAPTURE_COMMENTS_PER_24H: i64 = 4;
 const CAPTURE_MAX_ATTEMPTS: i32 = 3;
 const CAPTURE_CLAIM_TTL_SECONDS: i64 = 2 * 60 * 60;
 
-fn capture_slug(source_id: Uuid) -> String {
+pub(super) fn capture_slug(source_id: Uuid) -> String {
     format!("capture-youtube-{}", source_id.simple())
 }
 
-fn signal_destination(site_root: &str, source_id: Uuid) -> String {
+pub(super) fn signal_destination(site_root: &str, source_id: Uuid) -> String {
     format!(
         "{}/signal?utm_source=youtube&utm_medium=video_comment&utm_campaign=content_{}&utm_content=fan_capture_comment",
         site_root.trim_end_matches('/'),
@@ -36,7 +36,7 @@ fn signal_destination(site_root: &str, source_id: Uuid) -> String {
     )
 }
 
-fn capture_comment_text(variant: &str, public_link: &str) -> String {
+pub(super) fn capture_comment_text(variant: &str, public_link: &str) -> String {
     format!("{}\n\n{}", variant.trim(), public_link)
 }
 
@@ -48,10 +48,6 @@ impl YoutubeRepliesWorker {
     /// each claim consumes one bounded attempt, so a permanently broken video
     /// cannot become an infinite YouTube API loop.
     pub(super) async fn seed_fan_capture_comment(&self) -> Result<usize, sqlx::Error> {
-        if !flag("CROWDRELAY_SOCIAL_AUTO_POST") {
-            return Ok(0);
-        }
-
         let settings = TenantSettingsRepository::new(self.pool.clone());
         let Some(config) = settings.join_ask_config(self.workspace_id).await? else {
             return Ok(0);
@@ -60,12 +56,22 @@ impl YoutubeRepliesWorker {
             return Ok(0);
         };
         let brand = settings.brand_settings(self.workspace_id).await?;
-        if !brand.social_auto_post {
-            return Ok(0);
-        }
         let Some(site_root) = brand.site_root().map(str::to_owned) else {
             return Ok(0);
         };
+        // Nothing may post it: prepare the placement for a person instead of
+        // doing nothing. Preparing writes nothing to YouTube.
+        if !flag("CROWDRELAY_SOCIAL_AUTO_POST") || !brand.social_auto_post {
+            return Ok(usize::from(
+                super::fan_capture_draft::prepare_fan_capture_draft(
+                    &self.pool,
+                    self.workspace_id,
+                    &variant,
+                    &site_root,
+                )
+                .await?,
+            ));
+        }
         let Some(token) = self.access_token().await? else {
             return Ok(0);
         };
@@ -108,6 +114,9 @@ impl YoutubeRepliesWorker {
               AND active
               AND occurred_at > now() - make_interval(days => $2)
               AND NOT (metadata ? 'fan_capture_comment_posted_unix')
+              -- A person was handed this comment to post; a second one from
+              -- the machine would be a duplicate under the same video.
+              AND NOT (metadata ? 'fan_capture_draft_at')
               -- A source that already carries the owned CTA does not need a
               -- second one in comments.
               AND COALESCE(metadata->>'body', '') NOT ILIKE '%/signal%'
