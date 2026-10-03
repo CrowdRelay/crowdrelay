@@ -78,6 +78,7 @@ pub struct OrganicFunnelControl {
     pub activated_mature: u32,
     pub retention_mature: u32,
     pub retained: u32,
+    #[serde(default)]
     pub qualified_referrals: u32,
 }
 
