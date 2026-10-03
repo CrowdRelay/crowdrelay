@@ -302,11 +302,24 @@ WITH publications AS (
    AND posted_at IS NOT NULL
    AND status='posted'
    AND COALESCE(NULLIF(btrim(platform_post_id),''),NULLIF(btrim(platform_post_url),'')) IS NOT NULL
- UNION ALL SELECT smart_link_id,action_id,posted_at FROM telegram_posts WHERE workspace_id=$1 AND smart_link_id IS NOT NULL AND posted_at IS NOT NULL
- UNION ALL SELECT smart_link_id,action_id,posted_at FROM discord_posts WHERE workspace_id=$1 AND smart_link_id IS NOT NULL AND posted_at IS NOT NULL
+ UNION ALL SELECT smart_link_id,action_id,posted_at FROM telegram_posts
+ WHERE workspace_id=$1
+   AND smart_link_id IS NOT NULL
+   AND status='posted'
+   AND posted_at IS NOT NULL
+   AND message_id IS NOT NULL
+ UNION ALL SELECT smart_link_id,action_id,posted_at FROM discord_posts
+ WHERE workspace_id=$1
+   AND smart_link_id IS NOT NULL
+   AND status='posted'
+   AND posted_at IS NOT NULL
+   AND NULLIF(btrim(message_id),'') IS NOT NULL
  UNION ALL SELECT link.id,post.action_id,post.posted_at FROM community_posts post
  JOIN smart_links link ON link.workspace_id=post.workspace_id AND post.smart_link='/l/'||link.slug
- WHERE post.workspace_id=$1 AND post.posted_at IS NOT NULL
+ WHERE post.workspace_id=$1
+   AND post.status='posted'
+   AND post.posted_at IS NOT NULL
+   AND COALESCE(NULLIF(btrim(post.reddit_post_id),''),NULLIF(btrim(post.reddit_post_url),'')) IS NOT NULL
 ), links AS MATERIALIZED (
  SELECT link.id,link.slug,link.campaign_id,link.channel_source,link.active,
    COALESCE(link.action_id,publication.action_id) AS action_id,publication.posted_at AS published_at,
