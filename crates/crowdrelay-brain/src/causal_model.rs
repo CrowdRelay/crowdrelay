@@ -221,7 +221,20 @@ impl PredictionOutcome {
 /// evidence rows that resolved with an install count and no fan count were
 /// taught as zero fans, so fan posteriors, context effects and calibration
 /// already dragged toward zero are rebuilt from evidence.
-pub const EVIDENCE_BASIS_VERSION: u32 = 3;
+///
+/// 4 — the fan prior is the tenant's realized yield when it has one
+/// ([`CausalModel::with_realized_yield`]), not the compiled-in 2.0. A
+/// checkpoint built on the old prior is rebuilt so it starts from the record.
+pub const EVIDENCE_BASIS_VERSION: u32 = 4;
+
+/// Published, tracked dispatches needed before the tenant's own record may
+/// replace the compiled-in prior. Fewer says nothing: a first post that has
+/// not had time to land is not evidence of zero.
+pub const MIN_REALIZED_DELIVERIES: u32 = 3;
+/// Deliveries counted toward the realized prior, newest-first by the caller.
+/// A prior is a starting belief, not a ledger: the resolved evidence the
+/// learner reads afterwards is what keeps counting.
+pub const MAX_REALIZED_DELIVERIES: u32 = 25;
 
 /// The default expected fans per dispatch when no data is available.
 /// A prior of 2.0 means the brain expects ~2 new fans per worker dispatch
@@ -510,6 +523,38 @@ impl CausalModel {
     #[must_use]
     pub fn with_expected_outcome(expected: f64) -> Self {
         Self::with_tenant_scale(expected, MEANINGFUL_EFFECT_THRESHOLD)
+    }
+
+    /// Starts from what this tenant's dispatches have actually produced.
+    ///
+    /// `delivered` is how many published, tracked dispatches the tenant has;
+    /// `attributed_fans` is how many currently-active fans trace to an
+    /// action's own tracked link. On 2026-10-03 production had 13 and 0 —
+    /// twenty active fans, every one the band's own or a direct invite — and
+    /// the brain still predicted two fans per dispatch, because that was the
+    /// only number it had been given.
+    ///
+    /// The prior mean is the posterior a Gamma(1, 0.5) belief reaches after
+    /// seeing that record: `(1 + fans) / (0.5 + deliveries)`. Thirteen
+    /// dispatches and no fans gives about 0.07 per dispatch, not 2.0. It stays
+    /// positive on purpose: `min_dispatches` breaks the cold start only while a
+    /// candidate has positive value, and a prior of exactly zero would stop the
+    /// brain acting and so stop it learning.
+    ///
+    /// Below [`MIN_REALIZED_DELIVERIES`] there is no record worth trusting and
+    /// the compiled-in prior stands.
+    #[must_use]
+    pub fn with_realized_yield(delivered: u32, attributed_fans: u32) -> Self {
+        if delivered < MIN_REALIZED_DELIVERIES {
+            return Self::default();
+        }
+        let delivered = f64::from(delivered.min(MAX_REALIZED_DELIVERIES));
+        // Cannot exceed what the dispatches could have produced as a rate the
+        // default already allows: a record richer than the default is a
+        // reason to believe the default, not to inflate past it.
+        let mean =
+            ((1.0 + f64::from(attributed_fans)) / (0.5 + delivered)).min(DEFAULT_EXPECTED_FANS);
+        Self::with_expected_outcome(mean)
     }
 
     /// Creates a causal model sized to the tenant it will judge.
