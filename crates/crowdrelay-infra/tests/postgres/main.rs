@@ -102,6 +102,7 @@ mod events;
 mod fan_demand;
 mod fan_identity;
 mod fan_lifecycle;
+mod fan_privacy_family;
 mod fan_privacy_unpublish;
 mod fan_prospect_actions;
 mod fan_prospects;
