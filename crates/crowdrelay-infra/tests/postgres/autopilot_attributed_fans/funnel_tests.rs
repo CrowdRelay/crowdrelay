@@ -268,5 +268,51 @@ async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
     .execute(&f.pool)
     .await
     .expect("return interest");
-    assert_eq!(control().await.expect("control"), None);
+    assert_eq!(
+        control().await.expect("control").map(|c| c.directive),
+        Some(OrganicFunnelDirective::MultiplyReferrals),
+        "a retained cohort with zero qualified referrals should hand control to multiplication"
+    );
+
+    let referred = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans(id,workspace_id,normalized_email,status)
+         VALUES($1,$2,$3,'active')",
+    )
+    .bind(referred)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("referred-{}@example.test", referred.simple()))
+    .execute(&f.pool)
+    .await
+    .expect("referred fan");
+    let referral_code: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO referral_codes(workspace_id,fan_id,code)
+         VALUES($1,$2,encode(gen_random_bytes(18),'hex'))
+         RETURNING id",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(old_fan)
+    .fetch_one(&f.pool)
+    .await
+    .expect("referral code");
+    sqlx::query(
+        "INSERT INTO referral_attributions(
+             workspace_id,referrer_fan_id,referred_fan_id,referral_code_id,
+             accepted_at,status,qualified_at
+         ) VALUES($1,$2,$3,$4,$5,'qualified',$5)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(old_fan)
+    .bind(referred)
+    .bind(referral_code)
+    .bind(f.now - time::Duration::hours(12))
+    .execute(&f.pool)
+    .await
+    .expect("qualified referral");
+
+    assert_eq!(
+        control().await.expect("control"),
+        None,
+        "one real qualified referral closes the multiplication zero"
+    );
 }
