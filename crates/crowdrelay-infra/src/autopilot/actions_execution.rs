@@ -53,6 +53,16 @@ impl PostgresAutopilotRepository {
                     template_key,
                     show,
                 } => {
+                    if template_key == CONFIRMATION_RECOVERY_TEMPLATE {
+                        confirmation_recovery::execute(
+                            &mut transaction,
+                            workspace_id,
+                            action.id,
+                            *fan_id,
+                            now,
+                        )
+                        .await?;
+                    } else {
                     ensure_marketing_eligible(&mut transaction, workspace_id, *fan_id).await?;
                     let fan = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
                         "SELECT normalized_email, display_name, locale FROM fans WHERE workspace_id=$1 AND id=$2 AND status='active' FOR SHARE",
@@ -260,6 +270,7 @@ impl PostgresAutopilotRepository {
                         }),
                     )
                     .await?;
+                    }
                 }
                 AutopilotActionPayload::RequestMerchReorder {
                     variant_id,
