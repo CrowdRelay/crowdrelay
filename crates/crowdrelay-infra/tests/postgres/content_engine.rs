@@ -737,14 +737,12 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     ))
     .fetch_one(&pool)
     .await?;
-    sqlx::query(
-        "UPDATE workspaces SET organization_id=$3 WHERE id IN ($1,$2)",
-    )
-    .bind(beneficiary.into_uuid())
-    .bind(audience_owner.into_uuid())
-    .bind(organization_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("UPDATE workspaces SET organization_id=$3 WHERE id IN ($1,$2)")
+        .bind(beneficiary.into_uuid())
+        .bind(audience_owner.into_uuid())
+        .bind(organization_id)
+        .execute(&pool)
+        .await?;
 
     sqlx::query(
         "INSERT INTO amplification_consents
@@ -920,13 +918,11 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
                 .distribution_promise
                 .get("peer_audience")
                 .is_none_or(|audience| {
-                    audience
-                        .as_array()
-                        .is_some_and(|items| {
-                            !items
-                                .iter()
-                                .any(|name| name.as_str() == Some(peer_name.as_str()))
-                        })
+                    audience.as_array().is_some_and(|items| {
+                        !items
+                            .iter()
+                            .any(|name| name.as_str() == Some(peer_name.as_str()))
+                    })
                 })
         }),
         "the research peer row itself must never become distribution authority"
