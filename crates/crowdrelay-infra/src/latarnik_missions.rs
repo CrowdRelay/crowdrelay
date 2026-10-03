@@ -79,7 +79,11 @@ pub async fn load_carriers(
                 history.last_offered_at,
                 history.has_open_mission,
                 (SELECT rc.code FROM referral_codes rc
-                  WHERE rc.workspace_id = fan.workspace_id AND rc.fan_id = fan.id AND rc.active
+                  WHERE rc.workspace_id = fan.workspace_id
+                    AND rc.fan_id IN (
+                        SELECT fan_id FROM canonical_fan_family(fan.workspace_id,fan.id)
+                    )
+                    AND rc.active
                   ORDER BY rc.created_at, rc.id LIMIT 1) AS referral_code,
                 history.offered_90d,
                 history.tapped_90d,
