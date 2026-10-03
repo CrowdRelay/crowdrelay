@@ -354,7 +354,6 @@ pub fn transition(from: ActionState, to: ActionState) -> Result<ActionState, Ill
 /// `outbox_event_to_evidence`) translate external state into this type.
 /// The canonical resolver (`resolve_observation` + `legal_transition`)
 /// consumes it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Whether a provider/outbox error proves the external side effect did not happen.
 ///
 /// Ambiguous transport failures are deliberately excluded: a timeout or lost
@@ -375,6 +374,7 @@ pub fn provider_delivery_failure_is_definitive(kind: &str) -> bool {
         || kind == "materialization_database"
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderDeliveryState {
     /// Delivery confirmed — the external side effect happened.
     /// (e.g. `community_posts.status = 'posted'`, outbox `delivered`.)
