@@ -27,6 +27,8 @@ pub struct HarvestedComment {
     pub id: String,
     /// `t3_…` (under the post) or `t1_…` (under a comment).
     pub parent_id: String,
+    /// Stable provider user/channel id when the API exposes one.
+    pub provider_author_id: Option<String>,
     pub author: String,
     pub body: String,
     /// Written by the band's own account.
@@ -170,6 +172,7 @@ mod tests {
         HarvestedComment {
             id: id.to_owned(),
             parent_id: parent.to_owned(),
+            provider_author_id: None,
             author: author.to_owned(),
             body: "what tuning is this?".to_owned(),
             by_band,
