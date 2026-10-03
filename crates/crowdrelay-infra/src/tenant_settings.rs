@@ -695,6 +695,44 @@ impl TenantSettingsRepository {
         }))
     }
 
+    /// Explicitly grants or revokes the narrow owned-Facebook autopost lane.
+    ///
+    /// Enabling intentionally replaces the platform list with exactly
+    /// `facebook`. A tenant that previously had `telegram` stored while the
+    /// master switch was off must not accidentally grant Telegram authority
+    /// when Facebook is enabled. Both rows commit together, so readers never
+    /// observe a half-grant.
+    pub async fn set_facebook_autopost_authority(
+        &self,
+        workspace_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        for (key, value) in [
+            (KEY_SOCIAL_AUTOPOST_PLATFORMS, "facebook"),
+            (KEY_SOCIAL_AUTO_POST, if enabled { "true" } else { "false" }),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO tenant_settings (workspace_id, key, value)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (workspace_id, key) DO UPDATE SET
+                    value = EXCLUDED.value, updated_at = now()
+                "#,
+            )
+            .bind(workspace_id)
+            .bind(key)
+            .bind(value)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        if let Ok(mut cache) = cache().write() {
+            cache.remove(&workspace_id);
+        }
+        Ok(())
+    }
+
     /// Upserts one override and drops the workspace's cache entry so the next
     /// read observes it without waiting out the TTL.
     pub async fn set_setting(
