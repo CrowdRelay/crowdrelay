@@ -324,6 +324,78 @@ async fn grounded_scout_candidate_lands_as_unverified_beacon() -> Result<()> {
     Ok(())
 }
 
+// ── Reject: a known band is not a generic creator ─────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn known_peer_band_cannot_enter_creator_short_form_lane() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    create_foreign_task_table(&pool).await?;
+
+    let ws = workspace(&pool).await?;
+    let city_id = city(&pool).await?;
+    let event_id = event(&pool, ws, city_id).await?;
+
+    // The shared act registry already knows this is a band. A model seeing
+    // its YouTube page must not reinterpret "has a channel" as "is a creator"
+    // and thereby unlock co_post / short_form_clip.
+    let peer_name = format!("Misscore {}", Uuid::now_v7().simple());
+    sqlx::query(
+        "INSERT INTO place_peer_acts (name_key, display_name)
+         VALUES (place_venue_key($1), $1)",
+    )
+    .bind(&peer_name)
+    .execute(&pool)
+    .await?;
+
+    let peer_evidence = json!({
+        "version": 1,
+        "urls": [{
+            "url": "https://radio-ostrow.pl/kontakt",
+            "tool": "web_search",
+            "snippet": "Public page for a known peer act.",
+            "fetched_at": "2026-10-01T12:00:00Z"
+        }],
+        "contacts": []
+    });
+    let task_id = scout_task(&pool, ws, SCOUT_TEMPLATE, event_id, peer_evidence).await?;
+    let outcome_id = insert_outcome(
+        &pool,
+        ws,
+        task_id,
+        json!({
+            "event_id": event_id,
+            "beacon_kind": "creator",
+            "display_name": peer_name,
+            "source_url": "https://radio-ostrow.pl/kontakt",
+            "why_fit": "has a YouTube channel"
+        }),
+    )
+    .await?;
+
+    worker(&pool, ws).run_once().await?;
+
+    let (status, reason) = outcome_status(&pool, outcome_id).await?;
+    ensure!(
+        status == "rejected",
+        "a known band must not enter the generic creator lane, got {status}"
+    );
+    ensure!(
+        reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("known peer act"),
+        "rejection must explain the role collision, got {reason:?}"
+    );
+    ensure!(
+        beacon_rows(&pool, ws).await?.is_empty(),
+        "rejected peer-as-creator must write no beacon"
+    );
+    Ok(())
+}
+
 // ── Reject: URLs the model was never shown ────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

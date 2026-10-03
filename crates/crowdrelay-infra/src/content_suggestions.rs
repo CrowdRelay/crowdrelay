@@ -80,12 +80,19 @@ struct HistoryRow {
 
 impl PostgresContentEngineRepository {
     /// What the promise can honestly name: admitted community names,
-    /// admitted-or-promoted press-route candidates, confirmed peers (a
-    /// collaboration's "other audience" is nameable), and fans reachable
-    /// under a marketing consent — the same `reachable_consented` the KPI
-    /// view computes. `fan_consents` is append-only, so the count reads
-    /// each fan's *latest* marketing row: a grant followed by a withdrawal
-    /// is not consent.
+    /// admitted-or-promoted press-route candidates, roster audiences that
+    /// have an ACTIVE amplification consent into this workspace and at least
+    /// one reachable fan today, and fans reachable under a marketing consent.
+    ///
+    /// A confirmed `peers` row is research, not distribution authority.
+    /// This distinction is load-bearing: observing a good band must never
+    /// become "promote their content" or "their audience will carry ours".
+    /// The only peer audience that counts as reach is an explicit, revocable,
+    /// capped portfolio edge in the direction peer -> this workspace.
+    ///
+    /// `fan_consents` is append-only, so both local and portfolio reach read
+    /// each fan's *latest* marketing row: a grant followed by a withdrawal is
+    /// not consent.
     async fn reach_snapshot(&self, workspace_id: WorkspaceId) -> Result<ReachSnapshot> {
         let row = sqlx::query_as::<_, ReachRow>(
             r#"
@@ -102,9 +109,59 @@ impl PostgresContentEngineRepository {
                    AND target_kind IN ('press','radio','media_patronage')
                 ) AS press_contacts,
                 COALESCE(
-                    (SELECT array_agg(name ORDER BY name)
-                     FROM peers
-                     WHERE workspace_id = $1 AND status = 'confirmed'),
+                    (
+                        SELECT array_agg(DISTINCT audience_owner.name ORDER BY audience_owner.name)
+                        FROM amplification_consents AS edge
+                        JOIN workspaces AS audience_owner
+                          ON audience_owner.id = edge.from_workspace_id
+                        WHERE edge.to_workspace_id = $1
+                          AND edge.status = 'active'
+                          -- Event crossbill consent is scoped to that event,
+                          -- not a standing right to use the act's audience for
+                          -- generic content ideas.
+                          AND edge.purpose IN ('cross_promote','release_feature')
+                          -- A spent monthly edge is not reach available now.
+                          AND (
+                              SELECT count(DISTINCT ledger.campaign_reference)
+                              FROM amplification_deliveries AS ledger
+                              WHERE ledger.consent_id = edge.id
+                                AND ledger.delivered_at >= date_trunc('month', now())
+                          ) < edge.max_campaigns_per_month
+                          -- Name the audience only when at least one fan could
+                          -- actually receive an amplification today. "Active
+                          -- edge, zero eligible humans" is measured zero reach,
+                          -- not a promise.
+                          AND EXISTS (
+                              SELECT 1
+                              FROM fans AS peer_fan
+                              WHERE peer_fan.workspace_id = edge.from_workspace_id
+                                AND peer_fan.status = 'active'
+                                AND EXISTS (
+                                    SELECT 1 FROM fan_consents AS consent
+                                    WHERE consent.workspace_id = peer_fan.workspace_id
+                                      AND consent.fan_id = peer_fan.id
+                                      AND consent.purpose = 'marketing'
+                                      AND consent.granted
+                                      AND consent.id = (
+                                          SELECT newest.id
+                                          FROM fan_consents AS newest
+                                          WHERE newest.workspace_id = peer_fan.workspace_id
+                                            AND newest.fan_id = peer_fan.id
+                                            AND newest.purpose = 'marketing'
+                                          ORDER BY newest.recorded_at DESC, newest.id DESC
+                                          LIMIT 1
+                                      )
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM amplification_deliveries AS recent
+                                    WHERE recent.consent_id = edge.id
+                                      AND recent.fan_id = peer_fan.id
+                                      AND recent.delivered_at >
+                                          now() - make_interval(days => edge.cooldown_days::int)
+                                )
+                          )
+                    ),
                     ARRAY[]::text[]
                 ) AS peers,
                 (SELECT count(*) FROM fans f

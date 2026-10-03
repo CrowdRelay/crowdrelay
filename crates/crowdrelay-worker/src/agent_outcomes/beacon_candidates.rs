@@ -169,6 +169,37 @@ async fn insert_beacon_candidate(
         .into());
     }
 
+    // "Creator" carries co-post/short-form asks. A band already known to the
+    // peer registry is a scene relationship, not a generic creator merely
+    // because it has a YouTube channel. Bill-mate seeds already arrive as
+    // scene_partner; this guard catches model/source misclassification and
+    // prevents the exact class of "promote another band's Short" tasks.
+    if kind == "creator" {
+        let known_peer = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM peers
+                WHERE workspace_id=$1
+                  AND place_venue_key(name)=place_venue_key($2)
+                UNION ALL
+                SELECT 1 FROM place_peer_acts
+                WHERE name_key=place_venue_key($2)
+            )
+            "#,
+        )
+        .bind(outcome.workspace_id)
+        .bind(display_name)
+        .fetch_one(&mut **tx)
+        .await?;
+        if known_peer {
+            return Err(OutcomeRejection::UngroundedBeaconCandidate {
+                reason: "known peer act cannot be classified as generic creator; use scene_partner/cross-promotion consent"
+                    .to_owned(),
+            }
+            .into());
+        }
+    }
+
     let urls = evidence_urls(task_metadata);
     let contacts = evidence_contacts(task_metadata);
 
