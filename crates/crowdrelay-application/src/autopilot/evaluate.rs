@@ -493,11 +493,7 @@ where
                     if !matches!(policy.config, AutopilotPolicyConfig::ContentSupply(_)) {
                         continue;
                     }
-                    // Admitted communities — and the push audience the
-                    // approval will quote — are loaded once, and only when a
-                    // fresh synced post could be relayed or a fresh drop
-                    // could surge — a cycle with neither owes either read
-                    // nothing.
+                    // Load relay targets only when fresh material can actually fan out.
                     let domain_policy = match &policy.config {
                         AutopilotPolicyConfig::ContentSupply(config) => Some(*config),
                         _ => None,
