@@ -161,8 +161,7 @@ async fn only_terminal_failed_confirmation_delivery_is_auto_recoverable() {
     )
     .await;
 
-    let (pending_fan, _) =
-        seed_pending_attributed_fan(&f, "pending-confirmation", acquired).await;
+    let (pending_fan, _) = seed_pending_attributed_fan(&f, "pending-confirmation", acquired).await;
     let pending_event =
         confirmation_event(&f, pending_fan, acquired + time::Duration::hours(1)).await;
     delivery(
@@ -186,13 +185,7 @@ async fn only_terminal_failed_confirmation_delivery_is_auto_recoverable() {
         acquired + time::Duration::hours(2),
     )
     .await;
-    marketing_consent(
-        &f,
-        withdrawn_fan,
-        false,
-        f.now - time::Duration::hours(2),
-    )
-    .await;
+    marketing_consent(&f, withdrawn_fan, false, f.now - time::Duration::hours(2)).await;
 
     let recoverable = crowdrelay_infra::organic_funnel::confirmation_recovery_snapshots(
         &f.pool,
@@ -217,14 +210,7 @@ async fn autonomous_confirmation_recovery_is_bounded_to_once_per_acquisition() {
     let ep = endpoint(&f, "bounded").await;
     let (fan, _) = seed_pending_attributed_fan(&f, "bounded-confirmation", acquired).await;
     let failed = confirmation_event(&f, fan, acquired + time::Duration::hours(1)).await;
-    delivery(
-        &f,
-        failed,
-        ep,
-        "dead",
-        acquired + time::Duration::hours(2),
-    )
-    .await;
+    delivery(&f, failed, ep, "dead", acquired + time::Duration::hours(2)).await;
 
     assert_eq!(
         crowdrelay_infra::organic_funnel::confirmation_recovery_snapshots(
@@ -274,7 +260,6 @@ async fn autonomous_confirmation_recovery_is_bounded_to_once_per_acquisition() {
         "one autonomous retry owns the acquisition episode even if its delivery later fails"
     );
 }
-
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
@@ -374,11 +359,10 @@ async fn recovery_execution_mints_one_action_owned_confirmation_without_fake_gro
         .execute_action(f.workspace_id, action, f.now)
         .await?;
 
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id=$1")
-            .bind(action_id)
-            .fetch_one(&f.pool)
-            .await?;
+    let status: String = sqlx::query_scalar("SELECT status FROM autopilot_actions WHERE id=$1")
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await?;
     assert_eq!(status, "succeeded");
 
     let emitted: Vec<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
