@@ -268,6 +268,87 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
     Ok(())
 }
 
+/// A join ask is special among first-party actions: dispatch succeeds only
+/// because the in-process social executor now has an instruction to claim.
+/// It is not publication. The learning envelope may exist, but no publication
+/// outcome or click/fan measurement may exist until a provider receipt lands.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_join_ask_dispatch_is_not_publication_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let f = setup().await?;
+    let now = OffsetDateTime::now_utc();
+    let action_id = seed_outcome_action(
+        &f,
+        "social.join_ask.publish",
+        json!({
+            "kind": "publish_join_ask",
+            "platform": "facebook",
+            "variant_index": 0,
+            "text": "Join for updates.",
+            "cta_url": "https://band.example/signal?utm_source=facebook",
+            "image_url": null
+        }),
+        now,
+    )
+    .await?;
+
+    let claimed = f
+        .repository
+        .claim_due_autonomous_actions(f.workspace_id, 8, now)
+        .await?;
+    let action = claimed
+        .iter()
+        .find(|a| a.id.into_uuid() == action_id)
+        .expect("the queued join ask must be claimable");
+    f.repository
+        .execute_action(f.workspace_id, action, now)
+        .await?;
+
+    let (outcomes, measurements, prediction, evidence) =
+        sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT
+               (SELECT count(*)::bigint FROM autopilot_outcomes
+                WHERE workspace_id=$1 AND action_id=$2
+                  AND metric_key='join_ask_published'),
+               (SELECT count(*)::bigint FROM autopilot_measurements
+                WHERE workspace_id=$1 AND action_id=$2
+                  AND measurement_kind IN
+                    ('content_link_clicks_7d','content_fan_acquisition_7d')),
+               (SELECT count(*)::bigint FROM dispatch_predictions
+                WHERE workspace_id=$1 AND action_id=$2),
+               (SELECT count(*)::bigint FROM growth_evidence
+                WHERE workspace_id=$1 AND action_id=$2)"
+        )
+        .bind(f.workspace_id.into_uuid())
+        .bind(action_id)
+        .fetch_one(&f.pool)
+        .await?;
+
+    assert_eq!(
+        (outcomes, measurements),
+        (0, 0),
+        "instruction dispatch must not masquerade as provider publication"
+    );
+    assert_eq!(
+        (prediction, evidence),
+        (1, 1),
+        "the action keeps its learning envelope while its outcome waits for publication"
+    );
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM autopilot_actions WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(
+        status, "succeeded",
+        "the instruction itself executed; only publication evidence is deferred"
+    );
+    Ok(())
+}
+
 /// An action whose work only counts when the executor reports back must not
 /// leave dispatch with evidence — the envelope belongs to the receipt.
 #[tokio::test]
