@@ -93,18 +93,24 @@ async fn delivery(
             .await
             .expect("delivered route");
         }
-        "dead" => {
+        "dead" | "ambiguous_dead" => {
+            let error_kind = if status == "dead" {
+                "http_permanent_status"
+            } else {
+                "transport_timeout"
+            };
             sqlx::query(
                 "INSERT INTO webhook_deliveries
                    (id,workspace_id,outbox_event_id,endpoint_id,status,max_attempts,
                     attempt_count,created_at,updated_at,dead_at,last_error_kind)
-                 VALUES($1,$2,$3,$4,'dead',3,3,$5,$5,$5,'http_permanent_status')",
+                 VALUES($1,$2,$3,$4,'dead',3,3,$5,$5,$5,$6)",
             )
             .bind(id)
             .bind(f.workspace_id.into_uuid())
             .bind(event)
             .bind(endpoint_id)
             .bind(occurred_at)
+            .bind(error_kind)
             .execute(&f.pool)
             .await
             .expect("dead route");
@@ -169,6 +175,46 @@ async fn only_terminal_failed_confirmation_delivery_is_auto_recoverable() {
         pending_event,
         ep,
         "pending",
+        acquired + time::Duration::hours(2),
+    )
+    .await;
+
+
+    // A transport timeout is not proof the provider rejected the message.
+    // It may have accepted the mail before the acknowledgement was lost, so
+    // rotating the confirmation token here could invalidate the real email
+    // sitting in the person's inbox.
+    let (ambiguous_event_fan, _) =
+        seed_pending_attributed_fan(&f, "ambiguous-event-confirmation", acquired).await;
+    let ambiguous_event = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outbox_events
+           (id,workspace_id,event_type,event_version,payload,status,
+            request_id,created_at,updated_at,dead_at,last_error_kind)
+         VALUES($1,$2,'fan.confirmation_requested',1,$3,'dead',
+                $4,$5,$5,$5,'transport_timeout')",
+    )
+    .bind(ambiguous_event)
+    .bind(f.workspace_id.into_uuid())
+    .bind(serde_json::json!({
+        "fan_id": ambiguous_event_fan,
+        "confirmation_token": "possibly-delivered"
+    }))
+    .bind(format!("confirmation-{ambiguous_event}"))
+    .bind(acquired + time::Duration::hours(1))
+    .execute(&f.pool)
+    .await
+    .expect("ambiguous dead event");
+
+    let (ambiguous_delivery_fan, _) =
+        seed_pending_attributed_fan(&f, "ambiguous-delivery-confirmation", acquired).await;
+    let ambiguous_delivery_event =
+        confirmation_event(&f, ambiguous_delivery_fan, acquired + time::Duration::hours(1)).await;
+    delivery(
+        &f,
+        ambiguous_delivery_event,
+        ep,
+        "ambiguous_dead",
         acquired + time::Duration::hours(2),
     )
     .await;
