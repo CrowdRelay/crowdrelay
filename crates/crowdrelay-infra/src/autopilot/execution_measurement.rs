@@ -116,39 +116,3 @@ fn wave_reply_measurement(
 }
 
 
-/// New Signal installs in the `days` before `now`, counted exactly the way
-/// the install observers count the window after it: active, not
-/// invalidated, created inside the window.
-///
-/// The install measurements compare two windows of the same width. The
-/// agent-run arm used to pass the standing install total instead, so the
-/// comparison was "installs this week" against "installs ever": with three
-/// endpoints on record every dispatch that added none read −100%, and one
-/// that added two still read −33%. Production scored 43 of 87 worsened
-/// outcomes that way in the week to 2026-09-27. The Signal push arm had the
-/// same fault in a smaller form — its one-day checkpoint was compared
-/// against a seven-day pre-window.
-async fn pre_action_signal_installs(
-    transaction: &mut Transaction<'_, Postgres>,
-    workspace_id: WorkspaceId,
-    now: OffsetDateTime,
-    days: i32,
-) -> Result<f64, RepositoryError> {
-    sqlx::query_scalar::<_, f64>(
-        r#"
-        SELECT COUNT(*)::double precision
-        FROM fan_push_endpoints
-        WHERE workspace_id = $1
-          AND active = true
-          AND invalidated_at IS NULL
-          AND created_at >= $2::timestamptz - make_interval(days => $3)
-          AND created_at < $2::timestamptz
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(now)
-    .bind(days)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(map_sqlx)
-}
