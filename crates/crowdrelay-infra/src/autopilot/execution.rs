@@ -266,6 +266,11 @@ pub(super) async fn schedule_effect_measurement(
             // whether anybody uses it is measured as a qualified referral
             // against the fan, not against the act of minting it.
         }
+        AutopilotActionPayload::OfferLatarnikMission { .. } => {
+            // The mission writer owns its own action-linked Smart Link. Its
+            // click/fan truth is read from the canonical acquisition ledger;
+            // do not invent a generic fan-growth window at offer time.
+        }
         AutopilotActionPayload::RaiseGrowthDebt { .. } => {
             // Same reasoning as the raised growth opportunity above, one step
             // further: debt is measured by the work getting done, and the
