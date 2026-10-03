@@ -11,7 +11,7 @@ use crowdrelay_domain::{
 };
 use crowdrelay_infra::{
     fan_prospects::{ObservedPerson, TouchKind, TouchReceipt, observe, record_touch},
-    scout_lane::{Breach, breaches, halted},
+    scout_lane::{Breach, acknowledge, breaches, halted},
 };
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
@@ -256,5 +256,143 @@ async fn a_clean_lane_shows_no_breach_and_each_breach_is_seen_alone() -> Result<
     // Another tenant's lane is not this tenant's.
     let other = workspace(&pool).await?;
     ensure!(breaches(&pool, other.into_uuid()).await?.is_empty());
+    Ok(())
+}
+
+/// The halt is cleared by a person who looked, with a reason — and only for what
+/// they looked at. The same fault recurring after the acknowledgement halts the
+/// lane again at once; a different kind of breach is untouched by it.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_person_clears_a_halt_with_a_reason_and_a_recurrence_halts_again() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let now = OffsetDateTime::now_utc();
+    let ws = workspace(&pool).await?;
+    let w = ws.into_uuid();
+
+    // Two voices four minutes apart (the 2026-10-03 production halt: the owner's
+    // own account answered twice while testing).
+    let tester = prospect(&pool, ws, "tester").await?;
+    touch(
+        &pool,
+        ws,
+        tester,
+        TouchKind::Engage,
+        None,
+        now - Duration::hours(20),
+    )
+    .await?;
+    touch(
+        &pool,
+        ws,
+        tester,
+        TouchKind::Engage,
+        None,
+        now - Duration::hours(20) + Duration::minutes(4),
+    )
+    .await?;
+    ensure!(breaches(&pool, w).await? == [Breach::OverRate]);
+    ensure!(halted(&pool, w).await.is_some());
+
+    // An empty reason is refused by the schema: an acknowledgement is a reason.
+    ensure!(
+        acknowledge(&pool, w, Breach::OverRate, "owner", "  ")
+            .await
+            .is_err()
+    );
+    ensure!(
+        halted(&pool, w).await.is_some(),
+        "a refused acknowledgement clears nothing"
+    );
+
+    // A person looks and says why it is safe: the halt clears.
+    acknowledge(
+        &pool,
+        w,
+        Breach::OverRate,
+        "owner",
+        "both replies were my own test comments",
+    )
+    .await?;
+    ensure!(breaches(&pool, w).await?.is_empty());
+    ensure!(halted(&pool, w).await.is_none());
+
+    // The same fault recurring afterwards halts the lane again, at once.
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let again = prospect(&pool, ws, "repeat_fan").await?;
+    touch(
+        &pool,
+        ws,
+        again,
+        TouchKind::Engage,
+        None,
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    touch(
+        &pool,
+        ws,
+        again,
+        TouchKind::Engage,
+        None,
+        OffsetDateTime::now_utc(),
+    )
+    .await?;
+    ensure!(
+        breaches(&pool, w).await? == [Breach::OverRate],
+        "a new breach after the acknowledgement"
+    );
+
+    // An acknowledgement of one kind says nothing about another, and another
+    // tenant's acknowledgement says nothing about this one.
+    let refused = prospect(&pool, ws, "grumpy").await?;
+    sqlx::query(
+        "UPDATE fan_prospects SET status='refused', status_reason='asked to stop', updated_at=$3
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(w)
+    .bind(refused)
+    .bind(now - Duration::days(1))
+    .execute(&pool)
+    .await?;
+    touch(
+        &pool,
+        ws,
+        refused,
+        TouchKind::Engage,
+        None,
+        now - Duration::minutes(10),
+    )
+    .await?;
+    ensure!(
+        breaches(&pool, w).await? == [Breach::ContactedAfterNo, Breach::OverRate],
+        "{:?}",
+        breaches(&pool, w).await?
+    );
+    acknowledge(
+        &pool,
+        w,
+        Breach::OverRate,
+        "owner",
+        "reviewed the second pair",
+    )
+    .await?;
+    ensure!(
+        breaches(&pool, w).await? == [Breach::ContactedAfterNo],
+        "only the kind that was reviewed"
+    );
+    let other = workspace(&pool).await?;
+    acknowledge(
+        &pool,
+        other.into_uuid(),
+        Breach::ContactedAfterNo,
+        "owner",
+        "someone else's lane",
+    )
+    .await?;
+    ensure!(
+        breaches(&pool, w).await? == [Breach::ContactedAfterNo],
+        "not another tenant's decision"
+    );
     Ok(())
 }

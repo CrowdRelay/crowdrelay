@@ -1257,6 +1257,7 @@ pub(super) fn application_routes(state: AppState) -> Router {
         .merge(viral_coefficient_routes::control_plane_routes())
         .merge(latarnik_routes::control_plane_routes())
         .merge(lane_ledger_routes::control_plane_routes())
+        .merge(scout_lane_routes::control_plane_routes())
         .merge(fan_demand_routes::control_plane_routes())
         .merge(content_engine::admin_routes())
         .merge(portfolio::admin_routes())

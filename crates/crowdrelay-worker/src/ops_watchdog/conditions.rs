@@ -875,7 +875,8 @@ fn conditions(snapshot: &OpsSnapshot, posture: PublishingPosture) -> Vec<Conditi
                            prospect's refusal (fan_prospect_touches joined to \
                            fan_prospects where touched_at > updated_at), confirm \
                            which sender made it, and fix that path before the \
-                           30-day window lets the lane resume.",
+                           30-day window lets the lane resume, then acknowledge it with a reason \
+                           (POST /v1/control-plane/growth/scout-lane/acknowledge).",
             }),
         },
         Condition {
