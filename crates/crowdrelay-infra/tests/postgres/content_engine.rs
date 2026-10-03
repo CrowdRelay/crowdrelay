@@ -734,6 +734,74 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     .execute(&pool)
     .await?;
 
+    // The visible task is not only the suggestion row: Autopilot already
+    // materialised its approval action and handed it to a crew member. The
+    // self-heal must retract that whole active chain while keeping the
+    // immutable decision for audit.
+    let stale_decision = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_decisions (
+             id, workspace_id, decision_key, context, subject_kind, subject_id,
+             decision_kind, confidence_basis_points, disposition, reason,
+             input_snapshot, policy_snapshot, recommendation, trace_id
+         ) VALUES (
+             $1,$2,$3,'content_strategy','content_suggestion',$4,
+             'raise_content_suggestion',9000,'require_approval',
+             'legacy peer-is-reach shortcut','{}','{}','{}',$1
+         )",
+    )
+    .bind(stale_decision)
+    .bind(beneficiary.into_uuid())
+    .bind(format!("legacy-peer-task-{stale_task}"))
+    .bind(stale_task)
+    .execute(&pool)
+    .await?;
+    let stale_action = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autopilot_actions (
+             id, workspace_id, decision_id, context, action_kind,
+             subject_kind, subject_id, idempotency_key, payload, status,
+             approval_expires_at
+         ) VALUES (
+             $1,$2,$3,'content_strategy','content.suggestion.raise',
+             'content_suggestion',$4,$5,$6,'awaiting_approval',
+             now()+interval '7 days'
+         )",
+    )
+    .bind(stale_action)
+    .bind(beneficiary.into_uuid())
+    .bind(stale_decision)
+    .bind(stale_task)
+    .bind(format!("legacy-peer-action-{stale_action}"))
+    .bind(json!({
+        "kind": "raise_content_suggestion",
+        "suggestion_id": stale_task,
+        "format_key": "peer_cover",
+        "concept": "Promote Misscore Short on YouTube",
+        "reason": "legacy peer-is-reach shortcut",
+        "distribution_promise": {"peer_audience": ["Misscore"]}
+    }))
+    .execute(&pool)
+    .await?;
+    let stale_assignment = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO team_assignments (
+             id, workspace_id, action_id, source_kind, source_id, source_ref,
+             assignee_member_id, required_skill, status, due_at,
+             next_reminder_at
+         ) VALUES (
+             $1,$2,$3,'autopilot_action',$4,NULL,$5,'video','open',
+             now()+interval '7 days',now()+interval '1 day'
+         )",
+    )
+    .bind(stale_assignment)
+    .bind(beneficiary.into_uuid())
+    .bind(stale_action)
+    .bind(stale_task)
+    .bind(member_id)
+    .execute(&pool)
+    .await?;
+
     let today = time::OffsetDateTime::now_utc().date();
     let without_consent = repo.refresh_suggestions(beneficiary, today).await?;
     assert!(
@@ -757,6 +825,48 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
         stale_reason.as_deref(),
         Some("peer audience is no longer an executable consented route"),
         "the existing nonsense task must self-retire instead of staying in the operator queue"
+    );
+    let (action_status, action_error): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, last_error_kind
+         FROM autopilot_actions
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_action)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (action_status.as_str(), action_error.as_deref()),
+        ("cancelled", Some("peer_reach_unavailable")),
+        "the already-materialised approval task must disappear with its invalid subject"
+    );
+    let assignment_state: (String, Option<time::OffsetDateTime>) = sqlx::query_as(
+        "SELECT status, next_reminder_at
+         FROM team_assignments
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_assignment)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(assignment_state.0, "cancelled");
+    assert!(
+        assignment_state.1.is_none(),
+        "a cancelled nonsense task must not keep reminding a crew member"
+    );
+    let decision_still_there: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM autopilot_decisions
+             WHERE workspace_id=$1 AND id=$2
+         )",
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_decision)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        decision_still_there,
+        "the bad decision stays as audit evidence; only active work is retracted"
     );
 
     // A co-bill consent is event-scoped. It must not silently become standing
