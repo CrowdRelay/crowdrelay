@@ -392,7 +392,8 @@ async fn reddit_send_ignores_owned_replies(pool: &PgPool) -> Result<()> {
     .context("insert approved reddit reply")?;
 
     // A live send lane (write switch on, manual mode off) against a dead
-    // agents service: the claim must run, the send fails, the row defers.
+    // agents service: the claim runs, but once the external send was attempted
+    // a lost response is UNKNOWN. It must never return to the resend queue.
     let worker = worker(pool, ws, false, "http://127.0.0.1:1")?;
     worker.run_reply_lane().await?;
 
@@ -407,8 +408,8 @@ async fn reddit_send_ignores_owned_replies(pool: &PgPool) -> Result<()> {
          reply should have been claimed (attempts=1), got attempts={attempts}"
     );
     ensure!(
-        status == "approved",
-        "a deferred send returns to approved, got {status}"
+        status == "unknown",
+        "confirmation loss must leave the send unknown, never approved for retry; got {status}"
     );
     Ok(())
 }
