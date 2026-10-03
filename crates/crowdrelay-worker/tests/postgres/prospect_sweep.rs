@@ -45,12 +45,18 @@ async fn comment(
     days_ago: i64,
 ) -> Result<Uuid> {
     let id = Uuid::now_v7();
+    let provider_author_id = (!author.chars().any(char::is_whitespace)).then(|| {
+        format!(
+            "provider-{}",
+            author.trim().trim_start_matches('@').to_lowercase()
+        )
+    });
     sqlx::query(
         "INSERT INTO community_comments
              (id, workspace_id, platform_comment_id, parent_id, author, body, status, platform,
-              content_source_id, created_at, provider_observed_at)
+              content_source_id, created_at, provider_observed_at, provider_author_id)
          VALUES ($1,$2,$3,'18088912784228243',$4,$5,'skipped',$6,$7,
-                 now() - make_interval(days => $8::int), now())",
+                 now() - make_interval(days => $8::int), now(), $9)",
     )
     .bind(id)
     .bind(ws.into_uuid())
@@ -60,6 +66,7 @@ async fn comment(
     .bind(platform)
     .bind(source)
     .bind(i32::try_from(days_ago)?)
+    .bind(provider_author_id)
     .execute(pool)
     .await
     .context("insert comment")?;
@@ -101,6 +108,79 @@ async fn storage_row_without_provider_receipt_never_becomes_a_prospect() -> Resu
             .fetch_one(&pool)
             .await?;
     ensure!(prospects == 0, "synthetic discovery leaked into FAN SCOUT");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn stable_provider_id_survives_handle_rename_and_missing_id_fails_closed() -> Result<()> {
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let source = video(&pool, ws).await?;
+    let stable = "17841400000012345";
+
+    for (author, comment_id, body) in [
+        ("old_handle", "178900000000001", "Kiedy koncert?"),
+        ("new_handle", "178900000000002", "Świetny numer"),
+    ] {
+        sqlx::query(
+            "INSERT INTO community_comments(
+                 workspace_id,platform_comment_id,parent_id,author,body,status,platform,
+                 content_source_id,provider_observed_at,provider_author_id
+             ) VALUES(
+                 $1,$2,'17841400000000000',$3,$4,'skipped','instagram',$5,now(),$6
+             )",
+        )
+        .bind(ws.into_uuid())
+        .bind(comment_id)
+        .bind(author)
+        .bind(body)
+        .bind(source)
+        .bind(stable)
+        .execute(&pool)
+        .await?;
+    }
+    // A Facebook display name with no stable Graph id is not an identity.
+    sqlx::query(
+        "INSERT INTO community_comments(
+             workspace_id,platform_comment_id,parent_id,author,body,status,platform,
+             content_source_id,provider_observed_at
+         ) VALUES(
+             $1,'178900000000003','17841400000000000','John Smith',
+             'Love this','skipped','facebook',$2,now()
+         )",
+    )
+    .bind(ws.into_uuid())
+    .bind(source)
+    .execute(&pool)
+    .await?;
+
+    let sweep = ProspectSweep::new(pool.clone(), ws, Duration::from_secs(10));
+    let report = sweep.run_once(OffsetDateTime::now_utc()).await?;
+    ensure!(
+        report.created == 1 && report.appended == 1 && report.not_an_identity == 1,
+        "stable id must own the person, display-only Facebook must fail closed: {report:?}"
+    );
+    let people: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM persons WHERE workspace_id=$1")
+            .bind(ws.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    ensure!(people == 1, "rename created a second person: {people}");
+    let aliases: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind,value FROM person_identities
+         WHERE workspace_id=$1
+         ORDER BY kind,value",
+    )
+    .bind(ws.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    ensure!(
+        aliases.iter().any(|(k,v)| k=="platform_user_id" && v==stable)
+            && aliases.iter().any(|(k,v)| k=="platform_handle" && v=="old_handle")
+            && aliases.iter().any(|(k,v)| k=="platform_handle" && v=="new_handle"),
+        "stable identity did not retain both public aliases: {aliases:?}"
+    );
     Ok(())
 }
 
@@ -163,6 +243,7 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 appended: 1,
                 already_known: 0,
                 not_collected: 0,
+                unverified_source: 0,
                 excluded_identity: 0,
                 not_an_identity: 1,
                 own_accounts: 0,
@@ -181,6 +262,7 @@ async fn commenters_become_prospects_once_and_a_no_stays_a_no() -> Result<()> {
                 appended: 0,
                 already_known: 3,
                 not_collected: 0,
+                unverified_source: 0,
                 excluded_identity: 0,
                 not_an_identity: 1,
                 own_accounts: 0,
