@@ -11,7 +11,7 @@
             repository_port,
             WorkspaceId::new(),
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
 
         let response = app
@@ -52,7 +52,7 @@
             repository,
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
         )?)?;
 
         let redirect = app
@@ -181,7 +181,7 @@
             repository,
             workspace_id,
             Arc::new(RedirectCache::new()),
-            Arc::new(|_event| {}),
+            Arc::new(|_event| Box::pin(async { ClickSubmission::Accepted })),
             event_state_with_cache(workspace_id, cache),
             None,
         )?)?;
