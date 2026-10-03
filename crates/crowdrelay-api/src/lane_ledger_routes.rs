@@ -13,7 +13,7 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use crowdrelay_domain::lane_ledger::verdict;
 use serde::Deserialize;
@@ -27,6 +27,10 @@ pub(super) fn control_plane_routes() -> axum::Router<crate::AppState> {
     axum::Router::new()
         .route("/v1/control-plane/growth/lanes", get(list))
         .route("/v1/control-plane/growth/readiness", get(readiness))
+        .route(
+            "/v1/control-plane/growth/facebook-authority",
+            post(set_facebook_authority),
+        )
 }
 
 /// Can this tenant acquire fans on its own, and if not, what is the one
@@ -44,6 +48,80 @@ async fn readiness(State(state): State<crate::AppState>, headers: HeaderMap) -> 
         Err(error) => {
             tracing::warn!(%error, "day-zero readiness read failed");
             Problem::service_unavailable(request_id(&headers)).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FacebookAuthorityRequest {
+    enabled: bool,
+}
+
+/// Explicit owner handoff for exactly one owned public rail.
+///
+/// This endpoint never changes the deployment kill switch and never grants a
+/// community/Reddit/Discord capability. Enabling is refused unless the running
+/// worker reports its social publisher on and Facebook's connection is
+/// currently connected + working with the other Day-0 prerequisites present.
+async fn set_facebook_authority(
+    State(state): State<crate::AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<FacebookAuthorityRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let rid = request_id(&headers);
+    let Ok(Json(request)) = payload else {
+        return Problem::bad_request(rid).private().into_response();
+    };
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+
+    if request.enabled {
+        let facts = match crowdrelay_infra::lane_ledger::day_zero_facts(
+            &state.database,
+            workspace_id,
+        )
+        .await
+        {
+            Ok(facts) => facts,
+            Err(error) => {
+                tracing::warn!(%error, "facebook authority precondition read failed");
+                return Problem::service_unavailable(rid).private().into_response();
+            }
+        };
+        if !facts.facebook_authority_grantable() {
+            return Problem::conflict_because(
+                "Facebook autopost authority was not granted: the signup/copy/fresh-content prerequisites, a connected working Facebook rail, and the worker-reported CROWDRELAY_SOCIAL_AUTO_POST deployment gate must all be ready first.",
+                rid,
+            )
+            .private()
+            .into_response();
+        }
+    }
+
+    let settings = crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(
+        state.database.clone(),
+    );
+    if let Err(error) = settings
+        .set_facebook_autopost_authority(workspace_id, request.enabled)
+        .await
+    {
+        tracing::warn!(%error, "facebook authority update failed");
+        return Problem::service_unavailable(rid).private().into_response();
+    }
+
+    match crowdrelay_infra::lane_ledger::day_zero_facts(&state.database, workspace_id).await {
+        Ok(facts) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(json!({
+                "facebook_authority": if request.enabled { "granted" } else { "revoked" },
+                "readiness": facts.assess(),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "facebook authority post-write readiness read failed");
+            Problem::service_unavailable(rid).private().into_response()
         }
     }
 }
