@@ -874,6 +874,28 @@ mod postgres_tests {
         crowdrelay_infra::database::MIGRATOR.run(&pool).await?;
 
         let workspace_id = Uuid::now_v7();
+
+        // The suite shares one migrated database, so earlier proofs can leave
+        // claimable outbox work behind — and both claims under test are global
+        // FIFO. Retire every other workspace's leftovers in place rather than
+        // deleting: attempts and payloads hang off these rows by foreign key.
+        sqlx::query(
+            "UPDATE webhook_deliveries SET status='dead', dead_at=now(), \
+             locked_at=NULL, lock_owner=NULL, lease_expires_at=NULL \
+             WHERE status IN ('pending','processing') AND workspace_id <> $1",
+        )
+        .bind(workspace_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "UPDATE outbox_events SET status='dead', dead_at=now(), \
+             locked_at=NULL, lock_owner=NULL, lease_expires_at=NULL \
+             WHERE status IN ('pending','processing') AND workspace_id <> $1",
+        )
+        .bind(workspace_id)
+        .execute(&pool)
+        .await?;
+
         let endpoint_id = Uuid::now_v7();
         let inactive_endpoint_id = Uuid::now_v7();
         let event_id = Uuid::now_v7();
