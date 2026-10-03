@@ -54,6 +54,7 @@ impl AutopilotActionPayload {
             Self::RaiseDeclineAdvisory { .. } => "community.decline.advisory",
             Self::RaiseGrowthDebt { .. } => "growth.debt.raise",
             Self::IssueReferralCode { .. } => "referral.code.issue",
+            Self::OfferLatarnikMission { .. } => "latarnik.mission.offer",
             Self::RaiseContentSuggestion { .. } => "content.suggestion.raise",
             Self::RaiseContentArc { .. } => "content.arc.raise",
             Self::RunPlayStep { .. } => "play.step.run",

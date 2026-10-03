@@ -52,6 +52,10 @@ KNOWN_UNMEASURED = {
     "EscalateShowTask",
     "IssueCounterpartyReport",
     "IssueReferralCode",
+    # The mission's outcome is already the action-owned tracked click followed
+    # by a confirmed referral conversion. A generic time-window measurement at
+    # offer time would duplicate that canonical evidence.
+    "OfferLatarnikMission",
     "PrepareFundingPackage",
     "RaiseContentArc",
     "RaiseContentSuggestion",
