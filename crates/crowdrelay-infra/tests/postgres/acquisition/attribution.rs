@@ -707,6 +707,119 @@ async fn a_replayed_signup_writes_one_last_click_conversion()
 /// leaving a real CrowdRelay-acquired fan classified as direct forever.
 #[tokio::test]
 #[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
+async fn a_delayed_preview_click_cannot_manufacture_a_published_conversion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_config) = attribution_pool().await?;
+    let suffix = Uuid::now_v7().simple().to_string();
+    let (workspace_id, workspace_slug, city_slug, campaign_id, link_a, _) =
+        seed_attribution_scope(&pool, &suffix).await?;
+    let slug = format!("link-a-{suffix}");
+
+    // A post ledger row exists, but the provider never returned an id/url.
+    // This is precisely the dangerous shape: the model/executor prepared a
+    // public action and a preview can see its link, but nothing went live.
+    let _action = seed_action_and_post(&pool, workspace_id, link_a, &slug, false).await?;
+
+    let visitor_id = VisitorId::new();
+    let clicked_at = OffsetDateTime::now_utc();
+    let resolved = ResolvedSmartLink::new(
+        link_a,
+        workspace_id,
+        Some(campaign_id),
+        SmartLinkSlug::parse(&slug)?,
+        DestinationUrl::parse("https://example.test")?,
+        1,
+        Some("reddit".to_owned()),
+        Some("r/attrtest".to_owned()),
+    )?;
+    let delayed_click = ClickEvent::from_link(
+        &resolved,
+        Some(visitor_id),
+        Some("preview.example.test".to_owned()),
+        clicked_at,
+    )?;
+
+    // Signup wins the race, then the buffered preview click arrives.
+    let fan_id = signup_fan(
+        &pool,
+        &database_config,
+        workspace_id,
+        &workspace_slug,
+        &city_slug,
+        campaign_id,
+        visitor_id,
+        &format!("{suffix}-preview"),
+    )
+    .await?;
+
+    let repository = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug,
+        CountryCode::parse("PL")?,
+        &database_config,
+        false,
+        test_sensitive_response_codec(),
+    );
+    repository
+        .persist_click_batch(std::slice::from_ref(&delayed_click))
+        .await?;
+
+    let raw_clicks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM click_events
+         WHERE workspace_id=$1 AND anonymous_visitor_id=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(Into::<Uuid>::into(visitor_id))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(raw_clicks, 1, "the human click itself is still a real raw fact");
+
+    let credited: (i64, i64) = sqlx::query_as(
+        "SELECT
+           count(*) FILTER (
+             WHERE event_kind='conversion'
+               AND attribution_method='last_tracked_click'
+           )::bigint,
+           count(*) FILTER (
+             WHERE event_kind='interaction'
+               AND attribution_method='tracked_click'
+           )::bigint
+         FROM fan_provenance_events
+         WHERE workspace_id=$1
+           AND (fan_id=$2 OR anonymous_visitor_id=$3)",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid())
+    .bind(Into::<Uuid>::into(visitor_id))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        credited,
+        (0, 0),
+        "a preview click on a post-owned link has no publication/provider causality"
+    );
+
+    let verified: Option<bool> = sqlx::query_scalar(
+        "SELECT verified
+         FROM organic_fan_cohort($1,$2,$3,$4)
+         WHERE fan_id=$5",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(clicked_at - time::Duration::days(1))
+    .bind(clicked_at + time::Duration::days(1))
+    .bind(OffsetDateTime::now_utc())
+    .bind(fan_id.into_uuid())
+    .fetch_optional(&pool)
+    .await?;
+    assert!(
+        verified != Some(true),
+        "an unpublished preview path can never become North-Star verified"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit CROWDRELAY_TEST_DATABASE_URL PostgreSQL database"]
 async fn a_click_persisted_after_signup_recovers_the_canonical_conversion()
 -> Result<(), Box<dyn std::error::Error>> {
     let (pool, database_config) = attribution_pool().await?;
