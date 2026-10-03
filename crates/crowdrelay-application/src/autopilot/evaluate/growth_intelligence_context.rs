@@ -21,6 +21,15 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             .repository
             .load_growth_intelligence_snapshots(self.workspace_id, now)
             .await?;
+        let organic_funnel_control = self
+            .repository
+            .load_organic_funnel_control(self.workspace_id, now)
+            .await?;
+        if let Some(control) = organic_funnel_control {
+            report
+                .gi_dispatch_log
+                .push(organic_funnel_control_summary(control));
+        }
         // Report the North Star the world model actually resolved, so the cycle
         // record trends the metric the brain is optimizing rather than a second
         // figure derived somewhere else under the same name.
@@ -222,10 +231,16 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
             report,
         )?;
 
+        if let Some(control) = organic_funnel_control {
+            apply_organic_funnel_control(&mut scored_candidates, control);
+        }
+
         // If every normal template is quiet, the existing daily idle-exploration
         // path may ask the strategist for genuinely new channels. This is separate
         // from supply recovery: it responds to total idleness, not a goal shortfall.
         if scored_candidates.is_empty()
+            && organic_funnel_control
+                .is_none_or(|control| control.directive == OrganicFunnelDirective::ExpandReach)
             && let Some(candidate) =
                 idle_exploration_candidate(&snapshots, policy, self.workspace_id, now)?
         {
@@ -1268,3 +1283,5 @@ fn idle_exploration_candidate(
         novelty: 1.0,
     }))
 }
+
+

@@ -28,3 +28,24 @@ The fresh release/video surge no longer chooses its bounded community set by rot
 This changes which audience pockets get the scarce fresh-drop slots without raising send ceilings, bypassing approval/standing rules, repeating a source into the same target, or treating follower/member counts as fan growth. A merged PR is still not progress toward 100; production acceptance is a higher share of delivered fresh-drop placements producing real tracked visitors, confirmed fans and later durable fans.
 
 Next bottleneck after this checkpoint: make the autonomous loop consume the live organic-funnel stage so it expands reach only when traffic is the constraint and switches to conversion/activation recovery when people are already arriving.
+
+
+## Checkpoint — organic funnel becomes autonomous control
+
+The canonical verified-organic funnel now feeds a typed control signal back into Autopilot instead of ending at the ops readout.
+
+The control is evidence-gated:
+- publication must be verified, unambiguous and at least 24 hours old before top-of-funnel silence can steer anything;
+- fresh acquisition stages use the last 30 days, so an old successful campaign cannot hide a current zero-traffic or zero-conversion failure;
+- activation and retention use mature cohorts up to 90 days, preserving the existing D7/D30 definitions;
+- measured zero is distinct from an immature or uninstrumented window.
+
+Behavior changes:
+- `no_observed_visitors` narrows Growth Intelligence to attributable new-fan reach and the discovery workers that replenish that reach; real outward actions rank ahead of more research;
+- once visitors exist and the leak moves to signup, confirmation, activation or retention, Growth Intelligence stops buying more top-of-funnel and idle exploration is suppressed;
+- join asks remain available for reach/conversion repair, but are held once the current leak is confirmation, activation or retention;
+- existing Fan Lifecycle, confirmation/outbox recovery and other downstream contexts keep their own consent, cooldown, receipt and capability gates. The funnel signal does not bypass them.
+
+This is a control-plane change, not a growth claim. Production acceptance is behavioral evidence that a mature downstream leak reduces new acquisition dispatches while the relevant downstream recovery lane proceeds, and that zero-visitor periods do the opposite.
+
+Next checkpoint: make the chosen downstream recovery visible as one operator-facing causal trace — funnel directive → action actually dispatched → provider receipt → next funnel movement — and close any stage that still has no executable recovery path.

@@ -1,10 +1,12 @@
 //! Live canonical fan cohorts. Traffic is diagnostic evidence, never causal lift.
 use serde::Serialize;
 use sqlx::PgPool;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+use crowdrelay_application::autopilot::{OrganicFunnelControl, OrganicFunnelDirective};
+
+#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
 pub struct OrganicFunnelRow {
     pub link_id: Uuid,
     pub slug: String,
@@ -45,6 +47,79 @@ pub async fn read(
         .bind(now)
         .fetch_all(pool)
         .await
+}
+
+
+pub async fn control(
+    pool: &PgPool,
+    workspace: Uuid,
+    now: OffsetDateTime,
+) -> Result<Option<OrganicFunnelControl>, sqlx::Error> {
+    let rows = read(pool, workspace, None, None, 90, 100, now).await?;
+    Ok(derive_control(&rows, now))
+}
+
+fn derive_control(rows: &[OrganicFunnelRow], now: OffsetDateTime) -> Option<OrganicFunnelControl> {
+    let mature_before = now - Duration::days(1);
+    let recent_after = now - Duration::days(30);
+    let mature: Vec<&OrganicFunnelRow> = rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && row.action_id.is_some()
+                && !row.ambiguous_owner
+                && row.published_at.is_some_and(|at| at <= mature_before)
+        })
+        .collect();
+    if mature.is_empty() {
+        return None;
+    }
+    let recent: Vec<&OrganicFunnelRow> = mature
+        .iter()
+        .copied()
+        .filter(|row| row.published_at.is_some_and(|at| at >= recent_after))
+        .collect();
+
+    let sum_rows = |set: &[&OrganicFunnelRow], value: fn(&OrganicFunnelRow) -> i64| -> u32 {
+        let total = set
+            .iter()
+            .fold(0_i64, |acc, row| acc.saturating_add(value(row).max(0)));
+        u32::try_from(total).unwrap_or(u32::MAX)
+    };
+
+    let unique_visitors = sum_rows(&recent, |row| row.unique_visitors);
+    let signups = sum_rows(&recent, |row| row.signups);
+    let confirmed = sum_rows(&recent, |row| row.confirmed);
+    let activation_mature = sum_rows(&mature, |row| row.activation_mature);
+    let activated_mature = sum_rows(&mature, |row| row.activated_mature);
+    let retention_mature = sum_rows(&mature, |row| row.retention_mature);
+    let retained = sum_rows(&mature, |row| row.retained);
+
+    let directive = if !recent.is_empty() && unique_visitors == 0 {
+        OrganicFunnelDirective::ExpandReach
+    } else if !recent.is_empty() && signups == 0 {
+        OrganicFunnelDirective::RepairConversion
+    } else if !recent.is_empty() && confirmed == 0 {
+        OrganicFunnelDirective::RepairConfirmation
+    } else if activation_mature > 0 && activated_mature == 0 {
+        OrganicFunnelDirective::ActivateFans
+    } else if retention_mature > 0 && retained == 0 {
+        OrganicFunnelDirective::RetainFans
+    } else {
+        return None;
+    };
+
+    Some(OrganicFunnelControl {
+        directive,
+        mature_links: u32::try_from(mature.len()).unwrap_or(u32::MAX),
+        unique_visitors,
+        signups,
+        confirmed,
+        activation_mature,
+        activated_mature,
+        retention_mature,
+        retained,
+    })
 }
 
 const FUNNEL_SQL: &str = r#"
@@ -118,3 +193,89 @@ SELECT link.id AS link_id,link.slug,link.campaign_id,link.action_id,link.channel
    WHEN counts.retained=0 THEN 'no_observed_retention' ELSE 'retained_fans_observed' END AS diagnosis
 FROM links link JOIN counts ON counts.id=link.id
 "#;
+
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    fn row(published_at: OffsetDateTime) -> OrganicFunnelRow {
+        OrganicFunnelRow {
+            link_id: Uuid::now_v7(),
+            slug: "test".to_owned(),
+            campaign_id: None,
+            action_id: Some(Uuid::now_v7()),
+            channel: Some("reddit".to_owned()),
+            active: true,
+            ambiguous_owner: false,
+            published_at: Some(published_at),
+            unique_visitors: 0,
+            signups: 0,
+            confirmed: 0,
+            activated: 0,
+            activation_mature: 0,
+            activated_mature: 0,
+            retention_mature: 0,
+            retained: 0,
+            qualified_referrals: 0,
+            diagnosis: String::new(),
+        }
+    }
+
+    #[test]
+    fn funnel_control_follows_the_first_zero_after_real_denominators() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let mut value = row(now - Duration::days(3));
+
+        assert_eq!(
+            derive_control(&[value.clone()], now).map(|c| c.directive),
+            Some(OrganicFunnelDirective::ExpandReach)
+        );
+
+        value.unique_visitors = 12;
+        assert_eq!(
+            derive_control(&[value.clone()], now).map(|c| c.directive),
+            Some(OrganicFunnelDirective::RepairConversion)
+        );
+
+        value.signups = 3;
+        assert_eq!(
+            derive_control(&[value.clone()], now).map(|c| c.directive),
+            Some(OrganicFunnelDirective::RepairConfirmation)
+        );
+
+        value.confirmed = 2;
+        value.activation_mature = 2;
+        assert_eq!(
+            derive_control(&[value.clone()], now).map(|c| c.directive),
+            Some(OrganicFunnelDirective::ActivateFans)
+        );
+
+        value.activated_mature = 1;
+        value.retention_mature = 1;
+        assert_eq!(
+            derive_control(&[value.clone()], now).map(|c| c.directive),
+            Some(OrganicFunnelDirective::RetainFans)
+        );
+
+        value.retained = 1;
+        assert_eq!(derive_control(&[value], now), None);
+    }
+
+    #[test]
+    fn immature_unverified_and_ambiguous_links_never_drive_control() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let recent = row(now - Duration::hours(8));
+        let mut ambiguous = row(now - Duration::days(3));
+        ambiguous.ambiguous_owner = true;
+        let mut unverified = row(now - Duration::days(3));
+        unverified.published_at = None;
+        let mut unattributed = row(now - Duration::days(3));
+        unattributed.action_id = None;
+
+        assert_eq!(
+            derive_control(&[recent, ambiguous, unverified, unattributed], now),
+            None
+        );
+    }
+}

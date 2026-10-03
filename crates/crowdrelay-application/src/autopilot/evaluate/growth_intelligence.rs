@@ -36,12 +36,14 @@ use super::{policy_evidence, *};
 
 mod candidates;
 mod community_engager;
+mod funnel_control;
 mod scout_consult;
 mod supply_recovery;
 use community_engager::community_engager_candidates;
 use scout_consult::{rescan_bypass_active, scout_consult_dispatch};
 
 pub(super) use candidates::growth_intelligence_candidate;
+pub(super) use funnel_control::{apply_organic_funnel_control, organic_funnel_control_summary};
 pub(super) use supply_recovery::maybe_replenish_acquisition_supply;
 
 /// The deterministic decision: should the brain dispatch this worker now?
