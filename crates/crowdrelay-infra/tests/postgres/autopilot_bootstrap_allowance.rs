@@ -55,7 +55,8 @@ async fn action(
         approved_by,
         created_at,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 /// The same, in a chosen action class.
@@ -66,7 +67,7 @@ async fn classed_action(
     class: &str,
     approved_by: Option<&str>,
     created_at: OffsetDateTime,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Uuid, Box<dyn std::error::Error>> {
     let decision_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO autopilot_decisions \
@@ -106,7 +107,80 @@ async fn classed_action(
     .bind(class)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(action_id)
+}
+
+async fn resolved_evidence_action(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    context: &str,
+    kinds: &[&str],
+    at: OffsetDateTime,
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let action_id = classed_action(
+        pool,
+        workspace_id,
+        context,
+        "third_party",
+        Some("policy:bounded_auto"),
+        at,
+    )
+    .await?;
+    let decision_id: Uuid =
+        sqlx::query_scalar("SELECT decision_id FROM autopilot_actions WHERE id=$1")
+            .bind(action_id)
+            .fetch_one(pool)
+            .await?;
+
+    sqlx::query(
+        r#"INSERT INTO growth_evidence
+           (workspace_id, action_id, opportunity_id, timestamp, recipient_id,
+            channel, estimated_reach, treatment, propensity, converted,
+            predicted_fans, predicted_signal_installs, context, evidence_quality,
+            resolved_at)
+           VALUES ($1,$2,$3,$4,'recipient','reddit_post',1,'treatment',1.0,false,
+                   0.0,0.0,'{}'::jsonb,'observational',$4)"#,
+    )
+    .bind(workspace_id)
+    .bind(action_id)
+    .bind(format!("authority-{action_id}"))
+    .bind(at)
+    .execute(pool)
+    .await?;
+
+    for kind in kinds {
+        let measurement_id = Uuid::now_v7();
+        sqlx::query(
+            r#"INSERT INTO autopilot_measurements
+               (id, workspace_id, action_id, measurement_kind, subject_id,
+                action_finished_at, baseline_value, due_at, available_at,
+                status, finished_at)
+               VALUES ($1,$2,$3,$4,$3,$5,0.0,$5,$5,'succeeded',$5)"#,
+        )
+        .bind(measurement_id)
+        .bind(workspace_id)
+        .bind(action_id)
+        .bind(*kind)
+        .bind(at)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO autopilot_outcomes
+               (workspace_id, decision_id, action_id, measurement_id, metric_key,
+                observed_value, baseline_value, effect_assessment,
+                delta_basis_points, observed_at)
+               VALUES ($1,$2,$3,$4,$5,0.0,0.0,'neutral',0,$6)"#,
+        )
+        .bind(workspace_id)
+        .bind(decision_id)
+        .bind(action_id)
+        .bind(measurement_id)
+        .bind(format!("effect.{kind}"))
+        .bind(at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(action_id)
 }
 
 fn repository(pool: &PgPool, url: &str) -> PostgresAutopilotRepository {
@@ -209,6 +283,81 @@ async fn the_warm_up_spend_counts_unattended_actions_per_context()
         spend.get(&AutopilotContext::Plays).copied(),
         None,
         "a context that acted not at all is absent, not zero: {spend:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn unattended_authority_is_earned_from_people_not_the_system_itself()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, url) = common::test_pool_with_url("CROWDRELAY_TEST_DATABASE_URL")
+        .await
+        .expect("connect to the migrated suite database");
+    let now = OffsetDateTime::now_utc();
+    let workspace_id = workspace(&pool).await?;
+    let repo = repository(&pool, &url);
+
+    // All three are real completed measurements, but none says a human did
+    // anything. They may teach diagnostics and production quality; they may
+    // not make content_supply more trusted to act unattended.
+    resolved_evidence_action(
+        &pool,
+        workspace_id,
+        "content_supply",
+        &["agent_run_outcome_quality_1h"],
+        now - time::Duration::minutes(3),
+    )
+    .await?;
+    resolved_evidence_action(
+        &pool,
+        workspace_id,
+        "content_supply",
+        &["scanner_discovery_quality_1h"],
+        now - time::Duration::minutes(2),
+    )
+    .await?;
+    resolved_evidence_action(
+        &pool,
+        workspace_id,
+        "content_supply",
+        &["artifact_outcome_7d"],
+        now - time::Duration::minutes(1),
+    )
+    .await?;
+
+    let self_only = repo
+        .load_resolved_evidence_counts(WorkspaceId::from_uuid(workspace_id))
+        .await?;
+    assert_eq!(
+        self_only
+            .for_context(AutopilotContext::ContentSupply)
+            .observations
+            .0,
+        0,
+        "the machine cannot earn external authority by grading its own work"
+    );
+
+    // One audience-facing action carries two legitimate measurements. It
+    // still counts as one observed intervention, not two votes for authority.
+    resolved_evidence_action(
+        &pool,
+        workspace_id,
+        "content_supply",
+        &["content_link_clicks_7d", "content_fan_acquisition_7d"],
+        now,
+    )
+    .await?;
+    let external = repo
+        .load_resolved_evidence_counts(WorkspaceId::from_uuid(workspace_id))
+        .await?;
+    assert_eq!(
+        external
+            .for_context(AutopilotContext::ContentSupply)
+            .observations
+            .0,
+        1,
+        "one externally observed action earns one unit of authority regardless of measurement count"
     );
     Ok(())
 }
