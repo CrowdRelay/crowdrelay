@@ -138,6 +138,168 @@ async fn a_community_that_converted_outranks_a_bigger_quiet_one()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn community_yield_counts_one_canonical_person_and_latest_consent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let ws = workspace_id.into_uuid();
+    let suffix = ws.simple().to_string();
+    sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES($1,$2,'canonical community yield')")
+        .bind(ws)
+        .bind(format!("canonical-yield-{suffix}"))
+        .execute(&pool)
+        .await?;
+
+    let place_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO discovery_places
+           (id,workspace_id,place_kind,platform,name,url,member_count)
+         VALUES($1,$2,'subreddit','reddit','r/canonicalfans',
+                'https://www.reddit.com/r/canonicalfans',5000)",
+    )
+    .bind(place_id)
+    .bind(ws)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO agent_outreach_targets
+           (workspace_id,target_kind,display_name,status,subreddit,place_id,screening_verdict)
+         VALUES($1,'community','r/canonicalfans','promoted','canonicalfans',$2,'admitted')",
+    )
+    .bind(ws)
+    .bind(place_id)
+    .execute(&pool)
+    .await?;
+
+    let root = Uuid::now_v7();
+    let historical = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans(id,workspace_id,normalized_email,status)
+         VALUES($1,$3,$4,'active'),($2,$3,$5,'merged')",
+    )
+    .bind(root)
+    .bind(historical)
+    .bind(ws)
+    .bind(format!("canonical-root-{suffix}@example.test"))
+    .bind(format!("canonical-old-{suffix}@example.test"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE fans SET merged_into_fan_id=$1 WHERE workspace_id=$2 AND id=$3",
+    )
+    .bind(root)
+    .bind(ws)
+    .bind(historical)
+    .execute(&pool)
+    .await?;
+
+    // Both historical IDs received conversion rows before identity resolution.
+    // They are one person now and must contribute exactly one conversion.
+    for fan_id in [historical, root] {
+        sqlx::query(
+            "INSERT INTO fan_provenance_events
+               (workspace_id,fan_id,event_kind,channel,community,
+                attribution_method,attribution_confidence,occurred_at)
+             VALUES($1,$2,'conversion','reddit','r/canonicalfans',
+                    'last_tracked_click',1.0,now())",
+        )
+        .bind(ws)
+        .bind(fan_id)
+        .execute(&pool)
+        .await?;
+    }
+
+    // A real recent first-party action exists on the survivor.
+    sqlx::query(
+        "INSERT INTO fan_sessions(
+             workspace_id,fan_id,session_token_hash,last_seen_at,expires_at
+         ) VALUES($1,$2,$3,now(),now()+interval '30 days')",
+    )
+    .bind(ws)
+    .bind(root)
+    .bind(root.as_bytes().to_vec())
+    .execute(&pool)
+    .await?;
+
+    // Same timestamp, opposite decisions. id is the deterministic tie-breaker:
+    // the later inserted revoke must win and durable_fans must stay zero.
+    let at = OffsetDateTime::now_utc() - time::Duration::hours(1);
+    sqlx::query(
+        "INSERT INTO fan_consents(
+             id,workspace_id,fan_id,purpose,granted,policy_version,source,recorded_at
+         ) VALUES($1,$3,$4,'marketing',true,'v1','test',$5),
+                 ($2,$3,$4,'marketing',false,'v2','test',$5)",
+    )
+    .bind(Uuid::from_u128(1))
+    .bind(Uuid::from_u128(2))
+    .bind(ws)
+    .bind(root)
+    .bind(at)
+    .execute(&pool)
+    .await?;
+
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 4,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(10),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let repository = PostgresAutopilotRepository::new(pool.clone(), &database);
+    let load = || repository.load_growth_intelligence_snapshots(
+        workspace_id,
+        OffsetDateTime::now_utc(),
+    );
+
+    let snapshots = load().await?;
+    let target = snapshots
+        .iter()
+        .find(|snapshot| snapshot.template_id == "community-engager")
+        .and_then(|snapshot| {
+            snapshot
+                .unengaged_targets
+                .iter()
+                .find(|target| target.subreddit == "canonicalfans")
+        })
+        .ok_or("canonical target missing")?;
+    assert_eq!(target.converted_fans_90d, 1);
+    assert_eq!(
+        target.durable_fans_90d, 0,
+        "latest revoke wins even when grant/revoke timestamps tie"
+    );
+
+    sqlx::query(
+        "INSERT INTO fan_consents(
+             workspace_id,fan_id,purpose,granted,policy_version,source,recorded_at
+         ) VALUES($1,$2,'marketing',true,'v3','test',now())",
+    )
+    .bind(ws)
+    .bind(root)
+    .execute(&pool)
+    .await?;
+    let snapshots = load().await?;
+    let target = snapshots
+        .iter()
+        .find(|snapshot| snapshot.template_id == "community-engager")
+        .and_then(|snapshot| {
+            snapshot
+                .unengaged_targets
+                .iter()
+                .find(|target| target.subreddit == "canonicalfans")
+        })
+        .ok_or("canonical target missing after grant")?;
+    assert_eq!(target.converted_fans_90d, 1);
+    assert_eq!(
+        target.durable_fans_90d, 1,
+        "the one canonical person becomes durable after the latest explicit grant"
+    );
+    Ok(())
+}
+
 /// A Telegram chat named `deathcore` must not credit r/deathcore.
 ///
 /// Telegram and Discord links write their own `channel_community` — a chat
