@@ -507,6 +507,23 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
             .map_err(map_sqlx)
     }
 
+    async fn load_confirmation_recovery_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        now: OffsetDateTime,
+    ) -> Result<
+        Vec<crowdrelay_application::autopilot::ConfirmationRecoverySnapshot>,
+        RepositoryError,
+    > {
+        crate::organic_funnel::confirmation_recovery_snapshots(
+            &self.pool,
+            workspace_id.into_uuid(),
+            now,
+        )
+        .await
+        .map_err(map_sqlx)
+    }
+
     async fn load_open_content_suggestions(
         &self,
         workspace_id: WorkspaceId,
