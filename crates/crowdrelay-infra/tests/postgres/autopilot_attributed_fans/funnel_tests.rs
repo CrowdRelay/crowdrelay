@@ -317,7 +317,6 @@ async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
     );
 }
 
-
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and disposable PostgreSQL"]
 async fn organic_monthly_cohort_refuses_social_post_without_provider_receipt() {
