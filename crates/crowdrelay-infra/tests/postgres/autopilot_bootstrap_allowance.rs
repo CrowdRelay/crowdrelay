@@ -1,12 +1,12 @@
 //! The warm-up allowance, against a real schema.
 //!
 //! `disposition_with_evidence` downgrades unattended execution to approval
-//! until a context has twenty resolved outcomes, and its own comment names the
+//! until a context has twenty distinct externally-observed interventions, and
 //! trap: acting is how those observations get made, so a gate that blocks
 //! action below the floor guarantees the floor is never reached. Routing
 //! below-floor work through approval instead of denial was the intended way
 //! out and, against one operator and a 72-hour expiry, the same thing —
-//! measured, zero resolved outcomes against a floor of twenty.
+//! measured, zero authority-earning outcomes against a floor of twenty.
 //!
 //! The rule itself is pure and pinned in `domain::autonomy`. What only a
 //! database can show is the two numbers it is fed: the operator's cap comes
