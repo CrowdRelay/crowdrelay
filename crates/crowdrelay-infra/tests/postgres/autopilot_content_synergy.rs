@@ -153,8 +153,9 @@ async fn content_link_clicks_counts_only_the_posts_own_traffic() {
     sqlx::query(
         r#"INSERT INTO social_posts
            (workspace_id, action_id, platform, content, smart_link, smart_link_id,
-            status, posted_at)
-           VALUES ($1,$2,'instagram','{}'::jsonb,'/l/post-link',$3,'posted',$4)"#,
+            status, posted_at, platform_post_id, platform_post_url)
+           VALUES ($1,$2,'instagram','{}'::jsonb,'/l/post-link',$3,'posted',$4,
+                   'ig-post-link','https://instagram.com/p/post-link')"#,
     )
     .bind(workspace)
     .bind(action_id)
@@ -271,17 +272,19 @@ async fn content_fan_acquisition_credits_only_the_last_clicked_post() {
         sqlx::query(
             r#"INSERT INTO social_posts
                (workspace_id, action_id, platform, content, smart_link, smart_link_id,
-                status, posted_at)
-               VALUES ($1,$2,'instagram','{}'::jsonb,$3,$4,'posted',$5)"#,
+                status, posted_at, platform_post_id, platform_post_url)
+               VALUES ($1,$2,'instagram','{}'::jsonb,$3,$4,'posted',$5,$6,$7)"#,
         )
         .bind(workspace)
         .bind(action_id)
         .bind(format!("/l/{slug}"))
         .bind(link_id)
         .bind(posted)
+        .bind(format!("provider-{slug}"))
+        .bind(format!("https://instagram.com/p/{slug}"))
         .execute(&f.pool)
         .await
-        .expect("social post");
+        .expect("social post with provider receipt");
         action_ids.push(action_id);
     }
     let action_a = action_ids[0];
@@ -390,9 +393,10 @@ async fn content_link_clicks_reads_a_community_posts_slug_link() {
     sqlx::query(
         r#"INSERT INTO community_posts
            (workspace_id, action_id, subreddit, title, body, smart_link,
-            status, posted_at)
+            status, posted_at, reddit_post_id, reddit_post_url)
            VALUES ($1,$2,'Metal','new single','link inside','/l/community-link',
-                   'posted',$3)"#,
+                   'posted',$3,'community-proof',
+                   'https://www.reddit.com/r/Metal/comments/communityproof/post/')"#,
     )
     .bind(workspace)
     .bind(action_id)
@@ -459,11 +463,17 @@ async fn content_link_clicks_reads_telegram_and_discord_link_ids() {
         )
         .await;
         let link_id = insert_smart_link(&f, &format!("{table}-link")).await;
+        let receipt_sql = if table == "telegram_posts" {
+            ", message_id"
+        } else {
+            ", message_id"
+        };
+        let receipt_value = if table == "telegram_posts" { "42" } else { "'discord-proof'" };
         sqlx::query(&format!(
             "INSERT INTO {table}
              (workspace_id, action_id, {extra}, smart_link, smart_link_id,
-              status, posted_at)
-             VALUES ($1,$2,'metal','/l/x',$3,'posted',$4)"
+              status, posted_at{receipt_sql})
+             VALUES ($1,$2,'metal','/l/x',$3,'posted',$4,{receipt_value})"
         ))
         .bind(workspace)
         .bind(action_id)
@@ -525,8 +535,10 @@ async fn content_link_clicks_abandons_a_community_post_with_no_link() {
     .await;
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, subreddit, title, body, status, posted_at)
-           VALUES ($1,$2,'Metal','no link','plain text','posted',$3)"#,
+           (workspace_id, action_id, subreddit, title, body, status, posted_at,
+            reddit_post_id, reddit_post_url)
+           VALUES ($1,$2,'Metal','no link','plain text','posted',$3,'nolink-proof',
+                   'https://www.reddit.com/r/Metal/comments/nolinkproof/post/')"#,
     )
     .bind(workspace)
     .bind(action_id)
@@ -583,17 +595,22 @@ async fn posted_transition_schedules_one_click_measurement() {
         sqlx::query(
             r#"INSERT INTO community_posts
                (id, workspace_id, action_id, subreddit, title, body, smart_link,
-                status, posted_at)
-               VALUES ($1,$2,$3,'Metal','post','text',$4,'posted',$5)"#,
+                status, posted_at, reddit_post_id, reddit_post_url)
+               VALUES ($1,$2,$3,'Metal','post','text',$4,'posted',$5,$6,$7)"#,
         )
         .bind(post_id)
         .bind(workspace)
         .bind(action_id)
         .bind(if with_link { "/l/linked" } else { "" })
         .bind(f.now)
+        .bind(format!("scheduled-{}", post_id.simple()))
+        .bind(format!(
+            "https://www.reddit.com/r/Metal/comments/{}/scheduled/",
+            post_id.simple()
+        ))
         .execute(&f.pool)
         .await
-        .expect("community post");
+        .expect("community post with provider receipt");
 
         let mut transaction = f.pool.begin().await.expect("tx");
         crowdrelay_infra::fanbase::schedule_link_click_measurement(
@@ -659,8 +676,10 @@ async fn content_link_clicks_abandons_when_the_post_carried_no_link() {
     .await;
     sqlx::query(
         r#"INSERT INTO social_posts
-           (workspace_id, action_id, platform, content, status, posted_at)
-           VALUES ($1,$2,'facebook','{}'::jsonb,'posted',$3)"#,
+           (workspace_id, action_id, platform, content, status, posted_at,
+            platform_post_id, platform_post_url)
+           VALUES ($1,$2,'facebook','{}'::jsonb,'posted',$3,'fb-nolink',
+                   'https://www.facebook.com/fb-nolink')"#,
     )
     .bind(workspace)
     .bind(action_id)
@@ -729,8 +748,10 @@ async fn artifact_outcome_counts_only_posts_citing_its_source() {
     .await;
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, subreddit, title, body, status, posted_at)
-           VALUES ($1,$2,'Metal','playthrough','we filmed one','posted',$3)"#,
+           (workspace_id, action_id, subreddit, title, body, status, posted_at,
+            reddit_post_id, reddit_post_url)
+           VALUES ($1,$2,'Metal','playthrough','we filmed one','posted',$3,'artifact-community',
+                   'https://www.reddit.com/r/Metal/comments/artifactcommunity/post/')"#,
     )
     .bind(workspace)
     .bind(community_action)
@@ -753,8 +774,10 @@ async fn artifact_outcome_counts_only_posts_citing_its_source() {
     .await;
     sqlx::query(
         r#"INSERT INTO social_posts
-           (workspace_id, action_id, platform, content, status, posted_at)
-           VALUES ($1,$2,'instagram','{}'::jsonb,'posted',$3)"#,
+           (workspace_id, action_id, platform, content, status, posted_at,
+            platform_post_id, platform_post_url)
+           VALUES ($1,$2,'instagram','{}'::jsonb,'posted',$3,'artifact-social',
+                   'https://instagram.com/p/artifact-social')"#,
     )
     .bind(workspace)
     .bind(social_action)
@@ -780,8 +803,10 @@ async fn artifact_outcome_counts_only_posts_citing_its_source() {
     .await;
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, subreddit, title, body, status, posted_at)
-           VALUES ($1,$2,'Metal','other','not this artifact','posted',$3)"#,
+           (workspace_id, action_id, subreddit, title, body, status, posted_at,
+            reddit_post_id, reddit_post_url)
+           VALUES ($1,$2,'Metal','other','not this artifact','posted',$3,'other-artifact',
+                   'https://www.reddit.com/r/Metal/comments/otherartifact/post/')"#,
     )
     .bind(workspace)
     .bind(other_action)

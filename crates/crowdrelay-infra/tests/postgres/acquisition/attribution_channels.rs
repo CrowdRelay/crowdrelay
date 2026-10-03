@@ -83,8 +83,10 @@ async fn seed_social_post(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"INSERT INTO social_posts
-           (workspace_id, action_id, platform, content, smart_link, status, posted_at)
-           VALUES ($1, $2, 'instagram', '{}'::jsonb, '/l/' || $3, 'posted', now())"#,
+           (workspace_id, action_id, platform, content, smart_link, status, posted_at,
+            platform_post_id, platform_post_url)
+           VALUES ($1, $2, 'instagram', '{}'::jsonb, '/l/' || $3, 'posted', now(),
+                   'ig-proof','https://instagram.com/p/ig-proof')"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(action_id)
@@ -103,8 +105,8 @@ async fn seed_telegram_post(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"INSERT INTO telegram_posts
-           (workspace_id, action_id, channel, smart_link, status, posted_at)
-           VALUES ($1, $2, $3, '/l/' || $4, 'posted', now())"#,
+           (workspace_id, action_id, channel, smart_link, status, posted_at, message_id)
+           VALUES ($1, $2, $3, '/l/' || $4, 'posted', now(), 42)"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(action_id)
@@ -124,8 +126,8 @@ async fn seed_discord_post(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
         r#"INSERT INTO discord_posts
-           (workspace_id, action_id, channel_id, smart_link, status, posted_at)
-           VALUES ($1, $2, $3, '/l/' || $4, 'posted', now())"#,
+           (workspace_id, action_id, channel_id, smart_link, status, posted_at, message_id)
+           VALUES ($1, $2, $3, '/l/' || $4, 'posted', now(), 'discord-proof')"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(action_id)
@@ -690,8 +692,8 @@ async fn a_post_bound_by_link_id_alone_still_attributes()
     // The text column stays empty — only the FK binds the post to the link.
     sqlx::query(
         r#"INSERT INTO telegram_posts
-           (workspace_id, action_id, channel, smart_link, smart_link_id, status, posted_at)
-           VALUES ($1, $2, '@bandchat', NULL, $3, 'posted', now())"#,
+           (workspace_id, action_id, channel, smart_link, smart_link_id, status, posted_at, message_id)
+           VALUES ($1, $2, '@bandchat', NULL, $3, 'posted', now(), 43)"#,
     )
     .bind(workspace_id.into_uuid())
     .bind(action)

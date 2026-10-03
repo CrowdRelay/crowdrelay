@@ -271,9 +271,9 @@ impl PostgresAcquisitionRepository {
             -- conversion exists to count — and until now it landed in
             -- click_events only, where the ranking reads never look.
             -- fan_id stays NULL by design (anonymous until signup links it);
-            -- the same post-table UNION the conversion path uses resolves
-            -- action_id and format_key, so a channel can be ranked on what
-            -- it made people do, not just on followers it accumulated.
+            -- the same provider-receipt-gated post UNION the conversion path
+            -- uses resolves action_id and format_key. A naked posted_at never
+            -- upgrades an anonymous click into action-owned evidence.
             -- Rows repeat honestly per click; readers dedupe on
             -- DISTINCT anonymous_visitor_id.
             provenance AS (
@@ -315,29 +315,43 @@ impl PostgresAcquisitionRepository {
                         FROM community_posts
                         WHERE workspace_id = click.workspace_id
                           AND smart_link = '/l/' || link.slug
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND COALESCE(
+                                NULLIF(btrim(reddit_post_id), ''),
+                                NULLIF(btrim(reddit_post_url), '')
+                              ) IS NOT NULL
                         UNION ALL
                         SELECT action_id, posted_at, created_at
                         FROM social_posts
                         WHERE workspace_id = click.workspace_id
                           AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND COALESCE(
+                                NULLIF(btrim(platform_post_id), ''),
+                                NULLIF(btrim(platform_post_url), '')
+                              ) IS NOT NULL
                         UNION ALL
                         SELECT action_id, posted_at, created_at
                         FROM telegram_posts
                         WHERE workspace_id = click.workspace_id
                           AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND message_id IS NOT NULL
                         UNION ALL
                         SELECT action_id, posted_at, created_at
                         FROM discord_posts
                         WHERE workspace_id = click.workspace_id
                           AND (smart_link = '/l/' || link.slug OR smart_link_id = link.id)
+                          AND status = 'posted'
                           AND posted_at IS NOT NULL
                           AND posted_at <= click.occurred_at
+                          AND NULLIF(btrim(message_id), '') IS NOT NULL
                     ) AS post
                     LEFT JOIN autopilot_actions AS act
                       ON act.workspace_id = click.workspace_id

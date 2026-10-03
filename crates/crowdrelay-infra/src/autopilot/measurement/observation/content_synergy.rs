@@ -20,10 +20,10 @@
 
 use super::*;
 
-/// The action's tracked links with the real publication times of the posts
-/// carrying them. `posted_at` is the "was live" fact in all four ledgers —
-/// a draft, a failed send or a row awaiting a manual post has none, so an
-/// unpublished link cannot open a window. The link resolves differently per
+/// The action's tracked links with provider-confirmed publication times.
+/// `posted_at` is only the clock; every external row must also carry the
+/// durable provider id/URL/message id from its executor before it can open a
+/// measurement window. The link resolves differently per
 /// post table: social, Telegram and Discord posts carry `smart_link_id`
 /// outright; a community post stores only the `/l/{slug}` path in
 /// `smart_link`, resolved back to the `smart_links` row that serves it.
@@ -31,17 +31,23 @@ pub(in crate::autopilot::measurement) const POSTED_LINKS: &str = r#"
     SELECT post.smart_link_id AS link_id, post.posted_at
     FROM social_posts AS post
     WHERE post.workspace_id = $1 AND post.action_id = $2
+      AND post.status = 'posted'
       AND post.smart_link_id IS NOT NULL AND post.posted_at IS NOT NULL
+      AND COALESCE(NULLIF(btrim(post.platform_post_id),''),NULLIF(btrim(post.platform_post_url),'')) IS NOT NULL
     UNION ALL
     SELECT post.smart_link_id, post.posted_at
     FROM telegram_posts AS post
     WHERE post.workspace_id = $1 AND post.action_id = $2
+      AND post.status = 'posted'
       AND post.smart_link_id IS NOT NULL AND post.posted_at IS NOT NULL
+      AND post.message_id IS NOT NULL
     UNION ALL
     SELECT post.smart_link_id, post.posted_at
     FROM discord_posts AS post
     WHERE post.workspace_id = $1 AND post.action_id = $2
+      AND post.status = 'posted'
       AND post.smart_link_id IS NOT NULL AND post.posted_at IS NOT NULL
+      AND NULLIF(btrim(post.message_id),'') IS NOT NULL
     UNION ALL
     SELECT link.id, post.posted_at
     FROM community_posts AS post
@@ -49,7 +55,9 @@ pub(in crate::autopilot::measurement) const POSTED_LINKS: &str = r#"
       ON link.workspace_id = post.workspace_id
      AND link.slug = substring(post.smart_link from 4)
     WHERE post.workspace_id = $1 AND post.action_id = $2
+      AND post.status = 'posted'
       AND post.smart_link LIKE '/l/%' AND post.posted_at IS NOT NULL
+      AND COALESCE(NULLIF(btrim(post.reddit_post_id),''),NULLIF(btrim(post.reddit_post_url),'')) IS NOT NULL
 "#;
 
 /// Clicks on the link this post carried — joined through the post's own
@@ -312,6 +320,8 @@ pub(super) async fn artifact_outcome(
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
               AND post.status = 'posted'
+              AND post.posted_at IS NOT NULL
+              AND COALESCE(NULLIF(btrim(post.reddit_post_id),''),NULLIF(btrim(post.reddit_post_url),'')) IS NOT NULL
               AND (lower(act.payload->>'source_id') = $2::text
                    OR lower(act.payload->'draft'->>'source_id') = $2::text)
             UNION ALL
@@ -322,6 +332,8 @@ pub(super) async fn artifact_outcome(
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
               AND post.status = 'posted'
+              AND post.posted_at IS NOT NULL
+              AND COALESCE(NULLIF(btrim(post.platform_post_id),''),NULLIF(btrim(post.platform_post_url),'')) IS NOT NULL
               AND (lower(act.payload->>'source_id') = $2::text
                    OR lower(act.payload->'draft'->>'source_id') = $2::text)
             UNION ALL
@@ -332,6 +344,8 @@ pub(super) async fn artifact_outcome(
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
               AND post.status = 'posted'
+              AND post.posted_at IS NOT NULL
+              AND post.message_id IS NOT NULL
               AND (lower(act.payload->>'source_id') = $2::text
                    OR lower(act.payload->'draft'->>'source_id') = $2::text)
             UNION ALL
@@ -342,6 +356,8 @@ pub(super) async fn artifact_outcome(
              AND act.id = post.action_id
             WHERE post.workspace_id = $1
               AND post.status = 'posted'
+              AND post.posted_at IS NOT NULL
+              AND NULLIF(btrim(post.message_id),'') IS NOT NULL
               AND (lower(act.payload->>'source_id') = $2::text
                    OR lower(act.payload->'draft'->>'source_id') = $2::text)
         ) AS posts

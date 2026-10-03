@@ -50,16 +50,22 @@ pub(crate) async fn live_post(
     .expect("smart link");
     sqlx::query(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, subreddit, title, body, status, posted_at, smart_link)
-           VALUES ($1,$2,'r/lineage','t','b','posted',$3,$4)"#,
+           (workspace_id, action_id, subreddit, title, body, status, posted_at, smart_link,
+            reddit_post_id, reddit_post_url)
+           VALUES ($1,$2,'r/lineage','t','b','posted',$3,$4,$5,$6)"#,
     )
     .bind(f.workspace_id.into_uuid())
     .bind(action_id)
     .bind(posted_at)
     .bind(format!("/l/{slug}"))
+    .bind(format!("receipt-{}", action_id.simple()))
+    .bind(format!(
+        "https://www.reddit.com/r/lineage/comments/{}/proof/",
+        action_id.simple()
+    ))
     .execute(&f.pool)
     .await
-    .expect("post");
+    .expect("post with provider receipt");
 }
 
 /// A fan converted through `action_id`'s link at `at`, created at `created`.
@@ -205,6 +211,70 @@ async fn an_action_owned_link_is_a_live_fan_growth_surface_without_a_post() {
     assert!(
         (observe(&f, &measurement).await - 1.0).abs() < f64::EPSILON,
         "an action-owned redirect must feed the same canonical fan learner as a posted link"
+    );
+}
+
+/// A row that only says `posted_at` is not a live audience surface.
+/// Even if corrupted provenance already credits a conversion to that action,
+/// the learner refuses to open a fan-growth window until provider proof exists.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn receiptless_post_cannot_teach_the_fan_model() {
+    let f = setup().await.expect("fixture");
+    let finished = f.now - time::Duration::days(14);
+    let action = insert_dispatch(&f, "lineage:receiptless", finished).await;
+    sqlx::query(
+        "UPDATE autopilot_actions
+         SET action_kind='community.engage.request'
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .execute(&f.pool)
+    .await
+    .expect("action kind");
+    sqlx::query(
+        "INSERT INTO smart_links(workspace_id,slug,destination_url,active)
+         VALUES($1,'receiptless','https://example.test/go',true)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .execute(&f.pool)
+    .await
+    .expect("link");
+    sqlx::query(
+        "INSERT INTO community_posts
+           (workspace_id,action_id,subreddit,title,body,status,posted_at,smart_link)
+         VALUES($1,$2,'r/test','t','b','posted',$3,'/l/receiptless')",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action)
+    .bind(finished + time::Duration::hours(1))
+    .execute(&f.pool)
+    .await
+    .expect("receiptless post");
+
+    let converted = finished + time::Duration::days(2);
+    converted_fan(&f, action, converted, converted, "active").await;
+    let measurement = queue_measurement(
+        &f,
+        action,
+        AutopilotMeasurementKind::IncrementalFanGrowth14d,
+        0.0,
+        finished,
+    )
+    .await;
+
+    let observed = f
+        .repository
+        .observe_measurement(f.workspace_id, &measurement, f.now)
+        .await;
+    assert!(
+        matches!(
+            observed,
+            Err(crowdrelay_application::RepositoryError::ConflictBecause(reason))
+                if reason == AutopilotMeasurementKind::NO_TRACKED_LINK
+        ),
+        "receiptless post must be unmeasurable, got {observed:?}"
     );
 }
 

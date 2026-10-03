@@ -139,13 +139,21 @@ async fn seed_action_and_post(
     .execute(pool)
     .await?;
 
-    let posted_at_sql = if posted { ", posted_at" } else { "" };
-    let posted_at_bind = if posted { ", now()" } else { "" };
+    let publication_columns = if posted {
+        ", posted_at, reddit_post_id, reddit_post_url"
+    } else {
+        ""
+    };
+    let publication_values = if posted {
+        ", now(), 'attr-proof', 'https://www.reddit.com/r/attrtest/comments/attrproof/post/'"
+    } else {
+        ""
+    };
     let query_str = format!(
         r#"INSERT INTO community_posts
-           (workspace_id, action_id, subreddit, title, body, smart_link, status{posted_at_sql})
+           (workspace_id, action_id, subreddit, title, body, smart_link, status{publication_columns})
            VALUES ($1, $2, 'r/attrtest', 'Test post', 'Test body', '/l/' || $3,
-                   'posted'{posted_at_bind})"#
+                   'posted'{publication_values})"#
     );
     sqlx::query(&query_str)
         .bind(workspace_id.into_uuid())
