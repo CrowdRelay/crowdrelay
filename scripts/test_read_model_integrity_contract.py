@@ -53,6 +53,26 @@ class ReadModelIntegrityContract(unittest.TestCase):
             "learning loop must use LIMIT 1 in LATERAL subqueries",
         )
 
+    def test_learning_loop_exposes_funnel_to_delivery_trace(self):
+        """The control-plane loop must show why the action was chosen and
+        whether its transport/executor path actually produced a receipt."""
+        text = EVIDENCE.read_text()
+        for required in (
+            "pub funnel_control: Option<serde_json::Value>",
+            "pub current_funnel: Option<",
+            "pub executor_receipt: Option<LearningLoopExecutorReceipt>",
+            "pub webhook_delivery: Option<LearningLoopWebhookDelivery>",
+            "d.input_snapshot->'organic_funnel_control'",
+            "FROM autopilot_execution_reports",
+            "FROM outbox_events event",
+            "JOIN webhook_deliveries delivery",
+        ):
+            self.assertIn(
+                required,
+                text,
+                f"learning loop lost causal funnel/delivery trace: {required}",
+            )
+
     def test_data_integrity_warnings_are_stage_specific(self):
         """LearningLoopEntry must have stage-specific data_integrity warnings
         (action and outcome are independent). The old single
