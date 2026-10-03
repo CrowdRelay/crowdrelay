@@ -626,16 +626,15 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
         "the already-materialised approval task must leave the active queue"
     );
 
-    let (assignment_status, reminder): (String, Option<time::OffsetDateTime>) =
-        sqlx::query_as(
-            "SELECT status, next_reminder_at
+    let (assignment_status, reminder): (String, Option<time::OffsetDateTime>) = sqlx::query_as(
+        "SELECT status, next_reminder_at
              FROM team_assignments
              WHERE workspace_id=$1 AND id=$2",
-        )
-        .bind(beneficiary.into_uuid())
-        .bind(stale_assignment)
-        .fetch_one(&pool)
-        .await?;
+    )
+    .bind(beneficiary.into_uuid())
+    .bind(stale_assignment)
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(assignment_status, "cancelled");
     assert!(
         reminder.is_none(),
