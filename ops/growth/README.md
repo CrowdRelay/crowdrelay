@@ -9,8 +9,9 @@ fans EVERY month (October 2026 first; prod objective `signal/active_fans`
 20 → 120 by 2026-10-31) and every promoted video ≥1,000 organic views /
 ≥10 likes / ≥5 comments via CrowdRelay operations. A fan counts only when a
 `fan_provenance_events`/`fan_acquisition_events` row traces them to a CrowdRelay
-action — manual invites and imports do not count. Working plan:
-`~/.devin/plans/FAN_100_PLAN.md`.
+action — manual invites and imports do not count. The canonical shared implementation plan is
+`ops/growth/FAN_100_PLAN.md`. Local agent copies such as
+`~/.devin/plans/FAN_100_PLAN.md` are mirrors only and must not override the in-repo plan.
 
 ## Reproduce the read-only snapshot
 
