@@ -54,6 +54,10 @@ struct ReadyPost {
     drafted_at: OffsetDateTime,
     /// Why a person, not the machine, publishes it.
     needs_person_because: Option<String>,
+    /// The exact words to paste, when the system wrote them (a YouTube capture
+    /// comment). Community drafts carry theirs in the post itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_text: Option<String>,
 }
 
 /// One channel's backlog inside the machine's own lane — the automatic
@@ -87,7 +91,7 @@ async fn load_unpublished_drafts(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<Vec<UnpublishedDraftChannel>, OpsError> {
-    let mut channels = sqlx::query_as::<_, UnpublishedDraftChannel>(
+    let counts = format!(
         r#"
         SELECT channel, count(*)::bigint AS drafts, min(created_at) AS oldest_drafted_at
         FROM (
@@ -102,32 +106,49 @@ async fn load_unpublished_drafts(
             UNION ALL
             SELECT platform, created_at FROM social_posts
             WHERE workspace_id = $1 AND status = 'awaiting_manual_post'
+            UNION ALL
+            SELECT 'youtube', (cs.metadata->>'fan_capture_draft_at')::timestamptz
+            FROM content_sources cs
+            WHERE cs.workspace_id = $1 AND {OPEN_CAPTURE_DRAFT}
         ) AS drafts
         GROUP BY channel
         ORDER BY min(created_at)
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(pool)
-    .await
-    .map_err(OpsError::sqlx)?;
-    let ready = sqlx::query_as::<_, ReadyPost>(
+        "#
+    );
+    let mut channels = sqlx::query_as::<_, UnpublishedDraftChannel>(&counts)
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+        .map_err(OpsError::sqlx)?;
+    let ready_sql = format!(
         r#"
-        SELECT platform AS channel, id AS post_id, subreddit AS target, title,
-               smart_link AS tracked_link, created_at AS drafted_at,
-               NULLIF(error_message, '') AS needs_person_because
-        FROM community_posts
-        WHERE workspace_id = $1
-          AND status = 'awaiting_manual_post'
-          AND COALESCE(error_message, '') NOT LIKE 'held:%'
-        ORDER BY created_at
+        SELECT * FROM (
+            SELECT platform AS channel, id AS post_id, subreddit AS target, title,
+                   smart_link AS tracked_link, created_at AS drafted_at,
+                   NULLIF(error_message, '') AS needs_person_because,
+                   NULL::text AS draft_text
+            FROM community_posts
+            WHERE workspace_id = $1
+              AND status = 'awaiting_manual_post'
+              AND COALESCE(error_message, '') NOT LIKE 'held:%'
+            UNION ALL
+            SELECT 'youtube', cs.id, cs.title, 'Pinned comment with the tracked join link',
+                   '/l/' || (cs.metadata->>'fan_capture_link_slug'),
+                   (cs.metadata->>'fan_capture_draft_at')::timestamptz,
+                   'a person posts it: nothing is allowed to comment on YouTube unattended',
+                   cs.metadata->>'fan_capture_draft_text'
+            FROM content_sources cs
+            WHERE cs.workspace_id = $1 AND {OPEN_CAPTURE_DRAFT}
+        ) AS ready
+        ORDER BY drafted_at
         LIMIT 50
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(pool)
-    .await
-    .map_err(OpsError::sqlx)?;
+        "#
+    );
+    let ready = sqlx::query_as::<_, ReadyPost>(&ready_sql)
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+        .map_err(OpsError::sqlx)?;
     for post in ready {
         if let Some(channel) = channels.iter_mut().find(|c| c.channel == post.channel) {
             channel.ready_to_post.push(post);
@@ -135,6 +156,21 @@ async fn load_unpublished_drafts(
     }
     Ok(channels)
 }
+
+/// A YouTube capture comment that was prepared and has not visibly gone up: no
+/// click has landed on its tracked link yet (a click means someone saw it), the
+/// video is still inside the capture window, and the machine did not post it.
+const OPEN_CAPTURE_DRAFT: &str = r#"
+    cs.source_kind = 'video' AND cs.active
+    AND cs.metadata ? 'fan_capture_draft_at'
+    AND NOT (cs.metadata ? 'fan_capture_comment_posted_unix')
+    AND cs.occurred_at > now() - interval '30 days'
+    AND NOT EXISTS (
+        SELECT 1 FROM smart_links l
+        JOIN click_events c ON c.smart_link_id = l.id
+        WHERE l.workspace_id = cs.workspace_id
+          AND l.slug = cs.metadata->>'fan_capture_link_slug')
+"#;
 
 /// One channel's publication-measurement pipeline, counted by stage.
 ///

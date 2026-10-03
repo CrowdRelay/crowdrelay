@@ -188,6 +188,50 @@ mod post_queues_postgres_tests {
         assert_eq!(reddit.drafts, 1);
         assert!(reddit.ready_to_post.is_empty(), "{reddit:?}");
 
+        // A prepared YouTube capture comment is listed with the words to paste
+        // and its tracked link, until a click proves it is up.
+        let source_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO content_sources (workspace_id, source_kind, source_key, title, occurred_at, expires_at, metadata)
+             VALUES ($1,'video','youtube:aaaaaaaaaaa','Live at FLSS', now() - interval '1 day', now() + interval '30 days',
+                     jsonb_build_object('fan_capture_draft_at', now(), 'fan_capture_draft_text', 'Join us\n\nhttps://b.example/l/cap',
+                                        'fan_capture_link_slug', 'cap'))
+             RETURNING id",
+        )
+        .bind(ws)
+        .fetch_one(&pool)
+        .await
+        .expect("capture draft source");
+        let listed = load_unpublished_drafts(&pool, ws).await.expect("manual lane");
+        let youtube = listed.iter().find(|row| row.channel == "youtube").expect("youtube");
+        assert_eq!(youtube.drafts, 1);
+        assert_eq!(youtube.ready_to_post.len(), 1, "{youtube:?}");
+        assert_eq!(youtube.ready_to_post[0].tracked_link.as_deref(), Some("/l/cap"));
+        assert!(
+            youtube.ready_to_post[0].draft_text.as_deref().is_some_and(|t| t.contains("Join us")),
+            "{youtube:?}"
+        );
+        sqlx::query(
+            "INSERT INTO smart_links (workspace_id, slug, destination_url, active) VALUES ($1,'cap','https://b.example/signal',true)",
+        )
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("capture link");
+        sqlx::query(
+            "INSERT INTO click_events (workspace_id, smart_link_id, anonymous_visitor_id, occurred_at)
+             SELECT $1, id, gen_random_uuid(), now() FROM smart_links WHERE workspace_id = $1 AND slug = 'cap'",
+        )
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("a click");
+        let after = load_unpublished_drafts(&pool, ws).await.expect("manual lane");
+        assert!(
+            !after.iter().any(|row| row.channel == "youtube"),
+            "a click means the comment is up; it is no longer waiting: {after:?}"
+        );
+        let _ = source_id;
+
         let automatic = load_automatic_queue(&pool, ws).await.expect("machine lane");
         let facebook = automatic
             .iter()

@@ -35,6 +35,7 @@ use uuid::Uuid;
 use crate::google_oauth::resolve_google_access_token;
 
 mod fan_capture;
+pub mod fan_capture_draft;
 
 const API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 const CYCLE: Duration = Duration::from_secs(30 * 60);
@@ -249,7 +250,7 @@ impl YoutubeRepliesWorker {
                         Err(error) => tracing::warn!(%error, "youtube comment harvest failed"),
                     }
                     match self.seed_fan_capture_comment().await {
-                        Ok(count) if count > 0 => tracing::info!(count, "youtube fan-capture comment posted"),
+                        Ok(count) if count > 0 => tracing::info!(count, "youtube fan-capture comment posted or prepared for a person"),
                         Ok(_) => {}
                         Err(error) => tracing::warn!(%error, "youtube fan-capture comment failed"),
                     }
