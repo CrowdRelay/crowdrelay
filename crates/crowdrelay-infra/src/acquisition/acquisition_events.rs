@@ -222,7 +222,10 @@ impl PostgresAcquisitionRepository {
             SELECT $1, $2, 'conversion',
                    link.channel_source,
                    link.slug, link.channel_community, click.campaign_id,
-                   COALESCE(link.action_id, post.action_id),
+                   CASE
+                       WHEN post.action_id IS NOT NULL THEN post.action_id
+                       ELSE link.action_id
+                   END,
                    'last_tracked_click', 1.0, fan.created_at,
                    post.format_key
             FROM click_events AS click
@@ -295,6 +298,29 @@ impl PostgresAcquisitionRepository {
             WHERE click.workspace_id = $1
               AND click.anonymous_visitor_id = $3
               AND link.channel_source IS NOT NULL
+              -- If any publication ledger claimed this link, a provider
+              -- receipt must exist at/before the click. Otherwise a preview
+              -- or draft link could manufacture action/community acquisition.
+              AND (
+                  post.action_id IS NOT NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM community_posts p
+                      WHERE p.workspace_id=$1
+                        AND p.smart_link='/l/'||link.slug
+                      UNION ALL
+                      SELECT 1 FROM social_posts p
+                      WHERE p.workspace_id=$1
+                        AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                      UNION ALL
+                      SELECT 1 FROM telegram_posts p
+                      WHERE p.workspace_id=$1
+                        AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                      UNION ALL
+                      SELECT 1 FROM discord_posts p
+                      WHERE p.workspace_id=$1
+                        AND (p.smart_link='/l/'||link.slug OR p.smart_link_id=link.id)
+                  )
+              )
               AND click.occurred_at >= now() - INTERVAL '30 days'
               -- The click must precede the signup it is credited for —
               -- otherwise a post-signup click writes a conversion row whose
