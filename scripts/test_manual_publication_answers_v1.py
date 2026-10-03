@@ -107,15 +107,23 @@ class ManualPublicationAnswers(unittest.TestCase):
         """The one failure 400 actually describes."""
         reddit = handler_body("register_manual_community_post")
         self.assertIn("InvalidUrl(_) => Problem::bad_request", reddit)
-        # The other three take no URL to parse, so none of them should have a
-        # 400 path at all.
+        # The other three take no URL to parse, so their only client error is
+        # an unreadable receipt payload — exactly one named 400, and never the
+        # generic one.
         for name in HANDLERS[1:]:
             body = handler_body(name)
             failure = body[body.index("Err(error)") :]
-            self.assertNotIn(
-                "Problem::bad_request",
-                failure,
-                f"{name} has no URL to fail extraction on, so it has no 400 case",
+            self.assertEqual(
+                failure.count("Problem::bad_request("),
+                0,
+                f"{name} has no URL to fail extraction on, so it has no generic "
+                "400 case",
+            )
+            self.assertEqual(
+                failure.count("Problem::bad_request_owned("),
+                1,
+                f"{name} must answer the invalid-receipt arm with its one "
+                "named 400",
             )
 
     def test_the_repository_still_separates_the_two_zero_row_reasons(self):

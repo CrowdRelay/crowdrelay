@@ -62,6 +62,10 @@ KNOWN_WRITERS = {
     # the action's trace with `TraceContext::for_action` carrying the decision
     # as causation, so `ops/trace/{trace_id}` joins the approval to the letter.
     "crates/crowdrelay-infra/src/booking_agents.rs",
+    # Audited — a mission persists its decision under `TraceContext::root`,
+    # binds `trace_id` from that resolved trace, and derives the action's trace
+    # with `TraceContext::for_action` carrying the decision as causation.
+    "crates/crowdrelay-infra/src/latarnik_missions.rs",
     "crates/crowdrelay-worker/src/agent_outcomes.rs",
 }
 
