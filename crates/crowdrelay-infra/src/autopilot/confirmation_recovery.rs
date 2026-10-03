@@ -99,12 +99,12 @@ pub(super) async fn execute(
         "confirmation recovery refused: fan is no longer pending",
     ))?;
 
-    let policy_version = sqlx::query_scalar::<_, String>(
+    let latest_consent = sqlx::query_as::<_, (bool, String)>(
         r#"
-        SELECT policy_version
+        SELECT granted,policy_version
         FROM fan_consents
         WHERE workspace_id=$1 AND fan_id=$2
-          AND purpose='marketing' AND granted
+          AND purpose='marketing'
           AND recorded_at <= $3
         ORDER BY recorded_at DESC,id DESC
         LIMIT 1
@@ -119,6 +119,12 @@ pub(super) async fn execute(
     .ok_or(RepositoryError::ConflictBecause(
         "confirmation recovery refused: current consent is absent",
     ))?;
+    if !latest_consent.0 {
+        return Err(RepositoryError::ConflictBecause(
+            "confirmation recovery refused: consent was withdrawn",
+        ));
+    }
+    let policy_version = latest_consent.1;
 
     #[allow(clippy::type_complexity)]
     let latest: Option<(Uuid, String, i64, i64, i64, i64)> = sqlx::query_as(
