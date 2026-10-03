@@ -1285,24 +1285,29 @@ impl PostgresAutopilotRepository {
                     .await?;
                 }
                 AutopilotActionPayload::PublishJoinAsk { .. } => {
-                    // Deliberately no side effect: the payload on the
-                    // `succeeded` action row IS the instruction. The social
-                    // post executor claims these actions by kind and files
-                    // the `social_posts` row that is the publish receipt —
-                    // the same claim shape the channel executors use for
-                    // agent drafts, minus the outbox hop nobody consumes.
+                    // Deliberately no provider side effect here: the payload on
+                    // the succeeded action row is only the instruction the
+                    // social executor claims. Publication evidence, the 7-day
+                    // measurement window and the join_ask_published outcome are
+                    // deferred until that executor persists a real provider
+                    // receipt. Action dispatch must never masquerade as a post.
                 }
             }
 
             // External intents are only *dispatched* here. Their learning/outcome
             // evidence is committed when the executor reports provider-confirmed
             // success, so a queued webhook can never masquerade as completed work.
+            //
+            // Join asks are first-party in transport terms (the in-process social
+            // executor claims them), but external in evidence terms: this action
+            // succeeding means only "instruction filed". Their outcome and
+            // measurement window start only after the provider receipt is stored.
             if !payload_requires_executor(&action.payload)
                 && !is_confirmation_recovery(&action.payload)
             {
-                // The envelope first: outcome-created actions carry no
-                // prediction/evidence rows, and without them the measurements
-                // scheduled next resolve into nothing.
+                // The envelope first: evaluator-created actions normally carry it
+                // already, while outcome-created actions need it before any later
+                // publication measurement can resolve.
                 ensure_dispatch_envelope(
                     &mut transaction,
                     workspace_id,
@@ -1310,23 +1315,25 @@ impl PostgresAutopilotRepository {
                     &action.payload,
                 )
                 .await?;
-                schedule_effect_measurement(
-                    &mut transaction,
-                    workspace_id,
-                    action.id,
-                    &action.payload,
-                    now,
-                )
-                .await?;
+                if !matches!(action.payload, AutopilotActionPayload::PublishJoinAsk { .. }) {
+                    schedule_effect_measurement(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        &action.payload,
+                        now,
+                    )
+                    .await?;
 
-                record_execution_outcome(
-                    &mut transaction,
-                    workspace_id,
-                    action.id,
-                    &action.payload,
-                    now,
-                )
-                .await?;
+                    record_execution_outcome(
+                        &mut transaction,
+                        workspace_id,
+                        action.id,
+                        &action.payload,
+                        now,
+                    )
+                    .await?;
+                }
             }
 
             let completed = sqlx::query(
