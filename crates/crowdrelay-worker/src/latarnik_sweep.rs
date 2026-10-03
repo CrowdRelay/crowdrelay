@@ -134,8 +134,15 @@ impl LatarnikSweep {
         report.missions_expired = expired;
         for carrier in load_carriers(&self.pool, ws, now, FANS_PER_PASS).await? {
             if let Some(plan) = choose_mission(&carrier.context, now)
-                && offer(&self.pool, ws, carrier.role_id, &plan, now)
-                    .await?
+                && offer(
+                    &self.pool,
+                    ws,
+                    carrier.role_id,
+                    carrier.fan_id,
+                    &plan,
+                    now,
+                )
+                .await?
                     .is_some()
             {
                 report.missions_offered += 1;
