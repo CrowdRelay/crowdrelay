@@ -1044,11 +1044,20 @@ impl Problem {
     /// A bad request that names the failing part — the generic detail
     /// tells the operator it failed, this one tells them which value did.
     fn bad_request_because(detail: &'static str, request_id: Option<String>) -> Self {
+        Self::bad_request_owned(std::borrow::Cow::Borrowed(detail), request_id)
+    }
+
+    /// A bad request carrying a reason the domain wrote at runtime — e.g.
+    /// which receipt field failed validation — mirroring `conflict_owned`.
+    fn bad_request_owned(
+        detail: std::borrow::Cow<'static, str>,
+        request_id: Option<String>,
+    ) -> Self {
         Self {
             r#type: "https://crowdrelay.dev/problems/bad-request",
             title: "Bad request",
             status: StatusCode::BAD_REQUEST.as_u16(),
-            detail: std::borrow::Cow::Borrowed(detail),
+            detail,
             cache_control: "no-store",
             retry_after_seconds: None,
             request_id,

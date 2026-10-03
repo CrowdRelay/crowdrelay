@@ -467,6 +467,9 @@ pub async fn register_manual_social_post(
                      registered already — check its status before publishing again.",
                     request_id_value,
                 ),
+                E::InvalidReceipt(reason) => {
+                    Problem::bad_request_owned(reason.into(), request_id_value)
+                }
                 E::Database(_) => Problem::service_unavailable(request_id_value),
             }
             .into_response()
@@ -511,6 +514,9 @@ pub async fn register_manual_telegram_post(
                      registered already — check its status before publishing again.",
                     request_id_value,
                 ),
+                E::InvalidReceipt(reason) => {
+                    Problem::bad_request_owned(reason.into(), request_id_value)
+                }
                 E::Database(_) => Problem::service_unavailable(request_id_value),
             }
             .into_response()
@@ -555,6 +561,9 @@ pub async fn register_manual_discord_post(
                      registered already — check its status before publishing again.",
                     request_id_value,
                 ),
+                E::InvalidReceipt(reason) => {
+                    Problem::bad_request_owned(reason.into(), request_id_value)
+                }
                 E::Database(_) => Problem::service_unavailable(request_id_value),
             }
             .into_response()
