@@ -130,9 +130,8 @@ pub(super) async fn execute(
     let policy_version = latest_consent.1;
 
     #[allow(clippy::type_complexity)]
-    let latest: Option<(Uuid, String, Option<String>, i64, i64, Vec<String>)> =
-        sqlx::query_as(
-            r#"
+    let latest: Option<(Uuid, String, Option<String>, i64, i64, Vec<String>)> = sqlx::query_as(
+        r#"
             SELECT event.id,
                    event.status,
                    event.last_error_kind,
@@ -160,14 +159,14 @@ pub(super) async fn execute(
             ORDER BY event.created_at DESC,event.id DESC
             LIMIT 1
             "#,
-        )
-        .bind(workspace_id.into_uuid())
-        .bind(fan_id.into_uuid().to_string())
-        .bind(snapshot.acquired_at)
-        .bind(now)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(super::map_sqlx)?;
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(fan_id.into_uuid().to_string())
+    .bind(snapshot.acquired_at)
+    .bind(now)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(super::map_sqlx)?;
 
     let Some((
         latest_event_id,

@@ -7,10 +7,7 @@ use uuid::Uuid;
 use crowdrelay_application::autopilot::{
     ConfirmationRecoverySnapshot, OrganicFunnelControl, OrganicFunnelDirective,
 };
-use crowdrelay_domain::{
-    FanId,
-    action_ledger::provider_delivery_set_is_definitive_failure,
-};
+use crowdrelay_domain::{FanId, action_ledger::provider_delivery_set_is_definitive_failure};
 
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]
 pub struct OrganicFunnelRow {

@@ -374,7 +374,6 @@ pub fn provider_delivery_failure_is_definitive(kind: &str) -> bool {
         || kind == "materialization_database"
 }
 
-
 /// Returns true only when the full delivery picture proves the external side
 /// effect did not happen and an automated retry is therefore safe.
 ///

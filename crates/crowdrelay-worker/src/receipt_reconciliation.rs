@@ -1152,7 +1152,7 @@ fn deliveries_to_evidence(
     if !dead_kinds.is_empty() {
         let all_permanent = dead_kinds
             .iter()
-            .all(|kind| kind.as_deref().is_some_and(is_permanent_error_kind));
+            .all(|kind| kind.as_deref().is_some_and(provider_delivery_failure_is_definitive));
         return if all_permanent {
             // Every endpoint rejected it permanently → definitively failed.
             ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::DefinitiveFailure)

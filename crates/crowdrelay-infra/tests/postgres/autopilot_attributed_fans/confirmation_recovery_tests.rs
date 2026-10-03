@@ -179,7 +179,6 @@ async fn only_terminal_failed_confirmation_delivery_is_auto_recoverable() {
     )
     .await;
 
-
     // A transport timeout is not proof the provider rejected the message.
     // It may have accepted the mail before the acknowledgement was lost, so
     // rotating the confirmation token here could invalidate the real email
@@ -208,8 +207,12 @@ async fn only_terminal_failed_confirmation_delivery_is_auto_recoverable() {
 
     let (ambiguous_delivery_fan, _) =
         seed_pending_attributed_fan(&f, "ambiguous-delivery-confirmation", acquired).await;
-    let ambiguous_delivery_event =
-        confirmation_event(&f, ambiguous_delivery_fan, acquired + time::Duration::hours(1)).await;
+    let ambiguous_delivery_event = confirmation_event(
+        &f,
+        ambiguous_delivery_fan,
+        acquired + time::Duration::hours(1),
+    )
+    .await;
     delivery(
         &f,
         ambiguous_delivery_event,
