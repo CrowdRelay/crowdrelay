@@ -190,6 +190,7 @@ pub async fn day_zero_facts(
     .fetch_optional(pool)
     .await?;
 
+    let (recorded_scopes, check_age_hours) = recorded_publish_scopes(pool, workspace_id).await?;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         r#"
         SELECT platform, status, COALESCE(health, 'unverified')
@@ -202,13 +203,19 @@ pub async fn day_zero_facts(
     .await?;
     let connections = rows
         .into_iter()
-        .map(
-            |(platform, status, health)| crowdrelay_domain::day_zero::ConnectionFact {
+        .map(|(platform, status, health)| {
+            let publish = crowdrelay_domain::day_zero::publish_permission(
+                &platform,
+                recorded_scopes.as_deref(),
+                check_age_hours,
+            );
+            crowdrelay_domain::day_zero::ConnectionFact {
                 platform,
                 connected: status == "connected",
                 working: health == "working",
-            },
-        )
+                publish,
+            }
+        })
         .collect();
     Ok(DayZeroFacts {
         site_root: brand.site_root().map(str::to_owned),
@@ -285,4 +292,81 @@ impl DayZeroFacts {
             connections: &self.connections,
         })
     }
+}
+
+/// `tenant_settings` keys holding the last platform-confirmed scope check.
+///
+/// Stored beside the other tenant facts rather than on a connection row: the
+/// Meta publish credential is one worker-held token that covers both the
+/// Facebook Page and the Instagram account, so the answer belongs to the token,
+/// not to either connection.
+pub const KEY_META_PUBLISH_SCOPES: &str = "meta_publish_scopes";
+pub const KEY_META_PUBLISH_CHECKED_AT: &str = "meta_publish_scopes_checked_at";
+
+/// The last recorded scope check and how many hours old it is, or `(None, None)`
+/// when nothing has been recorded.
+async fn recorded_publish_scopes(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<(Option<Vec<String>>, Option<i64>), sqlx::Error> {
+    let row: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT value FROM tenant_settings WHERE workspace_id = $1 AND key = $2),
+            (SELECT (EXTRACT(EPOCH FROM now() - value::timestamptz) / 3600)::bigint
+               FROM tenant_settings
+              WHERE workspace_id = $1 AND key = $3
+                AND value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T')
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(KEY_META_PUBLISH_SCOPES)
+    .bind(KEY_META_PUBLISH_CHECKED_AT)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some((Some(scopes), Some(age))) => (
+            Some(scopes.split_whitespace().map(str::to_owned).collect()),
+            Some(age),
+        ),
+        _ => (None, None),
+    })
+}
+
+/// Records what the platform said about the publish token's scopes.
+///
+/// Called only with an answer the platform actually gave: a check that could
+/// not run records nothing, so an old answer ages out instead of being
+/// overwritten with a guess. An empty list is a real answer.
+///
+/// # Errors
+///
+/// Propagates the database error.
+pub async fn record_publish_scopes(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    scopes: &[String],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    for (key, value) in [
+        (KEY_META_PUBLISH_SCOPES, scopes.join(" ")),
+        (
+            KEY_META_PUBLISH_CHECKED_AT,
+            time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1, $2, $3)
+             ON CONFLICT (workspace_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        )
+        .bind(workspace_id)
+        .bind(key)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
