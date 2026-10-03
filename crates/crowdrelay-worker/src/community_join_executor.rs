@@ -115,6 +115,8 @@ pub enum CommunityJoinError {
     Http(#[from] reqwest::Error),
     #[error("agent service auth key not configured")]
     NoAuthKey,
+    #[error("provider join state is ambiguous: {0}")]
+    AmbiguousProviderState(String),
     #[error("rate limited by Reddit")]
     RateLimited,
     #[error("http client build failed: {0}")]
@@ -209,6 +211,7 @@ impl CommunityJoinError {
             // Our own side: database, transport, config, a row we cannot use.
             Self::Database(_)
             | Self::Http(_)
+            | Self::AmbiguousProviderState(_)
             | Self::NoAuthKey
             | Self::ClientBuild(_)
             | Self::RateLimited
@@ -402,6 +405,21 @@ impl CommunityJoinExecutorWorker {
                         .await
                         .ok();
                 }
+                Err(CommunityJoinError::AmbiguousProviderState(reason)) => {
+                    tracing::warn!(
+                        place_id = %place.place_id,
+                        place = %place.name,
+                        %reason,
+                        "community join outcome is unknown; automatic retry is blocked"
+                    );
+                    self.set_membership(
+                        place.place_id,
+                        "join_unknown",
+                        Some(&reason),
+                    )
+                    .await
+                    .ok();
+                }
                 Err(error) => {
                     // `rejected` is terminal. It is written only when Reddit
                     // actually refused; our own failures go back to
@@ -435,16 +453,19 @@ impl CommunityJoinExecutorWorker {
         Ok(processed)
     }
 
-    /// Recovers `joining` rows that have been stuck longer than the stale
-    /// threshold. Reverts them to `not_joined` — joining is idempotent on
-    /// Reddit's side, so retrying is safe.
+    /// Recovers stale local claims without inventing provider truth.
+    ///
+    /// A stale `joining` row never crossed the explicit dispatch boundary and
+    /// is safe to reclaim. A stale `join_dispatched` row may already have
+    /// changed provider state, so it becomes `join_unknown` and is never
+    /// automatically retried.
     async fn recover_stale_joining(&self) -> Result<(), CommunityJoinError> {
         let ws = self.workspace_id.into_uuid();
-        let result = sqlx::query(
+        let local = sqlx::query(
             r#"
             UPDATE discovery_places
             SET membership_state = 'not_joined',
-                membership_note = 'recovered from stale joining attempt',
+                membership_note = 'recovered stale local join claim before dispatch',
                 membership_changed_at = now(),
                 membership_changed_by = 'community-join-executor:recovery',
                 updated_at = now()
@@ -458,10 +479,29 @@ impl CommunityJoinExecutorWorker {
         .execute(&self.pool)
         .await?;
 
-        if result.rows_affected() > 0 {
+        let ambiguous = sqlx::query(
+            r#"
+            UPDATE discovery_places
+            SET membership_state = 'join_unknown',
+                membership_note = 'join request was dispatched but no provider receipt was recorded',
+                membership_changed_at = now(),
+                membership_changed_by = 'community-join-executor:recovery',
+                updated_at = now()
+            WHERE workspace_id = $1
+              AND membership_state = 'join_dispatched'
+              AND membership_changed_at < now() - make_interval(secs => $2::double precision)
+            "#,
+        )
+        .bind(ws)
+        .bind(JOINING_STALE_THRESHOLD.as_secs() as i64)
+        .execute(&self.pool)
+        .await?;
+
+        if local.rows_affected() > 0 || ambiguous.rows_affected() > 0 {
             tracing::info!(
-                recovered = result.rows_affected(),
-                "recovered stale joining rows (reverted to not_joined)"
+                local_recovered = local.rows_affected(),
+                ambiguous_blocked = ambiguous.rows_affected(),
+                "recovered stale community join states"
             );
         }
         Ok(())
@@ -624,7 +664,16 @@ impl CommunityJoinExecutorWorker {
             }
         };
 
-        let response = self
+        // This is the exact boundary after which a lost response is not a
+        // failure. Once stamped, crash recovery must not retry blindly.
+        self.set_membership(
+            place.place_id,
+            "join_dispatched",
+            Some("join request dispatch started; awaiting provider confirmation"),
+        )
+        .await?;
+
+        let response = match self
             .http_client
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
@@ -632,28 +681,77 @@ impl CommunityJoinExecutorWorker {
             .json(&payload)
             .timeout(JOIN_API_TIMEOUT)
             .send()
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is_connect() => {
+                // No connection to the agent service was established, so the
+                // external side effect could not have begun.
+                self.set_membership(
+                    place.place_id,
+                    "not_joined",
+                    Some("join dispatch could not connect to agent service"),
+                )
+                .await?;
+                return Err(CommunityJoinError::Http(error));
+            }
+            Err(error) => {
+                return Err(CommunityJoinError::AmbiguousProviderState(format!(
+                    "join request lost after dispatch boundary: {}",
+                    error_chain(&error)
+                )));
+            }
+        };
 
         let status = response.status();
         if status.as_u16() == 429 {
+            self.set_membership(place.place_id, "not_joined", Some("provider rate limited join"))
+                .await?;
             return Err(CommunityJoinError::RateLimited);
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            self.set_membership(
+                place.place_id,
+                "not_joined",
+                Some("provider returned a definitive non-success response"),
+            )
+            .await?;
             return Err(CommunityJoinError::AgentsService(format!(
                 "agents join HTTP {status} for {}: {body}",
                 place.place_kind
             )));
         }
 
-        // Success — transition to joined.
-        self.set_membership(place.place_id, "joined", None).await?;
+        let body: serde_json::Value = response.json().await.map_err(|error| {
+            CommunityJoinError::AmbiguousProviderState(format!(
+                "join returned HTTP {status} but provider receipt was unreadable: {error}"
+            ))
+        })?;
+        let confirmed = match place.place_kind.as_str() {
+            "lemmy" => body.get("following").and_then(serde_json::Value::as_bool) == Some(true),
+            "telegram" => body.get("joined").and_then(serde_json::Value::as_bool) == Some(true),
+            _ => body.get("joined").and_then(serde_json::Value::as_bool) == Some(true),
+        };
+        if !confirmed {
+            return Err(CommunityJoinError::AmbiguousProviderState(format!(
+                "join returned HTTP {status} without provider-confirmed membership for {}: {}",
+                place.place_kind, body
+            )));
+        }
+
+        self.set_membership(
+            place.place_id,
+            "joined",
+            Some("provider-confirmed join receipt"),
+        )
+        .await?;
 
         tracing::info!(
             place_id = %place.place_id,
             kind = %place.place_kind,
             community = %log_name,
-            "successfully joined community"
+            "provider confirmed community membership"
         );
         Ok(())
     }
