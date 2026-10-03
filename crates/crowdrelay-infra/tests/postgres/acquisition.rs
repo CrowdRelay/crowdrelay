@@ -65,6 +65,19 @@ async fn phase_one_acquisition_is_atomic_and_tenant_safe() -> Result<(), Box<dyn
         Some(workspace_id)
     );
     assert_eq!(repository.load_active_smart_links().await?.len(), 1);
+    let link_slug = SmartLinkSlug::parse("infra-test")?;
+    let targeted = repository
+        .load_active_smart_link(workspace_id, &link_slug)
+        .await?
+        .ok_or("targeted smart-link lookup missed the active row")?;
+    assert_eq!(targeted.id(), smart_link_id);
+    assert_eq!(
+        repository
+            .load_active_smart_link(WorkspaceId::new(), &link_slug)
+            .await?,
+        None,
+        "a public slug cannot escape the repository's trusted tenant"
+    );
 
     assert_click_batches_are_all_or_nothing(
         &pool,
@@ -117,6 +130,13 @@ async fn phase_one_acquisition_is_atomic_and_tenant_safe() -> Result<(), Box<dyn
         .bind(campaign_id.into_uuid())
         .execute(&pool)
         .await?;
+    assert_eq!(
+        repository
+            .load_active_smart_link(workspace_id, &link_slug)
+            .await?,
+        None,
+        "a fresh-cache fallback must not resurrect a link from an inactive campaign"
+    );
     sqlx::query(
         r#"
         UPDATE idempotency_keys
