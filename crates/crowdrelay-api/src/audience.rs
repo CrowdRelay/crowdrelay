@@ -201,45 +201,48 @@ pub async fn referral_conversion(
                 count(DISTINCT mission_id) FILTER (WHERE tapped_at IS NOT NULL)::bigint AS tapped
             FROM mission_windows
         ),
+        mission_funnel AS (
+            SELECT
+                mission.mission_id,
+                funnel.anonymous_visitor_id,
+                funnel.referred_fan_id,
+                funnel.referral_status,
+                funnel.accepted_at,
+                funnel.qualified_at,
+                funnel.outcome_deadline
+            FROM mission_windows AS mission
+            CROSS JOIN LATERAL latarnik_mission_funnel(
+                $1,
+                mission.mission_id,
+                $2
+            ) AS funnel
+            WHERE mission.tapped_at IS NOT NULL
+        ),
         mission_clickers AS (
-            SELECT count(DISTINCT provenance.anonymous_visitor_id)::bigint AS human_clickers
-            FROM fan_provenance_events AS provenance
-            WHERE provenance.workspace_id = $1
-              AND provenance.event_kind = 'interaction'
-              AND provenance.channel = 'referral'
-              AND provenance.attribution_method = 'referral_click'
-              AND provenance.anonymous_visitor_id IS NOT NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM mission_windows AS mission
-                  WHERE mission.tapped_at IS NOT NULL
-                    AND provenance.source_target = 'fan:' || mission.referrer_fan_id::text
-                    AND provenance.occurred_at >= mission.tapped_at
-                    AND provenance.occurred_at <= mission.expires_at + INTERVAL '7 days'
-              )
+            SELECT count(DISTINCT anonymous_visitor_id)::bigint AS human_clickers
+            FROM mission_funnel
         ),
         mission_referrals AS (
             SELECT DISTINCT
-                referral.referred_fan_id,
-                referral.status
-            FROM referral_attributions AS referral
-            WHERE referral.workspace_id = $1
-              AND EXISTS (
-                  SELECT 1
-                  FROM mission_windows AS mission
-                  WHERE mission.tapped_at IS NOT NULL
-                    AND mission.referrer_fan_id = referral.referrer_fan_id
-                    AND referral.accepted_at >= mission.tapped_at
-                    AND referral.accepted_at <= mission.expires_at + INTERVAL '7 days'
-              )
+                referred_fan_id,
+                (
+                    referral_status = 'qualified'
+                    AND qualified_at IS NOT NULL
+                    AND qualified_at <= outcome_deadline
+                    AND qualified_at <= $2
+                ) AS qualified
+            FROM mission_funnel
+            WHERE referred_fan_id IS NOT NULL
+              AND accepted_at IS NOT NULL
         ),
         mission_referral_counts AS (
             SELECT
                 count(DISTINCT referral.referred_fan_id)::bigint AS joined,
                 count(DISTINCT referral.referred_fan_id)
-                    FILTER (WHERE referral.status = 'qualified')::bigint AS qualified,
+                    FILTER (WHERE referral.qualified)::bigint AS qualified,
                 count(DISTINCT referral.referred_fan_id) FILTER (
-                    WHERE EXISTS (
+                    WHERE referral.qualified
+                      AND EXISTS (
                         SELECT 1
                         FROM fans AS referred
                         WHERE referred.workspace_id = $1
