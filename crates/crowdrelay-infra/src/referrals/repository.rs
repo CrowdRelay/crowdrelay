@@ -112,15 +112,14 @@ impl PostgresReferralRepository {
         let (qualified, pending) = sqlx::query_as::<_, (i64, i64)>(
             r#"
             SELECT
-                count(DISTINCT canonical_fan_id($1,referred_fan_id))
-                    FILTER (
-                        WHERE status = 'qualified'
-                          AND canonical_fan_id($1,referred_fan_id) IS DISTINCT FROM $2
-                    )::bigint,
+                canonical_qualified_referral_count($1,$2,NULL),
                 count(DISTINCT canonical_fan_id($1,referred_fan_id))
                     FILTER (
                         WHERE status = 'pending'
                           AND canonical_fan_id($1,referred_fan_id) IS DISTINCT FROM $2
+                          AND canonical_live_referral_owner_id(
+                              $1,referred_fan_id
+                          ) = $2
                     )::bigint
             FROM referral_attributions
             WHERE workspace_id = $1
@@ -197,16 +196,9 @@ impl PostgresReferralRepository {
                 draw.max_entries::bigint AS max_entries
             FROM reward_draws AS draw
             CROSS JOIN LATERAL (
-                SELECT count(DISTINCT canonical_fan_id($1,attribution.referred_fan_id))::bigint
-                    AS qualified_referrals
-                FROM referral_attributions AS attribution
-                WHERE attribution.workspace_id = draw.workspace_id
-                  AND attribution.referrer_fan_id IN (
-                      SELECT fan_id FROM canonical_fan_family($1,$2)
-                  )
-                  AND attribution.status = 'qualified'
-                  AND attribution.qualified_at <= draw.closes_at
-                  AND canonical_fan_id($1,attribution.referred_fan_id) IS DISTINCT FROM $2
+                SELECT canonical_qualified_referral_count(
+                    $1,$2,draw.closes_at
+                ) AS qualified_referrals
             ) AS referral_count
             CROSS JOIN LATERAL (
                 SELECT count(DISTINCT checkin.event_id)::bigint AS concert_checkins
