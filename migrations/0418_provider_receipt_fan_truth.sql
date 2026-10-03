@@ -1,4 +1,5 @@
--- FAN_100 integrity: a status/timestamp is not an external publication receipt.
+-- FAN_100 integrity follow-up: a status/timestamp is not an external publication receipt.
+-- Renumbered after main already acquired migration 0416; this stricter owner runs after 0417.
 --
 -- #545 made the owned-social executor and canonical funnel provider-receipt aware,
 -- but the monthly cohort copied an older publication CTE. That left a semantic
