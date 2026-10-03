@@ -236,7 +236,7 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
     // deliverable forum/Discord community even though the evaluator later
     // refuses the Reddit candidate.
     let lane_rows =
-        crate::lane_ledger::lane_rows(&repo.pool, workspace_id.into_uuid(), 14)
+        crate::lane_ledger::lane_rows(&repo.pool, workspace_id.into_uuid(), crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS)
             .await
             .map_err(map_sqlx)?;
     let community_verdicts: std::collections::BTreeMap<
