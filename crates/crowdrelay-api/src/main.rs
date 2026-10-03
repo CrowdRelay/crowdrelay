@@ -31,7 +31,7 @@ use std::{future::pending, sync::Arc, time::Duration};
 use anyhow::{Context, Result, anyhow};
 use crowdrelay_api::{
     AcquisitionState, AcquisitionStateArgs, AdmissionState, AdmissionStateArgs, AppState,
-    ClickMetricsReader, ClickMetricsSnapshot, ClickSubmitter, ConcertQrState,
+    ClickMetricsReader, ClickMetricsSnapshot, ClickSubmission, ClickSubmitter, ConcertQrState,
     EventActionMetricsReader, EventActionMetricsSnapshot, EventActionSubmitter, EventState,
     FanLifecycleState, HttpConfig, OpsState, PushPublicState, RateLimitPolicy, RateLimiter,
     ReferralState, TicketingState, tenant::TenantProfile,
@@ -45,7 +45,7 @@ use crowdrelay_application::{
     SetEventFestival, SetEventSupportSlots, SignupFan, UnsubscribeFan,
 };
 use crowdrelay_infra::{
-    acquisition::{ClickBuffer, PostgresAcquisitionRepository},
+    acquisition::{ClickBuffer, ClickSubmissionOutcome, PostgresAcquisitionRepository},
     admission::PostgresAdmissionRepository,
     autopilot::PostgresAutopilotRepository,
     config::Config,
@@ -166,7 +166,14 @@ async fn main() -> Result<()> {
             .context("invalid click buffer configuration")?;
     let click_metrics = click_buffer.metrics();
     let click_submitter: ClickSubmitter = Arc::new(move |event| {
-        let _outcome = click_buffer.try_send(event);
+        let click_buffer = click_buffer.clone();
+        Box::pin(async move {
+            match click_buffer.submit(event).await {
+                ClickSubmissionOutcome::Queued
+                | ClickSubmissionOutcome::OverflowPersisted => ClickSubmission::Accepted,
+                ClickSubmissionOutcome::Unavailable => ClickSubmission::Unavailable,
+            }
+        })
     });
     let metrics_for_reader = Arc::clone(&click_metrics);
     let click_metrics_reader: ClickMetricsReader = Arc::new(move || {
@@ -174,6 +181,8 @@ async fn main() -> Result<()> {
         ClickMetricsSnapshot {
             queued: snapshot.queued,
             persisted: snapshot.persisted,
+            overflowed: snapshot.overflowed,
+            overflow_recovered: snapshot.overflow_recovered,
             dropped: snapshot.dropped,
             persistence_failed: snapshot.persistence_failed,
         }
@@ -389,6 +398,8 @@ async fn main() -> Result<()> {
     tracing::info!(
         click_queued = click_snapshot.queued,
         click_persisted = click_snapshot.persisted,
+        click_overflowed = click_snapshot.overflowed,
+        click_overflow_recovered = click_snapshot.overflow_recovered,
         click_dropped = click_snapshot.dropped,
         click_persistence_failed = click_snapshot.persistence_failed,
         "click ingestion stopped"
