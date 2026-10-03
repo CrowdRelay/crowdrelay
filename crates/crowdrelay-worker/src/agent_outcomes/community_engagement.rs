@@ -219,3 +219,162 @@ impl AgentOutcomeWorker {
         ))
     }
 }
+
+/// Result of the community admission gate: the validated source row and its
+/// batch key, or the refusal the caller records after dropping its write —
+/// the gate returns rejections so its reads cannot pin the transaction open.
+enum CommunityAdmission {
+    Admitted(CommunityPostSourceRow, Option<Uuid>),
+    Rejected(OutcomeRejection),
+}
+
+impl AgentOutcomeWorker {
+    /// Admission gate for a community draft: the target must be a promoted,
+    /// admitted community row; the draft must match its recorded language;
+    /// the room must have been read; and the facts must name a live trusted
+    /// content source. The row is fetched rather than existence-checked
+    /// because its media fields and canonical public destination are what the
+    /// action payload carries — the model writes the words; it never gets to
+    /// substitute the source or URL.
+    async fn admit_community_post(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        outcome: &ValidatedOutcome,
+        producing_task: Option<&(String, String, Value)>,
+        target_id: Uuid,
+        producing_template: Option<&str>,
+    ) -> Result<CommunityAdmission, AgentOutcomeError> {
+        // `Some(language)` for an admitted community; its recorded language
+        // is what the draft is held to below.
+        let admitted = sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            SELECT language FROM agent_outreach_targets
+            WHERE workspace_id = $1
+              AND id = $2
+              AND target_kind = 'community'
+              AND screening_verdict = 'admitted'
+              AND status = 'promoted'
+            "#,
+        )
+        .bind(outcome.workspace_id)
+        .bind(target_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(community_language) = admitted else {
+            let rejection = OutcomeRejection::UnvettedCommunity { target_id };
+            tracing::warn!(
+                outcome_id = %outcome.id,
+                target_id = %target_id,
+                rejection = %rejection,
+                "rejecting community post: target is not an admitted community"
+            );
+            return Ok(CommunityAdmission::Rejected(rejection));
+        };
+        // Language gate: every draft, not only the sample a batch approval
+        // was given on. See `community_language`.
+        let draft_text = ["title", "body"]
+            .iter()
+            .filter_map(|key| outcome.payload.item.as_ref()?.get(*key)?.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some((expected, found)) =
+            crowdrelay_domain::community_language::community_language_mismatch(
+                &draft_text,
+                community_language.as_deref(),
+            )
+        {
+            let rejection = OutcomeRejection::CommunityLanguageMismatch { expected, found };
+            tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
+            return Ok(CommunityAdmission::Rejected(rejection));
+        }
+
+        if let Some(rejection) = self
+            .room_not_read(&mut *tx, outcome, target_id, producing_template)
+            .await?
+        {
+            tracing::warn!(outcome_id = %outcome.id, rejection = %rejection, "rejecting community post");
+            return Ok(CommunityAdmission::Rejected(rejection));
+        }
+
+        // Source gate: the post must name the trusted content source its
+        // facts come from — and which kinds it may name depends on which
+        // worker produced the draft. The community engager is the
+        // first-touch lane for fresh videos *and releases*; the repost
+        // worker is narrower and may carry only the band's own synced
+        // social posts. Events and stories remain outside this path.
+        let source_gate = match producing_template {
+            Some("community-repost") => "social_post",
+            _ => "community_engager",
+        };
+        let source_id_raw = outcome
+            .payload
+            .item
+            .as_ref()
+            .and_then(|i| i.get("source_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let source_uuid = source_id_raw
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        if let Some(pinned) = producing_task
+            .and_then(|(_, prompt, _)| pinned_community_uuid(prompt, "source_id"))
+            && source_uuid != Some(pinned)
+        {
+            return Err(OutcomeRejection::UnsourcedPost {
+                source_id: source_id_raw,
+            }
+            .into());
+        }
+        let source_row: Option<CommunityPostSourceRow> = match source_uuid {
+            Some(source_id) => {
+                sqlx::query_as::<_, CommunityPostSourceRow>(
+                    r#"
+                SELECT source_kind, metadata AS source_metadata,
+                       metadata->>'media_url' AS media_url,
+                       metadata->>'media_id' AS media_id,
+                       metadata->>'media_type' AS media_type,
+                       metadata->>'thumbnail_url' AS thumbnail_url,
+                       CASE
+                           WHEN source_kind = 'release'
+                               THEN COALESCE(
+                                   NULLIF(btrim(metadata->>'url'), ''),
+                                   NULLIF(btrim(metadata->>'listen_url'), '')
+                               )
+                           ELSE metadata->>'url'
+                       END AS source_url
+                FROM content_sources
+                WHERE workspace_id = $1
+                  AND id = $2
+                  AND (
+                      ($3 = 'social_post' AND source_kind = 'social_post')
+                      OR (
+                          $3 = 'community_engager'
+                          AND source_kind IN ('video', 'release')
+                      )
+                  )
+                  AND active
+                  AND expires_at > now()
+                "#,
+                )
+                .bind(outcome.workspace_id)
+                .bind(source_id)
+                .bind(source_gate)
+                .fetch_optional(&mut **tx)
+                .await?
+            }
+            None => None,
+        };
+        let Some(source_row) = source_row else {
+            let rejection = OutcomeRejection::UnsourcedPost {
+                source_id: source_id_raw,
+            };
+            tracing::warn!(
+                outcome_id = %outcome.id,
+                rejection = %rejection,
+                "rejecting community post: no live content source behind it"
+            );
+            return Ok(CommunityAdmission::Rejected(rejection));
+        };
+        Ok(CommunityAdmission::Admitted(source_row, source_uuid))
+    }
+}
