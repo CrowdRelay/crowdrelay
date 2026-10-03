@@ -81,6 +81,11 @@ pub struct PostRecord {
     /// The latest removal-aware read that saw the post live. `None` when no
     /// read could establish removal state at all.
     pub last_seen_live_at: Option<OffsetDateTime>,
+    /// Whether the community did anything beyond Reddit's initial score:
+    /// latest score > 1 or at least one comment. "Not removed" is safety
+    /// evidence; this is the minimal audience signal required before that post
+    /// may teach the machine that its judgement belongs in the room.
+    pub community_responded: bool,
 }
 
 /// How long a removal keeps the account halted or the ceiling at its floor.
@@ -165,8 +170,12 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
             daily_cap: BASE_DAILY_CAP,
         };
     }
-    let survived = history.iter().filter(|post| survived(post, now)).count();
-    let earned = u32::try_from(survived / SURVIVED_POSTS_PER_STEP).unwrap_or(u32::MAX);
+    let quality_survived = history
+        .iter()
+        .filter(|post| survived_with_signal(post, now))
+        .count();
+    let earned =
+        u32::try_from(quality_survived / SURVIVED_POSTS_PER_STEP).unwrap_or(u32::MAX);
     RedditStanding::Open {
         daily_cap: BASE_DAILY_CAP.saturating_add(earned).min(MAX_DAILY_CAP),
     }
@@ -180,7 +189,21 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
 /// observes for removals. Only then may automation take over.
 #[must_use]
 pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
-    history.iter().filter(|post| survived(post, now)).count() >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
+    // One current moderator/AutoModerator/site verdict is enough to take
+    // unattended posting away. The account-level `Halted` state remains the
+    // stronger two-removal/site-filter alarm; this gate is intentionally more
+    // conservative because a person can still decide whether one removal was
+    // contextual while the machine cannot.
+    let recent_verdict = history.iter().any(|post| {
+        post.removal.is_some_and(RemovalCause::is_verdict)
+            && now - post.removal_seen_at.unwrap_or(post.posted_at) <= REMOVAL_WINDOW
+    });
+    !recent_verdict
+        && history
+            .iter()
+            .filter(|post| survived_with_signal(post, now))
+            .count()
+            >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
 }
 
 /// Whether a community's moderators (or its AutoModerator) removed one of our
@@ -207,6 +230,10 @@ fn survived(post: &PostRecord, now: OffsetDateTime) -> bool {
             .is_some_and(|seen| seen - post.posted_at >= SURVIVAL_OBSERVED_AFTER)
 }
 
+fn survived_with_signal(post: &PostRecord, now: OffsetDateTime) -> bool {
+    survived(post, now) && post.community_responded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +250,7 @@ mod tests {
             removal: None,
             removal_seen_at: None,
             last_seen_live_at: Some(posted_at + Duration::hours(60)),
+            community_responded: true,
         }
     }
 
@@ -265,6 +293,32 @@ mod tests {
             })
             .collect();
         assert!(!autonomy_proven(&history, now()));
+    }
+
+    #[test]
+    fn ignored_but_unremoved_posts_do_not_earn_autonomy_or_volume() {
+        let ignored: Vec<_> = (8..20)
+            .map(|days| PostRecord {
+                community_responded: false,
+                ..live(days)
+            })
+            .collect();
+        assert!(!autonomy_proven(&ignored, now()));
+        assert_eq!(
+            reddit_standing(&ignored, now()),
+            RedditStanding::Open { daily_cap: BASE_DAILY_CAP }
+        );
+    }
+
+    #[test]
+    fn one_recent_moderator_verdict_revokes_unattended_posting() {
+        let mut history: Vec<_> = (8..20).map(live).collect();
+        assert!(autonomy_proven(&history, now()));
+        history.push(removed(2, RemovalCause::Moderator, "metal"));
+        assert!(
+            !autonomy_proven(&history, now()),
+            "a fresh moderation verdict returns Reddit to human control"
+        );
     }
 
     #[test]
