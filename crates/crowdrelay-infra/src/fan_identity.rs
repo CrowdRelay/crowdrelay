@@ -517,31 +517,52 @@ impl FanIdentityRepository for PgFanIdentityRepository {
             moved.insert("fan_identifiers".to_string(), json!(identifier_keys));
         }
 
-        // Mirror the loser's latest consent decision for any purpose the
-        // survivor has never decided. The survivor's own word always wins —
-        // a merge must never silently grant or revoke contact permission.
-        let consents_mirrored = sqlx::query(
-            "WITH latest AS ( \
-                 SELECT DISTINCT ON (purpose) purpose, granted, policy_version, source, recorded_at \
+        // Consent belongs to the canonical person, not to whichever duplicate
+        // was arbitrarily chosen as the survivor. Fold only a genuinely newer
+        // loser decision onto the survivor. Every mirror is causally tied to
+        // this exact merge so an unmerge can compensate it without timing
+        // heuristics; the append-only source history remains untouched.
+        let merge_id = Uuid::now_v7();
+        let consent_merge_request_id = format!("fan_merge:{merge_id}");
+        let mirrored_consent_keys = sqlx::query_scalar::<_, String>(
+            "WITH loser_latest AS ( \
+                 SELECT DISTINCT ON (purpose) id, purpose, granted, policy_version, recorded_at \
                  FROM fan_consents WHERE workspace_id = $1 AND fan_id = $3 \
-                 ORDER BY purpose, recorded_at DESC \
-             ), missing AS ( \
-                 SELECT l.* FROM latest l WHERE NOT EXISTS ( \
-                     SELECT 1 FROM fan_consents s WHERE s.workspace_id = $1 \
-                     AND s.fan_id = $2 AND s.purpose = l.purpose)) \
-             INSERT INTO fan_consents (workspace_id, fan_id, purpose, granted, policy_version, source, recorded_at) \
-             SELECT $1, $2, purpose, granted, policy_version, 'fan_merge', now() FROM missing",
+                 ORDER BY purpose, recorded_at DESC, id DESC \
+             ), survivor_latest AS ( \
+                 SELECT DISTINCT ON (purpose) id, purpose, granted, policy_version, recorded_at \
+                 FROM fan_consents WHERE workspace_id = $1 AND fan_id = $2 \
+                 ORDER BY purpose, recorded_at DESC, id DESC \
+             ), newer AS ( \
+                 SELECT l.* FROM loser_latest l \
+                 LEFT JOIN survivor_latest s USING (purpose) \
+                 WHERE s.id IS NULL OR ( \
+                     (l.recorded_at, l.id) > (s.recorded_at, s.id) \
+                     AND (l.granted IS DISTINCT FROM s.granted \
+                          OR l.policy_version IS DISTINCT FROM s.policy_version)) \
+             ) \
+             INSERT INTO fan_consents \
+                 (workspace_id, fan_id, purpose, granted, policy_version, source, request_id, recorded_at) \
+             SELECT $1, $2, purpose, granted, policy_version, 'fan_merge', $4, now() \
+             FROM newer RETURNING id::text",
         )
         .bind(workspace_id)
         .bind(command.survivor_fan_id)
         .bind(command.merged_fan_id)
-        .execute(&mut *tx)
+        .bind(&consent_merge_request_id)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|error| {
             tracing::warn!(%error, "fan identity store failed");
             FanIdentityError::Unavailable
-        })?
-        .rows_affected() as i64;
+        })?;
+        let consents_mirrored = mirrored_consent_keys.len() as i64;
+        if !mirrored_consent_keys.is_empty() {
+            moved.insert(
+                "fan_consents_mirrored".to_string(),
+                json!(mirrored_consent_keys),
+            );
+        }
 
         // Retained = whatever rows still name the merged fan afterwards.
         let mut retained: Map<String, Value> = Map::new();
@@ -628,12 +649,13 @@ impl FanIdentityRepository for PgFanIdentityRepository {
         })?;
 
         let merge = sqlx::query_as::<_, MergeRow>(
-            "INSERT INTO fan_merges (workspace_id, survivor_fan_id, merged_fan_id, prior_status, \
+            "INSERT INTO fan_merges (id, workspace_id, survivor_fan_id, merged_fan_id, prior_status, \
                  reason, moved, retained, consents_mirrored, merged_by, merged_at, request_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11) \
              RETURNING id, survivor_fan_id, merged_fan_id, moved, retained, consents_mirrored, \
                  merged_at, unmerged_at",
         )
+        .bind(merge_id)
         .bind(workspace_id)
         .bind(command.survivor_fan_id)
         .bind(command.merged_fan_id)
@@ -814,8 +836,68 @@ impl FanIdentityRepository for PgFanIdentityRepository {
             }
         }
 
-        // Restore the fan exactly as it was. Mirrored consent rows stay —
-        // append-only history recorded that the survivor held them for a while.
+        // Consent history is append-only, so a merge mirror cannot be deleted.
+        // If this merge's exact mirror is still the survivor's current decision,
+        // append a compensating decision from the survivor's prior state. A
+        // post-merge user decision always wins and is never overwritten. Mirrors
+        // from already-closed sibling merges are not valid prior state.
+        let consent_merge_request_id = format!("fan_merge:{merge_id}");
+        let consent_unmerge_request_id = format!("fan_unmerge:{merge_id}");
+        sqlx::query(
+            "WITH mirrored AS ( \
+                 SELECT DISTINCT ON (purpose) purpose, policy_version \
+                 FROM fan_consents \
+                 WHERE workspace_id = $1 AND fan_id = $2 AND request_id = $3 \
+                 ORDER BY purpose, recorded_at DESC, id DESC \
+             ), current AS ( \
+                 SELECT DISTINCT ON (purpose) purpose, request_id \
+                 FROM fan_consents \
+                 WHERE workspace_id = $1 AND fan_id = $2 \
+                 ORDER BY purpose, recorded_at DESC, id DESC \
+             ), prior AS ( \
+                 SELECT DISTINCT ON (consent.purpose) \
+                     consent.purpose, consent.granted, consent.policy_version \
+                 FROM fan_consents consent \
+                 JOIN mirrored USING (purpose) \
+                 WHERE consent.workspace_id = $1 AND consent.fan_id = $2 \
+                   AND consent.request_id IS DISTINCT FROM $3 \
+                   AND NOT ( \
+                       consent.source = 'fan_merge' \
+                       AND consent.request_id LIKE 'fan_merge:%' \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM fan_merges sibling \
+                           WHERE sibling.workspace_id = $1 \
+                             AND sibling.survivor_fan_id = $2 \
+                             AND sibling.unmerged_at IS NULL \
+                             AND consent.request_id = 'fan_merge:' || sibling.id::text)) \
+                 ORDER BY consent.purpose, consent.recorded_at DESC, consent.id DESC \
+             ), restore AS ( \
+                 SELECT mirrored.purpose, COALESCE(prior.granted, false) AS granted, \
+                        COALESCE(prior.policy_version, mirrored.policy_version) AS policy_version \
+                 FROM mirrored \
+                 JOIN current USING (purpose) \
+                 LEFT JOIN prior USING (purpose) \
+                 WHERE current.request_id = $3 \
+             ) \
+             INSERT INTO fan_consents \
+                 (workspace_id, fan_id, purpose, granted, policy_version, source, request_id, recorded_at) \
+             SELECT $1, $2, purpose, granted, policy_version, 'fan_unmerge', $4, now() \
+             FROM restore",
+        )
+        .bind(workspace_id)
+        .bind(survivor_id)
+        .bind(&consent_merge_request_id)
+        .bind(&consent_unmerge_request_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "fan identity store failed");
+            FanIdentityError::Unavailable
+        })?;
+
+        // Restore the fan exactly as it was. The compensating consent rows
+        // above restore the survivor's effective decision without mutating
+        // append-only history.
         sqlx::query(
             "UPDATE fans SET status = $3, merged_into_fan_id = NULL, merged_at = NULL, \
              updated_at = now() WHERE workspace_id = $1 AND id = $2",
