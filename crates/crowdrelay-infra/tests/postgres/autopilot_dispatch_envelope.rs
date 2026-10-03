@@ -319,15 +319,14 @@ async fn an_executor_required_action_gets_no_premature_envelope()
     Ok(())
 }
 
-/// A brain-requested artifact is the fourth loop closure: the brain asks for
-/// a piece of content, the executor produces it, and the provider-confirmed
-/// receipt both writes the learning envelope and schedules the fan-growth
-/// trio. Before this path a published video or post left nothing for the
-/// model to learn from — the artifact request sat in the do-nothing arm of
-/// `schedule_effect_measurement`.
+/// A brain-requested artifact closes the production half of the loop: the
+/// brain asks for a piece of content, the executor produces it, and the
+/// provider-confirmed receipt writes the learning envelope plus the proximal
+/// "was it actually published?" measurement. Fan growth belongs to the later
+/// delivery action with a real publication receipt and tracked link.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements()
+async fn a_content_artifact_receipt_measures_publication_not_fan_growth()
 -> Result<(), Box<dyn std::error::Error>> {
     let f = setup().await?;
     let now = OffsetDateTime::now_utc();
@@ -427,7 +426,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
         )
         .await?;
 
-    // The cold-prior envelope the measurement trio will update on resolution.
+    // The cold-prior envelope the proximal publication measurement updates.
     let prediction = sqlx::query_as::<_, (String, f64)>(
         "SELECT template_id, expected_new_fans FROM dispatch_predictions \
          WHERE action_id = $1",
@@ -456,8 +455,10 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
         "the receipt envelope is an expectation, not an outcome: {evidence:?}"
     );
 
-    // The fan-growth trio, anchored at the confirmed production time and
-    // pointed at the content source the artifact was made from.
+    // Production is not distribution: only the proximal
+    // artifact→publication outcome is scheduled here. The eventual post/send
+    // action owns clicks and fan acquisition, so one human cannot teach both
+    // the draft and the publication that carried it.
     let measurements = sqlx::query_as::<_, (String, Uuid, OffsetDateTime, OffsetDateTime)>(
         "SELECT measurement_kind, subject_id, action_finished_at, due_at \
          FROM autopilot_measurements \
@@ -467,42 +468,19 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     .bind(action_id)
     .fetch_all(&f.pool)
     .await?;
-    let expected_windows: [(&str, i64); 4] = [
-        ("artifact_outcome_7d", 7),
-        ("durable_fan_growth_30d", 44),
-        ("incremental_fan_growth_14d", 14),
-        ("incremental_fan_growth_3d", 3),
-    ];
-    assert_eq!(
-        measurements
-            .iter()
-            .map(|row| row.0.as_str())
-            .collect::<Vec<_>>(),
-        expected_windows
-            .iter()
-            .map(|(kind, _)| *kind)
-            .collect::<Vec<_>>()
+    assert_eq!(measurements.len(), 1, "artifact production owns one proximal measurement");
+    let (kind, subject, finished, due) = &measurements[0];
+    assert_eq!(kind, "artifact_outcome_7d");
+    assert_eq!(*subject, source_id);
+    assert!(
+        *finished > now && *finished <= produced_at,
+        "artifact outcome anchors at the production receipt, not the request"
     );
-    for (kind, subject, finished, due) in &measurements {
-        assert_eq!(
-            *subject, source_id,
-            "{kind} must measure the artifact's source"
-        );
-        assert!(
-            *finished > now && *finished <= produced_at,
-            "{kind} anchors at the receipt, not the request"
-        );
-        let window = expected_windows
-            .iter()
-            .find(|(expected, _)| expected == kind)
-            .map(|(_, days)| *days)
-            .expect("expected measurement kind");
-        assert_eq!(
-            *due - *finished,
-            time::Duration::days(window),
-            "{kind} due_at"
-        );
-    }
+    assert_eq!(
+        *due - *finished,
+        time::Duration::days(7),
+        "artifact outcome matures after the publication window"
+    );
 
     let status =
         sqlx::query_scalar::<_, String>("SELECT status FROM autopilot_actions WHERE id = $1")
