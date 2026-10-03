@@ -146,6 +146,9 @@ impl YoutubeRepliesWorker {
               AND active
               AND occurred_at > now() - make_interval(days => $2)
               AND NOT (metadata ? 'fan_capture_comment_posted_unix')
+              -- Confirmation loss is not failure. The provider may already
+              -- have accepted the comment; never post it again blindly.
+              AND NOT (metadata ? 'fan_capture_comment_unknown_at')
               -- A person was handed this comment to post; a second one from
               -- the machine would be a duplicate under the same video.
               AND NOT (metadata ? 'fan_capture_draft_at')
@@ -285,25 +288,43 @@ impl YoutubeRepliesWorker {
 
         match result {
             Ok(response) if response.status().is_success() => {
-                let comment_id = response
-                    .json::<Created>()
-                    .await
-                    .ok()
-                    .map(|created| created.id)
-                    .filter(|id| is_youtube_id(id));
+                let comment_id = match response.json::<Created>().await {
+                    Ok(created) if is_youtube_id(&created.id) => created.id,
+                    Ok(_) => {
+                        self.record_fan_capture_unknown(
+                            source_id,
+                            "YouTube accepted fan-capture comment but returned an unusable provider id",
+                        )
+                        .await?;
+                        return Ok(0);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error.without_url(),
+                            "fan-capture comment succeeded but provider receipt was unreadable"
+                        );
+                        self.record_fan_capture_unknown(
+                            source_id,
+                            "YouTube accepted fan-capture comment but provider receipt was unreadable",
+                        )
+                        .await?;
+                        return Ok(0);
+                    }
+                };
                 sqlx::query(
                     r#"
                     UPDATE content_sources
                     SET metadata =
                         (metadata - 'fan_capture_comment_claimed_unix'
-                                  - 'fan_capture_comment_hold_reason')
-                        || jsonb_strip_nulls(jsonb_build_object(
+                                  - 'fan_capture_comment_hold_reason'
+                                  - 'fan_capture_comment_unknown_at')
+                        || jsonb_build_object(
                             'fan_capture_comment_posted_at', now(),
                             'fan_capture_comment_posted_unix',
                                 EXTRACT(EPOCH FROM now())::bigint,
                             'fan_capture_comment_id', $3::text,
                             'fan_capture_link_slug', $4
-                        )),
+                        ),
                         updated_at = now()
                     WHERE workspace_id = $1 AND id = $2
                     "#,
@@ -330,27 +351,67 @@ impl YoutubeRepliesWorker {
                 .await?;
                 Ok(0)
             }
-            Ok(response) => {
-                let status = response.status();
+            Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                // Explicit non-execution receipt: safe to release the claim and
+                // try again later.
                 self.record_fan_capture_failure(
                     source_id,
                     false,
-                    &format!("youtube deferred fan-capture comment (HTTP {status})"),
+                    "youtube rate limited fan-capture comment (HTTP 429)",
+                )
+                .await?;
+                Ok(0)
+            }
+            Ok(response) => {
+                let status = response.status();
+                self.record_fan_capture_unknown(
+                    source_id,
+                    &format!(
+                        "provider confirmation lost after fan-capture comment attempt (HTTP {status}); do not resend automatically"
+                    ),
                 )
                 .await?;
                 Ok(0)
             }
             Err(error) => {
-                let detail = error.without_url().to_string();
-                self.record_fan_capture_failure(
+                tracing::warn!(
+                    error = %error.without_url(),
+                    "fan-capture comment outcome ambiguous; automation will not resend"
+                );
+                self.record_fan_capture_unknown(
                     source_id,
-                    false,
-                    &format!("youtube fan-capture request failed: {detail}"),
+                    "provider confirmation lost after fan-capture comment attempt; do not resend automatically",
                 )
                 .await?;
                 Ok(0)
             }
         }
+    }
+
+    async fn record_fan_capture_unknown(
+        &self,
+        source_id: Uuid,
+        reason: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE content_sources
+            SET metadata =
+                (metadata - 'fan_capture_comment_claimed_unix')
+                || jsonb_build_object(
+                    'fan_capture_comment_unknown_at', now(),
+                    'fan_capture_comment_hold_reason', $3
+                ),
+                updated_at = now()
+            WHERE workspace_id = $1 AND id = $2
+            "#,
+        )
+        .bind(self.workspace_id)
+        .bind(source_id)
+        .bind(reason.chars().take(500).collect::<String>())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn record_fan_capture_failure(
