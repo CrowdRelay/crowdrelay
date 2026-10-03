@@ -283,8 +283,8 @@ async fn unreachable_agents() -> Result<String> {
 }
 
 const JOIN_OK: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                       Content-Length: 22\r\nConnection: close\r\n\r\n\
-                       {\"status\":\"joined\"}\r\n\r\n";
+                       Content-Length: 15\r\nConnection: close\r\n\r\n\
+                       {\"joined\":true}\r\n\r\n";
 
 // ---------------------------------------------------------------------------
 // 1. Capability scope — a read token cannot mutate
@@ -579,29 +579,24 @@ async fn hung_dependency_scenario(pool: &PgPool, env: &Env, workspace: Uuid) -> 
     );
     let (state, note) = membership(pool, workspace, place).await?;
     ensure!(
-        state != "joined" && state != "joining",
-        "a timed-out join must not be left as `{state}` — neither a success \
-         nor a claim nobody will ever release"
+        state == "join_unknown",
+        "a timed-out join crossed the dispatch boundary and must stay UNKNOWN, found {state}"
     );
     ensure!(
-        state == "rejected",
-        "the state machine records a timed-out join as `rejected`, found {state}"
-    );
-    ensure!(
-        note.as_deref().is_some_and(|n| n.contains("http")),
-        "the note must say the request failed in transport, found: {note:?}"
+        note.as_deref().is_some_and(|n| n.contains("lost after dispatch boundary")),
+        "the note must preserve the ambiguous transport fact, found: {note:?}"
     );
 
-    // Retry: the place is out of the eligible set, so a second cycle cannot
-    // dispatch a second attempt at the same subreddit.
+    // UNKNOWN is not failure. A second cycle must not dispatch again because
+    // the first request may already have completed at the provider.
     let joined_again = worker.run_once().await.context("run a second join cycle")?;
     ensure!(
         joined_again == 0,
-        "retrying after a timeout must not join, got {joined_again}"
+        "an ambiguous join must not be retried, got {joined_again}"
     );
     let (state_after, _) = membership(pool, workspace, place).await?;
     ensure!(
-        state_after == "rejected",
+        state_after == "join_unknown",
         "the retry must not change the recorded outcome, found {state_after}"
     );
     Ok(())
@@ -750,8 +745,8 @@ async fn partial_outage_scenario(
 
     let (state_b, note_b) = membership(pool, workspace_b, place_b).await?;
     ensure!(
-        state_b == "rejected",
-        "tenant B must degrade explicitly rather than silently, found {state_b}"
+        state_b == "not_joined",
+        "a definite connect failure is retryable and must not become provider rejection, found {state_b}"
     );
     ensure!(
         note_b.as_deref().is_some_and(|n| !n.is_empty()),
