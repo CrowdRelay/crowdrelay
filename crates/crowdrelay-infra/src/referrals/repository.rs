@@ -39,14 +39,16 @@ impl PostgresReferralRepository {
             r#"
             SELECT EXISTS (
                 SELECT 1
-                FROM referral_codes
-                INNER JOIN fans
-                    ON fans.workspace_id = referral_codes.workspace_id
-                    AND fans.id = referral_codes.fan_id
-                WHERE referral_codes.workspace_id = $1
-                    AND referral_codes.code = $2
-                    AND referral_codes.active
-                    AND fans.status = 'active'
+                FROM referral_codes AS code
+                JOIN fans AS owner
+                  ON owner.workspace_id = code.workspace_id
+                 AND owner.id = canonical_fan_id(code.workspace_id, code.fan_id)
+                WHERE code.workspace_id = $1
+                  AND code.code = $2
+                  AND code.active
+                  AND owner.status = 'active'
+                  AND owner.deleted_at IS NULL
+                  AND owner.merged_into_fan_id IS NULL
             )
             "#,
         )
@@ -93,7 +95,9 @@ impl PostgresReferralRepository {
             r#"
             SELECT code
             FROM referral_codes
-            WHERE workspace_id = $1 AND fan_id = $2 AND active
+            WHERE workspace_id = $1
+              AND fan_id IN (SELECT fan_id FROM canonical_fan_family($1,$2))
+              AND active
             ORDER BY created_at, id
             LIMIT 1
             "#,
@@ -108,10 +112,21 @@ impl PostgresReferralRepository {
         let (qualified, pending) = sqlx::query_as::<_, (i64, i64)>(
             r#"
             SELECT
-                count(*) FILTER (WHERE status = 'qualified')::bigint,
-                count(*) FILTER (WHERE status = 'pending')::bigint
+                count(DISTINCT canonical_fan_id($1,referred_fan_id))
+                    FILTER (
+                        WHERE status = 'qualified'
+                          AND canonical_fan_id($1,referred_fan_id) IS DISTINCT FROM $2
+                    )::bigint,
+                count(DISTINCT canonical_fan_id($1,referred_fan_id))
+                    FILTER (
+                        WHERE status = 'pending'
+                          AND canonical_fan_id($1,referred_fan_id) IS DISTINCT FROM $2
+                    )::bigint
             FROM referral_attributions
-            WHERE workspace_id = $1 AND referrer_fan_id = $2
+            WHERE workspace_id = $1
+              AND referrer_fan_id IN (
+                  SELECT fan_id FROM canonical_fan_family($1,$2)
+              )
             "#,
         )
         .bind(workspace_id.into_uuid())
@@ -182,18 +197,24 @@ impl PostgresReferralRepository {
                 draw.max_entries::bigint AS max_entries
             FROM reward_draws AS draw
             CROSS JOIN LATERAL (
-                SELECT count(*)::bigint AS qualified_referrals
+                SELECT count(DISTINCT canonical_fan_id($1,attribution.referred_fan_id))::bigint
+                    AS qualified_referrals
                 FROM referral_attributions AS attribution
                 WHERE attribution.workspace_id = draw.workspace_id
-                  AND attribution.referrer_fan_id = $2
+                  AND attribution.referrer_fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
                   AND attribution.status = 'qualified'
                   AND attribution.qualified_at <= draw.closes_at
+                  AND canonical_fan_id($1,attribution.referred_fan_id) IS DISTINCT FROM $2
             ) AS referral_count
             CROSS JOIN LATERAL (
-                SELECT count(*)::bigint AS concert_checkins
+                SELECT count(DISTINCT checkin.event_id)::bigint AS concert_checkins
                 FROM concert_checkins AS checkin
                 WHERE checkin.workspace_id = draw.workspace_id
-                  AND checkin.fan_id = $2
+                  AND checkin.fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
                   AND checkin.checked_in_at >= draw.opens_at
                   AND checkin.checked_in_at <= draw.closes_at
             ) AS checkin_count
@@ -208,7 +229,9 @@ impl PostgresReferralRepository {
                       FROM event_interests AS interest
                       WHERE interest.workspace_id = draw.workspace_id
                         AND interest.event_id = draw.event_id
-                        AND interest.fan_id = $2
+                        AND interest.fan_id IN (
+                            SELECT fan_id FROM canonical_fan_family($1,$2)
+                        )
                   )
               )
             ORDER BY draw.closes_at, draw.id
