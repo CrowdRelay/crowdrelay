@@ -367,7 +367,6 @@ mod funnel_recovery_tests {
             OrganicFunnelDirective::RepairConfirmation,
             OrganicFunnelDirective::ActivateFans,
             OrganicFunnelDirective::RetainFans,
-            OrganicFunnelDirective::MultiplyReferrals,
         ] {
             let c = control(directive);
             assert_eq!(
@@ -379,6 +378,13 @@ mod funnel_recovery_tests {
                 10
             );
         }
+        // Referral multiplication is its own carrier loop: it holds
+        // content-supply fan-out but grants no generic context first rank.
+        let c = control(OrganicFunnelDirective::MultiplyReferrals);
+        assert_eq!(
+            funnel_context_rank(AutopilotContext::FanLifecycle, Some(c)),
+            10
+        );
         let c = control(OrganicFunnelDirective::RepairConversion);
         assert_eq!(
             funnel_context_rank(AutopilotContext::ContentStrategy, Some(c)),
