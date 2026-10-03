@@ -34,6 +34,7 @@ pub use lapsed_sweep::{LapsedSweepStats, sweep_lapsed_approval_asks};
 pub use outreach_supply::OutreachSupplyRefresh;
 mod lifecycle_activation;
 mod lifecycle_grants;
+mod lifecycle_execution;
 mod measurement;
 mod objectives;
 mod operations;
@@ -77,7 +78,8 @@ use crowdrelay_application::{
         AutopilotTicketStateRepository, AutopilotWaveOutcomeRepository, BookingTargetMutation,
         CandidatePersistence, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
         ClaimedAutopilotMeasurement, ClaimedPlayOutcome, ClaimedWaveOutcome,
-        CommunityRelayBatchView, DecisionCandidate, DeclareGrowthObjective, DeliveryFaultSubject,
+        CommunityRelayBatchView, CONFIRMATION_RECOVERY_TEMPLATE, DecisionCandidate,
+        DeclareGrowthObjective, DeliveryFaultSubject,
         EvidenceLedger, EvidencePacket, ExecutionClaimMutation, ExecutionReportMutation,
         ExecutorHeartbeatMutation, ExecutorReportStatus, FestivalEditionMutation,
         FirstPartyGrowthMetricReport, FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES,
