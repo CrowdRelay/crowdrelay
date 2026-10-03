@@ -141,14 +141,15 @@ class PlayLearningContract(unittest.TestCase):
 
     # --- where it bites --------------------------------------------------
 
-    def test_the_record_moves_with_the_outcome_or_not_at_all(self) -> None:
-        complete = self.infra.split("complete_play_outcome_impl", 1)[1]
-        self.assertIn("record_play_outcome", complete)
-        recorded = complete.index("record_play_outcome")
-        committed = complete.index("transaction.commit()")
-        self.assertLess(recorded, committed)
-        # Only the claim that yields a verdict feeds the record.
-        self.assertIn("outcome.claim == PlayClaim::Correlational", complete)
+    def test_correlation_never_steers_autonomous_standing(self) -> None:
+        complete = self.infra.split("complete_play_outcome_impl", 1)[1].split(
+            "fail_play_outcome_impl", 1
+        )[0]
+        # A provider series moving in the same window is still stored on the
+        # outcome row, but no correlational verdict may weight or retire a play.
+        self.assertNotIn("record_play_outcome(", complete)
+        self.assertNotIn("outcome.claim == PlayClaim::Correlational", complete)
+        self.assertIn("not causal authority", complete)
 
     def test_a_retired_kind_is_proposed_no_longer(self) -> None:
         arm = read(EVALUATE).split("AutopilotContext::Plays =>", 1)[1]
