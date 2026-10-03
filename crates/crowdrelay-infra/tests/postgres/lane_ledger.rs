@@ -368,6 +368,11 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
         vec!["facebook".to_owned()]
     );
     assert!(granted_facts.assess().ready);
+    assert_eq!(
+        granted_facts.executable_owned_social_platforms(),
+        vec!["facebook".to_owned()],
+        "the Brain sees exactly the rail the owner granted"
+    );
     settings
         .set_facebook_autopost_authority(prod, false)
         .await?;
@@ -377,6 +382,10 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
         revoked.autopost_platforms,
         vec!["facebook".to_owned()],
         "revocation does not broaden the remembered authority scope"
+    );
+    assert!(
+        revoked.executable_owned_social_platforms().is_empty(),
+        "revoked authority disappears from Brain routing immediately"
     );
 
     // No site root: named before any rail, whatever the rails look like.
