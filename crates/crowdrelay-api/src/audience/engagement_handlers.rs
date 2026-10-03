@@ -40,10 +40,15 @@ pub async fn overview(State(state): State<crate::AppState>, headers: HeaderMap) 
             (SELECT count(DISTINCT entries.fan_id)::bigint
              FROM synesthesia_reward_entries entries
              WHERE entries.workspace_id = $1) AS synesthesia_participants,
-            (SELECT count(*)::bigint
+            (SELECT count(DISTINCT canonical_fan_id(
+                 $1,referrals.referred_fan_id
+             ))::bigint
              FROM referral_attributions referrals
              WHERE referrals.workspace_id = $1
-               AND referrals.status = 'qualified') AS qualified_referrals,
+               AND referrals.status = 'qualified'
+               AND canonical_qualified_referral_owner_id(
+                   $1,referrals.referred_fan_id
+               ) IS NOT NULL) AS qualified_referrals,
             (SELECT count(*)::bigint
              FROM ticket_orders orders
              WHERE orders.workspace_id = $1
