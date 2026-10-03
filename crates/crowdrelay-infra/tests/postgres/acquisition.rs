@@ -474,8 +474,11 @@ async fn community_conversion_stamps_the_promoted_sources_format()
     .await?;
     sqlx::query(
         "INSERT INTO community_posts
-             (id, workspace_id, action_id, subreddit, title, body, smart_link, status, posted_at)
-         VALUES ($1,$2,$3,'r/progmetal','post','body','/l/infra-test','posted', now() - interval '1 day')",
+             (id, workspace_id, action_id, subreddit, title, body, smart_link, status, posted_at,
+              reddit_post_id, reddit_post_url)
+         VALUES ($1,$2,$3,'r/progmetal','post','body','/l/infra-test','posted',
+                 now() - interval '1 day','format-proof',
+                 'https://www.reddit.com/r/progmetal/comments/formatproof/post/')",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id.into_uuid())
