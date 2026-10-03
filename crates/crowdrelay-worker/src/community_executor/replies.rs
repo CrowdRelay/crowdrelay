@@ -376,8 +376,8 @@ impl CommunityExecutorWorker {
         sqlx::query(
             r#"
             UPDATE community_comments
-            SET status = 'awaiting_approval',
-                hold_reason = 'held: the send was interrupted — check the thread before approving again, it may already be posted',
+            SET status = 'unknown',
+                hold_reason = 'provider confirmation lost: the send may already be live; automation will not resend it',
                 updated_at = now()
             WHERE workspace_id = $1
               AND status = 'replying'
@@ -719,17 +719,27 @@ impl CommunityExecutorWorker {
         } else {
             owned_replies::unattended_owned_replies_enabled()
         };
-        let (status, hold_reason, approved_by, not_before) = if capture_added {
-            (
-                "awaiting_approval",
-                Some(
-                    "held: FAN SCOUT selected InviteToFanbase from explicit join/follow evidence — tracked capture link added; review before sending"
-                        .to_owned(),
-                ),
-                None,
-                None,
-            )
-        } else if fan_scout_invite {
+        let (status, hold_reason, approved_by, not_before) =
+            if capture_added && unattended {
+                (
+                    "approved",
+                    None,
+                    Some(
+                        "unattended: FAN SCOUT InviteToFanbase; explicit evidence, independent review, owned tracked CTA"
+                    ),
+                    Some(reply_not_before(OffsetDateTime::now_utc(), unit_draw())),
+                )
+            } else if capture_added {
+                (
+                    "awaiting_approval",
+                    Some(
+                        "held: FAN SCOUT selected InviteToFanbase from explicit join/follow evidence — tracked capture link added; unattended owned replies are off"
+                            .to_owned(),
+                    ),
+                    None,
+                    None,
+                )
+            } else if fan_scout_invite {
             // An invite decision without its reviewed tracked path must never
             // silently degrade into a plain auto-reply. A person can repair or
             // decline it; the machine cannot substitute a different action.
@@ -742,8 +752,8 @@ impl CommunityExecutorWorker {
                 None,
                 None,
             )
-        } else {
-            match route_reply(guard_hold.as_deref(), review, unattended) {
+            } else {
+                match route_reply(guard_hold.as_deref(), review, unattended) {
                 ReplyRoute::Approve => (
                     "approved",
                     None,
