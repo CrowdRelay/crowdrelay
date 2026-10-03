@@ -53,6 +53,12 @@ use super::model::{
 };
 use crate::RepositoryError;
 
+pub type DeliveryLaneVerdict = (
+    crowdrelay_domain::lane_ledger::LaneScope,
+    String,
+    crowdrelay_domain::lane_ledger::Verdict,
+);
+
 #[async_trait]
 pub trait AutopilotDecisionRepository: Send + Sync {
     async fn load_policies(
@@ -165,14 +171,7 @@ pub trait AutopilotDecisionRepository: Send + Sync {
     async fn load_delivery_lane_verdicts(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<
-        Vec<(
-            crowdrelay_domain::lane_ledger::LaneScope,
-            String,
-            crowdrelay_domain::lane_ledger::Verdict,
-        )>,
-        RepositoryError,
-    >;
+    ) -> Result<Vec<DeliveryLaneVerdict>, RepositoryError>;
 
     /// How many fans a Signal push to `segment` would reach right now — the
     /// same eligibility the send path applies (active fan, newest marketing
