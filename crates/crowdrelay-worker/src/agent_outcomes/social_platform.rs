@@ -21,7 +21,7 @@ impl AgentOutcomeWorker {
               ON dispatch.workspace_id = task.workspace_id
              AND dispatch.id = CASE
                  WHEN task.metadata ->> 'action_id'
-                      ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                      ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
                  THEN (task.metadata ->> 'action_id')::uuid
                  ELSE NULL
              END

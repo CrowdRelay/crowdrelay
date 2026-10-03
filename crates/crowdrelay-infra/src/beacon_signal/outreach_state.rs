@@ -322,7 +322,7 @@ pub async fn defer_beacon_outreach(
             request_id,
             details: serde_json::json!({
                 "event_id": event_id,
-                "deferred_until": deferred_until,
+                "deferred_until": crowdrelay_domain::wire_time::Wire(&deferred_until),
                 "days": days,
                 "cancelled_actions": cancelled_actions,
             }),

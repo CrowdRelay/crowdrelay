@@ -325,6 +325,18 @@ async fn a_defer_holds_the_pair_out_of_the_due_set_until_it_lapses()
     .fetch_one(&f.pool)
     .await?;
     assert_eq!(audit, 1);
+    // The stamp in the audit details is an RFC 3339 string. A bare
+    // `OffsetDateTime` in `json!` serializes as a `[2026, 276, ...]` tuple,
+    // which the n8n consumers and `::timestamptz` casts cannot read.
+    let stamp_type: String = sqlx::query_scalar(
+        "SELECT jsonb_typeof(details -> 'deferred_until') FROM operator_actions
+         WHERE workspace_id = $1 AND action = 'beacon_outreach_defer' AND target_id = $2",
+    )
+    .bind(f.workspace_id)
+    .bind(beacon_id)
+    .fetch_one(&f.pool)
+    .await?;
+    assert_eq!(stamp_type, "string");
 
     // The defer lapses on its own — the pair re-enters without a new answer.
     sqlx::query(
