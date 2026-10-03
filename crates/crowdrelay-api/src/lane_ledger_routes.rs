@@ -28,6 +28,10 @@ pub(super) fn control_plane_routes() -> axum::Router<crate::AppState> {
         .route("/v1/control-plane/growth/lanes", get(list))
         .route("/v1/control-plane/growth/readiness", get(readiness))
         .route(
+            "/v1/control-plane/growth/signup-channels",
+            get(signup_channels),
+        )
+        .route(
             "/v1/control-plane/growth/facebook-authority",
             post(set_facebook_authority),
         )
@@ -208,4 +212,41 @@ async fn list(
         })),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelsQuery {
+    days: Option<i32>,
+}
+
+/// Where this tenant's joins say they came from, split by what the system can
+/// prove. Read-only. `(untagged)` is a join that carried no campaign tag, not a
+/// channel: the readout never guesses one.
+async fn signup_channels(
+    State(state): State<crate::AppState>,
+    Query(query): Query<ChannelsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let days = query.days.unwrap_or(90);
+    if !(1..=crowdrelay_infra::signup_channels::MAX_WINDOW_DAYS).contains(&days) {
+        return Problem::bad_request(request_id(&headers))
+            .private()
+            .into_response();
+    }
+    let workspace_id = state.ticketing.workspace_id().into_uuid();
+    match crowdrelay_infra::signup_channels::signup_channels(&state.database, workspace_id, days)
+        .await
+    {
+        Ok(channels) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, PRIVATE_NO_STORE)],
+            Json(json!({ "window_days": days, "channels": channels })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "signup channels read failed");
+            Problem::service_unavailable(request_id(&headers)).into_response()
+        }
+    }
 }

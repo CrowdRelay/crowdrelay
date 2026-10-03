@@ -101,6 +101,7 @@ pub mod sensitive_response;
 pub mod sent_record;
 pub mod show_helpers;
 pub mod signal_installations;
+pub mod signup_channels;
 pub mod standing_approvals;
 pub mod tenant_settings;
 pub(crate) mod tracked_links;
