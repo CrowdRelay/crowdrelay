@@ -500,9 +500,10 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
         .await?;
     assert!(matches!(peer, PeerOutcome::Applied(_)));
 
-    // Reproduce the already-visible legacy task, not only the generator that
-    // created it. The queue has four layers: suggestion -> decision -> action
-    // -> crew assignment. Only the decision is immutable audit.
+    // Model the operator-visible bad task that already exists before this fix:
+    // a raised collaboration promise names Misscore's audience even though no
+    // distribution authority exists. Refresh must heal the queue as well as
+    // preventing new bad suggestions.
     let stale_task = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO content_suggestions (
@@ -520,6 +521,10 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     .execute(&pool)
     .await?;
 
+    // The visible task is not only the suggestion row: Autopilot already
+    // materialised its approval action and handed it to a crew member. The
+    // self-heal must retract that whole active chain while keeping the
+    // immutable decision for audit.
     let stale_decision = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO autopilot_decisions (
@@ -538,7 +543,6 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     .bind(stale_task)
     .execute(&pool)
     .await?;
-
     let stale_action = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO autopilot_actions (
@@ -566,7 +570,6 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     }))
     .execute(&pool)
     .await?;
-
     let stale_assignment = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO team_assignments (
@@ -592,8 +595,7 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
         without_consent.is_empty(),
         "a confirmed peer alone must not manufacture a distribution promise: {without_consent:?}"
     );
-
-    let (suggestion_status, outcome_reason): (String, Option<String>) = sqlx::query_as(
+    let (stale_status, stale_reason): (String, Option<String>) = sqlx::query_as(
         "SELECT suggestion.status, outcome.reason
          FROM content_suggestions AS suggestion
          LEFT JOIN suggestion_outcomes AS outcome
@@ -605,12 +607,12 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     .bind(stale_task)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(suggestion_status, "expired");
+    assert_eq!(stale_status, "expired");
     assert_eq!(
-        outcome_reason.as_deref(),
-        Some("peer audience is no longer an executable consented route")
+        stale_reason.as_deref(),
+        Some("peer audience is no longer an executable consented route"),
+        "the existing nonsense task must self-retire instead of staying in the operator queue"
     );
-
     let (action_status, action_error): (String, Option<String>) = sqlx::query_as(
         "SELECT status, last_error_kind
          FROM autopilot_actions
@@ -623,24 +625,22 @@ async fn a_confirmed_peer_is_learning_evidence_not_distribution_authority()
     assert_eq!(
         (action_status.as_str(), action_error.as_deref()),
         ("cancelled", Some("peer_reach_unavailable")),
-        "the already-materialised approval task must leave the active queue"
+        "the already-materialised approval task must disappear with its invalid subject"
     );
-
-    let (assignment_status, reminder): (String, Option<time::OffsetDateTime>) = sqlx::query_as(
+    let assignment_state: (String, Option<time::OffsetDateTime>) = sqlx::query_as(
         "SELECT status, next_reminder_at
-             FROM team_assignments
-             WHERE workspace_id=$1 AND id=$2",
+         FROM team_assignments
+         WHERE workspace_id=$1 AND id=$2",
     )
     .bind(beneficiary.into_uuid())
     .bind(stale_assignment)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(assignment_status, "cancelled");
+    assert_eq!(assignment_state.0, "cancelled");
     assert!(
-        reminder.is_none(),
-        "retired nonsense work must not keep reminding a crew member"
+        assignment_state.1.is_none(),
+        "a cancelled nonsense task must not keep reminding a crew member"
     );
-
     let decision_still_there: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM autopilot_decisions

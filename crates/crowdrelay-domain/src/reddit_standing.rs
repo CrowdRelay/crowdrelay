@@ -179,8 +179,7 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
         .iter()
         .filter(|post| survived_with_signal(post, now))
         .count();
-    let earned =
-        u32::try_from(quality_survived / SURVIVED_POSTS_PER_STEP).unwrap_or(u32::MAX);
+    let earned = u32::try_from(quality_survived / SURVIVED_POSTS_PER_STEP).unwrap_or(u32::MAX);
     RedditStanding::Open {
         daily_cap: BASE_DAILY_CAP.saturating_add(earned).min(MAX_DAILY_CAP),
     }
@@ -343,7 +342,9 @@ mod tests {
         );
         assert_eq!(
             reddit_standing(&ignored, now()),
-            RedditStanding::Open { daily_cap: BASE_DAILY_CAP }
+            RedditStanding::Open {
+                daily_cap: BASE_DAILY_CAP
+            }
         );
     }
 

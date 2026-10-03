@@ -167,14 +167,18 @@ async fn historical_artifact_growth_measurements_can_never_claim_a_later_publica
     // Recreate a pre-fix artifact action that already owns fan-growth
     // measurements. A later tracked post in its lineage must not resurrect
     // those rows and let the artifact producer share the publication's fan.
-    sqlx::query(
-        "UPDATE autopilot_actions SET action_kind='content.artifact.request' WHERE id=$1",
+    sqlx::query("UPDATE autopilot_actions SET action_kind='content.artifact.request' WHERE id=$1")
+        .bind(action)
+        .execute(&f.pool)
+        .await
+        .expect("mark historical artifact");
+    live_post(
+        &f,
+        action,
+        "old-artifact-post",
+        finished + time::Duration::days(1),
     )
-    .bind(action)
-    .execute(&f.pool)
-    .await
-    .expect("mark historical artifact");
-    live_post(&f, action, "old-artifact-post", finished + time::Duration::days(1)).await;
+    .await;
     converted_fan(
         &f,
         action,

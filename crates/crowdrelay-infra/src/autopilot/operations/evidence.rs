@@ -283,12 +283,7 @@ pub(in crate::autopilot) async fn load_resolved_evidence_counts(
 
     let counts = actions_by_context
         .into_iter()
-        .map(|(context, actions)| {
-            (
-                context,
-                i64::try_from(actions.len()).unwrap_or(i64::MAX),
-            )
-        })
+        .map(|(context, actions)| (context, i64::try_from(actions.len()).unwrap_or(i64::MAX)))
         .collect();
     Ok(EvidenceLedger::from_counts(counts))
 }
