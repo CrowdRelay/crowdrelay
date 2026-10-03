@@ -99,6 +99,7 @@ pub(super) async fn record_execution_outcome(
             None,
         ),
         AutopilotActionPayload::IssueReferralCode { .. } => ("referral_code_issued", 1.0, None),
+        AutopilotActionPayload::OfferLatarnikMission { .. } => ("latarnik_mission_offered", 1.0, None),
         AutopilotActionPayload::RunPlayStep { step_index, .. } => {
             ("play_step_dispatched", f64::from(*step_index), None)
         }
