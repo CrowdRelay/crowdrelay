@@ -239,7 +239,9 @@ impl DayZeroFacts {
     /// state this Day-0 surface exists to eliminate.
     #[must_use]
     pub fn facebook_authority_grantable(&self) -> bool {
-        self.site_root.as_deref().is_some_and(|root| !root.trim().is_empty())
+        self.site_root
+            .as_deref()
+            .is_some_and(|root| !root.trim().is_empty())
             && self.join_copy
             && self.fresh_asset
             && self.social_publish_runtime == Some(true)

@@ -11,10 +11,10 @@
 //! it; the brain meanwhile ranked actions for lanes that could only draft.
 //!
 //! This is a pure function of facts. It decides nothing about publishing,
- //! grants nothing and never reads a credential: a connection is not consent.
- //! It distinguishes tenant-owner work (for example standing authority) from
- //! deployment-operator work (for example a worker kill switch), so the UI
- //! cannot offer an owner button for something only a deployment can repair.
+//! grants nothing and never reads a credential: a connection is not consent.
+//! It distinguishes tenant-owner work (for example standing authority) from
+//! deployment-operator work (for example a worker kill switch), so the UI
+//! cannot offer an owner button for something only a deployment can repair.
 
 use serde::Serialize;
 

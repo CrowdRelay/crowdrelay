@@ -98,9 +98,8 @@ async fn set_facebook_authority(
         }
     }
 
-    let settings = crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(
-        state.database.clone(),
-    );
+    let settings =
+        crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(state.database.clone());
     if let Err(error) = settings
         .set_facebook_autopost_authority(workspace_id, request.enabled)
         .await

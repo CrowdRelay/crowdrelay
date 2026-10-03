@@ -360,12 +360,13 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
     // The explicit Facebook grant is atomic and exact: it must not wake the
     // previously stored Telegram lane alongside Facebook.
     let settings = crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone());
-    settings
-        .set_facebook_autopost_authority(prod, true)
-        .await?;
+    settings.set_facebook_autopost_authority(prod, true).await?;
     let granted_facts = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, prod).await?;
     assert!(granted_facts.social_auto_post);
-    assert_eq!(granted_facts.autopost_platforms, vec!["facebook".to_owned()]);
+    assert_eq!(
+        granted_facts.autopost_platforms,
+        vec!["facebook".to_owned()]
+    );
     assert!(granted_facts.assess().ready);
     settings
         .set_facebook_autopost_authority(prod, false)
