@@ -152,25 +152,48 @@ pub async fn referral_conversion(
         WITH all_referrals AS (
             SELECT
                 count(*)::bigint AS referrals_sent,
-                count(*) FILTER (WHERE ra.status = 'qualified')::bigint AS qualified,
-                count(*) FILTER (
-                    WHERE ra.status = 'qualified'
-                      AND fan_last_meaningful_action(
-                          referred.workspace_id, referred.id, referred.normalized_email
-                      ) BETWEEN $2 - INTERVAL '30 days' AND $2
-                      AND EXISTS (
-                          SELECT 1 FROM fan_consents AS consent
-                          WHERE consent.workspace_id = referred.workspace_id
-                            AND consent.fan_id = referred.id
-                            AND consent.purpose = 'marketing'
-                            AND consent.granted
-                      )
-                )::bigint AS activated,
+                count(DISTINCT canonical_fan_id($1,ra.referred_fan_id))
+                    FILTER (
+                        WHERE ra.status = 'qualified'
+                          AND canonical_qualified_referral_owner_id(
+                              $1,ra.referred_fan_id
+                          ) IS NOT NULL
+                    )::bigint AS qualified,
+                count(DISTINCT canonical_fan_id($1,ra.referred_fan_id))
+                    FILTER (
+                        WHERE ra.status = 'qualified'
+                          AND canonical_qualified_referral_owner_id(
+                              $1,ra.referred_fan_id
+                          ) IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM fans AS referred
+                              WHERE referred.workspace_id = $1
+                                AND referred.id = canonical_fan_id(
+                                    $1,ra.referred_fan_id
+                                )
+                                AND referred.status = 'active'
+                                AND referred.deleted_at IS NULL
+                                AND referred.merged_into_fan_id IS NULL
+                                AND fan_last_meaningful_action(
+                                    referred.workspace_id,
+                                    referred.id,
+                                    referred.normalized_email
+                                ) BETWEEN $2 - INTERVAL '30 days' AND $2
+                                AND COALESCE((
+                                    SELECT consent.granted
+                                    FROM fan_consents AS consent
+                                    WHERE consent.workspace_id = referred.workspace_id
+                                      AND consent.fan_id = referred.id
+                                      AND consent.purpose = 'marketing'
+                                      AND consent.recorded_at <= $2
+                                    ORDER BY consent.recorded_at DESC, consent.id DESC
+                                    LIMIT 1
+                                ),false)
+                          )
+                    )::bigint AS activated,
                 count(*) FILTER (WHERE ra.status = 'reversed')::bigint AS reversed
             FROM referral_attributions ra
-            JOIN fans AS referred
-              ON referred.workspace_id = ra.workspace_id
-             AND referred.id = ra.referred_fan_id
             WHERE ra.workspace_id = $1
         ),
         mission_windows AS (
@@ -223,9 +246,9 @@ pub async fn referral_conversion(
             FROM mission_funnel
         ),
         mission_referrals AS (
-            SELECT DISTINCT
-                referred_fan_id,
-                (
+            SELECT
+                canonical_fan_id($1,referred_fan_id) AS referred_fan_id,
+                bool_or(
                     referral_status = 'qualified'
                     AND qualified_at IS NOT NULL
                     AND qualified_at <= outcome_deadline
@@ -234,6 +257,8 @@ pub async fn referral_conversion(
             FROM mission_funnel
             WHERE referred_fan_id IS NOT NULL
               AND accepted_at IS NOT NULL
+              AND canonical_fan_id($1,referred_fan_id) IS NOT NULL
+            GROUP BY canonical_fan_id($1,referred_fan_id)
         ),
         mission_referral_counts AS (
             SELECT
@@ -247,19 +272,24 @@ pub async fn referral_conversion(
                         FROM fans AS referred
                         WHERE referred.workspace_id = $1
                           AND referred.id = referral.referred_fan_id
+                          AND referred.status = 'active'
+                          AND referred.deleted_at IS NULL
+                          AND referred.merged_into_fan_id IS NULL
                           AND fan_last_meaningful_action(
                               referred.workspace_id,
                               referred.id,
                               referred.normalized_email
                           ) BETWEEN $2 - INTERVAL '30 days' AND $2
-                          AND EXISTS (
-                              SELECT 1
+                          AND COALESCE((
+                              SELECT consent.granted
                               FROM fan_consents AS consent
                               WHERE consent.workspace_id = referred.workspace_id
                                 AND consent.fan_id = referred.id
                                 AND consent.purpose = 'marketing'
-                                AND consent.granted
-                          )
+                                AND consent.recorded_at <= $2
+                              ORDER BY consent.recorded_at DESC, consent.id DESC
+                              LIMIT 1
+                          ),false)
                     )
                 )::bigint AS activated
             FROM mission_referrals AS referral
