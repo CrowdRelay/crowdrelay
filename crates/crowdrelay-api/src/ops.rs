@@ -46,6 +46,7 @@ use crowdrelay_application::self_assessment::{DailyNorthStar, assess};
 include!("ops_action_ledger.rs");
 include!("ops/handlers.rs");
 include!("ops/attention.rs");
+include!("ops/attention_tests.rs");
 include!("ops/post_queues.rs");
 include!("ops/post_queues_pg_tests.rs");
 include!("ops/funnel.rs");
