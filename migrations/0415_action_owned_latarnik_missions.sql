@@ -12,9 +12,11 @@ ALTER TABLE latarnik_missions
 
 ALTER TABLE latarnik_missions
     ADD CONSTRAINT latarnik_missions_action_fk
-        FOREIGN KEY (action_id) REFERENCES autopilot_actions(id) ON DELETE SET NULL,
+        FOREIGN KEY (workspace_id, action_id)
+        REFERENCES autopilot_actions (workspace_id, id) ON DELETE SET NULL (action_id),
     ADD CONSTRAINT latarnik_missions_smart_link_fk
-        FOREIGN KEY (smart_link_id) REFERENCES smart_links(id) ON DELETE SET NULL;
+        FOREIGN KEY (workspace_id, smart_link_id)
+        REFERENCES smart_links (workspace_id, id) ON DELETE SET NULL (smart_link_id);
 
 CREATE UNIQUE INDEX latarnik_missions_action_uidx
     ON latarnik_missions (workspace_id, action_id)
