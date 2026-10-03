@@ -130,6 +130,12 @@ impl SocialPostExecutorWorker {
                 .bind(&image_url)
                 .execute(&mut *posted_tx)
                 .await?;
+                crowdrelay_infra::fanbase::record_verified_social_publication_evidence(
+                    &mut posted_tx,
+                    self.workspace_id.into_uuid(),
+                    action.id,
+                )
+                .await?;
                 crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
                     &mut posted_tx,
                     self.workspace_id.into_uuid(),
@@ -347,8 +353,9 @@ impl SocialPostExecutorWorker {
                     r#"
                     UPDATE social_posts
                     SET status = 'posted',
-                        platform_post_url = $3,
-                        image_url = COALESCE($4, image_url),
+                        platform_post_id = $3,
+                        platform_post_url = $4,
+                        image_url = COALESCE($5, image_url),
                         posted_at = now(),
                         updated_at = now(),
                         error_message = NULL
@@ -357,9 +364,16 @@ impl SocialPostExecutorWorker {
                 )
                 .bind(self.workspace_id.into_uuid())
                 .bind(action.id)
+                .bind(&post_id)
                 .bind(format!("https://www.facebook.com/{post_id}"))
                 .bind(action.image_url.as_deref())
                 .execute(&mut *posted_tx)
+                .await?;
+                crowdrelay_infra::fanbase::record_verified_social_publication_evidence(
+                    &mut posted_tx,
+                    self.workspace_id.into_uuid(),
+                    action.id,
+                )
                 .await?;
                 crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
                     &mut posted_tx,
@@ -531,6 +545,12 @@ impl SocialPostExecutorWorker {
                 .bind(&post_url)
                 .bind(action.image_url.as_deref())
                 .execute(&mut *posted_tx)
+                .await?;
+                crowdrelay_infra::fanbase::record_verified_social_publication_evidence(
+                    &mut posted_tx,
+                    self.workspace_id.into_uuid(),
+                    action.id,
+                )
                 .await?;
                 crowdrelay_infra::fanbase::anchor_content_measurements_to_publication(
                     &mut posted_tx,

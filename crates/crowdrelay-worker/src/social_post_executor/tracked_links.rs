@@ -109,17 +109,19 @@ impl SocialPostExecutorWorker {
         sqlx::query(
             r#"
             INSERT INTO smart_links
-                (workspace_id, slug, destination_url, active, channel_source)
-            VALUES ($1, $2, $3, true, $4)
+                (workspace_id, slug, destination_url, active, channel_source, action_id)
+            VALUES ($1, $2, $3, true, $4, $5)
             ON CONFLICT (workspace_id, slug) DO UPDATE SET
                 destination_url = EXCLUDED.destination_url,
-                active = true
+                active = true,
+                action_id = COALESCE(smart_links.action_id, EXCLUDED.action_id)
             "#,
         )
         .bind(ws)
         .bind(&slug)
         .bind(&destination)
         .bind(&row.platform)
+        .bind(row.action_id)
         .execute(&mut **tx)
         .await?;
         let bound = sqlx::query_scalar::<_, Option<Uuid>>(

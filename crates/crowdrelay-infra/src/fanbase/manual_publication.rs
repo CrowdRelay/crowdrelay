@@ -365,6 +365,8 @@ fn extract_reddit_post_id(url: &str) -> Option<String> {
 pub enum ManualContentPostError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("invalid provider receipt: {0}")]
+    InvalidReceipt(String),
     /// No row with that id in this workspace.
     ///
     /// Split from the status case because the caller answers them differently
@@ -401,6 +403,13 @@ pub async fn register_manual_social_post(
     platform_post_url: &str,
     platform_post_id: Option<&str>,
 ) -> Result<(), ManualContentPostError> {
+    let platform_post_url = platform_post_url.trim();
+    if !(platform_post_url.starts_with("https://") || platform_post_url.starts_with("http://")) {
+        return Err(ManualContentPostError::InvalidReceipt(
+            "a social publication needs the provider post URL".to_owned(),
+        ));
+    }
+    let platform_post_id = platform_post_id.map(str::trim).filter(|id| !id.is_empty());
     let mut transaction = pool.begin().await?;
     let result = sqlx::query(
         r#"
@@ -440,6 +449,12 @@ pub async fn register_manual_social_post(
             },
         );
     }
+    record_verified_social_publication_evidence(
+        &mut transaction,
+        workspace_id,
+        social_post_id,
+    )
+    .await?;
     anchor_content_measurements_to_publication(
         &mut transaction,
         workspace_id,
@@ -455,6 +470,80 @@ pub async fn register_manual_social_post(
     )
     .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+/// Commits the evidence that an owned-social post really reached its provider.
+///
+/// The action row may already be `succeeded`: for join asks that means only
+/// that CrowdRelay filed the instruction for the in-process social executor.
+/// This helper is therefore the publication seam. It runs only after the post
+/// row carries a durable provider receipt and `posted_at`.
+///
+/// It also starts the action-owned click/fan measurements at publication time.
+/// Replays are harmless: both the measurement and outcome inserts are unique.
+pub async fn record_verified_social_publication_evidence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    social_post_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let verified = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM social_posts
+            WHERE workspace_id = $1
+              AND id = $2
+              AND status = 'posted'
+              AND posted_at IS NOT NULL
+              AND COALESCE(
+                    NULLIF(btrim(platform_post_id), ''),
+                    NULLIF(btrim(platform_post_url), '')
+                  ) IS NOT NULL
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(social_post_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !verified {
+        return Ok(());
+    }
+
+    schedule_link_click_measurement(transaction, workspace_id, "social_posts", social_post_id)
+        .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO autopilot_outcomes (
+            workspace_id, decision_id, action_id, metric_key,
+            observed_value, baseline_value, observed_at
+        )
+        SELECT post.workspace_id, action.decision_id, action.id,
+               'join_ask_published', 1.0, NULL, post.posted_at
+        FROM social_posts AS post
+        JOIN autopilot_actions AS action
+          ON action.workspace_id = post.workspace_id
+         AND action.id = post.action_id
+        WHERE post.workspace_id = $1
+          AND post.id = $2
+          AND post.status = 'posted'
+          AND post.posted_at IS NOT NULL
+          AND action.action_kind = 'social.join_ask.publish'
+          AND COALESCE(
+                NULLIF(btrim(post.platform_post_id), ''),
+                NULLIF(btrim(post.platform_post_url), '')
+              ) IS NOT NULL
+          AND post.smart_link_id IS NOT NULL
+        ON CONFLICT (workspace_id, action_id, metric_key)
+            WHERE action_id IS NOT NULL AND measurement_id IS NULL DO NOTHING
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(social_post_id)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 

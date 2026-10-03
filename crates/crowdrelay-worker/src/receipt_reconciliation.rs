@@ -444,14 +444,16 @@ impl ReceiptReconciliationWorker {
         Ok(resolved)
     }
 
-    /// Sweep 2c: resolve `agent.content.request` actions from their post
-    /// ledgers (`social_posts`, `telegram_posts`, `discord_posts`). These
-    /// executors are internal workers that don't file execution reports —
-    /// the post tables ARE their receipts. The outbox event is just the
-    /// dispatch notification, not provider-confirmed delivery.
+    /// Sweep 2c: resolve drafted-content and weekly join-ask actions from
+    /// their post ledgers (`social_posts`, `telegram_posts`,
+    /// `discord_posts`). These executors are internal workers that don't file
+    /// execution reports — the post tables ARE their receipts. A `posted`
+    /// status alone is not enough: the row must also carry the provider's
+    /// durable id/url/message id.
     ///
     /// Each post table has the same status lifecycle:
-    ///   `posted` → provider accepted → succeeded
+    ///   `posted` + provider receipt → succeeded
+    ///   `posted` without provider receipt → confirmation lost
     ///   `failed` → definitive failure (or crash-marked → confirmation lost)
     ///   `awaiting_manual_post` / `pending` / `posting` / `rate_limited` → in flight
     async fn resolve_content_posts(
@@ -461,23 +463,27 @@ impl ReceiptReconciliationWorker {
         // social_posts, telegram_posts, and discord_posts all have the same
         // status vocabulary and an `action_id` column. UNION them into one
         // result set so a single loop resolves all three.
-        let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime)> = sqlx::query_as(
+        let rows: Vec<(Uuid, String, Option<String>, OffsetDateTime, bool)> = sqlx::query_as(
             r#"
-            SELECT a.id, post.status, post.error_message, post.evidence_at
+            SELECT a.id, post.status, post.error_message, post.evidence_at, post.provider_receipt
             FROM autopilot_actions a
             JOIN (
                 SELECT action_id, status, error_message,
-                       COALESCE(posted_at, updated_at) AS evidence_at FROM social_posts
+                       COALESCE(posted_at, updated_at) AS evidence_at,
+                       COALESCE(NULLIF(btrim(platform_post_id), ''), NULLIF(btrim(platform_post_url), '')) IS NOT NULL AS provider_receipt
+                FROM social_posts
                 UNION ALL
                 SELECT action_id, status, error_message,
-                       COALESCE(posted_at, updated_at) FROM telegram_posts
+                       COALESCE(posted_at, updated_at), message_id IS NOT NULL
+                FROM telegram_posts
                 UNION ALL
                 SELECT action_id, status, error_message,
-                       COALESCE(posted_at, updated_at) FROM discord_posts
+                       COALESCE(posted_at, updated_at), NULLIF(btrim(message_id), '') IS NOT NULL
+                FROM discord_posts
             ) post ON post.action_id = a.id
             WHERE a.workspace_id = $1
               AND a.status = 'unknown'
-              AND a.action_kind = 'agent.content.request'
+              AND a.action_kind IN ('agent.content.request', 'social.join_ask.publish')
             LIMIT $2
             "#,
         )
@@ -487,8 +493,9 @@ impl ReceiptReconciliationWorker {
         .await?;
 
         let mut resolved = 0usize;
-        for (action_id, post_status, error_message, evidence_at) in rows {
-            let evidence = content_post_to_evidence(&post_status, error_message.as_deref());
+        for (action_id, post_status, error_message, evidence_at, provider_receipt) in rows {
+            let evidence =
+                content_post_to_evidence(&post_status, error_message.as_deref(), provider_receipt);
             match legal_transition(
                 ActionState::Unknown,
                 resolve_observation(evidence),
@@ -1047,16 +1054,24 @@ fn community_post_to_evidence(
 /// `discord_posts` state into canonical [`ResolutionEvidence`] facts. All
 /// three tables share the same status vocabulary, so one adapter serves all.
 ///
-/// `posted` → provider confirmed the submission (succeeded).
+/// `posted` + a durable provider receipt → confirmed submission (succeeded).
+/// A bare `posted` status is confirmation-lost, never success.
 /// `failed` with a crash prefix → confirmation lost (the post may have
 /// succeeded but we lost the receipt).
 /// `failed` without a crash prefix → definitive failure.
 /// All other statuses (`pending`, `posting`, `rate_limited`,
 /// `awaiting_manual_post`) are in-flight — they resolve later through their
 /// own paths.
-fn content_post_to_evidence(post_status: &str, error_message: Option<&str>) -> ResolutionEvidence {
+fn content_post_to_evidence(
+    post_status: &str,
+    error_message: Option<&str>,
+    provider_receipt: bool,
+) -> ResolutionEvidence {
     match post_status {
-        "posted" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed),
+        "posted" if provider_receipt => {
+            ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::Confirmed)
+        }
+        "posted" => ResolutionEvidence::ProviderDelivery(ProviderDeliveryState::ConfirmationLost),
         "failed" => {
             let crashed = error_message
                 .is_some_and(|message| message.starts_with(CRASH_POSTING_ERROR_PREFIX));
@@ -1376,8 +1391,22 @@ mod tests {
     // ── content_post_to_evidence adapter tests ──
 
     #[test]
+    fn posted_without_provider_receipt_stays_unconfirmed() {
+        let evidence = content_post_to_evidence("posted", None, false);
+        assert_eq!(
+            legal_transition(
+                ActionState::Unknown,
+                resolve_observation(evidence),
+                SuccessEvidence::Premature,
+            ),
+            LegalTransition::NoChange,
+            "a status word without provider id/url is not publication proof"
+        );
+    }
+
+    #[test]
     fn posted_content_post_resolves_succeeded() {
-        let evidence = content_post_to_evidence("posted", None);
+        let evidence = content_post_to_evidence("posted", None, true);
         assert_eq!(
             legal_transition(
                 ActionState::Unknown,
@@ -1393,6 +1422,7 @@ mod tests {
         let evidence = content_post_to_evidence(
             "failed",
             Some("worker crashed during posting — check platform manually"),
+            false,
         );
         assert_eq!(
             legal_transition(
@@ -1406,7 +1436,7 @@ mod tests {
 
     #[test]
     fn definitive_content_failure_resolves_failed() {
-        let evidence = content_post_to_evidence("failed", Some("bot token invalid"));
+        let evidence = content_post_to_evidence("failed", Some("bot token invalid"), false);
         assert_eq!(
             legal_transition(
                 ActionState::Unknown,
@@ -1415,7 +1445,7 @@ mod tests {
             ),
             LegalTransition::Apply(ActionState::Failed)
         );
-        let evidence = content_post_to_evidence("failed", None);
+        let evidence = content_post_to_evidence("failed", None, false);
         assert_eq!(
             legal_transition(
                 ActionState::Unknown,
@@ -1429,7 +1459,7 @@ mod tests {
     #[test]
     fn in_flight_content_statuses_stay_unknown() {
         for status in ["pending", "posting", "rate_limited", "awaiting_manual_post"] {
-            let evidence = content_post_to_evidence(status, None);
+            let evidence = content_post_to_evidence(status, None, false);
             assert_eq!(
                 legal_transition(
                     ActionState::Unknown,
