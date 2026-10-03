@@ -54,7 +54,8 @@ The product must make these prerequisites explicit and bounded:
    - tracked-link support.
 
 2. **At least one executable net-new rail**
-   - currently, the strongest owned Day-0 candidates are connected Facebook/Instagram surfaces with valid publish credentials and explicit standing auto-post approval;
+   - the tenant needs at least one route that can actually introduce a new person: admitted community placement, opted-in public-social automation, consented amplification/partner route, or a qualified referral/Latarnik carrier;
+   - owned social is autonomous only when the tenant explicitly wants CrowdRelay to operate it; a channel the tenant already runs well by hand is an observed funnel input, not an engineering target;
    - community surfaces may participate only when their own admission, standing and moderation rules allow it;
    - a lane that can only draft for a person is not an autonomous Day-0 rail.
 
@@ -241,6 +242,29 @@ No audit-only runs.
 - [ ] activate and retain acquisition cohorts;
 - [ ] introduce qualified referral/Latarnik multiplication;
 - [ ] cut mature zero-yield lanes.
+
+
+## Checkpoint — retained fans become a measured referral engine
+
+Referral multiplication is now a first-class funnel stage rather than an always-on side mechanic.
+
+After acquisition, confirmation, activation and retention are healthy, the canonical funnel distinguishes:
+
+`retained cohort + zero qualified referrals → multiply_referrals`.
+
+The Latarnik mission loop consumes the same control signal:
+
+- `expand_reach` may use a qualified carrier because one person sharing with one friend is genuine net-new reach;
+- `multiply_referrals` explicitly enables the Latarnik mission rail;
+- `repair_conversion`, `repair_confirmation`, `activate_fans` and `retain_fans` hold new carrier missions so the system fixes the earlier leak instead of pouring more people into it;
+- a mission remains a first-party card in the Latarnik's authenticated Signal session; CrowdRelay never sends the friend's message on the Latarnik's behalf;
+- #550's action-owned Smart Link remains the strict acquisition spine, so a mission/share tap still does not count as a fan.
+
+Production acceptance is not "mission offered". It is a real action-owned Latarnik link producing:
+
+`tracked friend → signup → confirmation → canonical acquired fan → qualified referral`.
+
+Until that happens, referral multiplication remains a capability, not a North Star claim.
 
 ## Definition of done
 

@@ -31,10 +31,20 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// fans first.
 pub const FANS_PER_PASS: i64 = 1_000;
 
+fn missions_permitted(
+    control: Option<crowdrelay_application::autopilot::OrganicFunnelControl>,
+) -> bool {
+    control
+        .map(|control| control.directive.permits_latarnik_mission())
+        .unwrap_or(true)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
     #[error(transparent)]
     Latarnik(#[from] LatarnikError),
+    #[error("organic funnel read failed")]
+    Database(#[from] sqlx::Error),
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -48,6 +58,9 @@ pub struct SweepReport {
     pub referral_opportunities_recorded: u64,
     /// Missions offered this pass to active Latarniks, in their own session.
     pub missions_offered: u64,
+    /// Eligible mission opportunities deliberately not shown because the
+    /// canonical funnel has an earlier leak to repair first.
+    pub missions_held_by_funnel: u64,
     /// Missions that completed (someone they brought arrived) this pass.
     pub missions_completed: u64,
     /// Open missions that ran out their time this pass.
@@ -132,22 +145,74 @@ impl LatarnikSweep {
         let (completed, expired) = settle(&self.pool, ws, now).await?;
         report.missions_completed = completed;
         report.missions_expired = expired;
+        let funnel_control = crowdrelay_infra::organic_funnel::control(&self.pool, ws, now).await?;
+        let missions_permitted = missions_permitted(funnel_control);
         for carrier in load_carriers(&self.pool, ws, now, FANS_PER_PASS).await? {
-            if let Some(plan) = choose_mission(&carrier.context, now)
-                && offer(
-                    &self.pool,
-                    ws,
-                    carrier.role_id,
-                    carrier.fan_id,
-                    &plan,
-                    now,
-                )
-                .await?
-                    .is_some()
+            let Some(plan) = choose_mission(&carrier.context, now) else {
+                continue;
+            };
+            if !missions_permitted {
+                report.missions_held_by_funnel += 1;
+                continue;
+            }
+            if offer(
+                &self.pool,
+                ws,
+                carrier.role_id,
+                carrier.fan_id,
+                &plan,
+                now,
+            )
+            .await?
+            .is_some()
             {
                 report.missions_offered += 1;
             }
         }
         Ok(report)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::missions_permitted;
+    use crowdrelay_application::autopilot::{OrganicFunnelControl, OrganicFunnelDirective};
+
+    fn control(directive: OrganicFunnelDirective) -> OrganicFunnelControl {
+        OrganicFunnelControl {
+            directive,
+            mature_links: 1,
+            unique_visitors: 1,
+            signups: 1,
+            confirmed: 1,
+            activation_mature: 1,
+            activated_mature: 1,
+            retention_mature: 1,
+            retained: 1,
+            qualified_referrals: 0,
+        }
+    }
+
+    #[test]
+    fn carrier_missions_only_run_when_they_can_move_the_current_stage() {
+        assert!(missions_permitted(None));
+        assert!(missions_permitted(Some(control(
+            OrganicFunnelDirective::ExpandReach
+        ))));
+        assert!(missions_permitted(Some(control(
+            OrganicFunnelDirective::MultiplyReferrals
+        ))));
+        for directive in [
+            OrganicFunnelDirective::RepairConversion,
+            OrganicFunnelDirective::RepairConfirmation,
+            OrganicFunnelDirective::ActivateFans,
+            OrganicFunnelDirective::RetainFans,
+        ] {
+            assert!(
+                !missions_permitted(Some(control(directive))),
+                "{directive:?} must be repaired before asking carriers for more people"
+            );
+        }
     }
 }

@@ -29,7 +29,7 @@ fn organic_funnel_template_rank(
 
 pub(crate) fn organic_funnel_control_summary(control: OrganicFunnelControl) -> String {
     format!(
-        "organic funnel control: directive={} mature_links={} visitors={} signups={} confirmed={} activation={}/{} retention={}/{}",
+        "organic funnel control: directive={} mature_links={} visitors={} signups={} confirmed={} activation={}/{} retention={}/{} qualified_referrals={}",
         control.directive.as_str(),
         control.mature_links,
         control.unique_visitors,
@@ -39,6 +39,7 @@ pub(crate) fn organic_funnel_control_summary(control: OrganicFunnelControl) -> S
         control.activation_mature,
         control.retained,
         control.retention_mature,
+        control.qualified_referrals,
     )
 }
 
@@ -120,6 +121,13 @@ mod organic_funnel_control_tests {
         assert!(!OrganicFunnelDirective::RepairConfirmation.permits_join_ask());
         assert!(!OrganicFunnelDirective::ActivateFans.permits_join_ask());
         assert!(!OrganicFunnelDirective::RetainFans.permits_join_ask());
+        assert!(!OrganicFunnelDirective::MultiplyReferrals.permits_join_ask());
+        assert!(OrganicFunnelDirective::ExpandReach.permits_latarnik_mission());
+        assert!(OrganicFunnelDirective::MultiplyReferrals.permits_latarnik_mission());
+        assert!(!OrganicFunnelDirective::RepairConversion.permits_latarnik_mission());
+        assert!(!OrganicFunnelDirective::RepairConfirmation.permits_latarnik_mission());
+        assert!(!OrganicFunnelDirective::ActivateFans.permits_latarnik_mission());
+        assert!(!OrganicFunnelDirective::RetainFans.permits_latarnik_mission());
     }
 
     #[test]
@@ -129,6 +137,7 @@ mod organic_funnel_control_tests {
             OrganicFunnelDirective::RepairConfirmation,
             OrganicFunnelDirective::ActivateFans,
             OrganicFunnelDirective::RetainFans,
+            OrganicFunnelDirective::MultiplyReferrals,
         ] {
             for template in WorkerTemplate::active() {
                 assert_eq!(
