@@ -368,7 +368,7 @@ struct SmartLinkUpsertRow {
 }
 
 /// Non-blocking sender used directly by the redirect fast path.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ClickBuffer {
     sender: mpsc::Sender<ClickEvent>,
     repository: Arc<dyn AcquisitionRepository>,
