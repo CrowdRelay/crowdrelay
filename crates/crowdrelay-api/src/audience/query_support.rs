@@ -46,10 +46,9 @@ async fn load_fan_cards(
             fan.status,
             fan.created_at,
             fan.updated_at,
-            (SELECT count(*)::bigint FROM referral_attributions referral
-             WHERE referral.workspace_id = fan.workspace_id
-               AND referral.referrer_fan_id = fan.id
-               AND referral.status = 'qualified') AS qualified_referrals,
+            canonical_qualified_referral_count(
+                fan.workspace_id, fan.id, NULL
+            ) AS qualified_referrals,
             (SELECT count(*)::bigint FROM event_interests interest
              WHERE interest.workspace_id = fan.workspace_id
                AND interest.fan_id = fan.id) AS event_interests,
