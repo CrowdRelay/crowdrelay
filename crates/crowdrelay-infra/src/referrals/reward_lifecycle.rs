@@ -176,6 +176,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
                AND referred_fan_id IN (
                    SELECT fan_id FROM canonical_fan_family($1,$3)
                )
+               AND canonical_live_referral_owner_id($1,$3) = $5
                AND EXISTS (
                    SELECT 1 FROM fans
                     WHERE workspace_id=$1 AND id=$5
@@ -259,16 +260,7 @@ pub(crate) async fn qualify_signup_referral_and_rewards(
     .await?;
 
     let qualified_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT count(DISTINCT canonical_fan_id($1, attribution.referred_fan_id))::bigint
-        FROM referral_attributions attribution
-        WHERE attribution.workspace_id = $1
-          AND attribution.referrer_fan_id IN (
-              SELECT fan_id FROM canonical_fan_family($1,$2)
-          )
-          AND attribution.status = 'qualified'
-          AND canonical_fan_id($1, attribution.referred_fan_id) IS DISTINCT FROM $2
-        "#,
+        "SELECT canonical_qualified_referral_count($1,$2,NULL)",
     )
     .bind(workspace_id.into_uuid())
     .bind(canonical_referrer_fan_id)
@@ -558,16 +550,7 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
     }
 
     let qualified_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT count(DISTINCT canonical_fan_id($1, attribution.referred_fan_id))::bigint
-        FROM referral_attributions attribution
-        WHERE attribution.workspace_id = $1
-          AND attribution.referrer_fan_id IN (
-              SELECT fan_id FROM canonical_fan_family($1,$2)
-          )
-          AND attribution.status = 'qualified'
-          AND canonical_fan_id($1, attribution.referred_fan_id) IS DISTINCT FROM $2
-        "#,
+        "SELECT canonical_qualified_referral_count($1,$2,NULL)",
     )
     .bind(workspace_id.into_uuid())
     .bind(canonical_referrer_fan_id)
