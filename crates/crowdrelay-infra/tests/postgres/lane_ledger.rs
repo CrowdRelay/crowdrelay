@@ -397,9 +397,7 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
     let no_site = dayzero_tenant(&pool, "dz-nosite", &[JOIN_WORDS]).await?;
     let no_site_facts = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, no_site).await?;
     assert!(
-        no_site_facts
-            .executable_owned_social_platforms()
-            .is_empty(),
+        no_site_facts.executable_owned_social_platforms().is_empty(),
         "authority-shaped rail cannot bypass a missing first-party destination"
     );
     let no_site = no_site_facts.assess();
