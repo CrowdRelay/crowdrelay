@@ -183,7 +183,7 @@ async fn fresh_drop_selection_exploits_real_yield_but_keeps_one_exploration_slot
     seed_community_conversion(&pool, ws, "convertedroom").await?;
     seed_community_clicks(&pool, ws, "strongclicks", 3).await?;
     seed_community_clicks(&pool, ws, "weakclick", 1).await?;
-    seed_post(&pool, ws, measured_zero, "measuredzero", "posted", 20).await?;
+    seed_post(&pool, ws, measured_zero, "measuredzero", "posted", 5).await?;
 
     let targets = repo.load_relay_community_targets(ws).await?;
     let picked: std::collections::BTreeSet<Uuid> =
@@ -236,6 +236,10 @@ async fn relay_quality_never_leaks_across_tenants()
 
     seed_community_clicks(&pool, ws, "localstrong", 3).await?;
     seed_community_clicks(&pool, ws, "localsecond", 1).await?;
+    // Keep lane-health out of this test's subject: one recent delivery proves
+    // Reddit is an executable route, while ranking still comes only from this
+    // workspace's provenance.
+    seed_post(&pool, ws, local_second, "localsecond", "posted", 1).await?;
 
     // Same public community label, but all of this outcome evidence belongs to
     // another workspace. It must be invisible to ws's quality ranking.
