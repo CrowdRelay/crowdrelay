@@ -278,13 +278,23 @@ impl PostgresFanPrivacyRepository {
             SET normalized_email = format('deleted-%s@account.invalid', id),
                 display_name = NULL,
                 locale = NULL,
-                status = CASE WHEN id = $2 THEN 'suppressed' ELSE status END,
                 deleted_at = now()
             WHERE workspace_id = $1
               AND id IN (
                   SELECT fan_id FROM canonical_fan_family($1,$2)
               )
             "#,
+        )
+        .bind(workspace_id)
+        .bind(fan_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(Self::unexpected)?;
+
+        sqlx::query(
+            "UPDATE fans
+             SET status = 'suppressed'
+             WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace_id)
         .bind(fan_id)
