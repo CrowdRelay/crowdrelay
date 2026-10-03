@@ -95,6 +95,16 @@ impl AcquisitionRepository for PostgresAcquisitionRepository {
             .map_err(Into::into)
     }
 
+    async fn load_active_smart_link(
+        &self,
+        workspace_id: WorkspaceId,
+        slug: &SmartLinkSlug,
+    ) -> Result<Option<ResolvedSmartLink>, RepositoryError> {
+        self.bounded(self.load_active_smart_link_inner(workspace_id, slug))
+            .await
+            .map_err(Into::into)
+    }
+
     async fn load_redirect_context(&self) -> Result<Option<RedirectContext>, RepositoryError> {
         self.bounded(self.load_redirect_context_inner())
             .await
