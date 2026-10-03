@@ -186,31 +186,58 @@ pub fn reddit_standing(history: &[PostRecord], now: OffsetDateTime) -> RedditSta
     }
 }
 
-/// Whether unattended posting has earned the right to use the account.
+/// Why unattended posting has not been earned (or has been revoked).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyHoldReason {
+    RecentModerationVerdict,
+    InsufficientQualityHistory,
+}
+
+impl AutonomyHoldReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RecentModerationVerdict => {
+                "held: a moderator or AutoModerator removed one of our posts in the last 30 days — unattended Reddit posting is revoked; a person must decide what, if anything, is appropriate next"
+            }
+            Self::InsufficientQualityHistory => {
+                "held: unattended Reddit posting is not earned yet — manually publish and observe at least three posts that stay live and receive a real community response; silence is not proof that the machine understands the room"
+            }
+        }
+    }
+}
+
+/// Why unattended posting may not use the account right now.
 ///
-/// Rate limits answer "how much"; this answers the prior question "may the
-/// machine publish at all yet?". A clean slate is not evidence of judgement.
-/// The first posts are the calibration set a person publishes and the worker
-/// observes for removals. Only then may automation take over.
+/// The stronger account-level breaker still owns site-filter and repeated-
+/// removal emergencies. This gate is intentionally earlier: after a single
+/// moderator verdict the machine loses posting authority even though a person
+/// may still inspect and use the account.
 #[must_use]
-pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
-    // One current moderator/AutoModerator/site verdict is enough to take
-    // unattended posting away. The account-level `Halted` state remains the
-    // stronger two-removal/site-filter alarm; this gate is intentionally more
-    // conservative because a person can still decide whether one removal was
-    // contextual while the machine cannot.
+pub fn autonomy_hold_reason(
+    history: &[PostRecord],
+    now: OffsetDateTime,
+) -> Option<AutonomyHoldReason> {
     let recent_verdict = history.iter().any(|post| {
         post.removal.is_some_and(RemovalCause::is_verdict)
             && now - post.removal_seen_at.unwrap_or(post.posted_at) <= REMOVAL_WINDOW
     });
-    !recent_verdict
-        && history
-            .iter()
-            .filter(|post| survived_with_signal(post, now))
-            .count()
-            >= MIN_SURVIVED_POSTS_FOR_AUTONOMY
+    if recent_verdict {
+        return Some(AutonomyHoldReason::RecentModerationVerdict);
+    }
+    let proven = history
+        .iter()
+        .filter(|post| survived_with_signal(post, now))
+        .count()
+        >= MIN_SURVIVED_POSTS_FOR_AUTONOMY;
+    (!proven).then_some(AutonomyHoldReason::InsufficientQualityHistory)
 }
 
+/// Whether unattended posting has earned the right to use the account.
+#[must_use]
+pub fn autonomy_proven(history: &[PostRecord], now: OffsetDateTime) -> bool {
+    autonomy_hold_reason(history, now).is_none()
+}
 /// Whether a community's moderators (or its AutoModerator) removed one of our
 /// posts recently enough that its drafts should go to a person instead.
 #[must_use]
@@ -311,6 +338,10 @@ mod tests {
             .collect();
         assert!(!autonomy_proven(&ignored, now()));
         assert_eq!(
+            autonomy_hold_reason(&ignored, now()),
+            Some(AutonomyHoldReason::InsufficientQualityHistory)
+        );
+        assert_eq!(
             reddit_standing(&ignored, now()),
             RedditStanding::Open { daily_cap: BASE_DAILY_CAP }
         );
@@ -324,6 +355,10 @@ mod tests {
         assert!(
             !autonomy_proven(&history, now()),
             "a fresh moderation verdict returns Reddit to human control"
+        );
+        assert_eq!(
+            autonomy_hold_reason(&history, now()),
+            Some(AutonomyHoldReason::RecentModerationVerdict)
         );
     }
 
