@@ -1493,7 +1493,9 @@ impl PostgresAutopilotRepository {
             // External intents are only *dispatched* here. Their learning/outcome
             // evidence is committed when the executor reports provider-confirmed
             // success, so a queued webhook can never masquerade as completed work.
-            if !payload_requires_executor(&action.payload) {
+            if !payload_requires_executor(&action.payload)
+                && !is_confirmation_recovery(&action.payload)
+            {
                 // The envelope first: outcome-created actions carry no
                 // prediction/evidence rows, and without them the measurements
                 // scheduled next resolve into nothing.
