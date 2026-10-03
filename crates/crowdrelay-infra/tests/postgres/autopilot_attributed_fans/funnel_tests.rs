@@ -497,6 +497,41 @@ async fn organic_funnel_control_moves_the_autopilot_to_the_first_real_leak() {
         None,
         "one real qualified referral closes the multiplication zero"
     );
+
+    // Referral attribution is append-only/pinned to the historical fan id.
+    // Canonicalizing that referrer later must not make the control forget a
+    // real referral and reopen MultiplyReferrals.
+    use crowdrelay_application::{FanIdentityRepository, MergeFansCommand};
+    let canonical_referrer = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans(id,workspace_id,normalized_email,status,created_at)
+         VALUES($1,$2,$3,'active',$4)",
+    )
+    .bind(canonical_referrer)
+    .bind(f.workspace_id.into_uuid())
+    .bind(format!("canonical-{}@example.test", canonical_referrer.simple()))
+    .bind(old_acquired)
+    .execute(&f.pool)
+    .await
+    .expect("canonical referrer");
+    let identity = crowdrelay_infra::fan_identity::PgFanIdentityRepository::new(f.pool.clone());
+    identity
+        .merge_fans(&MergeFansCommand {
+            workspace_id: f.workspace_id,
+            survivor_fan_id: canonical_referrer,
+            merged_fan_id: old_fan,
+            reason: Some("same person".to_owned()),
+            merged_by: "funnel-test".to_owned(),
+            request_id: "funnel-referral-merge".to_owned(),
+        })
+        .await
+        .expect("merge referrer");
+
+    assert_eq!(
+        control().await.expect("control"),
+        None,
+        "pinned referral history must follow the canonical referrer after merge"
+    );
 }
 
 #[tokio::test]
