@@ -606,7 +606,7 @@ async fn the_schema_refuses_a_verdict_without_evidence() -> Result<(), Box<dyn s
 
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_settled_outcome_is_folded_into_the_record_for_its_kind()
+async fn a_correlational_provider_spike_is_reported_but_never_learned_as_causal()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = fixture("outcome-learning").await?;
     let series_id = create_series(&fixture).await?;
@@ -645,21 +645,15 @@ async fn a_settled_outcome_is_folded_into_the_record_for_its_kind()
          FROM play_learning WHERE workspace_id=$1 AND play_kind='track_us_ask'",
     )
     .bind(fixture.workspace_id.into_uuid())
-    .fetch_one(&fixture.pool)
+    .fetch_optional(&fixture.pool)
     .await?;
     assert_eq!(
-        record.0, 1,
-        "the correlational verdict is the play's verdict"
+        record, None,
+        "a provider series moving in the same window must never create causal play learning"
     );
-    assert_eq!(
-        record.3, 0,
-        "the attributed claim settled insufficient and must not count"
-    );
-    assert_eq!(record.4, 0);
-    assert_eq!(record.5, None);
 
-    // The standings travel with the ledger, and a single good result leaves the
-    // play untested rather than promoted.
+    // The correlational result remains visible in the ledger, while standing
+    // stays Untested/default because no authoritative causal verdict exists.
     let ledger = fixture
         .repository
         .load_play_ledger(fixture.workspace_id, after)
@@ -668,11 +662,13 @@ async fn a_settled_outcome_is_folded_into_the_record_for_its_kind()
         .standings
         .first()
         .ok_or("every kind is reported, even without a record")?;
-    assert_eq!(standing.record.improved, 1);
+    assert_eq!(standing.record.improved, 0);
+    assert_eq!(standing.record.neutral, 0);
+    assert_eq!(standing.record.worsened, 0);
     assert_eq!(
         standing.effective_max_recipients_per_step,
         crowdrelay_domain::plays::PlayPolicy::default().max_recipients_per_step,
-        "one result changes nothing"
+        "correlation may be reported but cannot change autonomous reach"
     );
     Ok(())
 }
