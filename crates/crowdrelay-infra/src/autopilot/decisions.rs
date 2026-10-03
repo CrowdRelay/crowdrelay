@@ -180,6 +180,16 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         .map_err(map_sqlx)
     }
 
+    async fn load_executable_owned_social_platforms(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<String>, RepositoryError> {
+        crate::lane_ledger::day_zero_facts(&self.pool, workspace_id.into_uuid())
+            .await
+            .map(|facts| facts.executable_owned_social_platforms())
+            .map_err(map_sqlx)
+    }
+
     async fn load_signal_push_audience(
         &self,
         workspace_id: WorkspaceId,
