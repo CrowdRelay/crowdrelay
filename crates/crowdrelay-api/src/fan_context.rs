@@ -660,10 +660,17 @@ pub async fn fan_home(State(state): State<crate::AppState>, headers: HeaderMap) 
     let referral = sqlx::query_as::<_, (i64, i64)>(
         r#"
         SELECT
-          COUNT(*) FILTER (WHERE status = 'qualified')::bigint AS qualified,
-          COUNT(*) FILTER (WHERE status = 'pending')::bigint AS pending
+          canonical_qualified_referral_count($1,$2,NULL) AS qualified,
+          COUNT(DISTINCT canonical_fan_id($1,referred_fan_id))
+            FILTER (
+              WHERE status = 'pending'
+                AND canonical_live_referral_owner_id($1,referred_fan_id) = $2
+            )::bigint AS pending
         FROM referral_attributions
-        WHERE workspace_id = $1 AND referrer_fan_id = $2
+        WHERE workspace_id = $1
+          AND referrer_fan_id IN (
+            SELECT fan_id FROM canonical_fan_family($1,$2)
+          )
         "#,
     )
     .bind(workspace_id)
