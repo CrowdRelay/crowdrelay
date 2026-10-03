@@ -263,6 +263,17 @@ async fn dayzero_tenant(
         .execute(pool)
         .await?;
     }
+    // These fixtures model a worker whose deployment-level Meta publisher
+    // is actually on. Individual tests can flip the row to prove the runtime
+    // gate dominates tenant authority.
+    sqlx::query(
+        "INSERT INTO growth_component_state (workspace_id, component, enabled, missing_switch)
+         VALUES ($1, 'social_post_executor', true, NULL)",
+    )
+    .bind(ws)
+    .execute(pool)
+    .await?;
+
     for (key, value) in settings {
         sqlx::query("INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1,$2,$3)")
             .bind(ws)
@@ -318,6 +329,54 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
     let missing = readiness.smallest_missing.expect("a blocker is named");
     assert_eq!(missing.code, "standing_authority_not_granted");
     assert!(missing.what.starts_with("facebook"), "{}", missing.what);
+
+    // Tenant authority cannot override a deployment that cannot publish.
+    sqlx::query(
+        "UPDATE growth_component_state
+         SET enabled=false, missing_switch='CROWDRELAY_SOCIAL_AUTO_POST', observed_at=now()
+         WHERE workspace_id=$1 AND component='social_post_executor'",
+    )
+    .bind(prod)
+    .execute(&pool)
+    .await?;
+    let runtime_off = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, prod)
+        .await?
+        .assess();
+    let blocked = runtime_off.smallest_missing.expect("runtime blocker");
+    assert_eq!(blocked.code, "deployment_publish_gate_off");
+    assert!(
+        !blocked.owner_action,
+        "tenant settings cannot repair a worker deployment gate"
+    );
+    sqlx::query(
+        "UPDATE growth_component_state
+         SET enabled=true, missing_switch=NULL, observed_at=now()
+         WHERE workspace_id=$1 AND component='social_post_executor'",
+    )
+    .bind(prod)
+    .execute(&pool)
+    .await?;
+
+    // The explicit Facebook grant is atomic and exact: it must not wake the
+    // previously stored Telegram lane alongside Facebook.
+    let settings = crowdrelay_infra::tenant_settings::TenantSettingsRepository::new(pool.clone());
+    settings
+        .set_facebook_autopost_authority(prod, true)
+        .await?;
+    let granted_facts = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, prod).await?;
+    assert!(granted_facts.social_auto_post);
+    assert_eq!(granted_facts.autopost_platforms, vec!["facebook".to_owned()]);
+    assert!(granted_facts.assess().ready);
+    settings
+        .set_facebook_autopost_authority(prod, false)
+        .await?;
+    let revoked = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, prod).await?;
+    assert!(!revoked.social_auto_post, "revocation must be immediate");
+    assert_eq!(
+        revoked.autopost_platforms,
+        vec!["facebook".to_owned()],
+        "revocation does not broaden the remembered authority scope"
+    );
 
     // No site root: named before any rail, whatever the rails look like.
     let no_site = dayzero_tenant(&pool, "dz-nosite", &[JOIN_WORDS]).await?;
