@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use crowdrelay_application::autopilot::OrganicFunnelDirective;
 use crowdrelay_domain::latarnik_mission::choose_mission;
 use crowdrelay_domain::{
     WorkspaceId,
@@ -48,6 +49,9 @@ pub struct SweepReport {
     pub referral_opportunities_recorded: u64,
     /// Missions offered this pass to active Latarniks, in their own session.
     pub missions_offered: u64,
+    /// Eligible mission opportunities deliberately not shown because the
+    /// canonical funnel has an earlier leak to repair first.
+    pub missions_held_by_funnel: u64,
     /// Missions that completed (someone they brought arrived) this pass.
     pub missions_completed: u64,
     /// Open missions that ran out their time this pass.
@@ -132,18 +136,28 @@ impl LatarnikSweep {
         let (completed, expired) = settle(&self.pool, ws, now).await?;
         report.missions_completed = completed;
         report.missions_expired = expired;
+        let funnel_control = crowdrelay_infra::organic_funnel::control(&self.pool, ws, now).await?;
+        let missions_permitted = funnel_control
+            .map(|control| control.directive.permits_latarnik_mission())
+            .unwrap_or(true);
         for carrier in load_carriers(&self.pool, ws, now, FANS_PER_PASS).await? {
-            if let Some(plan) = choose_mission(&carrier.context, now)
-                && offer(
-                    &self.pool,
-                    ws,
-                    carrier.role_id,
-                    carrier.fan_id,
-                    &plan,
-                    now,
-                )
-                .await?
-                    .is_some()
+            let Some(plan) = choose_mission(&carrier.context, now) else {
+                continue;
+            };
+            if !missions_permitted {
+                report.missions_held_by_funnel += 1;
+                continue;
+            }
+            if offer(
+                &self.pool,
+                ws,
+                carrier.role_id,
+                carrier.fan_id,
+                &plan,
+                now,
+            )
+            .await?
+            .is_some()
             {
                 report.missions_offered += 1;
             }
