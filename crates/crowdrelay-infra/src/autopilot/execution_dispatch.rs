@@ -67,11 +67,11 @@ pub(super) async fn ensure_dispatch_envelope(
             None,
             DispatchContext::default(),
         ),
-        // A brain-requested artifact is a fan-facing intervention like the
-        // kinds above, but its candidates persist through the plain path —
-        // no envelope anywhere. Its measurements are scheduled at the
-        // executor receipt, so the envelope is filled there; without it the
-        // fan-growth trio would UPDATE evidence rows that do not exist.
+        // A brain-requested artifact is an internal precursor whose useful
+        // outcome is whether it reaches publication later. Its candidates
+        // persist through the plain path, so the receipt fills the envelope
+        // needed by that publication-outcome measurement. This envelope must
+        // not be read as proof that the artifact itself reached a fan.
         //
         // `channel_for_template` reads `Other` for this template id, which is
         // the honest surface: the artifact kind names the piece, not where
