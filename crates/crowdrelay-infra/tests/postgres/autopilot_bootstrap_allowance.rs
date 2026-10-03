@@ -115,6 +115,7 @@ async fn resolved_evidence_action(
     workspace_id: Uuid,
     context: &str,
     kinds: &[&str],
+    assessment: &str,
     at: OffsetDateTime,
 ) -> Result<Uuid, Box<dyn std::error::Error>> {
     let action_id = classed_action(
@@ -169,13 +170,16 @@ async fn resolved_evidence_action(
                (workspace_id, decision_id, action_id, measurement_id, metric_key,
                 observed_value, baseline_value, effect_assessment,
                 delta_basis_points, observed_at)
-               VALUES ($1,$2,$3,$4,$5,0.0,0.0,'neutral',0,$6)"#,
+               VALUES ($1,$2,$3,$4,$5,0.0,0.0,$6,
+                      CASE WHEN $6='improved' THEN 1000
+                           WHEN $6='worsened' THEN -1000 ELSE 0 END,$7)"#,
         )
         .bind(workspace_id)
         .bind(decision_id)
         .bind(action_id)
         .bind(measurement_id)
         .bind(format!("effect.{kind}"))
+        .bind(assessment)
         .bind(at)
         .execute(pool)
         .await?;
@@ -306,6 +310,7 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
         workspace_id,
         "content_supply",
         &["agent_run_outcome_quality_1h"],
+        "neutral",
         now - time::Duration::minutes(3),
     )
     .await?;
@@ -314,6 +319,7 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
         workspace_id,
         "content_supply",
         &["scanner_discovery_quality_1h"],
+        "neutral",
         now - time::Duration::minutes(2),
     )
     .await?;
@@ -322,6 +328,7 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
         workspace_id,
         "content_supply",
         &["artifact_outcome_7d"],
+        "neutral",
         now - time::Duration::minutes(1),
     )
     .await?;
@@ -338,6 +345,30 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
         "the machine cannot earn external authority by grading its own work"
     );
 
+    // Even a real audience-facing intervention that honestly measured zero
+    // does not earn more freedom. "We learned it did nothing" is not evidence
+    // that the machine deserves to do more of it unattended.
+    resolved_evidence_action(
+        &pool,
+        workspace_id,
+        "content_supply",
+        &["content_link_clicks_7d"],
+        "neutral",
+        now - time::Duration::seconds(10),
+    )
+    .await?;
+    let external_zero = repo
+        .load_resolved_evidence_counts(WorkspaceId::from_uuid(workspace_id))
+        .await?;
+    assert_eq!(
+        external_zero
+            .for_context(AutopilotContext::ContentSupply)
+            .observations
+            .0,
+        0,
+        "a measured zero teaches the learner but earns no additional authority"
+    );
+
     // One audience-facing action carries two legitimate measurements. It
     // still counts as one observed intervention, not two votes for authority.
     resolved_evidence_action(
@@ -345,6 +376,7 @@ async fn unattended_authority_is_earned_from_people_not_the_system_itself()
         workspace_id,
         "content_supply",
         &["content_link_clicks_7d", "content_fan_acquisition_7d"],
+        "improved",
         now,
     )
     .await?;
