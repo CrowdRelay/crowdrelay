@@ -308,16 +308,16 @@ fn select_relay_targets(rows: Vec<RelayTargetRow>) -> Vec<RelayTargetRow> {
     }
 
     let mut selected = std::collections::BTreeSet::new();
-    let mut measured: Vec<usize> = rows
+    let mut measured: Vec<(usize, (i64, i64, i64))> = rows
         .iter()
         .enumerate()
-        .filter_map(|(index, row)| (relay_quality(row) != (0, 0, 0)).then_some(index))
+        .filter_map(|(index, row)| {
+            let quality = relay_quality(row);
+            (quality != (0, 0, 0)).then_some((index, quality))
+        })
         .collect();
-    measured.sort_by(|left, right| {
-        relay_quality(&rows[*right])
-            .cmp(&relay_quality(&rows[*left]))
-            .then_with(|| left.cmp(right))
-    });
+    measured.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let measured: Vec<usize> = measured.into_iter().map(|(index, _)| index).collect();
 
     for index in measured.into_iter().take(limit.saturating_sub(1)) {
         selected.insert(index);
