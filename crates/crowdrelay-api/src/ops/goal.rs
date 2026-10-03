@@ -157,6 +157,8 @@ async fn load_goal_scoreboard(
 
     let cut_list = load_lanes_60d(pool, workspace_id, now).await?;
 
+    let proof = load_fan_acquisition_proof(pool, workspace_id, since, now).await?;
+
     let reddit = load_reddit_standing(pool, workspace_id, now).await?;
 
     Ok(json!({
@@ -191,7 +193,170 @@ async fn load_goal_scoreboard(
             "oldest_awaiting_hours": oldest_awaiting_hours,
         },
         "lanes_60d": cut_list,
+        "proof": proof,
         "reddit": reddit,
+    }))
+}
+
+/// Hard causal proof that CrowdRelay found/acquired real people.
+///
+/// Two rails stay separate:
+/// * FAN SCOUT is person-level: observed prospect -> provider-confirmed invite
+///   touch -> that touch's Smart Link -> anonymous visitor -> first-party fan.
+/// * action attribution is execution-level: conversion provenance carries the
+///   exact autopilot action id.
+///
+/// Signal counts require an active endpoint created after the conversion. No
+/// workspace delta, timing-only join or provider follower estimate is accepted.
+async fn load_fan_acquisition_proof(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    since: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let (
+        prospects_discovered,
+        invites_confirmed,
+        prospect_fans,
+        prospect_signal_fans,
+    ) = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        r#"
+        WITH exact_prospect_conversions AS (
+            SELECT DISTINCT
+                   touch.prospect_id,
+                   canonical_fan_id($1, arrival.fan_id) AS fan_id,
+                   MIN(arrival.occurred_at) AS converted_at
+            FROM fan_prospect_touches AS touch
+            JOIN click_events AS click
+              ON click.workspace_id = touch.workspace_id
+             AND click.smart_link_id = touch.smart_link_id
+             AND click.anonymous_visitor_id IS NOT NULL
+             AND click.occurred_at >= touch.touched_at
+            JOIN fan_acquisition_events AS arrival
+              ON arrival.workspace_id = touch.workspace_id
+             AND arrival.anonymous_visitor_id = click.anonymous_visitor_id
+             AND arrival.fan_id IS NOT NULL
+             AND arrival.occurred_at >= click.occurred_at
+             AND arrival.occurred_at <= click.occurred_at + interval '30 days'
+            JOIN fan_prospects AS prospect
+              ON prospect.workspace_id = touch.workspace_id
+             AND prospect.id = touch.prospect_id
+             AND prospect.status = 'converted'
+             AND canonical_fan_id($1, prospect.linked_fan_id)
+                   = canonical_fan_id($1, arrival.fan_id)
+            WHERE touch.workspace_id = $1
+              AND touch.kind = 'invite'
+              AND arrival.occurred_at >= $2
+              AND arrival.occurred_at <= $3
+            GROUP BY touch.prospect_id, canonical_fan_id($1, arrival.fan_id)
+        )
+        SELECT
+            (SELECT count(DISTINCT prospect.id)::bigint
+             FROM fan_prospects AS prospect
+             WHERE prospect.workspace_id=$1
+               AND prospect.created_at >= $2
+               AND prospect.created_at <= $3),
+            (SELECT count(DISTINCT touch.id)::bigint
+             FROM fan_prospect_touches AS touch
+             WHERE touch.workspace_id=$1
+               AND touch.kind='invite'
+               AND touch.touched_at >= $2
+               AND touch.touched_at <= $3),
+            (SELECT count(*)::bigint
+             FROM exact_prospect_conversions),
+            (SELECT count(*)::bigint
+             FROM exact_prospect_conversions AS conversion
+             JOIN fans AS fan
+               ON fan.workspace_id=$1
+              AND fan.id=conversion.fan_id
+              AND fan.status='active'
+              AND fan.deleted_at IS NULL
+              AND fan.merged_into_fan_id IS NULL
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM fan_push_endpoints AS endpoint
+                 WHERE endpoint.workspace_id=$1
+                   AND endpoint.audience_kind='fan'
+                   AND canonical_fan_id($1,endpoint.fan_id)=conversion.fan_id
+                   AND endpoint.active
+                   AND endpoint.invalidated_at IS NULL
+                   AND endpoint.created_at >= conversion.converted_at
+                   AND endpoint.created_at <= $3
+             ))
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(since)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+
+    let (action_fans, action_signal_fans) = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        WITH action_conversions AS (
+            SELECT canonical_fan_id($1, conversion.fan_id) AS fan_id,
+                   MIN(conversion.occurred_at) AS converted_at
+            FROM fan_provenance_events AS conversion
+            WHERE conversion.workspace_id=$1
+              AND conversion.event_kind='conversion'
+              AND conversion.attribution_method='last_tracked_click'
+              AND conversion.action_id IS NOT NULL
+              AND conversion.occurred_at >= $2
+              AND conversion.occurred_at <= $3
+            GROUP BY canonical_fan_id($1, conversion.fan_id)
+        ), owned AS (
+            SELECT conversion.fan_id, conversion.converted_at
+            FROM action_conversions AS conversion
+            JOIN fans AS fan
+              ON fan.workspace_id=$1
+             AND fan.id=conversion.fan_id
+             AND fan.status='active'
+             AND fan.deleted_at IS NULL
+             AND fan.merged_into_fan_id IS NULL
+            WHERE conversion.fan_id IS NOT NULL
+        )
+        SELECT
+            (SELECT count(*)::bigint FROM owned),
+            (SELECT count(*)::bigint
+             FROM owned
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM fan_push_endpoints AS endpoint
+                 WHERE endpoint.workspace_id=$1
+                   AND endpoint.audience_kind='fan'
+                   AND canonical_fan_id($1,endpoint.fan_id)=owned.fan_id
+                   AND endpoint.active
+                   AND endpoint.invalidated_at IS NULL
+                   AND endpoint.created_at >= owned.converted_at
+                   AND endpoint.created_at <= $3
+             ))
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(since)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(json!({
+        "window": {"since": since, "observed_at": now},
+        "fan_scout": {
+            "prospects_discovered": prospects_discovered,
+            // Written only after the sending surface says the reply is live.
+            "provider_confirmed_invites": invites_confirmed,
+            "exact_converted_fans": prospect_fans,
+            "exact_signal_fans": prospect_signal_fans,
+            "evidence_class": "person_touch_visitor_fan_exact",
+        },
+        "actions": {
+            "exact_canonical_fans": action_fans,
+            "exact_signal_fans": action_signal_fans,
+            "evidence_class": "action_last_tracked_click_fan_exact",
+        },
+        "external_social": {
+            "evidence_class": "provider_series_only_not_person_identity",
+            "note": "Follower/subscriber series are reported elsewhere as provider-observed or experimental lift; they are never counted here as person-level acquired fans."
+        }
     }))
 }
 
