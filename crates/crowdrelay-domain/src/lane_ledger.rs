@@ -21,6 +21,10 @@
 
 use serde::Serialize;
 
+/// Default recent-delivery window shared by ops readout and autonomous routing.
+/// A screen and the Brain must not disagree about whether a lane is alive.
+pub const DEFAULT_WINDOW_DAYS: i32 = 14;
+
 /// Which authority surface produced the lane row.
 ///
 /// The platform name alone is not enough: a joined Telegram community and
