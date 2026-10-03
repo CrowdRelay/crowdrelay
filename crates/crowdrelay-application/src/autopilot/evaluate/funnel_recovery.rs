@@ -38,7 +38,7 @@ fn conversion_recovery_only(control: Option<OrganicFunnelControl>) -> bool {
     control.is_some_and(|control| control.directive == OrganicFunnelDirective::RepairConversion)
 }
 
-fn content_supply_public_reach(candidate: &DecisionCandidate) -> bool {
+fn content_supply_net_new_reach(candidate: &DecisionCandidate) -> bool {
     if !matches!(
         candidate.decision_kind,
         "relay_owned_post" | "drop_surge_fanout"
@@ -46,18 +46,20 @@ fn content_supply_public_reach(candidate: &DecisionCandidate) -> bool {
         return false;
     }
     match &candidate.action {
+        // Community placements are the clearest organic cold-start rail: the
+        // audience is not the workspace's existing fan list. They keep their
+        // own admission, standing, approval and moderation gates.
         AutopilotActionPayload::RequestAgentRun { template_id, .. } => matches!(
             template_id.as_str(),
             "community-engager" | "community-repost"
         ),
-        AutopilotActionPayload::RequestAgentContent { template_id, .. } => template_id
-            .as_deref()
-            .is_some_and(|template| {
-                matches!(
-                    template,
-                    "social-post" | "telegram-poster" | "discord-poster"
-                )
-            }),
+        // Instagram/Facebook/X are public discovery surfaces: a post can reach
+        // non-followers through platform distribution. Telegram/Discord are
+        // intentionally absent here — posting into the band's own channel is
+        // delivery to an existing subscribed audience, not a new-audience rail.
+        AutopilotActionPayload::RequestAgentContent { template_id, .. } => {
+            template_id.as_deref() == Some("social-post")
+        }
         AutopilotActionPayload::RequestCommunityEngagement { .. } => true,
         _ => false,
     }
@@ -70,11 +72,14 @@ fn content_supply_owned_fan_delivery(candidate: &DecisionCandidate) -> bool {
     ) {
         return false;
     }
-    matches!(
-        &candidate.action,
+    match &candidate.action {
         AutopilotActionPayload::RequestSignalPush { .. }
-            | AutopilotActionPayload::RequestSourceCampaign { .. }
-    )
+        | AutopilotActionPayload::RequestSourceCampaign { .. } => true,
+        AutopilotActionPayload::RequestAgentContent { template_id, .. } => template_id
+            .as_deref()
+            .is_some_and(|template| matches!(template, "telegram-poster" | "discord-poster")),
+        _ => false,
+    }
 }
 
 fn funnel_allows_content_supply(
@@ -82,7 +87,7 @@ fn funnel_allows_content_supply(
     control: Option<OrganicFunnelControl>,
 ) -> bool {
     control.is_none_or(|control| {
-        let public_reach = content_supply_public_reach(candidate);
+        let net_new_reach = content_supply_net_new_reach(candidate);
         let owned_fan_delivery = content_supply_owned_fan_delivery(candidate);
         match control.directive {
             // The measured problem is no new audience. Spend fan-out on lanes
@@ -95,13 +100,13 @@ fn funnel_allows_content_supply(
             // transport is broken. Those stages have dedicated recovery paths.
             OrganicFunnelDirective::RepairConversion
             | OrganicFunnelDirective::RepairConfirmation => {
-                !public_reach && !owned_fan_delivery
+                !net_new_reach && !owned_fan_delivery
             }
             // Once acquisition itself is no longer the limiting stage, preserve
             // consented owned-audience delivery for activation/retention while
             // holding new public fan-out behind the measured downstream leak.
             OrganicFunnelDirective::ActivateFans
-            | OrganicFunnelDirective::RetainFans => !public_reach,
+            | OrganicFunnelDirective::RetainFans => !net_new_reach,
         }
     })
 }
