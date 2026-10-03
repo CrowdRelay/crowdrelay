@@ -587,11 +587,51 @@ async fn a_mission_is_offered_once_tapped_in_private_and_completed_only_by_a_ref
         mine.prompt
     );
     ensure!(
-        mine.share_text.contains("https://band.example/r/")
-            && mine.share_text.contains("?event=gorzow&lang=pl")
-            && !mine.share_text.contains("//r/"),
-        "their own contextual link on the stored site root: {}",
+        mine.share_text.contains("https://band.example/l/latarnik-")
+            && !mine.share_text.contains("https://band.example/r/"),
+        "the share sheet exposes only the action-owned tracked link: {}",
         mine.share_text
+    );
+    let (mission_action, mission_link): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT action_id, smart_link_id
+         FROM latarnik_missions
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(w)
+    .bind(mine.id)
+    .fetch_one(&pool)
+    .await?;
+    let (slug, destination, link_action): (String, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT slug, destination_url, action_id
+         FROM smart_links
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(w)
+    .bind(mission_link)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        slug == format!("latarnik-{}", mission_action.simple())
+            && destination.contains("https://band.example/r/")
+            && destination.contains("?event=gorzow&lang=pl")
+            && link_action == Some(mission_action),
+        "mission link must preserve referral semantics and be action-owned: {slug} {destination} {link_action:?}"
+    );
+    let action = sqlx::query_as::<_, (String, String, Uuid, String)>(
+        "SELECT action_kind, status, subject_id, action_class
+         FROM autopilot_actions
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(w)
+    .bind(mission_action)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(
+        action.0 == "latarnik.mission.offer"
+            && action.1 == "succeeded"
+            && action.2 == kuba
+            && action.3 == "first_party_reversible",
+        "mission offer must be a real first-party fan action: {action:?}"
     );
     let hers = my_open_mission(&pool, w, &ania_token, now)
         .await?
