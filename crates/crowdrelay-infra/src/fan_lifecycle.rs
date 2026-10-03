@@ -701,6 +701,27 @@ pub(crate) async fn issue_fan_action_token(
     FanActionToken::parse(raw).map_err(|_| LifecycleStoreError::Unexpected)
 }
 
+/// Serializes every token-rotation path for one fan.
+///
+/// The public access route and autonomous confirmation recovery both rotate
+/// the same one-time token family. Without one shared lock, the recovery
+/// worker can invalidate the link a fan just requested in another transaction.
+pub async fn lock_fan_access(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    fan_id: FanId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "fan-access:{}:{}",
+            workspace_id.into_uuid(),
+            fan_id.into_uuid()
+        ))
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 /// Creates a short-lived inbox confirmation token.
 pub(crate) async fn issue_confirmation_token(
     transaction: &mut Transaction<'_, Postgres>,
