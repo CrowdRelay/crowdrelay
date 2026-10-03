@@ -157,6 +157,23 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         workspace_id: WorkspaceId,
     ) -> Result<Vec<CommunityRelayTarget>, RepositoryError>;
 
+    /// Recent delivery truth used to route new ContentSupply work. Scope is
+    /// part of the key because an owned Telegram channel and a joined Telegram
+    /// community are different authority surfaces even though both say
+    /// `telegram`. A missing key means the lane was quiet in the window — it
+    /// may receive one probe, never an unlimited assumption of health.
+    async fn load_delivery_lane_verdicts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<
+        Vec<(
+            crowdrelay_domain::lane_ledger::LaneScope,
+            String,
+            crowdrelay_domain::lane_ledger::Verdict,
+        )>,
+        RepositoryError,
+    >;
+
     /// How many fans a Signal push to `segment` would reach right now — the
     /// same eligibility the send path applies (active fan, newest marketing
     /// consent granted, the segment's predicates, at least one live push
