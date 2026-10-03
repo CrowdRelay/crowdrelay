@@ -55,9 +55,10 @@ impl YoutubeRepliesWorker {
         let Some(config) = settings.join_ask_config(self.workspace_id).await? else {
             return Ok(0);
         };
-        let Some(variant) = config.variants.first().cloned() else {
+        if config.variants.is_empty() {
             return Ok(0);
-        };
+        }
+        let variants = config.variants;
         let brand = settings.brand_settings(self.workspace_id).await?;
         let Some(site_root) = brand.site_root().map(str::to_owned) else {
             return Ok(0);
@@ -75,7 +76,7 @@ impl YoutubeRepliesWorker {
                 super::fan_capture_draft::prepare_fan_capture_draft(
                     &self.pool,
                     self.workspace_id,
-                    &variant,
+                    &variants,
                     &site_root,
                 )
                 .await?,
@@ -103,6 +104,28 @@ impl YoutubeRepliesWorker {
         .fetch_one(&self.pool)
         .await?;
         if posted_24h >= CAPTURE_COMMENTS_PER_24H {
+            return Ok(0);
+        }
+        // The same channel commenting under several of its own videos in quick
+        // succession reads as automation to YouTube's filters, whatever the
+        // words. Space the posts out; the daily cap is a ceiling, not a pace.
+        let last_posted_unix = sqlx::query_scalar::<_, Option<i64>>(
+            r#"
+            SELECT max(CASE
+                         WHEN COALESCE(metadata->>'fan_capture_comment_posted_unix', '') ~ '^[0-9]+$'
+                         THEN (metadata->>'fan_capture_comment_posted_unix')::bigint
+                       END)
+            FROM content_sources
+            WHERE workspace_id = $1 AND source_kind = 'video'
+            "#,
+        )
+        .bind(self.workspace_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let now_unix = sqlx::query_scalar::<_, i64>("SELECT EXTRACT(EPOCH FROM now())::bigint")
+            .fetch_one(&self.pool)
+            .await?;
+        if !super::fan_capture_draft::spaced_enough(last_posted_unix, now_unix) {
             return Ok(0);
         }
 
@@ -237,7 +260,12 @@ impl YoutubeRepliesWorker {
         tx.commit().await?;
 
         let public_link = format!("{}/l/{slug}", site_root.trim_end_matches('/'));
-        let text = capture_comment_text(&variant, &public_link);
+        // Each video gets one of the tenant's own variants, chosen by the video
+        // and stable across retries, so identical words do not appear under
+        // every upload.
+        let variant =
+            super::fan_capture_draft::pick_variant(&variants, source_id).unwrap_or_default();
+        let text = capture_comment_text(variant, &public_link);
         let body = serde_json::json!({
             "snippet": {
                 "videoId": video_id,

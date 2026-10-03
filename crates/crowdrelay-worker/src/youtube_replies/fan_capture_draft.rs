@@ -52,6 +52,31 @@ pub fn capture_mode(deployment_gate: bool, youtube_grant: bool) -> CaptureMode {
     }
 }
 
+/// Minimum gap between two capture comments posted by the machine.
+pub const MIN_SPACING_SECONDS: i64 = 6 * 60 * 60;
+
+/// Whether enough time has passed since the last capture comment went up.
+/// Nothing posted yet is always fine; a clock that says the last one is in the
+/// future is a fault, treated as "not yet" so it can never be spammed through.
+#[must_use]
+pub fn spaced_enough(last_posted_unix: Option<i64>, now_unix: i64) -> bool {
+    match last_posted_unix {
+        None => true,
+        Some(last) => now_unix >= last && now_unix - last >= MIN_SPACING_SECONDS,
+    }
+}
+
+/// The tenant's variant for this video: stable per video, spread across the
+/// tenant's own words. `None` only when the tenant wrote no variants.
+#[must_use]
+pub fn pick_variant(variants: &[String], source_id: Uuid) -> Option<&str> {
+    let count = u128::try_from(variants.len())
+        .ok()
+        .filter(|count| *count > 0)?;
+    let index = usize::try_from(source_id.as_u128() % count).ok()?;
+    variants.get(index).map(String::as_str)
+}
+
 /// Prepares at most one capture comment draft. Returns whether it did.
 ///
 /// # Errors
@@ -60,7 +85,7 @@ pub fn capture_mode(deployment_gate: bool, youtube_grant: bool) -> CaptureMode {
 pub async fn prepare_fan_capture_draft(
     pool: &PgPool,
     workspace_id: Uuid,
-    variant: &str,
+    variants: &[String],
     site_root: &str,
 ) -> Result<bool, sqlx::Error> {
     let open: i64 = sqlx::query_scalar(
@@ -171,7 +196,10 @@ pub async fn prepare_fan_capture_draft(
     )
     .bind(workspace_id)
     .bind(source_id)
-    .bind(capture_comment_text(variant, &public_link))
+    .bind(capture_comment_text(
+        pick_variant(variants, source_id).unwrap_or_default(),
+        &public_link,
+    ))
     .bind(&slug)
     .execute(&mut *tx)
     .await?;
@@ -182,6 +210,40 @@ pub async fn prepare_fan_capture_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn posts_are_spaced_and_a_future_stamp_never_unlocks_one() {
+        let now = 1_800_000_000;
+        assert!(spaced_enough(None, now));
+        assert!(!spaced_enough(Some(now - 60), now));
+        assert!(!spaced_enough(Some(now - MIN_SPACING_SECONDS + 1), now));
+        assert!(spaced_enough(Some(now - MIN_SPACING_SECONDS), now));
+        assert!(
+            !spaced_enough(Some(now + 10), now),
+            "a fault is not a licence"
+        );
+    }
+
+    #[test]
+    fn each_video_gets_a_stable_variant_and_the_words_are_spread() {
+        let variants: Vec<String> = ["a", "b", "c", "d"].map(str::to_owned).to_vec();
+        let ids: Vec<Uuid> = (0..40_u128).map(Uuid::from_u128).collect();
+        assert!(pick_variant(&[], ids[0]).is_none());
+        // Stable: the same video always gets the same words, retry after retry.
+        assert_eq!(
+            pick_variant(&variants, ids[7]),
+            pick_variant(&variants, ids[7])
+        );
+        // Spread: forty videos use all four variants, none dominates.
+        let mut used = [0_u32; 4];
+        for id in &ids {
+            let v = pick_variant(&variants, *id).expect("variant");
+            used[usize::from(v.as_bytes()[0] - b'a')] += 1;
+        }
+        assert!(used.iter().all(|n| *n == 10), "{used:?}");
+        // One variant is still valid.
+        assert_eq!(pick_variant(&["only".to_owned()], ids[3]), Some("only"));
+    }
 
     #[test]
     fn only_both_halves_together_post() {

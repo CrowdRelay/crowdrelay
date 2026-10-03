@@ -64,7 +64,9 @@ async fn a_fresh_video_gets_a_tracked_link_and_a_comment_to_paste() -> Result<()
     )
     .await?;
 
-    let prepared = prepare_fan_capture_draft(&pool, ws, "Want the next show first?", ROOT).await?;
+    let prepared =
+        prepare_fan_capture_draft(&pool, ws, &["Want the next show first?".to_owned()], ROOT)
+            .await?;
     ensure!(prepared, "the fresh video is drafted");
 
     let (text, slug): (String, String) = sqlx::query_as(
@@ -107,7 +109,8 @@ async fn a_fresh_video_gets_a_tracked_link_and_a_comment_to_paste() -> Result<()
     // Idempotent: the same video is not drafted twice, and the ones that are
     // not owed one stay undrafted.
     ensure!(
-        !prepare_fan_capture_draft(&pool, ws, "Want the next show first?", ROOT).await?,
+        !prepare_fan_capture_draft(&pool, ws, &["Want the next show first?".to_owned()], ROOT)
+            .await?,
         "nothing else is owed a comment"
     );
     Ok(())
@@ -124,7 +127,7 @@ async fn the_queue_of_things_to_paste_stays_short() -> Result<()> {
     }
     let mut drafted = 0;
     for _ in 0..letters.len() {
-        if prepare_fan_capture_draft(&pool, ws, "Join us", ROOT).await? {
+        if prepare_fan_capture_draft(&pool, ws, &["Join us".to_owned()], ROOT).await? {
             drafted += 1;
         }
     }
@@ -132,5 +135,44 @@ async fn the_queue_of_things_to_paste_stays_short() -> Result<()> {
         drafted == OPEN_DRAFTS_MAX,
         "at most {OPEN_DRAFTS_MAX} comments wait on a person at once: {drafted}"
     );
+    Ok(())
+}
+
+/// Identical words under every upload read as automation. Each video's draft
+/// uses the variant chosen for that video — stable, from the tenant's own words.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn each_video_is_drafted_with_the_variant_chosen_for_it() -> Result<()> {
+    use crowdrelay_worker::youtube_replies::fan_capture_draft::pick_variant;
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let ws = workspace(&pool).await?;
+    let variants: Vec<String> = [
+        "Pierwsze słowa",
+        "Drugie słowa",
+        "Trzecie słowa",
+        "Czwarte słowa",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    for (i, letter) in ["h", "i", "j"].iter().enumerate() {
+        video(&pool, ws, &letter.repeat(11), i32::try_from(i)?, "v").await?;
+    }
+    while prepare_fan_capture_draft(&pool, ws, &variants, ROOT).await? {}
+
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, metadata->>'fan_capture_draft_text', metadata->>'fan_capture_link_slug'
+         FROM content_sources WHERE workspace_id = $1 AND metadata ? 'fan_capture_draft_text'",
+    )
+    .bind(ws)
+    .fetch_all(&pool)
+    .await?;
+    ensure!(rows.len() == 3, "all three drafted: {}", rows.len());
+    for (id, text, slug) in rows {
+        let expected = pick_variant(&variants, id).context("a variant exists")?;
+        ensure!(
+            text == format!("{expected}\n\n{ROOT}/l/{slug}"),
+            "video {id} carries its own variant, not the first: {text}"
+        );
+    }
     Ok(())
 }
