@@ -56,6 +56,7 @@ mod growth_readiness_tests {
     ) -> ReadinessFacts<'a> {
         ReadinessFacts {
             site_root: Some("https://band.example"),
+            confirmation_delivery_route: true,
             join_copy: true,
             fresh_asset: true,
             social_publish_runtime: Some(true),

@@ -33,6 +33,69 @@ async fn materialization_failure_refunds_the_attempt() -> Result<()> {
     outcome
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires CROWDRELAY_OUTBOX_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn confirmation_without_a_subscribed_endpoint_is_dead_not_delivered() -> Result<()> {
+    let database = common::isolated_database("CROWDRELAY_OUTBOX_TEST_DATABASE_URL").await?;
+    let pool = database.pool.clone();
+    let outcome = async {
+        let workspace_id = seed_workspace(&pool).await?;
+        seed_endpoint(&pool, workspace_id).await?;
+        // There is a healthy webhook endpoint, but it explicitly does not
+        // accept confirmation mail. This is the subtle production shape:
+        // "webhooks exist" is not the same as "double opt-in can deliver".
+        sqlx::query(
+            "UPDATE webhook_endpoints
+             SET event_types = ARRAY['fan.created']::text[]
+             WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .execute(&pool)
+        .await?;
+
+        let event_id = seed_confirmation_event(&pool, workspace_id).await?;
+        let worker = test_worker(&pool, event_id)?;
+        let stats = worker.run_once().await.context("run unrouted confirmation")?;
+        ensure!(stats.outbox_claimed == 1, "confirmation event was not claimed");
+        ensure!(
+            stats.deliveries_materialized == 0,
+            "an unsubscribed endpoint must not receive confirmation mail"
+        );
+
+        let row = sqlx::query_as::<_, (String, Option<String>, bool, bool)>(
+            "SELECT status, last_error_kind, delivered_at IS NOT NULL, dead_at IS NOT NULL
+             FROM outbox_events WHERE id=$1",
+        )
+        .bind(event_id)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(
+            row.0 == "dead"
+                && row.1.as_deref() == Some("endpoint_missing_route")
+                && !row.2
+                && row.3,
+            "unrouted authentication mail must be terminal and visible, got {row:?}"
+        );
+
+        let deliveries: i64 = sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM webhook_deliveries
+             WHERE workspace_id=$1 AND outbox_event_id=$2",
+        )
+        .bind(workspace_id)
+        .bind(event_id)
+        .fetch_one(&pool)
+        .await?;
+        ensure!(deliveries == 0, "no route means no invented delivery row");
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    database
+        .drop()
+        .await
+        .context("drop the isolated database")?;
+    outcome
+}
+
 async fn run(pool: &PgPool) -> Result<()> {
     let pool = pool.clone();
 
@@ -173,6 +236,23 @@ async fn seed_event(pool: &PgPool, workspace_id: Uuid) -> Result<Uuid> {
     .execute(pool)
     .await
     .context("insert outbox event")?;
+    Ok(id)
+}
+
+async fn seed_confirmation_event(pool: &PgPool, workspace_id: Uuid) -> Result<Uuid> {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outbox_events
+             (id, workspace_id, event_type, event_version, payload, request_id, available_at)
+         VALUES ($1, $2, 'fan.confirmation_requested', 1, '{}'::jsonb, $3,
+                 TIMESTAMPTZ '1970-01-01 00:00:00+00')",
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .bind(format!("request-confirmation-{id}"))
+    .execute(pool)
+    .await
+    .context("insert confirmation event")?;
     Ok(id)
 }
 

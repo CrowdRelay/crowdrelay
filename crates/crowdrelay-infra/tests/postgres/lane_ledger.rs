@@ -276,6 +276,20 @@ async fn dayzero_tenant(
     .execute(pool)
     .await?;
 
+    // A real fan-acquisition rail ends at an active, confirmed fan. Model a
+    // subscribed mail bridge by default; the missing-route regression below
+    // deletes it explicitly.
+    sqlx::query(
+        "INSERT INTO webhook_endpoints
+             (workspace_id, name, url, signing_secret_ref, event_types)
+         VALUES ($1,$2,'https://mail.example.test/hook','test/confirmation',
+                 ARRAY['fan.confirmation_requested']::text[])",
+    )
+    .bind(ws)
+    .bind(format!("confirmation-{label}"))
+    .execute(pool)
+    .await?;
+
     for (key, value) in settings {
         sqlx::query("INSERT INTO tenant_settings (workspace_id, key, value) VALUES ($1,$2,$3)")
             .bind(ws)
@@ -427,6 +441,51 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
         revoked.executable_owned_social_platforms().is_empty(),
         "revoked authority disappears from Brain routing immediately"
     );
+
+    // A publisher without a double-opt-in delivery route is not a usable
+    // acquisition rail: it would manufacture pending fans that can never
+    // become canonical active fans.
+    let no_confirmation = dayzero_tenant(
+        &pool,
+        "dz-no-confirmation",
+        &[
+            SITE,
+            JOIN_WORDS,
+            ("social_auto_post", "true"),
+            ("social_autopost_platforms", "facebook"),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "DELETE FROM webhook_endpoints
+         WHERE workspace_id=$1
+           AND event_types @> ARRAY['fan.confirmation_requested']::text[]",
+    )
+    .bind(no_confirmation)
+    .execute(&pool)
+    .await?;
+    let no_confirmation_facts =
+        crowdrelay_infra::lane_ledger::day_zero_facts(&pool, no_confirmation).await?;
+    assert!(
+        !no_confirmation_facts.confirmation_delivery_route,
+        "the route fact must reflect the actual endpoint subscription"
+    );
+    assert!(
+        !no_confirmation_facts.facebook_authority_grantable(),
+        "authority cannot be granted into an unconfirmable funnel"
+    );
+    assert!(
+        no_confirmation_facts
+            .executable_owned_social_platforms()
+            .is_empty(),
+        "the Brain must see no executable acquisition rail"
+    );
+    let no_confirmation_readiness = no_confirmation_facts.assess();
+    let blocker = no_confirmation_readiness
+        .smallest_missing
+        .expect("confirmation route blocker");
+    assert_eq!(blocker.code, "confirmation_delivery_unavailable");
+    assert!(!blocker.owner_action);
 
     // No site root: named before any rail, whatever the rails look like.
     let no_site = dayzero_tenant(&pool, "dz-nosite", &[JOIN_WORDS]).await?;

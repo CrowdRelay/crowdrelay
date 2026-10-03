@@ -99,6 +99,12 @@ pub fn publish_permission(
 pub struct ReadinessFacts<'a> {
     /// The tenant's own public site root, where signup lives.
     pub site_root: Option<&'a str>,
+    /// At least one active delivery endpoint explicitly accepts the canonical
+    /// double-opt-in confirmation event (or accepts the full event stream).
+    ///
+    /// Acquisition is not executable without this: a signup that cannot
+    /// receive its confirmation mail can never become a canonical active fan.
+    pub confirmation_delivery_route: bool,
     /// Safe join-ask copy exists: either an explicit tenant variant or one
     /// deterministic starter derived from current tenant-owned content.
     pub join_copy: bool,
@@ -209,6 +215,13 @@ pub fn assess(facts: &ReadinessFacts<'_>) -> Readiness {
             what: "No public site root is set, so a tracked link has nowhere first-party to send anyone."
                 .to_owned(),
             owner_action: true,
+        })
+    } else if !facts.confirmation_delivery_route {
+        Some(Missing {
+            code: "confirmation_delivery_unavailable",
+            what: "No active delivery endpoint can carry fan.confirmation_requested; new signups could enter pending state but could not complete double opt-in."
+                .to_owned(),
+            owner_action: false,
         })
     } else if !facts.join_copy {
         Some(Missing {
@@ -326,6 +339,7 @@ mod tests {
     ) -> ReadinessFacts<'a> {
         ReadinessFacts {
             site_root: Some("https://band.example"),
+            confirmation_delivery_route: true,
             join_copy: true,
             fresh_asset: true,
             social_publish_runtime: Some(true),
@@ -423,6 +437,30 @@ mod tests {
         assert_eq!(
             readiness.smallest_missing.map(|m| m.code),
             Some("deployment_publish_state_unknown")
+        );
+    }
+
+    #[test]
+    fn a_missing_confirmation_delivery_route_blocks_acquisition_before_publish() {
+        let connections = [conn("facebook", true)];
+        let platforms = vec!["facebook".to_owned()];
+        let mut f = facts(&connections, &platforms, true);
+        f.confirmation_delivery_route = false;
+        let readiness = assess(&f);
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness
+                .smallest_missing
+                .as_ref()
+                .map(|missing| (missing.code, missing.owner_action)),
+            Some(("confirmation_delivery_unavailable", false))
+        );
+        assert!(
+            readiness
+                .smallest_missing
+                .expect("confirmation blocker")
+                .what
+                .contains("fan.confirmation_requested")
         );
     }
 

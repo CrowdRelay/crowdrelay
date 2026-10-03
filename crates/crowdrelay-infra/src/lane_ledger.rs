@@ -182,6 +182,28 @@ pub async fn day_zero_facts(
     .bind(workspace_id)
     .fetch_one(pool)
     .await?;
+    // Double opt-in is part of acquisition, not an optional downstream
+    // notification. A social rail that can create pending signups but has no
+    // route for their confirmation mail is not an executable fan-acquisition
+    // rail. Count the same endpoint subscription predicate the outbox
+    // materializer enforces.
+    let confirmation_delivery_route: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM webhook_endpoints
+            WHERE workspace_id = $1
+              AND active
+              AND (
+                    event_types IS NULL
+                    OR 'fan.confirmation_requested' = ANY(event_types)
+                  )
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
     let social_publish_runtime: Option<bool> = sqlx::query_scalar(
         "SELECT enabled FROM growth_component_state
          WHERE workspace_id = $1 AND component = 'social_post_executor'",
@@ -219,6 +241,7 @@ pub async fn day_zero_facts(
         .collect();
     Ok(DayZeroFacts {
         site_root: brand.site_root().map(str::to_owned),
+        confirmation_delivery_route,
         join_copy,
         fresh_asset,
         social_publish_runtime,
@@ -233,6 +256,7 @@ pub async fn day_zero_facts(
 #[derive(Debug)]
 pub struct DayZeroFacts {
     pub site_root: Option<String>,
+    pub confirmation_delivery_route: bool,
     pub join_copy: bool,
     pub fresh_asset: bool,
     pub social_publish_runtime: Option<bool>,
@@ -269,6 +293,7 @@ impl DayZeroFacts {
         self.site_root
             .as_deref()
             .is_some_and(|root| !root.trim().is_empty())
+            && self.confirmation_delivery_route
             && self.join_copy
             && self.fresh_asset
             && self.social_publish_runtime == Some(true)
@@ -284,6 +309,7 @@ impl DayZeroFacts {
     pub fn assess(&self) -> crowdrelay_domain::day_zero::Readiness {
         crowdrelay_domain::day_zero::assess(&crowdrelay_domain::day_zero::ReadinessFacts {
             site_root: self.site_root.as_deref(),
+            confirmation_delivery_route: self.confirmation_delivery_route,
             join_copy: self.join_copy,
             fresh_asset: self.fresh_asset,
             social_publish_runtime: self.social_publish_runtime,

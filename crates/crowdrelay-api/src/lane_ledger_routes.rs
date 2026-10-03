@@ -94,7 +94,7 @@ async fn set_facebook_authority(
         };
         if !facts.facebook_authority_grantable() {
             return Problem::conflict_because(
-                "Facebook autopost authority was not granted: the signup/copy/fresh-content prerequisites, a connected working Facebook rail, and the worker-reported CROWDRELAY_SOCIAL_AUTO_POST deployment gate must all be ready first.",
+                "Facebook autopost authority was not granted: the signup destination, double-opt-in confirmation delivery route, copy/fresh-content prerequisites, a connected working Facebook rail, and the worker-reported CROWDRELAY_SOCIAL_AUTO_POST deployment gate must all be ready first.",
                 rid,
             )
             .private()
