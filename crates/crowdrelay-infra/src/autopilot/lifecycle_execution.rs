@@ -54,10 +54,11 @@ pub(super) async fn execute(
     } else {
         None
     };
-    // The referral invite is the fan→fan growth loop: the
-    // executor receives a complete first-party URL rather
-    // than reconstructing one from the code, and a missing
-    // code or site is terminal for this message.
+    // The referral invite is the fan→fan growth loop. The executor receives
+    // a complete action-owned /l/ URL and never reconstructs either the host or
+    // referral path. Its destination is still the fan's ordinary /r/{code}
+    // route, so referral cookies and qualification stay exactly where they
+    // already live; the extra hop only makes the invitation attributable.
     let (referral_code, referral_url) = if template_key == "crowdrelay.fan.referral_invite.v1" {
         let code = sqlx::query_scalar::<_, Option<String>>(
             "SELECT code FROM referral_codes WHERE workspace_id=$1 AND fan_id=$2 AND active",
@@ -75,12 +76,43 @@ pub(super) async fn execute(
             .brand_settings(workspace_id.into_uuid())
             .await
             .map_err(map_sqlx)?;
-        let url = brand
+        let destination = brand
             .referral_url(&code)
             .ok_or(RepositoryError::ConflictBecause(
                 "referral invite refused: tenant has no member site URL",
             ))?;
-        (Some(code), Some(url))
+        let slug = format!("referral-invite-{}", action.id.into_uuid().simple());
+        let link = crate::tracked_links::ensure_smart_link_in_tx(
+            transaction,
+            workspace_id.into_uuid(),
+            &slug,
+            &destination,
+            brand.site_root(),
+            Some("email"),
+            Some("referral-invite"),
+        )
+        .await
+        .map_err(map_sqlx)?
+        .ok_or(RepositoryError::ConflictBecause(
+            "referral invite refused: destination is not a printable URL",
+        ))?;
+        let bound = sqlx::query(
+            "UPDATE smart_links
+             SET action_id=$3
+             WHERE workspace_id=$1 AND slug=$2 AND (action_id IS NULL OR action_id=$3)",
+        )
+        .bind(workspace_id.into_uuid())
+        .bind(&slug)
+        .bind(action.id.into_uuid())
+        .execute(&mut **transaction)
+        .await
+        .map_err(map_sqlx)?;
+        if bound.rows_affected() != 1 {
+            return Err(RepositoryError::ConflictBecause(
+                "referral invite link belongs to another action",
+            ));
+        }
+        (Some(code), Some(link.as_str().to_owned()))
     } else {
         (None, None)
     };
