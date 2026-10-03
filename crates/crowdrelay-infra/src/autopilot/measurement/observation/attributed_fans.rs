@@ -264,19 +264,27 @@ const ATTRIBUTED_FANS: &str = r#"
           ON child.workspace_id = root.workspace_id
          AND child.trace_id = root.trace_id
         WHERE root.workspace_id = $1 AND root.id = $2
+    ), canonical_conversions AS (
+        SELECT canonical_fan_id($1, conversion.fan_id) AS fan_id,
+               MIN(conversion.occurred_at) AS acquired_at
+        FROM fan_provenance_events AS conversion
+        WHERE conversion.workspace_id = $1
+          AND conversion.event_kind = 'conversion'
+          AND conversion.action_id IN (SELECT action_id FROM lineage)
+          AND conversion.occurred_at >= $3
+          AND conversion.occurred_at < $3 + make_interval(days => $4)
+          AND conversion.occurred_at <= $6
+        GROUP BY canonical_fan_id($1, conversion.fan_id)
     )
-    SELECT COUNT(DISTINCT fan.id)::double precision
-    FROM fan_provenance_events AS conversion
+    SELECT COUNT(*)::double precision
+    FROM canonical_conversions AS conversion
     JOIN fans AS fan
-      ON fan.workspace_id = conversion.workspace_id
+      ON fan.workspace_id = $1
      AND fan.id = conversion.fan_id
-    WHERE conversion.workspace_id = $1
-      AND conversion.event_kind = 'conversion'
-      AND conversion.action_id IN (SELECT action_id FROM lineage)
-      AND conversion.occurred_at >= $3
-      AND conversion.occurred_at < $3 + make_interval(days => $4)
-      AND conversion.occurred_at <= $6
+    WHERE conversion.fan_id IS NOT NULL
+      AND fan.merged_into_fan_id IS NULL
       AND fan.created_at <= $6
+      AND fan.deleted_at IS NULL
       AND (
           (NOT $5 AND fan.status <> 'suppressed')
           OR (
@@ -284,7 +292,7 @@ const ATTRIBUTED_FANS: &str = r#"
               AND fan_is_meaningfully_retained(
                   fan.workspace_id,
                   fan.id,
-                  conversion.occurred_at,
+                  conversion.acquired_at,
                   $6
               )
           )
@@ -310,19 +318,27 @@ const ATTRIBUTED_FANS_WITH_TASKS: &str = r#"
           AND outcome.processed_action_id IS NOT NULL
           AND task.workspace_id = $1
           AND task.metadata->>'action_id' = $2::text
+    ), canonical_conversions AS (
+        SELECT canonical_fan_id($1, conversion.fan_id) AS fan_id,
+               MIN(conversion.occurred_at) AS acquired_at
+        FROM fan_provenance_events AS conversion
+        WHERE conversion.workspace_id = $1
+          AND conversion.event_kind = 'conversion'
+          AND conversion.action_id IN (SELECT action_id FROM lineage)
+          AND conversion.occurred_at >= $3
+          AND conversion.occurred_at < $3 + make_interval(days => $4)
+          AND conversion.occurred_at <= $6
+        GROUP BY canonical_fan_id($1, conversion.fan_id)
     )
-    SELECT COUNT(DISTINCT fan.id)::double precision
-    FROM fan_provenance_events AS conversion
+    SELECT COUNT(*)::double precision
+    FROM canonical_conversions AS conversion
     JOIN fans AS fan
-      ON fan.workspace_id = conversion.workspace_id
+      ON fan.workspace_id = $1
      AND fan.id = conversion.fan_id
-    WHERE conversion.workspace_id = $1
-      AND conversion.event_kind = 'conversion'
-      AND conversion.action_id IN (SELECT action_id FROM lineage)
-      AND conversion.occurred_at >= $3
-      AND conversion.occurred_at < $3 + make_interval(days => $4)
-      AND conversion.occurred_at <= $6
+    WHERE conversion.fan_id IS NOT NULL
+      AND fan.merged_into_fan_id IS NULL
       AND fan.created_at <= $6
+      AND fan.deleted_at IS NULL
       AND (
           (NOT $5 AND fan.status <> 'suppressed')
           OR (
@@ -330,7 +346,7 @@ const ATTRIBUTED_FANS_WITH_TASKS: &str = r#"
               AND fan_is_meaningfully_retained(
                   fan.workspace_id,
                   fan.id,
-                  conversion.occurred_at,
+                  conversion.acquired_at,
                   $6
               )
           )
