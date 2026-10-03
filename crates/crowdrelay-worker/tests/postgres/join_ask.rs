@@ -248,7 +248,11 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
         OffsetDateTime::now_utc(),
     )
     .await?;
-    ensure!(before.len() == 1, "expected one funnel link, got {}", before.len());
+    ensure!(
+        before.len() == 1,
+        "expected one funnel link, got {}",
+        before.len()
+    );
     ensure!(
         before[0].published_at.is_none() && before[0].diagnosis == "publication_unverified",
         "draft must remain publication_unverified, got {:?} / {}",
@@ -293,14 +297,15 @@ async fn a_join_ask_becomes_a_tracked_artifact_awaiting_a_person() -> Result<()>
         "provider receipt must open exactly the click and fan windows, got {confirmed_measurements}"
     );
 
-    let receipt = sqlx::query_as::<_, (Option<String>, Option<String>, Option<time::OffsetDateTime>)>(
-        "SELECT platform_post_id, platform_post_url, posted_at
+    let receipt =
+        sqlx::query_as::<_, (Option<String>, Option<String>, Option<time::OffsetDateTime>)>(
+            "SELECT platform_post_id, platform_post_url, posted_at
          FROM social_posts WHERE workspace_id=$1 AND id=$2",
-    )
-    .bind(ws.into_uuid())
-    .bind(social_post_id)
-    .fetch_one(&database)
-    .await?;
+        )
+        .bind(ws.into_uuid())
+        .bind(social_post_id)
+        .fetch_one(&database)
+        .await?;
     ensure!(
         receipt.0.as_deref() == Some("joinask-provider-post")
             && receipt.1.as_deref() == Some("https://www.facebook.com/joinask-provider-post")

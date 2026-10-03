@@ -274,8 +274,8 @@ async fn a_community_engagement_action_leaves_execution_with_a_learning_envelope
 /// outcome or click/fan measurement may exist until a provider receipt lands.
 #[tokio::test]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn a_join_ask_dispatch_is_not_publication_evidence()
--> Result<(), Box<dyn std::error::Error>> {
+async fn a_join_ask_dispatch_is_not_publication_evidence() -> Result<(), Box<dyn std::error::Error>>
+{
     let f = setup().await?;
     let now = OffsetDateTime::now_utc();
     let action_id = seed_outcome_action(
@@ -305,9 +305,8 @@ async fn a_join_ask_dispatch_is_not_publication_evidence()
         .execute_action(f.workspace_id, action, now)
         .await?;
 
-    let (outcomes, measurements, prediction, evidence) =
-        sqlx::query_as::<_, (i64, i64, i64, i64)>(
-            "SELECT
+    let (outcomes, measurements, prediction, evidence) = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        "SELECT
                (SELECT count(*)::bigint FROM autopilot_outcomes
                 WHERE workspace_id=$1 AND action_id=$2
                   AND metric_key='join_ask_published'),
@@ -318,12 +317,12 @@ async fn a_join_ask_dispatch_is_not_publication_evidence()
                (SELECT count(*)::bigint FROM dispatch_predictions
                 WHERE workspace_id=$1 AND action_id=$2),
                (SELECT count(*)::bigint FROM growth_evidence
-                WHERE workspace_id=$1 AND action_id=$2)"
-        )
-        .bind(f.workspace_id.into_uuid())
-        .bind(action_id)
-        .fetch_one(&f.pool)
-        .await?;
+                WHERE workspace_id=$1 AND action_id=$2)",
+    )
+    .bind(f.workspace_id.into_uuid())
+    .bind(action_id)
+    .fetch_one(&f.pool)
+    .await?;
 
     assert_eq!(
         (outcomes, measurements),

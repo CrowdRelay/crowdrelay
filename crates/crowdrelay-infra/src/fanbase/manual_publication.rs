@@ -449,12 +449,8 @@ pub async fn register_manual_social_post(
             },
         );
     }
-    record_verified_social_publication_evidence(
-        &mut transaction,
-        workspace_id,
-        social_post_id,
-    )
-    .await?;
+    record_verified_social_publication_evidence(&mut transaction, workspace_id, social_post_id)
+        .await?;
     anchor_content_measurements_to_publication(
         &mut transaction,
         workspace_id,
