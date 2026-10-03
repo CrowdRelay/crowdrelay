@@ -313,8 +313,7 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
         "the 3-day-old video counts, the 200-day one does not"
     );
     assert!(facts.join_copy && !facts.social_auto_post);
-    let explicit_snapshot =
-        crowdrelay_infra::join_ask::load_join_ask_snapshot(&pool, prod).await?;
+    let explicit_snapshot = crowdrelay_infra::join_ask::load_join_ask_snapshot(&pool, prod).await?;
     assert_eq!(
         explicit_snapshot.variants,
         vec!["Want the next show first?".to_owned()],
@@ -336,8 +335,7 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
         grounded_snapshot.variants,
         vec!["Fresh\n\nJoin for updates.".to_owned()]
     );
-    let grounded_facts =
-        crowdrelay_infra::lane_ledger::day_zero_facts(&pool, grounded).await?;
+    let grounded_facts = crowdrelay_infra::lane_ledger::day_zero_facts(&pool, grounded).await?;
     assert!(grounded_facts.join_copy);
     assert!(
         grounded_facts.facebook_authority_grantable(),
