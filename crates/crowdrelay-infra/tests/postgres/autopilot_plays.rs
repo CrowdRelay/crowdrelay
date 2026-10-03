@@ -910,12 +910,28 @@ async fn a_ladder_is_anchored_on_one_engaged_fan_and_needs_a_tracked_link()
     .bind(workspace_id.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let expected_follow_path = format!("/l/play-follow-{}", action_id.simple());
     assert_eq!(
         emitted
             .get("call_to_action_url")
             .and_then(|url| url.as_str()),
-        Some("/l/follow"),
-        "the one call to action is the operator's tracked link"
+        Some(expected_follow_path.as_str()),
+        "the send owns a deterministic redirect to the operator's follow destination"
+    );
+    let action_link: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT destination_url,action_id
+         FROM smart_links
+         WHERE workspace_id=$1 AND slug=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(expected_follow_path.trim_start_matches("/l/"))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(action_link.0, "https://example.test/follow");
+    assert_eq!(
+        action_link.1,
+        Some(action_id),
+        "click ownership is exact action identity, not a shared follow slug"
     );
     assert!(
         emitted.get("event").is_some_and(serde_json::Value::is_null),
