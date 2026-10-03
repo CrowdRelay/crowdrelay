@@ -5,7 +5,6 @@
     "agent_outreach_targets(city_id) -> cities",
     "agent_outreach_targets(place_id) -> discovery_places",
     "agent_scan_query_queue(workspace_id) -> workspaces",
-    "agent_service_workflow_tasks(task_id) -> agent_service_tasks",
     "amplification_consents(to_workspace_id) -> workspaces",
     "amplification_deliveries(from_workspace_id) -> workspaces",
     "amplification_deliveries(to_workspace_id) -> workspaces",

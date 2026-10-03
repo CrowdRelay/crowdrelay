@@ -42,7 +42,7 @@ class ReleaseRunwayContract(unittest.TestCase):
     def setUp(self) -> None:
         self.sql = strip_sql_comments(read(MIGRATION))
         self.domain = read(DOMAIN)
-        self.infra = read(INFRA)
+        self.infra = read(INFRA) + read(INFRA.with_name("plays") / "statements.rs")
         self.model = read(MODEL)
         self.evaluate = read(EVALUATE)
 

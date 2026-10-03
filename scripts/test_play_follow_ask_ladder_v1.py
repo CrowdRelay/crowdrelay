@@ -55,7 +55,7 @@ class FollowAskLadderContract(unittest.TestCase):
     def setUp(self) -> None:
         self.sql = strip_sql_comments(read(MIGRATION))
         self.domain = read(DOMAIN)
-        self.infra = read(INFRA)
+        self.infra = read(INFRA) + read(INFRA.with_name("plays") / "statements.rs")
 
     # --- the anchor is a choice now, not an assumption -------------------
 
