@@ -68,6 +68,9 @@ pub struct SweepReport {
     pub appended: u64,
     pub already_known: u64,
     pub not_collected: u64,
+    /// Rows present in storage without a provider-read receipt. They are not
+    /// evidence that an external person exists and can never create a prospect.
+    pub unverified_source: u64,
     /// Comments belonging to explicit staff/own-account/test identities.
     pub excluded_identity: u64,
     pub not_an_identity: u64,
@@ -91,6 +94,7 @@ struct CommentRow {
     author: String,
     body: String,
     created_at: OffsetDateTime,
+    provider_observed_at: Option<OffsetDateTime>,
     source_url: Option<String>,
 }
 
@@ -147,6 +151,7 @@ impl ProspectSweep {
         let mut report = SweepReport::default();
         let comments = sqlx::query_as::<_, CommentRow>(
             "SELECT c.id, c.platform, c.author, c.body, c.created_at,
+                    c.provider_observed_at,
                     CASE WHEN cs.metadata->>'url' ~ '^https?://'
                          THEN cs.metadata->>'url' END AS source_url
              FROM community_comments c
@@ -166,6 +171,13 @@ impl ProspectSweep {
         .await?;
         let own = self.own_handles(ws).await?;
         for comment in &comments {
+            if comment
+                .provider_observed_at
+                .is_none_or(|observed_at| observed_at > now)
+            {
+                report.unverified_source += 1;
+                continue;
+            }
             if normalize_handle(&comment.author).is_some_and(|h| own.contains(&h)) {
                 report.own_accounts += 1;
                 continue;
