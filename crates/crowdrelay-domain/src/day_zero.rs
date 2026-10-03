@@ -33,6 +33,65 @@ pub struct ConnectionFact {
     /// Its last sync succeeded (`health = working`). A connection that has
     /// never been read, or whose latest read failed, is not known to work.
     pub working: bool,
+    /// Whether the credential may publish. A sync proves it can *read*; the
+    /// first Facebook post on 2026-09-28 was refused for a missing publish
+    /// permission although every read worked.
+    pub publish: PublishPermission,
+}
+
+/// What is known about a credential's permission to publish.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishPermission {
+    /// The platform confirmed the scope the rail needs.
+    Verified,
+    /// The platform answered and the scope is not there. Only a person can fix
+    /// a token, so this blocks the rail.
+    Missing,
+    /// Never checked, the check could not run, or the answer is stale. Does not
+    /// block: the first post will tell, and a check that cannot run must not be
+    /// able to hold a working rail hostage.
+    Unverified,
+}
+
+/// The scope a platform's publish call needs, as Graph names it.
+#[must_use]
+pub fn required_publish_scope(platform: &str) -> Option<&'static str> {
+    match platform {
+        "facebook" => Some("pages_manage_posts"),
+        "instagram" => Some("instagram_content_publish"),
+        _ => None,
+    }
+}
+
+/// How long a verification stays good. A token can be rotated or lose a grant,
+/// so a two-day-old answer is not trusted as current.
+pub const PUBLISH_CHECK_MAX_AGE_HOURS: i64 = 48;
+
+/// Reads a recorded scope check into a permission.
+///
+/// `scopes` is `None` when nothing has been recorded; `age_hours` is how old the
+/// record is. A recorded empty list is a real answer — the token has no scopes
+/// at all — and is `Missing`, not `Unverified`.
+#[must_use]
+pub fn publish_permission(
+    platform: &str,
+    scopes: Option<&[String]>,
+    age_hours: Option<i64>,
+) -> PublishPermission {
+    let (Some(needed), Some(scopes), Some(age)) =
+        (required_publish_scope(platform), scopes, age_hours)
+    else {
+        return PublishPermission::Unverified;
+    };
+    if !(0..=PUBLISH_CHECK_MAX_AGE_HOURS).contains(&age) {
+        return PublishPermission::Unverified;
+    }
+    if scopes.iter().any(|scope| scope == needed) {
+        PublishPermission::Verified
+    } else {
+        PublishPermission::Missing
+    }
 }
 
 /// Everything the decision reads.
@@ -66,6 +125,8 @@ pub enum RailState {
     RuntimeUnknown,
     /// The worker explicitly reports the deployment-level social publisher off.
     DeploymentGateOff,
+    /// The platform says the credential cannot publish.
+    PublishPermissionMissing,
     /// Connected, but its last read failed or never happened.
     CredentialNotWorking,
     NotConnected,
@@ -97,6 +158,10 @@ pub struct Readiness {
     pub ready: bool,
     pub rails: Vec<Rail>,
     pub smallest_missing: Option<Missing>,
+    /// Things that do not block the rail but are not known to be fine. A rail
+    /// can be `ready` and still carry one: its publish permission was never
+    /// confirmed, so the first post is also the first proof.
+    pub caveats: Vec<String>,
 }
 
 fn rail(facts: &ReadinessFacts<'_>, platform: &'static str) -> Rail {
@@ -114,6 +179,9 @@ fn rail(facts: &ReadinessFacts<'_>, platform: &'static str) -> Rail {
         Some(c) if !c.working => (RailState::CredentialNotWorking, 3),
         Some(_) if facts.social_publish_runtime.is_none() => (RailState::RuntimeUnknown, 2),
         Some(_) if facts.social_publish_runtime == Some(false) => (RailState::DeploymentGateOff, 2),
+        Some(c) if c.publish == PublishPermission::Missing => {
+            (RailState::PublishPermissionMissing, 2)
+        }
         Some(_) if !authority => (RailState::NeedsAuthority, 1),
         Some(_) => (RailState::Executable, 0),
     };
@@ -180,6 +248,15 @@ pub fn assess(facts: &ReadinessFacts<'_>) -> Readiness {
                     what: "The running worker reports CROWDRELAY_SOCIAL_AUTO_POST off; enable that deployment gate and restart the worker before granting tenant autopost authority.".to_owned(),
                     owner_action: false,
                 },
+                RailState::PublishPermissionMissing => Missing {
+                    code: "publish_permission_missing",
+                    what: format!(
+                        "{p} is connected and its reads work, but the platform reports the token lacks {scope}; reconnect it with publish permission before granting autopost.",
+                        p = closest.platform,
+                        scope = required_publish_scope(closest.platform).unwrap_or("the publish scope"),
+                    ),
+                    owner_action: true,
+                },
                 RailState::CredentialNotWorking => Missing {
                     code: "rail_credential_not_working",
                     what: format!(
@@ -196,10 +273,27 @@ pub fn assess(facts: &ReadinessFacts<'_>) -> Readiness {
                 },
             })
     };
+    let caveats = facts
+        .connections
+        .iter()
+        .filter(|c| {
+            c.connected
+                && c.working
+                && c.publish == PublishPermission::Unverified
+                && required_publish_scope(&c.platform.to_ascii_lowercase()).is_some()
+        })
+        .map(|c| {
+            format!(
+                "{}: publish permission is not verified; the first post will be the proof.",
+                c.platform.to_ascii_lowercase()
+            )
+        })
+        .collect();
     Readiness {
         ready: missing.is_none(),
         rails,
         smallest_missing: missing,
+        caveats,
     }
 }
 
@@ -212,6 +306,14 @@ mod tests {
             platform: platform.to_owned(),
             connected: true,
             working,
+            publish: PublishPermission::Verified,
+        }
+    }
+
+    fn conn_publish(platform: &str, publish: PublishPermission) -> ConnectionFact {
+        ConnectionFact {
+            publish,
+            ..conn(platform, true)
         }
     }
 
@@ -341,6 +443,96 @@ mod tests {
         assert_eq!(
             assess(&f).smallest_missing.map(|m| m.code),
             Some("no_signup_destination")
+        );
+    }
+
+    #[test]
+    fn a_token_the_platform_says_cannot_publish_blocks_the_rail_even_when_granted() {
+        // 2026-09-28: every read worked, the first post was refused (#200).
+        let connections = [conn_publish("facebook", PublishPermission::Missing)];
+        let platforms = vec!["facebook".to_owned()];
+        let readiness = assess(&facts(&connections, &platforms, true));
+        assert!(!readiness.ready);
+        let missing = readiness.smallest_missing.expect("blocker");
+        assert_eq!(missing.code, "publish_permission_missing");
+        assert!(missing.owner_action);
+        assert!(
+            missing.what.contains("pages_manage_posts"),
+            "{}",
+            missing.what
+        );
+    }
+
+    #[test]
+    fn an_unverified_permission_never_blocks_but_is_said_out_loud() {
+        let connections = [conn_publish("facebook", PublishPermission::Unverified)];
+        let platforms = vec!["facebook".to_owned()];
+        let readiness = assess(&facts(&connections, &platforms, true));
+        assert!(
+            readiness.ready,
+            "a check that cannot run must not hold a rail hostage"
+        );
+        assert_eq!(readiness.caveats.len(), 1);
+        assert!(
+            readiness.caveats[0].starts_with("facebook"),
+            "{:?}",
+            readiness.caveats
+        );
+        // Verified carries no caveat.
+        let verified = [conn_publish("facebook", PublishPermission::Verified)];
+        assert!(
+            assess(&facts(&verified, &platforms, true))
+                .caveats
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_recorded_scope_check_reads_into_a_permission() {
+        let granted = vec![
+            "pages_read_engagement".to_owned(),
+            "pages_manage_posts".to_owned(),
+        ];
+        let read_only = vec!["pages_read_engagement".to_owned()];
+        let none: Vec<String> = Vec::new();
+        assert_eq!(
+            publish_permission("facebook", Some(&granted), Some(1)),
+            PublishPermission::Verified
+        );
+        assert_eq!(
+            publish_permission("facebook", Some(&read_only), Some(1)),
+            PublishPermission::Missing
+        );
+        assert_eq!(
+            publish_permission("facebook", Some(&none), Some(1)),
+            PublishPermission::Missing,
+            "an empty answer is a real answer"
+        );
+        // Instagram needs its own scope; Facebook's does not stand in for it.
+        assert_eq!(
+            publish_permission("instagram", Some(&granted), Some(1)),
+            PublishPermission::Missing
+        );
+        // Never checked, stale, from the future, or a platform with no scope: unverified.
+        assert_eq!(
+            publish_permission("facebook", None, None),
+            PublishPermission::Unverified
+        );
+        assert_eq!(
+            publish_permission(
+                "facebook",
+                Some(&granted),
+                Some(PUBLISH_CHECK_MAX_AGE_HOURS + 1)
+            ),
+            PublishPermission::Unverified
+        );
+        assert_eq!(
+            publish_permission("facebook", Some(&granted), Some(-3)),
+            PublishPermission::Unverified
+        );
+        assert_eq!(
+            publish_permission("telegram", Some(&granted), Some(1)),
+            PublishPermission::Unverified
         );
     }
 }

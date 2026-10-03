@@ -73,6 +73,7 @@ use uuid::Uuid;
 
 pub(crate) mod join_ask;
 pub(crate) mod platforms;
+pub(crate) mod publish_scopes;
 pub(crate) mod reach;
 pub(crate) mod tracked_links;
 
@@ -303,12 +304,30 @@ impl SocialPostExecutorWorker {
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut ticker = interval(self.poll_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // Whether the token may publish, asked of the platform on its own slow
+        // clock — see `publish_scopes`. The first tick checks at startup.
+        let mut scope_ticker = interval(publish_scopes::CHECK_INTERVAL);
+        scope_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
+                    }
+                }
+                _ = scope_ticker.tick() => {
+                    match self.verify_publish_scopes().await {
+                        Some(publish_scopes::ScopeCheck::Answered(scopes)) => {
+                            tracing::info!(scopes = scopes.len(), "publish token scopes verified");
+                        }
+                        Some(publish_scopes::ScopeCheck::InvalidToken) => {
+                            tracing::warn!("the platform reports the publish token invalid");
+                        }
+                        Some(publish_scopes::ScopeCheck::Unverifiable(reason)) => {
+                            tracing::info!(%reason, "publish token scopes could not be verified");
+                        }
+                        None => {}
                     }
                 }
                 _ = ticker.tick() => {

@@ -435,3 +435,97 @@ async fn readiness_names_the_one_decision_between_the_tenant_and_an_autonomous_r
     );
     Ok(())
 }
+
+/// What the platform said about the publish token reaches readiness: a token
+/// that reads but cannot publish is named and blocks the rail, a confirmed one
+/// is clean, an answer older than two days stops counting, and a tenant nobody
+/// has checked carries a caveat instead of a block.
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn a_recorded_publish_scope_check_decides_whether_the_rail_is_ready()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_domain::day_zero::PublishPermission;
+    use crowdrelay_infra::lane_ledger::{day_zero_facts, record_publish_scopes};
+    let pool = common::test_pool("CROWDRELAY_TEST_DATABASE_URL").await?;
+    let granted_settings = [
+        SITE,
+        JOIN_WORDS,
+        ("social_auto_post", "true"),
+        ("social_autopost_platforms", "facebook"),
+    ];
+    let permission = |facts: &crowdrelay_infra::lane_ledger::DayZeroFacts, p: &str| {
+        facts
+            .connections
+            .iter()
+            .find(|c| c.platform == p)
+            .map(|c| c.publish)
+    };
+
+    // Nobody has checked: unverified, and a caveat, not a block.
+    let unchecked = dayzero_tenant(&pool, "dz-scope-none", &granted_settings).await?;
+    let facts = day_zero_facts(&pool, unchecked).await?;
+    assert_eq!(
+        permission(&facts, "facebook"),
+        Some(PublishPermission::Unverified)
+    );
+
+    // Reads work but the platform says the token cannot publish.
+    let read_only = dayzero_tenant(&pool, "dz-scope-read", &granted_settings).await?;
+    record_publish_scopes(&pool, read_only, &["pages_read_engagement".to_owned()]).await?;
+    let facts = day_zero_facts(&pool, read_only).await?;
+    assert_eq!(
+        permission(&facts, "facebook"),
+        Some(PublishPermission::Missing)
+    );
+    assert_eq!(
+        permission(&facts, "instagram"),
+        Some(PublishPermission::Missing),
+        "each platform needs its own scope"
+    );
+    assert_eq!(
+        facts.assess().smallest_missing.map(|m| m.code),
+        Some("publish_permission_missing")
+    );
+
+    // Confirmed: clean.
+    let confirmed = dayzero_tenant(&pool, "dz-scope-ok", &granted_settings).await?;
+    record_publish_scopes(
+        &pool,
+        confirmed,
+        &[
+            "pages_manage_posts".to_owned(),
+            "instagram_content_publish".to_owned(),
+        ],
+    )
+    .await?;
+    let facts = day_zero_facts(&pool, confirmed).await?;
+    assert_eq!(
+        permission(&facts, "facebook"),
+        Some(PublishPermission::Verified)
+    );
+
+    // Re-recording overwrites (one row per key), it does not accumulate.
+    record_publish_scopes(&pool, confirmed, &["pages_read_engagement".to_owned()]).await?;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tenant_settings WHERE workspace_id = $1 AND key LIKE 'meta_publish_scopes%'",
+    )
+    .bind(confirmed)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rows, 2);
+
+    // An answer older than two days is not trusted as current.
+    sqlx::query(
+        "UPDATE tenant_settings SET value = to_char(now() - interval '3 days', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+         WHERE workspace_id = $1 AND key = 'meta_publish_scopes_checked_at'",
+    )
+    .bind(read_only)
+    .execute(&pool)
+    .await?;
+    let stale = day_zero_facts(&pool, read_only).await?;
+    assert_eq!(
+        permission(&stale, "facebook"),
+        Some(PublishPermission::Unverified)
+    );
+    Ok(())
+}
