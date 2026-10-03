@@ -294,6 +294,7 @@ impl CommunityExecutorWorker {
             .map(|c| HarvestedComment {
                 id: c.id,
                 parent_id: c.parent_id,
+                provider_author_id: None,
                 author: c.author,
                 body: c.body,
                 by_band: c.is_submitter,
