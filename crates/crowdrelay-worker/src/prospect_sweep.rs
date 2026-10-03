@@ -68,6 +68,8 @@ pub struct SweepReport {
     pub appended: u64,
     pub already_known: u64,
     pub not_collected: u64,
+    /// Comments belonging to explicit staff/own-account/test identities.
+    pub excluded_identity: u64,
     pub not_an_identity: u64,
     /// Replies the band sent that were recorded as touches this pass.
     pub touched: u64,
@@ -191,6 +193,7 @@ impl ProspectSweep {
                     appended: false, ..
                 } => report.already_known += 1,
                 ObserveOutcome::NotCollected { .. } => report.not_collected += 1,
+                ObserveOutcome::ExcludedIdentity => report.excluded_identity += 1,
                 ObserveOutcome::NotAnIdentity => report.not_an_identity += 1,
                 ObserveOutcome::IdentityConflict => {
                     tracing::warn!(
