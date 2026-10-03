@@ -336,18 +336,35 @@ impl CommunityExecutorWorker {
             .await;
         match result {
             Ok(response) if response.status().is_success() => {
-                let created: GraphCreated = response.json().await?;
-                if !is_graph_id(&created.id) {
-                    return Err(CommunityExecutorError::RedditApi(
-                        "graph returned a reply id that is not a Graph id".to_owned(),
-                    ));
-                }
+                let created = match response.json::<GraphCreated>().await {
+                    Ok(created) if is_graph_id(&created.id) => created,
+                    Ok(_) => {
+                        self.mark_owned_reply_unknown(
+                            id,
+                            "Graph accepted the reply but returned an unusable provider id",
+                        )
+                        .await?;
+                        return Ok(0);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error.without_url(),
+                            "Graph reply succeeded but its provider receipt could not be decoded"
+                        );
+                        self.mark_owned_reply_unknown(
+                            id,
+                            "Graph accepted the reply but the provider receipt was unreadable",
+                        )
+                        .await?;
+                        return Ok(0);
+                    }
+                };
                 sqlx::query(
                     r#"
                     UPDATE community_comments
                     SET status = 'replied', reply_comment_id = $3, replied_at = now(),
                         hold_reason = NULL, updated_at = now()
-                    WHERE id = $1 AND workspace_id = $2
+                    WHERE id = $1 AND workspace_id = $2 AND status = 'replying'
                     "#,
                 )
                 .bind(id)
@@ -357,13 +374,21 @@ impl CommunityExecutorWorker {
                 .await?;
                 Ok(1)
             }
+            Ok(response) if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                // A provider 429 is an explicit non-execution receipt: safe to
+                // retry later because the side effect was refused before send.
+                self.back_off(id, attempts + 1, "approved").await?;
+                Ok(0)
+            }
             Ok(response) if response.status().is_client_error() => {
-                // The platform refused this reply (a deleted comment, a
-                // missing permission) — terminal for it, with the reason.
+                // Definitive provider refusal (deleted comment, missing
+                // permission, invalid request): terminal, not UNKNOWN.
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 sqlx::query(
-                    "UPDATE community_comments SET status = 'failed', hold_reason = $3, updated_at = now() WHERE id = $1 AND workspace_id = $2",
+                    "UPDATE community_comments
+                     SET status = 'failed', hold_reason = $3, updated_at = now()
+                     WHERE id = $1 AND workspace_id = $2 AND status = 'replying'",
                 )
                 .bind(id)
                 .bind(ws)
@@ -378,16 +403,51 @@ impl CommunityExecutorWorker {
                 Ok(0)
             }
             Ok(response) => {
-                tracing::warn!(status = %response.status(), "owned reply send deferred");
-                self.back_off(id, attempts + 1, "approved").await?;
+                let status = response.status();
+                tracing::warn!(
+                    %status,
+                    "Graph reply outcome ambiguous; automation will not resend"
+                );
+                self.mark_owned_reply_unknown(
+                    id,
+                    &format!(
+                        "provider confirmation lost after reply attempt (HTTP {status}); do not resend automatically"
+                    ),
+                )
+                .await?;
                 Ok(0)
             }
             Err(error) => {
-                tracing::warn!(error = %error.without_url(), "owned reply send deferred");
-                self.back_off(id, attempts + 1, "approved").await?;
+                tracing::warn!(
+                    error = %error.without_url(),
+                    "Graph reply outcome ambiguous; automation will not resend"
+                );
+                self.mark_owned_reply_unknown(
+                    id,
+                    "provider confirmation lost after reply attempt; do not resend automatically",
+                )
+                .await?;
                 Ok(0)
             }
         }
+    }
+
+    async fn mark_owned_reply_unknown(
+        &self,
+        id: Uuid,
+        reason: &str,
+    ) -> Result<(), CommunityExecutorError> {
+        sqlx::query(
+            "UPDATE community_comments
+             SET status='unknown', hold_reason=$3, updated_at=now()
+             WHERE id=$1 AND workspace_id=$2 AND status='replying'",
+        )
+        .bind(id)
+        .bind(self.workspace_id.into_uuid())
+        .bind(reason.chars().take(500).collect::<String>())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 
