@@ -133,7 +133,7 @@ where
         &self,
         now: OffsetDateTime,
     ) -> Result<AutopilotCycleReport, AutopilotError> {
-        let policies = self.repository.load_policies(self.workspace_id).await?;
+        let (policies, organic_funnel_control) = self.cycle_policies_and_funnel(now).await?;
         // Loaded once per cycle rather than per candidate: the ceiling is an
         // operator setting that does not change mid-cycle, and re-reading it
         // for every decision would be a query per finding.
@@ -214,18 +214,14 @@ where
                     }
                 }
                 AutopilotContext::FanLifecycle => {
-                    let snapshots = self
-                        .repository
-                        .load_fan_lifecycle_snapshots(self.workspace_id, now)
-                        .await?;
-                    for snapshot in snapshots {
-                        if let Some(candidate) = lifecycle_candidate(snapshot, &policy, now)? {
-                            self.persist(&candidate, &mut limits, &mut report).await?;
-                        }
-                    }
-
-                    self.evaluate_relationship_research(&policy, now, &mut limits, &mut report)
-                        .await?;
+                    self.evaluate_fan_lifecycle_with_funnel(
+                        &policy,
+                        now,
+                        &mut limits,
+                        &mut report,
+                        organic_funnel_control,
+                    )
+                    .await?;
                 }
                 AutopilotContext::CampaignLifecycle => {
                     let snapshots = self
@@ -497,11 +493,7 @@ where
                     if !matches!(policy.config, AutopilotPolicyConfig::ContentSupply(_)) {
                         continue;
                     }
-                    // Admitted communities — and the push audience the
-                    // approval will quote — are loaded once, and only when a
-                    // fresh synced post could be relayed or a fresh drop
-                    // could surge — a cycle with neither owes either read
-                    // nothing.
+                    // Load relay targets only when fresh material can actually fan out.
                     let domain_policy = match &policy.config {
                         AutopilotPolicyConfig::ContentSupply(config) => Some(*config),
                         _ => None,
@@ -549,7 +541,7 @@ where
                     ordered.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.occurred_at));
                     let mut produced = 0usize;
                     for snapshot in ordered {
-                        for candidate in content_candidates(
+                        for mut candidate in content_candidates(
                             snapshot,
                             &policy,
                             &communities,
@@ -557,6 +549,13 @@ where
                             evidence.for_context(policy.context),
                             now,
                         )? {
+                            if !Self::prepare_content_candidate_for_funnel(
+                                &mut candidate,
+                                organic_funnel_control,
+                                &mut report,
+                            ) {
+                                continue;
+                            }
                             let relay_push = match &candidate.action {
                                 AutopilotActionPayload::RequestSignalPush {
                                     title, body, ..
@@ -868,6 +867,7 @@ where
                         now,
                         &mut limits,
                         &mut report,
+                        organic_funnel_control,
                     )
                     .await?;
                 }
@@ -893,8 +893,14 @@ where
                             self.persist(&candidate, &mut limits, &mut report).await?;
                         }
                     }
-                    self.evaluate_join_ask_week(&policy, now, &mut limits, &mut report)
-                        .await?;
+                    self.evaluate_join_ask_week(
+                        &policy,
+                        now,
+                        &mut limits,
+                        &mut report,
+                        organic_funnel_control,
+                    )
+                    .await?;
                 }
                 AutopilotContext::Representation | AutopilotContext::BookingAgent => {
                     // Approaches are band-initiated: the evaluator never
@@ -966,6 +972,7 @@ include!("evaluate/live_terms.rs");
 include!("evaluate/types.rs");
 include!("evaluate/candidates.rs");
 include!("evaluate/candidates_lifecycle.rs");
+include!("evaluate/funnel_recovery.rs");
 include!("evaluate/candidates_terms.rs");
 include!("evaluate/candidates_relay.rs");
 include!("evaluate/candidates_drop_surge.rs");

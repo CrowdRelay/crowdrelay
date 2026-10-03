@@ -58,6 +58,12 @@ pub(crate) fn apply_organic_funnel_control(
         let Some(rank) = organic_funnel_template_rank(control.directive, template) else {
             return false;
         };
+        if let Some(object) = candidate.candidate.input_snapshot.as_object_mut() {
+            object.insert(
+                "organic_funnel_control".to_owned(),
+                serde_json::to_value(control).unwrap_or(serde_json::Value::Null),
+            );
+        }
         candidate.strategy_rank = rank;
         true
     });

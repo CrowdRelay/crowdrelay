@@ -4,6 +4,7 @@ mod action_recovery;
 mod actions;
 mod actions_execution;
 mod capture_plans;
+mod confirmation_recovery;
 mod control;
 mod cycle_trigger;
 mod daily_briefing;
@@ -32,6 +33,7 @@ mod relay_mutations;
 pub use lapsed_sweep::{LapsedSweepStats, sweep_lapsed_approval_asks};
 pub use outreach_supply::OutreachSupplyRefresh;
 mod lifecycle_activation;
+mod lifecycle_execution;
 mod lifecycle_grants;
 mod measurement;
 mod objectives;
@@ -74,35 +76,36 @@ use crowdrelay_application::{
         AutopilotPlayOutcomeRepository, AutopilotPolicy, AutopilotPolicyConfig,
         AutopilotPolicySummary, AutopilotRuntimeRepository, AutopilotShowCostRepository,
         AutopilotTicketStateRepository, AutopilotWaveOutcomeRepository, BookingTargetMutation,
-        CandidatePersistence, CityMarketSignalMutation, ClaimExecution, ClaimedAutopilotAction,
-        ClaimedAutopilotMeasurement, ClaimedPlayOutcome, ClaimedWaveOutcome,
-        CommunityRelayBatchView, DecisionCandidate, DeclareGrowthObjective, DeliveryFaultSubject,
-        EvidenceLedger, EvidencePacket, ExecutionClaimMutation, ExecutionReportMutation,
-        ExecutorHeartbeatMutation, ExecutorReportStatus, FestivalEditionMutation,
-        FirstPartyGrowthMetricReport, FreezeShowCostPrediction, GROWTH_STALL_AFTER_MINUTES,
-        GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress, GrowthDeliveryTotals,
-        GrowthMetricPointMutation, GrowthMetricSeriesMutation, GrowthMetricSubject,
-        GrowthMetricTrendView, GrowthObjectiveMutation, GrowthObjectiveView, GrowthOutreachSummary,
-        GrowthPosture, GrowthPostureView, HarmObservation, LiveTermsSnapshot, LoadedCausalModel,
-        ManagerBookingPolicySummary, ManagerConfigMutation, MerchProductEconomicsMutation,
-        NextBestAction, ORG_ATTENTION_BUDGET_ERROR_KIND, OutreachKindStanding, OutreachWaveAnchor,
-        OutreachWaveSnapshot, OutreachWaveStart, OutreachWaveTransition, PLAYLIST_TEMPLATE_KEY,
-        PendingApprovalLink, PendingAutopilotAction, PlacementSettlement, PlayAnchor,
-        PlayAnchorRef, PlayAudience, PlayClaimView, PlayKindStanding, PlayLedger, PlayLedgerEntry,
-        PlayOutcomeObservation, PlayRunSnapshot, PlayStart, PlayStepSettlement,
-        PlaylistPlacementSnapshot, PortfolioPoolEntry, PromotionBudgetGuardrailMutation,
-        PromotionBudgetGuardrailSummary, PromotionCampaignStateMutation, ProviderActionCorrelation,
-        RecentAutopilotAction, RecentAutopilotDecision, RecentAutopilotEffect, RecordDeliveryFault,
-        RecordExecutionReport, RecordExecutorHeartbeat, RecordGrowthMetricPoint,
-        RecordPlaylistPlacement, RecordRumSample, RelationshipResearchSnapshot,
-        ReleaseComponentMutation, ReleaseComponentSummary, ReleaseLedgerOverview, RumMetricSummary,
-        SetAutopilotAuthority, SetGrowthEnvelope, SetGrowthPosture, SetManagerBookingPolicy,
-        SetTourEconomics, SettleShowCost, ShowCostLedgerEntry, ShowCostMutation,
-        TeamAssigneeSummary, TermsSettlement, TicketAllocationGuardrailMutation,
-        TourEconomicsMutation, TourEconomicsSummary, UpsertBookingTarget, UpsertCityMarketSignal,
-        UpsertFestivalEdition, UpsertGrowthMetricSeries, UpsertMerchProductEconomics,
-        UpsertPromotionBudgetGuardrail, UpsertPromotionCampaignState, UpsertReleaseComponent,
-        UpsertTicketAllocationGuardrail, WaveOutcomeObservation,
+        CONFIRMATION_RECOVERY_TEMPLATE, CandidatePersistence, CityMarketSignalMutation,
+        ClaimExecution, ClaimedAutopilotAction, ClaimedAutopilotMeasurement, ClaimedPlayOutcome,
+        ClaimedWaveOutcome, CommunityRelayBatchView, DecisionCandidate, DeclareGrowthObjective,
+        DeliveryFaultSubject, EvidenceLedger, EvidencePacket, ExecutionClaimMutation,
+        ExecutionReportMutation, ExecutorHeartbeatMutation, ExecutorReportStatus,
+        FestivalEditionMutation, FirstPartyGrowthMetricReport, FreezeShowCostPrediction,
+        GROWTH_STALL_AFTER_MINUTES, GROWTH_TEMPLATE_KEYS, GrowthCampaignProgress,
+        GrowthDeliveryTotals, GrowthMetricPointMutation, GrowthMetricSeriesMutation,
+        GrowthMetricSubject, GrowthMetricTrendView, GrowthObjectiveMutation, GrowthObjectiveView,
+        GrowthOutreachSummary, GrowthPosture, GrowthPostureView, HarmObservation,
+        LiveTermsSnapshot, LoadedCausalModel, ManagerBookingPolicySummary, ManagerConfigMutation,
+        MerchProductEconomicsMutation, NextBestAction, ORG_ATTENTION_BUDGET_ERROR_KIND,
+        OutreachKindStanding, OutreachWaveAnchor, OutreachWaveSnapshot, OutreachWaveStart,
+        OutreachWaveTransition, PLAYLIST_TEMPLATE_KEY, PendingApprovalLink, PendingAutopilotAction,
+        PlacementSettlement, PlayAnchor, PlayAnchorRef, PlayAudience, PlayClaimView,
+        PlayKindStanding, PlayLedger, PlayLedgerEntry, PlayOutcomeObservation, PlayRunSnapshot,
+        PlayStart, PlayStepSettlement, PlaylistPlacementSnapshot, PortfolioPoolEntry,
+        PromotionBudgetGuardrailMutation, PromotionBudgetGuardrailSummary,
+        PromotionCampaignStateMutation, ProviderActionCorrelation, RecentAutopilotAction,
+        RecentAutopilotDecision, RecentAutopilotEffect, RecordDeliveryFault, RecordExecutionReport,
+        RecordExecutorHeartbeat, RecordGrowthMetricPoint, RecordPlaylistPlacement, RecordRumSample,
+        RelationshipResearchSnapshot, ReleaseComponentMutation, ReleaseComponentSummary,
+        ReleaseLedgerOverview, RumMetricSummary, SetAutopilotAuthority, SetGrowthEnvelope,
+        SetGrowthPosture, SetManagerBookingPolicy, SetTourEconomics, SettleShowCost,
+        ShowCostLedgerEntry, ShowCostMutation, TeamAssigneeSummary, TermsSettlement,
+        TicketAllocationGuardrailMutation, TourEconomicsMutation, TourEconomicsSummary,
+        UpsertBookingTarget, UpsertCityMarketSignal, UpsertFestivalEdition,
+        UpsertGrowthMetricSeries, UpsertMerchProductEconomics, UpsertPromotionBudgetGuardrail,
+        UpsertPromotionCampaignState, UpsertReleaseComponent, UpsertTicketAllocationGuardrail,
+        WaveOutcomeObservation,
     },
 };
 use crowdrelay_brain::GrowthIntelligenceSnapshot;

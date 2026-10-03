@@ -637,18 +637,24 @@ pub(super) async fn schedule_effect_measurement(
             // the contract test happy while still extracting the subject.
             if let AutopilotActionPayload::RequestFanLifecycleMessage {
                 fan_id, template_key, ..
-            } = payload {
-                let kind = if template_key == WELCOME_V2_TEMPLATE {
-                    AutopilotMeasurementKind::FanLifecycleActivation7d
-                } else {
-                    AutopilotMeasurementKind::FanLifecycleEngagement7d
-                };
-                plans.push((
-                    kind,
-                    fan_id.into_uuid(),
-                    0.0,
-                    now + time::Duration::days(7),
-                ));
+            } = payload
+            {
+                // A transactional double-opt-in retry is not fan engagement.
+                // Its truth is the confirmation funnel + webhook delivery,
+                // not a seven-day "did the fan do something" reward.
+                if template_key != CONFIRMATION_RECOVERY_TEMPLATE {
+                    let kind = if template_key == WELCOME_V2_TEMPLATE {
+                        AutopilotMeasurementKind::FanLifecycleActivation7d
+                    } else {
+                        AutopilotMeasurementKind::FanLifecycleEngagement7d
+                    };
+                    plans.push((
+                        kind,
+                        fan_id.into_uuid(),
+                        0.0,
+                        now + time::Duration::days(7),
+                    ));
+                }
             }
         }
         // A Signal push exists to put the app in someone's hand, so measure

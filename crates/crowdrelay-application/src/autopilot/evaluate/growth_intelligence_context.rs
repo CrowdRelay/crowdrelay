@@ -16,14 +16,11 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
         now: OffsetDateTime,
         _limits: &mut CycleLimits<'_>,
         report: &mut AutopilotCycleReport,
+        organic_funnel_control: Option<OrganicFunnelControl>,
     ) -> Result<(), AutopilotError> {
         let mut snapshots = self
             .repository
             .load_growth_intelligence_snapshots(self.workspace_id, now)
-            .await?;
-        let organic_funnel_control = self
-            .repository
-            .load_organic_funnel_control(self.workspace_id, now)
             .await?;
         if let Some(control) = organic_funnel_control {
             report

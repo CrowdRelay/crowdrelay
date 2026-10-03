@@ -455,6 +455,17 @@ pub trait AutopilotDecisionRepository: Send + Sync {
         Ok(None)
     }
 
+    /// Pending, attributable signups whose latest confirmation delivery
+    /// definitively failed. Empty by default so non-SQL test repositories do
+    /// not invent delivery failures.
+    async fn load_confirmation_recovery_snapshots(
+        &self,
+        _workspace_id: WorkspaceId,
+        _now: OffsetDateTime,
+    ) -> Result<Vec<ConfirmationRecoverySnapshot>, RepositoryError> {
+        Ok(Vec::new())
+    }
+
     async fn load_growth_intelligence_snapshots(
         &self,
         workspace_id: WorkspaceId,

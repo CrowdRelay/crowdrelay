@@ -204,6 +204,19 @@ pub async fn request_fan_access(
             .into_response();
     };
 
+    if let Err(error) = crowdrelay_infra::fan_lifecycle::lock_fan_access(
+        &mut transaction,
+        state.fan_lifecycle.workspace_id,
+        crowdrelay_domain::FanId::from_uuid(fan_id),
+    )
+    .await
+    {
+        tracing::warn!(%error, "could not lock fan access token rotation");
+        return Problem::service_unavailable(request_id_value)
+            .private()
+            .into_response();
+    }
+
     let profile = sqlx::query_as::<_, (Option<String>, Option<String>)>(
         r#"
         SELECT display_name, locale

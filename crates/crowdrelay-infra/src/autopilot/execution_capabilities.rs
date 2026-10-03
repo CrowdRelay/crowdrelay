@@ -143,7 +143,18 @@ fn executor_capability_for_emission(event_type: &str, payload: &Value) -> &'stat
 /// a terminal execution receipt. Public for the worker's receipt
 /// reconciliation sweep, which flags dispatched actions whose receipts
 /// never arrived.
-pub const fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
+pub(super) fn is_confirmation_recovery(payload: &AutopilotActionPayload) -> bool {
+    matches!(
+        payload,
+        AutopilotActionPayload::RequestFanLifecycleMessage { template_key, .. }
+            if template_key == CONFIRMATION_RECOVERY_TEMPLATE
+    )
+}
+
+pub fn payload_requires_executor(payload: &AutopilotActionPayload) -> bool {
+    if is_confirmation_recovery(payload) {
+        return false;
+    }
     match payload {
         // CanonicalLinkSetup is a pure first-party DB write (smart_links), so
         // it must not be gated behind an executor capability. is_first_party
