@@ -133,7 +133,6 @@ where
         &self,
         now: OffsetDateTime,
     ) -> Result<AutopilotCycleReport, AutopilotError> {
-        // One bottleneck snapshot governs the whole cycle, including context order.
         let (policies, organic_funnel_control) = self.cycle_policies_and_funnel(now).await?;
         // Loaded once per cycle rather than per candidate: the ceiling is an
         // operator setting that does not change mid-cycle, and re-reading it
@@ -555,9 +554,7 @@ where
                             now,
                         )? {
                             if !Self::prepare_content_candidate_for_funnel(
-                                &mut candidate,
-                                organic_funnel_control,
-                                &mut report,
+                                &mut candidate, organic_funnel_control, &mut report,
                             ) {
                                 continue;
                             }
