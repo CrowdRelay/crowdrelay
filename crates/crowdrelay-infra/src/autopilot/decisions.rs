@@ -178,7 +178,7 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         )>,
         RepositoryError,
     > {
-        crate::lane_ledger::lane_rows(&self.pool, workspace_id.into_uuid(), 14)
+        crate::lane_ledger::lane_rows(&self.pool, workspace_id.into_uuid(), crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS)
             .await
             .map(|rows| {
                 rows.into_iter()
