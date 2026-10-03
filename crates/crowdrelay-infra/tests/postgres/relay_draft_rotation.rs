@@ -60,26 +60,29 @@ async fn dispatched_drafts_rotate_before_any_community_post_exists()
         seed_community(&pool, ws, name, None).await?;
     }
     let first = repo.load_relay_community_targets(ws).await?;
-    assert_eq!(first.len(), 3);
-    for target in &first {
-        seed_draft_request(
-            &pool,
-            ws,
-            source,
-            target.target_id.into_uuid(),
-            "",
-            "succeeded",
-        )
-        .await?;
-    }
-    let next = repo.load_relay_community_targets(ws).await?;
-    assert_eq!(next.len(), 3);
     assert_eq!(
-        next.iter()
-            .filter(|target| !first.iter().any(|old| old.target_id == target.target_id))
-            .count(),
-        2,
-        "both untouched communities get a turn while the first drafts have no post rows"
+        first.len(),
+        1,
+        "an unmeasured Reddit lane gets one probe, not three speculative drafts"
+    );
+    seed_draft_request(
+        &pool,
+        ws,
+        source,
+        first[0].target_id.into_uuid(),
+        "",
+        "succeeded",
+    )
+    .await?;
+
+    // The dispatch has not materialized a post yet, so the platform remains
+    // quiet. Rotation still moves the single probe to a different room
+    // instead of stacking another draft onto the same target.
+    let next = repo.load_relay_community_targets(ws).await?;
+    assert_eq!(next.len(), 1);
+    assert_ne!(
+        next[0].target_id, first[0].target_id,
+        "the quiet-lane probe rotates while no delivery receipt exists"
     );
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM community_posts WHERE workspace_id=$1")
