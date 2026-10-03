@@ -171,6 +171,23 @@ mod post_queues_postgres_tests {
         assert!(lanes.contains(&("discord", 1)), "{lanes:?}");
         assert!(!lanes.iter().any(|(channel, _)| *channel == "facebook"), "{lanes:?}");
 
+        // The forum draft is named, with where it goes; a policy-held Reddit
+        // draft is counted but never offered as "post this now".
+        let forum = drafts.iter().find(|row| row.channel == "forum").expect("forum");
+        assert_eq!(forum.ready_to_post.len(), 1, "{forum:?}");
+        assert_eq!(forum.ready_to_post[0].target, "metal");
+        sqlx::query(
+            "UPDATE community_posts SET error_message = 'held: moderators removed two or more of our posts' WHERE workspace_id = $1 AND platform = 'reddit'",
+        )
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("hold reddit");
+        let held = load_unpublished_drafts(&pool, ws).await.expect("manual lane");
+        let reddit = held.iter().find(|row| row.channel == "reddit").expect("reddit");
+        assert_eq!(reddit.drafts, 1);
+        assert!(reddit.ready_to_post.is_empty(), "{reddit:?}");
+
         let automatic = load_automatic_queue(&pool, ws).await.expect("machine lane");
         let facebook = automatic
             .iter()
