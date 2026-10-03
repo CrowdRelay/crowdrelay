@@ -7821,7 +7821,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [member_site_base_url, member_area_path, live_page_path, synesthesia_campaign_slug, signal_enabled, synesthesia_enabled, north_star_metric, social_auto_post, growth_cadence_moments_per_month, growth_cadence_fillers_enabled, crew_locale, team_weekly_ask_ceiling, tenant_intent, act_style, act_home_city, ticketing_enabled, join_ask_variants, join_ask_cadence_days, join_ask_platforms, join_ask_image_url, join_ask_capture_context, brand_wordmark, social_autopost_platforms]
+          enum: [member_site_base_url, member_area_path, live_page_path, synesthesia_campaign_slug, signal_enabled, synesthesia_enabled, north_star_metric, social_auto_post, growth_cadence_moments_per_month, growth_cadence_fillers_enabled, crew_locale, team_weekly_ask_ceiling, tenant_intent, act_style, act_home_city, ticketing_enabled, join_ask_variants, join_ask_cadence_days, join_ask_platforms, join_ask_image_url, join_ask_capture_context, brand_wordmark, social_autopost_platforms, youtube_capture_comment_auto_post]
       requestBody:
         required: true
         content:
