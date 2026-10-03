@@ -221,14 +221,52 @@ async fn load_fan_acquisition_proof(
         prospect_signal_fans,
     ) = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         r#"
-        WITH exact_prospect_conversions AS (
+        WITH provider_prospects AS (
+            SELECT DISTINCT observation.prospect_id
+            FROM fan_prospect_observations AS observation
+            JOIN community_comments AS comment
+              ON comment.workspace_id = observation.workspace_id
+             AND comment.id::text = observation.source_ref
+             AND comment.provider_observed_at IS NOT NULL
+             AND comment.provider_observed_at <= $3
+            WHERE observation.workspace_id = $1
+              AND observation.source = 'own_comments'
+              AND observation.observed_at >= $2
+              AND observation.observed_at <= $3
+        ), confirmed_invites AS (
+            SELECT DISTINCT
+                   touch.id,
+                   touch.prospect_id,
+                   touch.smart_link_id,
+                   touch.touched_at
+            FROM fan_prospect_touches AS touch
+            JOIN community_comments AS comment
+              ON comment.workspace_id = touch.workspace_id
+             AND comment.id::text = touch.source_ref
+             AND comment.status = 'replied'
+             AND comment.replied_at = touch.touched_at
+             AND NULLIF(btrim(comment.reply_comment_id),'') IS NOT NULL
+            JOIN smart_links AS link
+              ON link.workspace_id = touch.workspace_id
+             AND link.id = touch.smart_link_id
+             AND link.active
+             AND link.slug = 'reply-capture-' || replace(comment.id::text,'-','')
+             AND position('/l/' || link.slug in COALESCE(comment.draft,'')) > 0
+            JOIN provider_prospects AS discovered
+              ON discovered.prospect_id = touch.prospect_id
+            WHERE touch.workspace_id = $1
+              AND touch.source = 'owned_reply'
+              AND touch.kind = 'invite'
+              AND touch.touched_at >= $2
+              AND touch.touched_at <= $3
+        ), exact_prospect_conversions AS (
             SELECT DISTINCT
                    touch.prospect_id,
                    canonical_fan_id($1, arrival.fan_id) AS fan_id,
                    MIN(arrival.occurred_at) AS converted_at
-            FROM fan_prospect_touches AS touch
+            FROM confirmed_invites AS touch
             JOIN click_events AS click
-              ON click.workspace_id = touch.workspace_id
+              ON click.workspace_id = $1
              AND click.smart_link_id = touch.smart_link_id
              AND click.anonymous_visitor_id IS NOT NULL
              AND click.occurred_at >= touch.touched_at
@@ -244,24 +282,13 @@ async fn load_fan_acquisition_proof(
              AND prospect.status = 'converted'
              AND canonical_fan_id($1, prospect.linked_fan_id)
                    = canonical_fan_id($1, arrival.fan_id)
-            WHERE touch.workspace_id = $1
-              AND touch.kind = 'invite'
-              AND arrival.occurred_at >= $2
+            WHERE arrival.occurred_at >= $2
               AND arrival.occurred_at <= $3
             GROUP BY touch.prospect_id, canonical_fan_id($1, arrival.fan_id)
         )
         SELECT
-            (SELECT count(DISTINCT prospect.id)::bigint
-             FROM fan_prospects AS prospect
-             WHERE prospect.workspace_id=$1
-               AND prospect.created_at >= $2
-               AND prospect.created_at <= $3),
-            (SELECT count(DISTINCT touch.id)::bigint
-             FROM fan_prospect_touches AS touch
-             WHERE touch.workspace_id=$1
-               AND touch.kind='invite'
-               AND touch.touched_at >= $2
-               AND touch.touched_at <= $3),
+            (SELECT count(*)::bigint FROM provider_prospects),
+            (SELECT count(*)::bigint FROM confirmed_invites),
             (SELECT count(*)::bigint
              FROM exact_prospect_conversions),
             (SELECT count(*)::bigint
