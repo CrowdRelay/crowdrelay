@@ -13,7 +13,7 @@ pub(super) async fn execute(
     action: &ClaimedAutopilotAction,
     fan_id: FanId,
     template_key: &str,
-    show: &Option<crowdrelay_application::autopilot::LifecycleShowContext>,
+    show: Option<&crowdrelay_application::autopilot::LifecycleShowContext>,
     now: OffsetDateTime,
 ) -> Result<(), RepositoryError> {
     ensure_marketing_eligible(transaction, workspace_id, fan_id).await?;
@@ -42,7 +42,7 @@ pub(super) async fn execute(
         lifecycle_activation::prepare(
             transaction, &brand,
             lifecycle_activation::WelcomeRequest {
-                workspace_id, action_id: action.id, fan_id: fan_id,
+                workspace_id, action_id: action.id, fan_id,
                 locale: fan.2.as_deref().unwrap_or_default(), now,
             },
         ).await?
@@ -91,7 +91,7 @@ pub(super) async fn execute(
     let wants_install_url = template_key
         == "crowdrelay.fan.signal_install_ask.v1"
         || (template_key == "crowdrelay.fan.show_recall.v1"
-            && show.as_ref().is_some_and(|show| show.wants_install_url));
+            && show.is_some_and(|show| show.wants_install_url));
     let install_url =
         // The fan may have opened Signal since the recall's
         // decision. Keep the recall, drop the stale install CTA.
@@ -144,7 +144,7 @@ pub(super) async fn execute(
     // would pool different recipients' clicks rather than
     // attributing them to the message that carried the link.
     // Historical redirects are left untouched.
-    let show_url = if let Some(show) = show.as_ref() {
+    let show_url = if let Some(show) = show {
         let brand = crate::tenant_settings::TenantSettingsRepository::new(
             repo.pool.clone(),
         )
@@ -217,7 +217,7 @@ pub(super) async fn execute(
                 // The night the recall names — the template's
                 // only subject. Both are None for every other
                 // lifecycle key.
-                "show_title": show.as_ref().map(|show| show.event_title.as_str()),
+                "show_title": show.map(|show| show.event_title.as_str()),
                 "show_url": show_url,
             },
         }),
