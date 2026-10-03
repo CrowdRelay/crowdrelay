@@ -5,6 +5,7 @@
 //! authentication, push, public leaderboard and game identity links are removed
 //! atomically in the same transaction.
 
+use crowdrelay_domain::WorkspaceId;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -91,6 +92,30 @@ impl PostgresFanPrivacyRepository {
         .await
         .map_err(Self::unexpected)?;
 
+        let impacted_referrers = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT referrer_id
+            FROM (
+                SELECT canonical_fan_id($1,$2) AS referrer_id
+                UNION ALL
+                SELECT canonical_fan_id($1,attribution.referrer_fan_id)
+                FROM referral_attributions attribution
+                WHERE attribution.workspace_id=$1
+                  AND attribution.referred_fan_id IN (
+                      SELECT fan_id FROM canonical_fan_family($1,$2)
+                  )
+                  AND attribution.status IN ('pending','qualified')
+            ) impacted
+            WHERE referrer_id IS NOT NULL
+            ORDER BY referrer_id
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(fan_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(Self::unexpected)?;
+
         // Acquisition/referral data is not required for accounting or consent
         // evidence. Erase the deleted fan from the marketing graph and make any
         // public referral code unusable. `fan_acquisition_events` is append-only
@@ -168,6 +193,24 @@ impl PostgresFanPrivacyRepository {
         .execute(&mut *tx)
         .await
         .map_err(Self::unexpected)?;
+
+        for referrer in impacted_referrers {
+            crate::referrals::sync_referral_rewards_for_referrer(
+                &mut tx,
+                WorkspaceId::from_uuid(workspace_id),
+                referrer,
+                request_id.unwrap_or("fan.account_erased"),
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    %error,
+                    %referrer,
+                    "referral reward reconciliation failed during account erasure"
+                );
+                FanPrivacyError::Unexpected
+            })?;
+        }
 
         // Draw entry e-mail is voluntary/non-transactional data. Deleting the
         // account forfeits pending Synesthesia draw participation and removes it.
