@@ -10,7 +10,6 @@
 
 use std::time::Duration;
 
-use crowdrelay_application::autopilot::OrganicFunnelDirective;
 use crowdrelay_domain::latarnik_mission::choose_mission;
 use crowdrelay_domain::{
     WorkspaceId,
@@ -36,6 +35,8 @@ pub const FANS_PER_PASS: i64 = 1_000;
 pub enum SweepError {
     #[error(transparent)]
     Latarnik(#[from] LatarnikError),
+    #[error("organic funnel read failed")]
+    Database(#[from] sqlx::Error),
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
