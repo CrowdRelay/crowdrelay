@@ -718,6 +718,7 @@ mod tests {
     include!("lib_tests_attestation.rs");
     include!("lib_tests_operator_surface.rs");
     include!("lib_tests_redirect_automated.rs");
+    include!("lib_tests_redirect_cache_miss.rs");
     include!("lib_tests_referrals.rs");
 
     #[tokio::test]
