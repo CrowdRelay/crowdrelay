@@ -663,137 +663,115 @@ pub(crate) async fn reverse_signup_referral_and_rewards(
         return Ok(());
     };
 
-    let attribution = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>)>(
+    // Lock every qualified historical row for this one canonical human. A
+    // duplicate merge can reveal more than one attribution; unsubscribing the
+    // person reverses all of them, not whichever row happens to sort first.
+    let attributions = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>)>(
         r#"
-        SELECT id, referrer_fan_id, canonical_fan_id($1, referrer_fan_id)
+        SELECT id, referrer_fan_id,
+               canonical_fan_id($1, referrer_fan_id) AS canonical_referrer_fan_id
         FROM referral_attributions
         WHERE workspace_id = $1
           AND referred_fan_id IN (
               SELECT fan_id FROM canonical_fan_family($1,$2)
           )
           AND status = 'qualified'
-        ORDER BY qualified_at, id
-        LIMIT 1
+        ORDER BY id
         FOR UPDATE
         "#,
     )
     .bind(workspace_id.into_uuid())
     .bind(canonical_referred_fan_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_all(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
-    let Some((attribution_id, referrer_fan_id, Some(canonical_referrer_fan_id))) = attribution else {
+    if attributions.is_empty() {
         return Ok(());
-    };
+    }
 
-    sqlx::query(
-        r#"
-        SELECT pg_advisory_xact_lock(
-            hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0)
+    let mut canonical_referrers = attributions
+        .iter()
+        .filter_map(|row| row.2)
+        .collect::<Vec<_>>();
+    canonical_referrers.sort_unstable();
+    canonical_referrers.dedup();
+
+    // Acquire locks in UUID order so two concurrent family reversals cannot
+    // deadlock by touching the same pair of referrers in opposite order.
+    for referrer in &canonical_referrers {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                 hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0)
+             )",
         )
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(canonical_referrer_fan_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(ReferralStoreError::from_sqlx)?;
+        .bind(workspace_id.into_uuid())
+        .bind(*referrer)
+        .execute(&mut **transaction)
+        .await
+        .map_err(ReferralStoreError::from_sqlx)?;
+    }
 
     let changed = sqlx::query(
         r#"
         UPDATE referral_attributions
-        SET
-            status = 'reversed',
+        SET status = 'reversed',
             qualification_reason = 'fan_unsubscribed',
             reversed_at = now()
         WHERE workspace_id = $1
-            AND id = $2
-            AND status = 'qualified'
+          AND referred_fan_id IN (
+              SELECT fan_id FROM canonical_fan_family($1,$2)
+          )
+          AND status = 'qualified'
         "#,
     )
     .bind(workspace_id.into_uuid())
-    .bind(attribution_id)
+    .bind(canonical_referred_fan_id)
     .execute(&mut **transaction)
     .await
     .map_err(ReferralStoreError::from_sqlx)?;
-    if changed.rows_affected() != 1 {
+    if changed.rows_affected() == 0 {
         return Ok(());
     }
 
-    let qualified_count = sqlx::query_scalar::<_, i64>(
-        "SELECT canonical_qualified_referral_count($1,$2,NULL)",
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(canonical_referrer_fan_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(ReferralStoreError::from_sqlx)?;
+    let mut synced = Vec::with_capacity(canonical_referrers.len());
+    for referrer in canonical_referrers {
+        let result = sync_referral_rewards_for_referrer(
+            transaction,
+            workspace_id,
+            referrer,
+            request_id,
+        )
+        .await?;
+        synced.push((referrer, result));
+    }
 
-    let revoked_coupons = sqlx::query(
-        r#"
-        UPDATE merch_coupons AS coupon
-        SET
-            status = 'revoked',
-            revoked_at = now()
-        FROM reward_grants AS reward_grant
-        INNER JOIN reward_rules AS rule
-            ON rule.workspace_id = reward_grant.workspace_id
-            AND rule.id = reward_grant.reward_rule_id
-        WHERE coupon.workspace_id = $1
-            AND coupon.workspace_id = reward_grant.workspace_id
-            AND coupon.reward_grant_id = reward_grant.id
-            AND reward_grant.fan_id = $2
-            AND rule.threshold::bigint > $3
-            AND coupon.status = 'issued'
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(canonical_referrer_fan_id)
-    .bind(qualified_count)
-    .execute(&mut **transaction)
-    .await
-    .map_err(ReferralStoreError::from_sqlx)?
-    .rows_affected();
-
-    let revoked_grants = sqlx::query(
-        r#"
-        UPDATE reward_grants AS reward_grant
-        SET
-            status = 'revoked',
-            revoked_at = now()
-        FROM reward_rules AS rule
-        WHERE reward_grant.workspace_id = $1
-            AND reward_grant.fan_id = $2
-            AND reward_grant.status = 'issued'
-            AND rule.workspace_id = reward_grant.workspace_id
-            AND rule.id = reward_grant.reward_rule_id
-            AND rule.threshold::bigint > $3
-        "#,
-    )
-    .bind(workspace_id.into_uuid())
-    .bind(canonical_referrer_fan_id)
-    .bind(qualified_count)
-    .execute(&mut **transaction)
-    .await
-    .map_err(ReferralStoreError::from_sqlx)?
-    .rows_affected();
-
-    append_outbox(
-        transaction,
-        workspace_id,
-        "referral.reversed",
-        request_id,
-        json!({
-            "workspace_id": workspace_id,
-            "attribution_id": attribution_id,
-            "referrer_fan_id": referrer_fan_id,
-            "canonical_referrer_fan_id": canonical_referrer_fan_id,
-            "referred_fan_id": referred_fan_id,
-            "canonical_referred_fan_id": canonical_referred_fan_id,
-            "qualified_referral_count": qualified_count,
-            "revoked_grant_count": revoked_grants,
-            "revoked_coupon_count": revoked_coupons,
-        }),
-    )
-    .await
+    for (attribution_id, historical_referrer_fan_id, canonical_referrer_fan_id) in attributions {
+        let sync = canonical_referrer_fan_id
+            .and_then(|referrer| {
+                synced
+                    .iter()
+                    .find(|(candidate, _)| *candidate == referrer)
+                    .map(|(_, result)| *result)
+            })
+            .unwrap_or((0, 0, 0));
+        append_outbox(
+            transaction,
+            workspace_id,
+            "referral.reversed",
+            request_id,
+            json!({
+                "workspace_id": workspace_id,
+                "attribution_id": attribution_id,
+                "referrer_fan_id": historical_referrer_fan_id,
+                "canonical_referrer_fan_id": canonical_referrer_fan_id,
+                "referred_fan_id": referred_fan_id,
+                "canonical_referred_fan_id": canonical_referred_fan_id,
+                "qualified_referral_count": sync.0,
+                "revoked_grant_count": sync.1,
+                "revoked_coupon_count": sync.2,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
 }
