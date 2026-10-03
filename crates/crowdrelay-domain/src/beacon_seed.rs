@@ -194,10 +194,15 @@ pub fn beacon_kind_for(raw: &str) -> Option<BeaconKind> {
         "local_press" | "press" | "media" | "newspaper" => BeaconKind::LocalPress,
         "television" | "tv" => BeaconKind::Television,
         "reviewer" | "review" | "critic" => BeaconKind::Reviewer,
+        // A platform is not a role. "YouTube channel", "YouTube video"
+        // and "SoundCloud artist" are deliberately NOT aliases for Creator:
+        // those labels routinely describe bands, labels and media. Treating
+        // them as creators gives them the creator offer menu, including
+        // short_form_clip, which turns "we observed another band" into a
+        // nonsensical promo task. Sources that actually know the role must say
+        // creator/influencer/streamer explicitly.
         "creator" | "local_creator" | "instagram_creator" | "tiktok_creator"
-        | "youtube_channel" | "youtube_video" | "soundcloud_artist" | "influencer" | "streamer" => {
-            BeaconKind::Creator
-        }
+        | "influencer" | "streamer" => BeaconKind::Creator,
         "photographer" | "photo" => BeaconKind::Photographer,
         "promoter" | "gig_promoter" => BeaconKind::Promoter,
         "venue" | "room" => BeaconKind::Venue,
@@ -417,8 +422,6 @@ mod tests {
             ("creator", BeaconKind::Creator),
             ("instagram_creator", BeaconKind::Creator),
             ("tiktok_creator", BeaconKind::Creator),
-            ("youtube_channel", BeaconKind::Creator),
-            ("soundcloud_artist", BeaconKind::Creator),
             ("promoter", BeaconKind::Promoter),
             ("patron", BeaconKind::Patron),
             ("facebook_page", BeaconKind::Community),
@@ -427,6 +430,13 @@ mod tests {
             ("cultural_hub", BeaconKind::Community),
         ] {
             assert_eq!(beacon_kind_for(raw), Some(want), "kind {raw} mis-mapped");
+        }
+        for ambiguous in ["youtube_channel", "youtube_video", "soundcloud_artist"] {
+            assert_eq!(
+                beacon_kind_for(ambiguous),
+                None,
+                "{ambiguous} names a platform/content type, not a creator role"
+            );
         }
         assert_eq!(beacon_kind_for("hologram"), None);
     }
