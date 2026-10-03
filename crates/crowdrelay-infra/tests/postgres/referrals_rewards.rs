@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use crate::common;
 use crowdrelay_application::{
-    AcquisitionRepository, ConfirmFanCommand, FanLifecycleRepository, IdempotencyKey,
-    RedeemCouponCommand, ReferralRepository, RepositoryError, RequestId, SignupFanCommand,
+    AcquisitionRepository, ConfirmFanCommand, FanIdentityRepository, FanLifecycleRepository,
+    IdempotencyKey, MergeFansCommand, RedeemCouponCommand, ReferralRepository, RepositoryError,
+    RequestId, SignupFanCommand,
 };
 use crowdrelay_domain::{
     CitySlug, CountryCode, FanActionToken, FanSignup, FanSignupInput, MarketingConsent,
@@ -12,6 +13,7 @@ use crowdrelay_domain::{
 use crowdrelay_infra::{
     acquisition::PostgresAcquisitionRepository,
     config::DatabaseConfig,
+    fan_identity::PgFanIdentityRepository,
     fan_lifecycle::PostgresFanLifecycleRepository,
     referrals::{PostgresReferralRepository, record_referral_interaction},
     sensitive_response::{SensitiveResponseCodec, SensitiveResponseKey},
@@ -301,6 +303,161 @@ async fn qualifies_referrals_grants_one_coupon_and_redeems_idempotently()
     .await?;
     assert_eq!(redeemed_event_count, 1);
 
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CROWDRELAY_REFERRAL_TEST_DATABASE_URL and a disposable PostgreSQL database"]
+async fn pinned_referral_code_stays_live_and_rewards_the_canonical_survivor_after_merge()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (pool, database_url) =
+        common::test_pool_with_url("CROWDRELAY_REFERRAL_TEST_DATABASE_URL").await?;
+    let workspace_id = WorkspaceId::new();
+    let workspace_slug = WorkspaceSlug::parse(format!(
+        "referral-merge-{}",
+        workspace_id.into_uuid().simple()
+    ))?;
+    seed_fixture(&pool, workspace_id, &workspace_slug).await?;
+    let database = DatabaseConfig {
+        url: database_url,
+        max_connections: 8,
+        connect_timeout: Duration::from_secs(3),
+        ping_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(5),
+        lock_timeout: Duration::from_secs(1),
+    };
+    let acquisition = PostgresAcquisitionRepository::new(
+        pool.clone(),
+        workspace_slug.clone(),
+        CountryCode::parse("PL")?,
+        &database,
+        false,
+        test_sensitive_response_codec(),
+    );
+    let referrals =
+        PostgresReferralRepository::new(pool.clone(), workspace_slug.clone(), &database);
+
+    let historical = acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "historical-referrer@example.test",
+            None,
+            "merge-historical-referrer",
+        )?)
+        .await?;
+    let old_code = historical.referral_code.clone().ok_or("historical code")?;
+    let old_session = historical
+        .fan_session_token
+        .clone()
+        .ok_or("historical session")?;
+
+    // This first real conversion pins the old code owner through the composite
+    // attribution FK. Merge must preserve that exact history.
+    acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "before-merge@example.test",
+            Some(old_code.clone()),
+            "merge-referred-before",
+        )?)
+        .await?;
+
+    let canonical = acquisition
+        .persist_fan_signup(&signup_command(
+            workspace_id,
+            "canonical-referrer@example.test",
+            None,
+            "merge-canonical-referrer",
+        )?)
+        .await?;
+    let identity = PgFanIdentityRepository::new(pool.clone());
+    identity
+        .merge_fans(&MergeFansCommand {
+            workspace_id,
+            survivor_fan_id: canonical.fan_id.into_uuid(),
+            merged_fan_id: historical.fan_id.into_uuid(),
+            reason: Some("same person".to_owned()),
+            merged_by: "referral-merge-test".to_owned(),
+            request_id: "referral-code-owner-merge".to_owned(),
+        })
+        .await?;
+
+    let code_owner: (Uuid, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT code.fan_id, fan.status, fan.merged_into_fan_id
+         FROM referral_codes code
+         JOIN fans fan ON fan.workspace_id=code.workspace_id AND fan.id=code.fan_id
+         WHERE code.workspace_id=$1 AND code.code=$2",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(old_code.as_str())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(code_owner.0, historical.fan_id.into_uuid());
+    assert_eq!(code_owner.1, "merged");
+    assert_eq!(code_owner.2, Some(canonical.fan_id.into_uuid()));
+    assert!(
+        referrals
+            .referral_code_is_active(workspace_id, &old_code)
+            .await?,
+        "a shared code pinned to history must remain operational through its canonical owner"
+    );
+
+    // Two more independent humans use the exact same already-shared code after
+    // the owner merge. Together with the pre-merge conversion this reaches the
+    // threshold of three.
+    for (index, email) in [
+        (1, "after-merge-one@example.test"),
+        (2, "after-merge-two@example.test"),
+    ] {
+        acquisition
+            .persist_fan_signup(&signup_command(
+                workspace_id,
+                email,
+                Some(old_code.clone()),
+                &format!("merge-referred-after-{index}"),
+            )?)
+            .await?;
+    }
+
+    let progress = referrals
+        .load_referral_progress(workspace_id, &old_session)
+        .await?;
+    assert_eq!(progress.qualified_referrals, 3);
+    assert_eq!(progress.pending_referrals, 0);
+    assert_eq!(
+        progress.referral_code, old_code,
+        "the already-distributed code remains the fan-visible stable code"
+    );
+    assert_eq!(progress.coupons.len(), 1);
+
+    let grants: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT fan_id FROM reward_grants
+         WHERE workspace_id=$1 AND status='issued'
+         ORDER BY created_at,id",
+    )
+    .bind(workspace_id.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        grants,
+        vec![canonical.fan_id.into_uuid()],
+        "reward ownership must be canonical even though attribution history stays pinned"
+    );
+
+    let attributed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM referral_attributions
+         WHERE workspace_id=$1
+           AND referrer_fan_id=$2
+           AND status='qualified'",
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(historical.fan_id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        attributed, 3,
+        "all attribution rows keep the exact historical code owner for audit"
+    );
     Ok(())
 }
 
