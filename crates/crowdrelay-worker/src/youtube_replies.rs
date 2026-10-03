@@ -139,6 +139,10 @@ fn flatten(
         out.push(HarvestedComment {
             id: comment.id.clone(),
             parent_id: parent.to_owned(),
+            provider_author_id: snippet
+                .author_channel_id
+                .as_ref()
+                .and_then(|author| author.value.clone()),
             author: snippet
                 .author_display_name
                 .clone()
@@ -352,13 +356,17 @@ impl YoutubeRepliesWorker {
                     INSERT INTO community_comments
                         (workspace_id, platform, content_source_id, platform_comment_id,
                          parent_id, author, body, parent_body, parent_by_band,
-                         provider_observed_at)
-                    VALUES ($1, 'youtube', $2, $3, $4, $5, $6, $7, $8, now())
+                         provider_author_id, provider_observed_at)
+                    VALUES ($1, 'youtube', $2, $3, $4, $5, $6, $7, $8, $9, now())
                     ON CONFLICT (workspace_id, platform, platform_comment_id) DO UPDATE
-                    SET provider_observed_at = GREATEST(
-                        community_comments.provider_observed_at,
-                        EXCLUDED.provider_observed_at
-                    )
+                    SET provider_author_id = COALESCE(
+                            community_comments.provider_author_id,
+                            EXCLUDED.provider_author_id
+                        ),
+                        provider_observed_at = GREATEST(
+                            community_comments.provider_observed_at,
+                            EXCLUDED.provider_observed_at
+                        )
                     "#,
                 )
                 .bind(self.workspace_id)
@@ -369,6 +377,7 @@ impl YoutubeRepliesWorker {
                 .bind(comment.body.chars().take(4000).collect::<String>())
                 .bind(parent.map(|p| p.body.chars().take(4000).collect::<String>()))
                 .bind(parent.is_some_and(|p| p.by_band))
+                .bind(comment.provider_author_id.as_deref())
                 .execute(&mut *tx)
                 .await?;
                 harvested += usize::try_from(inserted.rows_affected()).unwrap_or(0);
