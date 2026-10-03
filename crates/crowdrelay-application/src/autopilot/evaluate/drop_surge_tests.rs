@@ -32,8 +32,23 @@ fn fresh_video_snapshot(
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: None,
     }
+}
+
+fn fresh_release_snapshot(
+    now: OffsetDateTime,
+) -> crowdrelay_domain::content_supply::ContentSupplySnapshot {
+    let mut snapshot = fresh_video_snapshot(now);
+    snapshot.source_kind = crowdrelay_domain::content_supply::ContentSourceKind::Release;
+    snapshot.source_key = format!("release:{}", snapshot.source_id.into_uuid());
+    snapshot.title = "New album".to_owned();
+    snapshot.source_url = Some("https://open.spotify.com/album/test-release".to_owned());
+    snapshot.source_body = Some("Our new album is out now.".to_owned());
+    snapshot.source_thumbnail_url = None;
+    snapshot.communication_enabled = Some(true);
+    snapshot
 }
 
 fn surge_policy() -> AutopilotPolicy {
@@ -158,6 +173,55 @@ fn a_fresh_video_fans_out_to_every_surge_lane_at_once() -> Result<(), Box<dyn st
             .all(|disposition| *disposition == PolicyDisposition::AutoExecute),
         "outward lanes auto-execute at bounded-auto: {dispositions:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn a_fresh_release_reaches_read_admitted_communities_too()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crowdrelay_domain::content_supply::{DROP_SURGE_LANES, SignalPushAudience};
+    let now = OffsetDateTime::now_utc();
+    let snapshot = fresh_release_snapshot(now);
+    let source = snapshot.source_id.into_uuid();
+    let community = surge_community();
+    let target = community.target_id.into_uuid();
+    let candidates = content_candidates(
+        &snapshot,
+        &surge_policy(),
+        &[community],
+        Some(SignalPushAudience {
+            eligible: 12,
+            reached: 12,
+        }),
+        ContextEvidence::UNPROVEN,
+        now,
+    )?;
+
+    let surge: Vec<&DecisionCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.decision_kind == "drop_surge_fanout")
+        .collect();
+    assert_eq!(
+        surge.len(),
+        DROP_SURGE_LANES.len(),
+        "a linked fresh release owes the same first-day fan-out as a video"
+    );
+    let community = surge
+        .iter()
+        .find(|candidate| {
+            matches!(
+                &candidate.action,
+                AutopilotActionPayload::RequestAgentRun { template_id, .. }
+                    if template_id == "community-engager"
+            )
+        })
+        .expect("release gets a community-engager dispatch");
+    assert_eq!(community.subject, ActionSubject::TargetCommunity(target));
+    let AutopilotActionPayload::RequestAgentRun { prompt, .. } = &community.action else {
+        unreachable!("matched above")
+    };
+    assert!(prompt.contains(&format!("source_id: {source}")));
+    assert!(prompt.contains("https://open.spotify.com/album/test-release"));
     Ok(())
 }
 
@@ -432,6 +496,7 @@ fn a_failed_community_relay_retries_under_an_attempt_key()
         completed_artifacts: Vec::new(),
         in_flight_artifacts: Vec::new(),
         failed_artifacts: Vec::new(),
+        lane_outages: Vec::new(),
         social_post: Some(SocialPostFact {
             title: "rehearsal cut".to_owned(),
             url: Some("https://instagram.com/p/xyz".to_owned()),

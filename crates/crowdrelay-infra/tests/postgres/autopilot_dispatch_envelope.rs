@@ -456,8 +456,10 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
         "the receipt envelope is an expectation, not an outcome: {evidence:?}"
     );
 
-    // The fan-growth trio, anchored at the confirmed production time and
-    // pointed at the content source the artifact was made from.
+    // Production is not distribution: the production receipt may schedule
+    // only the publication-outcome measurement. In particular it must not
+    // manufacture Y3/Y14/Y30 fan-growth experiments before a real placement
+    // with an attributable rail exists.
     let measurements = sqlx::query_as::<_, (String, Uuid, OffsetDateTime, OffsetDateTime)>(
         "SELECT measurement_kind, subject_id, action_finished_at, due_at \
          FROM autopilot_measurements \
@@ -467,12 +469,7 @@ async fn a_content_artifact_receipt_writes_the_envelope_and_growth_measurements(
     .bind(action_id)
     .fetch_all(&f.pool)
     .await?;
-    let expected_windows: [(&str, i64); 4] = [
-        ("artifact_outcome_7d", 7),
-        ("durable_fan_growth_30d", 44),
-        ("incremental_fan_growth_14d", 14),
-        ("incremental_fan_growth_3d", 3),
-    ];
+    let expected_windows: [(&str, i64); 1] = [("artifact_outcome_7d", 7)];
     assert_eq!(
         measurements
             .iter()

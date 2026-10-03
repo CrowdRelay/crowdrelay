@@ -169,6 +169,11 @@ async fn the_relay_pool_excludes_unfit_places_and_non_admitted_targets()
     let ok_no_place = seed_community(&pool, ws, "oknoplace", None).await?;
     let ok_active = seed_community(&pool, ws, "okactive", Some(("active", "joined"))).await?;
 
+    // This test is about target eligibility, not cold-lane probing. Give the
+    // Reddit route one real delivery receipt so both eligible target rows may
+    // reach the selector.
+    seed_post(&pool, ws, ok_active, "okactive", "posted", 1).await?;
+
     // Excluded by the place-fitness predicate — the graph's own judgement
     // overrides the target row's admission.
     seed_community(&pool, ws, "archivedplace", Some(("archived", "joined"))).await?;
@@ -218,7 +223,7 @@ async fn the_relay_pool_excludes_unfit_places_and_non_admitted_targets()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CROWDRELAY_AUTOPILOT_TEST_DATABASE_URL and a disposable PostgreSQL database"]
-async fn the_relay_caps_at_three_and_rotates_least_recently_drafted()
+async fn a_platform_with_held_or_failed_backlog_does_not_receive_more_drafts()
 -> Result<(), Box<dyn std::error::Error>> {
     let (repo, pool) = repository().await?;
     let ws = WorkspaceId::new();
@@ -238,22 +243,11 @@ async fn the_relay_caps_at_three_and_rotates_least_recently_drafted()
     seed_post(&pool, ws, posted, "postedsub", "posted", 5).await?;
 
     let targets = repo.load_relay_community_targets(ws).await?;
-    assert_eq!(
-        targets.len(),
-        3,
-        "the relay fans out to at most three communities per post, got {}",
-        targets.len()
-    );
-    let picked: Vec<Uuid> = targets.iter().map(|t| t.target_id.into_uuid()).collect();
     assert!(
-        picked.contains(&fresh) && picked.contains(&failed_only) && picked.contains(&also_fresh),
-        "never-drafted and failed-only communities lead the rotation — live drafts and \
-         recent posts sort last: {picked:?}"
+        targets.is_empty(),
+        "a platform that is delivering only partly — with manual/failure backlog — must drain before new acquisition work: {targets:?}"
     );
-    assert!(
-        !picked.contains(&queued) && !picked.contains(&posted),
-        "a community with a live draft or a recent post consumed its turn: {picked:?}"
-    );
+    let _ = (fresh, failed_only, also_fresh, queued, posted);
     Ok(())
 }
 
@@ -273,14 +267,13 @@ async fn the_relay_stops_drafting_while_drafts_wait_to_be_posted()
 
     seed_post(&pool, ws, first, "firstsub", "awaiting_manual_post", 1).await?;
     assert!(
-        !repo.load_relay_community_targets(ws).await?.is_empty(),
-        "one waiting draft does not stop the relay"
+        repo.load_relay_community_targets(ws).await?.is_empty(),
+        "one manual backlog item is enough to hold the whole platform lane; do not manufacture more work behind a person"
     );
 
+    // A second waiting row changes no routing truth: the platform was already
+    // held after the first.
     seed_post(&pool, ws, second, "secondsub", "awaiting_manual_post", 1).await?;
-    assert!(
-        repo.load_relay_community_targets(ws).await?.is_empty(),
-        "two waiting drafts stop new drafting"
-    );
+    assert!(repo.load_relay_community_targets(ws).await?.is_empty());
     Ok(())
 }

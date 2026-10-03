@@ -21,7 +21,10 @@ pub use drop_surge::{
     DROP_SURGE_LANES, DROP_SURGE_MAX_ATTEMPTS, DropSurgeLaneFailure, drop_surge_eligible,
     drop_surge_link_slug,
 };
-pub use retry::{FailedArtifact, MAX_ARTIFACT_ATTEMPTS, RelayLaneFailure, artifact_retry_due};
+pub use retry::{
+    ArtifactLaneOutage, FailedArtifact, LANE_OUTAGE_THRESHOLD, MAX_ARTIFACT_ATTEMPTS,
+    RelayLaneFailure, artifact_retry_due, is_lane_failure,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -321,6 +324,12 @@ pub struct ContentSupplySnapshot {
     /// Artifacts whose requests for this source version failed at the
     /// executor. See [`FailedArtifact`].
     pub failed_artifacts: Vec<FailedArtifact>,
+    /// Artifact kinds whose whole delivery lane is down and not due a probe
+    /// for this source. See [`ArtifactLaneOutage`]. The loader leaves it off
+    /// the one source elected to probe, so a recovering lane is found by one
+    /// request rather than by every source at once.
+    #[serde(default)]
+    pub lane_outages: Vec<ArtifactLaneOutage>,
     /// The synced post's own facts — `Some` only when `source_kind` is
     /// `SocialPost`. The relay needs them to carry the post; every other
     /// kind leaves it `None`.
@@ -479,6 +488,15 @@ pub fn evaluate_content_supply(
         let already_done = snapshot.completed_artifacts.contains(artifact);
         let in_flight = snapshot.in_flight_artifacts.contains(artifact);
         if already_done || in_flight {
+            continue;
+        }
+        // A down lane takes nothing: asking again only adds a failure that
+        // says nothing about the artifact.
+        if snapshot
+            .lane_outages
+            .iter()
+            .any(|outage| outage.artifact == *artifact)
+        {
             continue;
         }
         let failed = snapshot

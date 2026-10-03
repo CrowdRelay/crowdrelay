@@ -53,6 +53,39 @@ async fn load_failed_relay_tasks(
     Ok(failures)
 }
 
+pub(in crate::autopilot) async fn load_recent_relay_pushes(
+    repo: &PostgresAutopilotRepository,
+    workspace_id: WorkspaceId,
+    since: OffsetDateTime,
+) -> Result<Vec<crowdrelay_domain::content_supply::RecentRelayPush>, RepositoryError> {
+    // Only relay-owned pushes participate in relay pacing. Pending approval
+    // already counts because it would reach the same phones once approved.
+    let rows = sqlx::query_as::<_, (OffsetDateTime, Option<String>, Option<String>)>(
+        r#"
+        SELECT created_at, payload->>'title', payload->>'body'
+        FROM autopilot_actions
+        WHERE workspace_id = $1
+          AND action_kind = 'signal.push.request'
+          AND idempotency_key LIKE 'action:relay:%:signal_push'
+          AND status <> 'cancelled'
+          AND created_at >= $2
+        "#,
+    )
+    .bind(workspace_id.into_uuid())
+    .bind(since)
+    .fetch_all(&repo.pool)
+    .await
+    .map_err(map_sqlx)?;
+    Ok(rows
+        .into_iter()
+        .map(|(at, title, body)| crowdrelay_domain::content_supply::RecentRelayPush {
+            at,
+            title: title.unwrap_or_default(),
+            body: body.unwrap_or_default(),
+        })
+        .collect())
+}
+
 pub(in crate::autopilot) async fn load_relay_community_targets(
     repo: &PostgresAutopilotRepository,
     workspace_id: WorkspaceId,
@@ -229,6 +262,30 @@ pub(in crate::autopilot) async fn load_relay_community_targets(
     .fetch_all(&repo.pool)
     .await
     .map_err(map_sqlx)?;
+
+    // Platform health is a routing input, not just an ops readout. Filter
+    // before the three-slot quality/rotation selector: otherwise a blocked
+    // Reddit lane can occupy the scarce candidate pool and crowd out a
+    // deliverable forum/Discord community even though the evaluator later
+    // refuses the Reddit candidate.
+    let lane_rows =
+        crate::lane_ledger::lane_rows(&repo.pool, workspace_id.into_uuid(), crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS)
+            .await
+            .map_err(map_sqlx)?;
+    let community_verdicts: std::collections::BTreeMap<
+        String,
+        crowdrelay_domain::lane_ledger::Verdict,
+    > = lane_rows
+        .into_iter()
+        .filter(|lane| lane.scope == crowdrelay_domain::lane_ledger::LaneScope::Community)
+        .map(|lane| {
+            (
+                lane.lane,
+                crowdrelay_domain::lane_ledger::verdict(&lane.counts),
+            )
+        })
+        .collect();
+    let rows = route_relay_rows(rows, &community_verdicts);
     let rows = select_relay_targets(rows);
     let mut task_failures = load_failed_relay_tasks(repo, workspace_id).await?;
     rows.into_iter()
@@ -301,6 +358,30 @@ fn relay_quality(row: &RelayTargetRow) -> (i64, i64, i64) {
 /// in rotation order, so a new tenant with no history behaves exactly
 /// like the old fair round-robin instead of being starved by "quality" it
 /// cannot possibly have measured yet.
+fn route_relay_rows(
+    rows: Vec<RelayTargetRow>,
+    verdicts: &std::collections::BTreeMap<String, crowdrelay_domain::lane_ledger::Verdict>,
+) -> Vec<RelayTargetRow> {
+    use crowdrelay_domain::lane_ledger::PlanningAvailability;
+
+    let mut quiet_probe_taken = std::collections::BTreeSet::new();
+    rows.into_iter()
+        .filter(|row| {
+            let verdict = verdicts
+                .get(&row.platform)
+                .copied()
+                .unwrap_or(crowdrelay_domain::lane_ledger::Verdict::Quiet);
+            match verdict.planning_availability() {
+                PlanningAvailability::Open => true,
+                // One candidate is enough to turn an unmeasured lane into a
+                // measured lane. More would turn "probe" into backlog.
+                PlanningAvailability::Probe => quiet_probe_taken.insert(row.platform.clone()),
+                PlanningAvailability::Busy | PlanningAvailability::Blocked => false,
+            }
+        })
+        .collect()
+}
+
 fn select_relay_targets(rows: Vec<RelayTargetRow>) -> Vec<RelayTargetRow> {
     let limit = usize::try_from(MAX_RELAY_COMMUNITIES_PER_POST).unwrap_or(3);
     if rows.len() <= limit {

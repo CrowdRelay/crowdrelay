@@ -915,4 +915,5 @@ include!("evaluate/plays_tests.rs");
 include!("evaluate/play_advance.rs");
 include!("evaluate/join_ask_funnel.rs");
 include!("evaluate/support.rs");
+include!("evaluate/lane_routing.rs");
 include!("evaluate/content_supply_arm.rs");

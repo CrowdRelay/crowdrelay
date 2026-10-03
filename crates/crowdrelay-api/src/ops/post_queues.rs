@@ -28,6 +28,32 @@ struct UnpublishedDraftChannel {
     /// is a channel nobody is running.
     #[serde(with = "time::serde::rfc3339::option")]
     oldest_drafted_at: Option<OffsetDateTime>,
+    /// The drafts a person can publish right now, oldest first. A count says
+    /// a channel is waiting; this names the post, where it goes and the
+    /// tracked link it carries, so "post this one" is one glance. Policy
+    /// holds (`held: …`) are not listed: posting by hand around a moderator
+    /// gate is not what the queue is asking for. Community posts only — the
+    /// other tables do not carry a target or link.
+    #[sqlx(skip)]
+    ready_to_post: Vec<ReadyPost>,
+}
+
+/// One drafted community post a person can publish now.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct ReadyPost {
+    #[serde(skip)]
+    channel: String,
+    post_id: Uuid,
+    /// The community, server or forum it is drafted for.
+    target: String,
+    title: String,
+    /// The tracked path the post carries. `None` means it would publish
+    /// uninstrumented and could never count toward a fan.
+    tracked_link: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    drafted_at: OffsetDateTime,
+    /// Why a person, not the machine, publishes it.
+    needs_person_because: Option<String>,
 }
 
 /// One channel's backlog inside the machine's own lane — the automatic
@@ -61,7 +87,7 @@ async fn load_unpublished_drafts(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<Vec<UnpublishedDraftChannel>, OpsError> {
-    sqlx::query_as::<_, UnpublishedDraftChannel>(
+    let mut channels = sqlx::query_as::<_, UnpublishedDraftChannel>(
         r#"
         SELECT channel, count(*)::bigint AS drafts, min(created_at) AS oldest_drafted_at
         FROM (
@@ -84,7 +110,30 @@ async fn load_unpublished_drafts(
     .bind(workspace_id)
     .fetch_all(pool)
     .await
-    .map_err(OpsError::sqlx)
+    .map_err(OpsError::sqlx)?;
+    let ready = sqlx::query_as::<_, ReadyPost>(
+        r#"
+        SELECT platform AS channel, id AS post_id, subreddit AS target, title,
+               smart_link AS tracked_link, created_at AS drafted_at,
+               NULLIF(error_message, '') AS needs_person_because
+        FROM community_posts
+        WHERE workspace_id = $1
+          AND status = 'awaiting_manual_post'
+          AND COALESCE(error_message, '') NOT LIKE 'held:%'
+        ORDER BY created_at
+        LIMIT 50
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(OpsError::sqlx)?;
+    for post in ready {
+        if let Some(channel) = channels.iter_mut().find(|c| c.channel == post.channel) {
+            channel.ready_to_post.push(post);
+        }
+    }
+    Ok(channels)
 }
 
 /// One channel's publication-measurement pipeline, counted by stage.

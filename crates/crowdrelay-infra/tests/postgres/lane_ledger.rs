@@ -5,7 +5,7 @@
 
 use crate::common;
 
-use crowdrelay_domain::lane_ledger::{Verdict, verdict};
+use crowdrelay_domain::lane_ledger::{LaneScope, Verdict, verdict};
 use crowdrelay_infra::lane_ledger::{autopost_settings, lane_rows};
 use uuid::Uuid;
 
@@ -97,7 +97,19 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
     .bind(action(&pool, ws).await?)
     .execute(&pool)
     .await?;
-    // Telegram delivers; Instagram delivers with one held behind it.
+    // A joined/community Telegram can be blocked while the band's own
+    // Telegram channel is delivering. Platform name alone must never merge
+    // those two authority surfaces.
+    sqlx::query(
+        "INSERT INTO community_posts
+             (workspace_id, action_id, platform, subreddit, title, body, status)
+         VALUES ($1,$2,'telegram','metal-room','t','b','awaiting_manual_post')",
+    )
+    .bind(ws)
+    .bind(action(&pool, ws).await?)
+    .execute(&pool)
+    .await?;
+    // Owned Telegram delivers; Instagram delivers with one held behind it.
     for status in ["posted", "posted"] {
         sqlx::query("INSERT INTO telegram_posts (workspace_id, action_id, channel, status) VALUES ($1,$2,'@virya',$3)")
             .bind(ws)
@@ -138,21 +150,24 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
         .await?;
 
     let lanes = lane_rows(&pool, ws, 14).await?;
-    let find = |name: &str| {
+    let find = |scope: LaneScope, name: &str| {
         lanes
             .iter()
-            .find(|lane| lane.lane == name)
-            .unwrap_or_else(|| panic!("no lane {name}: {lanes:?}"))
+            .find(|lane| lane.scope == scope && lane.lane == name)
+            .unwrap_or_else(|| panic!("no {scope:?}/{name} lane: {lanes:?}"))
     };
-    let reddit = find("reddit");
+    let reddit = find(LaneScope::Community, "reddit");
     assert_eq!(
         (reddit.counts.held_for_person, reddit.counts.failed),
         (15, 4)
     );
     assert_eq!(verdict(&reddit.counts), Verdict::HeldForPerson);
     assert_eq!(reddit.oldest_unfinished_hours, Some(50));
-    assert_eq!(verdict(&find("forum").counts), Verdict::HeldForPerson);
-    let telegram = find("telegram");
+    assert_eq!(
+        verdict(&find(LaneScope::Community, "forum").counts),
+        Verdict::HeldForPerson
+    );
+    let telegram = find(LaneScope::Owned, "telegram");
     assert_eq!(telegram.counts.delivered, 2);
     assert_eq!(
         telegram.counts.failed, 0,
@@ -160,27 +175,36 @@ async fn lanes_are_platforms_across_four_tables_and_the_verdict_names_where_each
     );
     assert_eq!(verdict(&telegram.counts), Verdict::Delivering);
     assert_eq!(
-        verdict(&find("instagram").counts),
+        verdict(&find(LaneScope::Owned, "instagram").counts),
         Verdict::DeliveringPartly
     );
-    assert_eq!(verdict(&find("discord_channel").counts), Verdict::Queued);
+    assert_eq!(
+        verdict(&find(LaneScope::Owned, "discord_channel").counts),
+        Verdict::Queued
+    );
     assert!(lanes.iter().all(|lane| lane.unknown_statuses == 0));
     assert_eq!(
+        verdict(&find(LaneScope::Community, "telegram").counts),
+        Verdict::HeldForPerson,
+        "community Telegram hold must not poison owned Telegram"
+    );
+    assert_eq!(
         lanes.len(),
-        5,
-        "reddit, forum, telegram, instagram, discord_channel"
+        6,
+        "community reddit/forum/telegram plus owned telegram/instagram/discord_channel"
     );
 
     // A wider window sees the old failure; another tenant sees only its own lane.
     let wide = lane_rows(&pool, ws, 60).await?;
     assert_eq!(
         wide.iter()
-            .find(|l| l.lane == "telegram")
+            .find(|l| l.scope == LaneScope::Owned && l.lane == "telegram")
             .map(|l| l.counts.failed),
         Some(1)
     );
     let theirs = lane_rows(&pool, other, 14).await?;
     assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].scope, LaneScope::Owned);
     assert_eq!(theirs[0].counts.delivered, 1);
     // A tenant that asked its lanes nothing has no lanes: quiet, not healthy.
     let empty = workspace(&pool, "lanes-empty").await?;

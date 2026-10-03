@@ -221,6 +221,7 @@ mod tests {
             completed_artifacts: Vec::new(),
             in_flight_artifacts: Vec::new(),
             failed_artifacts: Vec::new(),
+            lane_outages: Vec::new(),
             social_post: None,
         };
         let policy = ContentSupplyPolicy::default();

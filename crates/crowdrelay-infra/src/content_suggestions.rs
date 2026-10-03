@@ -670,15 +670,14 @@ impl PostgresContentEngineRepository {
         .bind(ws)
         .execute(&mut *tx)
         .await?;
-        // Distribution authority can disappear before a person answers a
-        // suggestion: a peer consent may be revoked, its monthly cap may fill,
-        // or every reachable fan may enter cooldown. A raised collaboration
-        // that promised that peer audience is no longer the same executable
-        // ask. Retire it before queue headroom is counted instead of leaving a
-        // stale "promote/collaborate with this band" task for a human to clean
-        // up. Approved rows are deliberately left alone: approval is a human
-        // commitment and changing it requires a human decision, not silent
-        // system withdrawal.
+        // Reach authority is revocable. If a raised collaboration promise
+        // names a peer audience that is no longer in the live reach snapshot,
+        // the ask is no longer executable. Heal the whole active chain here:
+        // suggestion -> awaiting approval action -> crew handoff/reminder.
+        //
+        // Decisions remain immutable audit evidence, and approved suggestions
+        // are not touched: once a person committed to the beat, withdrawing it
+        // is another human decision rather than silent system cleanup.
         sqlx::query(
             r#"
             WITH stale_peer_reach AS (

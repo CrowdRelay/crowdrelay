@@ -261,11 +261,18 @@ pub fn template_channels(template: &str) -> &'static [&'static str] {
 /// 2. fresh attributed conversions;
 /// 3. tracked unique clickers.
 ///
-/// Ties keep a stable prior (Facebook, Instagram, X) so identical evidence
-/// does not make the selected channel flap between cycles.
+/// Only platforms whose feed post can carry the action-owned clickable link
+/// are eligible here. Instagram feed captions are deliberately excluded: the
+/// executor cannot put a dependable clickable acquisition rail in that post,
+/// so bio/story conversions must not make an Instagram feed dispatch look like
+/// a direct fan-acquisition action. Instagram remains available through its
+/// separately tracked bio/story/comment placements.
+///
+/// Ties keep a stable prior (Facebook, X) so identical evidence does not make
+/// the selected channel flap between cycles.
 #[must_use]
 pub fn preferred_owned_social_platform(channel_yield: &[ChannelYield]) -> Option<&'static str> {
-    const PRIOR: [&str; 3] = ["facebook", "instagram", "x"];
+    const PRIOR: [&str; 2] = ["facebook", "x"];
     PRIOR
         .into_iter()
         .enumerate()
@@ -435,6 +442,17 @@ mod tests {
             preferred_owned_social_platform(&[instagram, x, facebook]),
             Some("facebook"),
             "one retained fan is stronger than fresh conversions or click volume"
+        );
+    }
+
+    #[test]
+    fn owned_social_does_not_route_acquisition_to_an_unclickable_instagram_feed() {
+        let instagram = yielded("instagram", 12, 500);
+
+        assert_eq!(
+            preferred_owned_social_platform(&[instagram]),
+            None,
+            "Instagram bio/story yield must not select a feed post that cannot carry the tracked CTA"
         );
     }
 

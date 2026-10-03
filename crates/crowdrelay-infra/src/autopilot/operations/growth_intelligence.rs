@@ -41,6 +41,7 @@ mod evidence_replay;
 mod exchange;
 mod fatigue;
 pub(super) mod metacognition;
+mod realized_prior;
 mod rescans;
 mod social_performance;
 mod strategy_checkpoint;
@@ -1418,7 +1419,7 @@ async fn full_replay(
         super::evidence::load_growth_evidence_with_cursor(repo, workspace_id, None).await?;
     let evidence_replayed = u32::try_from(evidence.len()).unwrap_or(u32::MAX);
     if !evidence.is_empty() || read_cursor.is_some() {
-        let mut model = CausalModel::default();
+        let mut model = realized_prior::seeded_model(repo, workspace_id).await;
         apply_evidence_to_model(&mut model, &evidence);
         causal_cursor::advance(&mut model, read_cursor);
         // Also replay evidence into the strategy posterior from scratch — this
