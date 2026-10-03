@@ -87,7 +87,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                     organic_funnel_control,
                     report,
                 ) {
-                    return Ok(());
+                    continue;
                 }
                 let relay_push = match &candidate.action {
                     AutopilotActionPayload::RequestSignalPush {
@@ -105,7 +105,7 @@ impl<R: AutopilotDecisionRepository> EvaluateAutopilot<'_, R> {
                         now,
                     ) != crowdrelay_domain::content_supply::RelayPushVerdict::Send
                 {
-                    return Ok(());
+                    continue;
                 }
                 produced += 1;
                 let action = self.persist(&candidate, limits, report).await?;
