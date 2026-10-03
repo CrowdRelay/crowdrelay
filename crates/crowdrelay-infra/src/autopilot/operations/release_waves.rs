@@ -183,9 +183,9 @@ pub(in crate::autopilot) async fn tag_likely_listeners(
                        WHERE o.workspace_id = fan.workspace_id
                          AND o.buyer_email = fan.normalized_email
                          AND o.status IN ('paid','partially_refunded','refunded'))
-                   + (SELECT count(*) FROM referral_attributions r
-                       WHERE r.workspace_id = fan.workspace_id AND r.referrer_fan_id = fan.id
-                         AND r.status = 'qualified')
+                   + canonical_qualified_referral_count(
+                       fan.workspace_id, fan.id, NULL
+                     )
                    + (SELECT count(*) FROM synesthesia_reward_entries e
                        JOIN synesthesia_runs run ON run.workspace_id = e.workspace_id AND run.id = e.run_id
                        WHERE e.workspace_id = fan.workspace_id AND e.fan_id = fan.id
