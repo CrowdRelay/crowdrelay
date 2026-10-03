@@ -155,8 +155,9 @@ pub struct ReachSnapshot {
     pub press_contacts: u32,
     /// Fans reachable under a marketing consent today.
     pub consented_fans: u32,
-    /// Confirmed peers — a collaboration's "other audience" is nameable,
-    /// so `peer_cover` and the swap formats can promise it.
+    /// Peer/labelmate audiences the workspace can actually reach now through
+    /// an active, revocable amplification consent edge. A confirmed peer is
+    /// evidence to learn from, not distribution authority.
     pub peers: Vec<String>,
 }
 
@@ -273,8 +274,9 @@ fn pattern_lifts(pattern: &str, format_key: &str) -> bool {
 /// string-matched: the catalogue writes `post → communities, fans, press
 /// list`, and the promise names which communities, how many fans, how
 /// many contacts. Collaboration formats reach "both audiences" / "the
-/// peer's orbit" — the peer is a nameable entity, so `peer_audience`
-/// carries confirmed peer names rather than a guessed count. A format
+/// peer's orbit" only when the repository supplied an active consented
+/// amplification route; `peer_audience` carries those audience-owner names,
+/// never every band we happen to observe. A format
 /// whose text names none of the surfaces produces `{}` and the engine
 /// declines it.
 #[must_use]
