@@ -172,8 +172,12 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         workspace_id: WorkspaceId,
     ) -> Result<Vec<crowdrelay_application::autopilot::DeliveryLaneVerdict>, RepositoryError> {
         crate::lane_ledger::lane_verdicts(
-            &self.pool, workspace_id.into_uuid(), crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS,
-        ).await.map_err(map_sqlx)
+            &self.pool,
+            workspace_id.into_uuid(),
+            crowdrelay_domain::lane_ledger::DEFAULT_WINDOW_DAYS,
+        )
+        .await
+        .map_err(map_sqlx)
     }
 
     async fn load_signal_push_audience(
