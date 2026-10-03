@@ -167,6 +167,33 @@ impl AutopilotDecisionRepository for PostgresAutopilotRepository {
         operations::load_relay_community_targets(self, workspace_id).await
     }
 
+    async fn load_delivery_lane_verdicts(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<
+        Vec<(
+            crowdrelay_domain::lane_ledger::LaneScope,
+            String,
+            crowdrelay_domain::lane_ledger::Verdict,
+        )>,
+        RepositoryError,
+    > {
+        crate::lane_ledger::lane_rows(&self.pool, workspace_id.into_uuid(), 14)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        (
+                            row.scope,
+                            row.lane,
+                            crowdrelay_domain::lane_ledger::verdict(&row.counts),
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(map_sqlx)
+    }
+
     async fn load_signal_push_audience(
         &self,
         workspace_id: WorkspaceId,
