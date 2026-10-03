@@ -433,6 +433,36 @@ async fn a_reply_that_carried_the_join_link_becomes_a_touch_and_then_a_fan() -> 
     .fetch_one(&pool)
     .await?;
 
+    let asked_slug = format!("reply-capture-{}", asked.simple());
+    sqlx::query(
+        "UPDATE community_comments
+         SET draft = draft || ' https://band.example/l/' || $3
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(asked)
+    .bind(&asked_slug)
+    .execute(&pool)
+    .await?;
+
+    // Hostile counterexample: the CTA was prepared for Ania too, but an
+    // operator edited it out before the provider-confirmed send. The orphan
+    // link row must not turn that real reply into an invitation receipt.
+    sqlx::query(
+        "INSERT INTO smart_links (
+             workspace_id,slug,destination_url,active,
+             channel_source,channel_community,channel_creative
+         ) VALUES(
+             $1,$2,'https://band.example/signal',true,
+             'instagram',$3,'owned_reply_capture'
+         )",
+    )
+    .bind(ws.into_uuid())
+    .bind(format!("reply-capture-{}", engaged.simple()))
+    .bind(format!("comment:{engaged}"))
+    .execute(&pool)
+    .await?;
+
     let first = sweep.run_once(now).await?;
     ensure!(first.touched == 2 && first.converted == 0, "{first:?}");
     let statuses: Vec<(String, String)> = sqlx::query_as(
