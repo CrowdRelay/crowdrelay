@@ -75,6 +75,17 @@ pub async fn load_fan_evidence(
 ) -> Result<Vec<ObservedFan>, LatarnikError> {
     let rows = sqlx::query_as::<_, EvidenceRow>(
         r#"
+        WITH RECURSIVE family(root_id, member_id) AS (
+            SELECT fan.id, fan.id
+            FROM fans fan
+            WHERE fan.workspace_id = $1 AND fan.merged_into_fan_id IS NULL
+            UNION ALL
+            SELECT family.root_id, child.id
+            FROM family
+            JOIN fans child
+              ON child.workspace_id = $1
+             AND child.merged_into_fan_id = family.member_id
+        )
         SELECT f.id AS fan_id,
                f.normalized_email,
                FLOOR(EXTRACT(EPOCH FROM ($2 - f.created_at)) / 86400.0)::bigint AS tenure_days,
@@ -98,10 +109,19 @@ pub async fn load_fan_evidence(
                + (EXISTS (SELECT 1 FROM merch_order_facts m
                            WHERE m.workspace_id = f.workspace_id AND m.fan_id = f.id
                              AND m.confirmed_at >= $2 - interval '90 days'))::int
-               + (EXISTS (SELECT 1 FROM referral_attributions r
-                           WHERE r.workspace_id = f.workspace_id AND r.referrer_fan_id = f.id
-                             AND r.status = 'qualified'
-                             AND r.qualified_at >= $2 - interval '90 days'))::int
+               + (EXISTS (
+                     SELECT 1
+                     FROM referral_attributions r
+                     JOIN family referrer
+                       ON referrer.root_id = f.id
+                      AND referrer.member_id = r.referrer_fan_id
+                     JOIN family referred
+                       ON referred.member_id = r.referred_fan_id
+                     WHERE r.workspace_id = f.workspace_id
+                       AND r.status = 'qualified'
+                       AND r.qualified_at >= $2 - interval '90 days'
+                       AND referred.root_id <> referrer.root_id
+                 ))::int
                + (EXISTS (SELECT 1 FROM concert_checkins c
                            WHERE c.workspace_id = f.workspace_id AND c.fan_id = f.id
                              AND c.checked_in_at >= $2 - interval '90 days')
@@ -129,9 +149,18 @@ pub async fn load_fan_evidence(
                            AND o.status IN ('paid', 'partially_refunded'))
                 OR EXISTS (SELECT 1 FROM merch_order_facts m
                             WHERE m.workspace_id = f.workspace_id AND m.fan_id = f.id)) AS has_purchased,
-               (SELECT count(*) FROM referral_attributions r
-                 WHERE r.workspace_id = f.workspace_id AND r.referrer_fan_id = f.id
-                   AND r.status = 'qualified') AS qualified_referrals,
+               (
+                 SELECT count(DISTINCT referred.root_id)
+                 FROM referral_attributions r
+                 JOIN family referrer
+                   ON referrer.root_id = f.id
+                  AND referrer.member_id = r.referrer_fan_id
+                 JOIN family referred
+                   ON referred.member_id = r.referred_fan_id
+                 WHERE r.workspace_id = f.workspace_id
+                   AND r.status = 'qualified'
+                   AND referred.root_id <> referrer.root_id
+               ) AS qualified_referrals,
                EXISTS (SELECT 1 FROM outreach_targets t
                         WHERE t.workspace_id = f.workspace_id
                           AND lower(btrim(t.contact_email)) = f.normalized_email
