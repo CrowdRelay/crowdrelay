@@ -519,6 +519,39 @@ async fn a_reply_that_carried_the_join_link_becomes_a_touch_and_then_a_fan() -> 
     .bind(now - Span::hours(19))
     .execute(&pool)
     .await?;
+
+    // Identity resolution can happen before the hourly prospect sweep catches
+    // up. The acquisition row intentionally stays pinned to the historical fan,
+    // so conversion attribution must resolve that pointer to the live person.
+    let canonical = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO fans(id,workspace_id,normalized_email,status)
+         VALUES($1,$2,'kuba-canonical@fan.test','active')",
+    )
+    .bind(canonical)
+    .bind(ws.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO fan_identifiers(
+             workspace_id,fan_id,kind,value,source,verified_at
+         ) VALUES($1,$2,'email','kuba-canonical@fan.test','test',now())",
+    )
+    .bind(ws.into_uuid())
+    .bind(canonical)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE fans
+         SET status='merged',merged_into_fan_id=$3
+         WHERE workspace_id=$1 AND id=$2",
+    )
+    .bind(ws.into_uuid())
+    .bind(fan)
+    .bind(canonical)
+    .execute(&pool)
+    .await?;
+
     let converted = sweep.run_once(now).await?;
     ensure!(converted.converted == 1, "{converted:?}");
     let (status, linked): (String, Option<Uuid>) = sqlx::query_as(
@@ -529,8 +562,8 @@ async fn a_reply_that_carried_the_join_link_becomes_a_touch_and_then_a_fan() -> 
     .fetch_one(&pool)
     .await?;
     ensure!(
-        (status.as_str(), linked) == ("converted", Some(fan)),
-        "{status} {linked:?}"
+        (status.as_str(), linked) == ("converted", Some(canonical)),
+        "prospect must link to the live canonical fan, not the historical acquisition row: {status} {linked:?}"
     );
     let trace: Uuid = sqlx::query_scalar(
         "SELECT trace_id FROM fan_prospect_touches WHERE workspace_id=$1 AND smart_link_id=$2",
