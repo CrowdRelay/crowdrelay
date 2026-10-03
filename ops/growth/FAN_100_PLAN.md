@@ -184,6 +184,8 @@ Every connected profile must be classified by its real role:
 
 The Brain should use each profile for the stage it can actually move. Unsupported or manual-only profiles must not create a false impression of autonomous reach.
 
+A manually operated channel that the tenant already runs well is **not** an automation gap by itself. FAN_100 must not automate Facebook (or any other channel) merely to replace a healthy human workflow. Treat strong operator-owned distribution as an input to the funnel and invest autonomous engineering in complementary paths that add reach or multiplication — Signal/site conversion, referral/Latarnik, retention, community and other proven rails.
+
 ## Hourly implementation loop
 
 Every FAN_100 implementation run must begin by reading:
