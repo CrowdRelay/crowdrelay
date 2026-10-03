@@ -36,6 +36,24 @@ impl OrganicFunnelDirective {
     pub const fn permits_join_ask(self) -> bool {
         matches!(self, Self::ExpandReach | Self::RepairConversion)
     }
+
+    /// True once verified traffic already exists and the limiting loss is
+    /// downstream of acquisition. New public/community acquisition work then
+    /// waits; owned-fan recovery may continue.
+    #[must_use]
+    pub const fn holds_new_audience_expansion(self) -> bool {
+        matches!(
+            self,
+            Self::RepairConfirmation | Self::ActivateFans | Self::RetainFans
+        )
+    }
+
+    /// A downstream leak makes FanLifecycle the first context that may spend
+    /// the cycle's owned-audience envelope.
+    #[must_use]
+    pub const fn prioritizes_fan_recovery(self) -> bool {
+        self.holds_new_audience_expansion()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
