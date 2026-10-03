@@ -432,7 +432,10 @@ async fn an_outcome_child_published_later_keeps_the_parents_fan_measurement_aliv
     );
     let posted = now + time::Duration::hours(1);
     sqlx::query(
-        "UPDATE community_posts SET status='posted', posted_at=$3
+        "UPDATE community_posts
+         SET status='posted', posted_at=$3,
+             reddit_post_id='outcome-child-proof',
+             reddit_post_url='https://www.reddit.com/r/lineage/comments/outcomechild/proof/'
          WHERE workspace_id=$1 AND action_id=$2",
     )
     .bind(f.workspace_id.into_uuid())
