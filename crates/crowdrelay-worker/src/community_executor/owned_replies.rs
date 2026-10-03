@@ -105,6 +105,10 @@ fn flatten(post_id: &str, account_id: &str, comments: Vec<GraphComment>) -> Vec<
         out.push(HarvestedComment {
             id: comment.id.clone(),
             parent_id: parent.to_owned(),
+            provider_author_id: from
+                .and_then(|f| f.id.as_deref())
+                .filter(|id| is_graph_id(id))
+                .map(ToOwned::to_owned),
             author,
             body: comment
                 .text
@@ -223,13 +227,17 @@ impl CommunityExecutorWorker {
                     INSERT INTO community_comments
                         (workspace_id, platform, content_source_id, platform_comment_id,
                          parent_id, author, body, parent_body, parent_by_band,
-                         provider_observed_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                         provider_author_id, provider_observed_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
                     ON CONFLICT (workspace_id, platform, platform_comment_id) DO UPDATE
-                    SET provider_observed_at = GREATEST(
-                        community_comments.provider_observed_at,
-                        EXCLUDED.provider_observed_at
-                    )
+                    SET provider_author_id = COALESCE(
+                            community_comments.provider_author_id,
+                            EXCLUDED.provider_author_id
+                        ),
+                        provider_observed_at = GREATEST(
+                            community_comments.provider_observed_at,
+                            EXCLUDED.provider_observed_at
+                        )
                     "#,
                 )
                 .bind(ws)
@@ -241,6 +249,7 @@ impl CommunityExecutorWorker {
                 .bind(comment.body.chars().take(4000).collect::<String>())
                 .bind(parent.map(|p| p.body.chars().take(4000).collect::<String>()))
                 .bind(parent.is_some_and(|p| p.by_band))
+                .bind(comment.provider_author_id.as_deref())
                 .execute(&mut *tx)
                 .await?;
                 harvested += usize::try_from(inserted.rows_affected()).unwrap_or(0);
